@@ -1,0 +1,3 @@
+[workspace]
+resolver = "3"
+members = ["feature-toggle-backend", "feature-toggle-ui"]
