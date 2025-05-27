@@ -4,14 +4,22 @@ use actix_web::{App, HttpRequest, HttpResponse, HttpServer, guard, web, Result};
 use async_graphql::{Context, EmptyMutation, EmptySubscription, Object, Schema, SimpleObject};
 use async_graphql_actix_web::{GraphQL, GraphQLRequest, GraphQLResponse, GraphQLSubscription};
 use std::net::SocketAddr;
+use actix_cors::Cors;
 use async_graphql::http::GraphiQLSource;
 use crate::mutation::MutationRoot;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+
     HttpServer::new(|| {
         let schema = Schema::build(Query, MutationRoot, EmptySubscription).finish();
+        let cors = Cors::default()
+            .allowed_origin("http://localhost:5173") // Or your frontend's domain
+            .allowed_methods(vec!["GET", "POST", "PUT", "DELETE", "OPTIONS"]) // Or your allowed methods
+            .allowed_headers(vec!["content-type", "authorization"]) // Or your allowed headers
+            .max_age(3600);
         App::new()
+            .wrap(cors)
             .service(
                 web::resource("/graphql")
                     .guard(guard::Post())
@@ -40,14 +48,6 @@ async fn index_graphiql() -> Result<HttpResponse> {
                 .subscription_endpoint("/graphql")
                 .finish(),
         ))
-}
-
-async fn index(
-    // Schema now accessible here
-    schema: web::Data<Schema<Query, EmptyMutation, EmptySubscription>>,
-    request: GraphQLRequest,
-) -> web::Json<GraphQLResponse> {
-    web::Json(schema.execute(request.into_inner()).await.into())
 }
 
 async fn index_ws(
