@@ -1,4 +1,6 @@
 mod mutation;
+pub mod database;
+mod service;
 
 use actix_web::{App, HttpRequest, HttpResponse, HttpServer, guard, web, Result};
 use async_graphql::{Context, EmptyMutation, EmptySubscription, Object, Schema, SimpleObject};
@@ -6,18 +8,26 @@ use async_graphql_actix_web::{GraphQL, GraphQLRequest, GraphQLResponse, GraphQLS
 use std::net::SocketAddr;
 use actix_cors::Cors;
 use async_graphql::http::GraphiQLSource;
+use crate::database::init_pg_pool;
 use crate::mutation::MutationRoot;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+    
+    let db_pool = init_pg_pool().await;
 
-    HttpServer::new(|| {
-        let schema = Schema::build(Query, MutationRoot, EmptySubscription).finish();
+    HttpServer::new(move || {
+        
+        let schema = Schema::build(Query, MutationRoot, EmptySubscription)
+            .data(db_pool.clone())
+            .finish();
+        
         let cors = Cors::default()
             .allowed_origin("http://localhost:5173") // Or your frontend's domain
             .allowed_methods(vec!["GET", "POST", "PUT", "DELETE", "OPTIONS"]) // Or your allowed methods
             .allowed_headers(vec!["content-type", "authorization"]) // Or your allowed headers
             .max_age(3600);
+
         App::new()
             .wrap(cors)
             .service(

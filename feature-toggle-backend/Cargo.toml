@@ -5,11 +5,16 @@ edition = "2024"
 
 [dependencies]
 actix-web = "4.11.0"
-async-graphql = "7.0.17"
+async-graphql = { version = "7.0.17", features = ["uuid"] }
 async-graphql-actix-web = "7.0.17"
 #serde = { version = "1.0.219", features = ["derive"] }
 #serde_json = "1.0.140"
 tokio = { version = "1.45.1", features = ["full"] }
 feature-toggle-shared = { path = "../feature-toggle-shared" }
-uuid = { version = "1.17.0", features = ["v4"] }
+uuid = { version = "1.17.0", features = ["v4","serde"] }
 actix-cors = "0.7.1"
+sqlx = { version = "0.8.6", features = ["postgres", "runtime-tokio-native-tls", "macros", "uuid"] }
+dotenvy = "0.15.7"
+diesel = "2.2.10"
+diesel-async = { version = "0.5.2", features = ["postgres"] }
+serde = { version = "1.0.219", features = ["derive"] }
