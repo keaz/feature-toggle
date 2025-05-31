@@ -1,6 +1,5 @@
 use async_graphql::{Enum, InputObject, SimpleObject, ID};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 #[derive(Enum, Copy, Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub enum FeatureType {
@@ -39,6 +38,7 @@ pub struct ContextRule {
 pub struct Environment {
     pub id: ID,
     pub name: String,
+    pub active: bool,
 }
 
 #[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
@@ -88,11 +88,7 @@ pub struct CreatePipelineInput {
 pub struct UpdateEnvironmentInput {
     pub id: ID,
     pub name: String,
-}
-
-#[derive(InputObject)]
-pub struct DeleteEnvironmentInput {
-    pub id: ID,
+    pub active: Option<bool>,
 }
 
 #[derive(InputObject)]

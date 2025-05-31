@@ -9,7 +9,8 @@ pub trait EnvironmentLogic: Send + Sync {
     async fn get_environment_by_id(&self, env_id: Uuid) -> Result<Environment, Error>;
     async fn create_environment(&self, input: CreateEnvironmentInput)
     -> Result<Environment, Error>;
-    async fn update_environment(&self, input: UpdateEnvironmentInput) -> Result<(), Error>;
+    async fn update_environment(&self, input: UpdateEnvironmentInput)
+    -> Result<Environment, Error>;
     async fn delete_environment(&self, id: Uuid) -> Result<(), Error>;
 
     fn clone_box(&self) -> Box<dyn EnvironmentLogic>;
@@ -38,6 +39,7 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
         Ok(Environment {
             id,
             name: environment.name,
+            active: environment.active,
         })
     }
 
@@ -50,11 +52,21 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
         Ok(Environment {
             id,
             name: environment.name,
+            active: environment.active,
         })
     }
 
-    async fn update_environment(&self, input: UpdateEnvironmentInput) -> Result<(), Error> {
-        self.repository.update_environment(input).await
+    async fn update_environment(
+        &self,
+        input: UpdateEnvironmentInput,
+    ) -> Result<Environment, Error> {
+        let environment = self.repository.update_environment(input).await?;
+        let id = ID::from(environment.id);
+        Ok(Environment {
+            id,
+            name: environment.name,
+            active: environment.active,
+        })
     }
 
     async fn delete_environment(&self, id: Uuid) -> Result<(), Error> {
@@ -109,6 +121,130 @@ mod tests {
 
         let logic = environment_logic(Box::new(mock_repository));
         let result = logic.get_environment_by_id(id).await;
+
+        assert!(result.is_err());
+        let error = result.err().unwrap();
+        match error {
+            Error::NotFound(eid) => assert_eq!(eid, id),
+            _ => panic!("Expected NotFound error variant"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_environment() {
+        let mut mock_repository = MockEnvironmentRepository::new();
+        let input = CreateEnvironmentInput {
+            name: "New Environment".to_string(),
+        };
+        let expected_id = Uuid::new_v4();
+        mock_repository
+            .expect_create_environment()
+            .withf(|input| input.name == "New Environment")
+            .times(1)
+            .returning(move |_| {
+                Ok(crate::database::entity::Environment {
+                    id: expected_id,
+                    name: "New Environment".to_string(),
+                    active: true,
+                })
+            });
+
+        let logic = environment_logic(Box::new(mock_repository));
+        let result = logic.create_environment(input).await;
+
+        assert!(result.is_ok());
+        let environment = result.unwrap();
+        assert_eq!(environment.id, ID::from(expected_id));
+        assert_eq!(environment.name, "New Environment");
+    }
+
+    #[tokio::test]
+    async fn test_update_environment() {
+        let mut mock_repository = MockEnvironmentRepository::new();
+        let input = UpdateEnvironmentInput {
+            id: ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"),
+            name: "Updated Environment".to_string(),
+            active: Some(true),
+        };
+        let expected_id = Uuid::parse_str(&input.id).unwrap();
+        mock_repository
+            .expect_update_environment()
+            .withf(|input| input.id == input.id && input.name == "Updated Environment")
+            .times(1)
+            .returning(move |_| {
+                Ok(crate::database::entity::Environment {
+                    id: expected_id,
+                    name: "Updated Environment".to_string(),
+                    active: true,
+                })
+            });
+
+        let logic = environment_logic(Box::new(mock_repository));
+        let result = logic.update_environment(input).await;
+
+        assert!(result.is_ok());
+        let environment = result.unwrap();
+        assert_eq!(environment.id, ID::from(expected_id));
+        assert_eq!(environment.name, "Updated Environment");
+    }
+
+    #[tokio::test]
+    async fn test_not_exists_update_environment() {
+        let mut mock_repository = MockEnvironmentRepository::new();
+        const ENV_ID: &str = "51ecc366-f1cd-4d3d-ab73-fa60bad98f27";
+        let input = UpdateEnvironmentInput {
+            id: ID::from(ENV_ID),
+            name: "Updated Environment".to_string(),
+            active: Some(true),
+        };
+        let expected_id = Uuid::parse_str(&input.id).unwrap();
+        mock_repository
+            .expect_update_environment()
+            .withf(|input| input.id == input.id && input.name == "Updated Environment")
+            .times(1)
+            .returning(move |_| Err(Error::NotFound(expected_id.clone())));
+
+        let logic = environment_logic(Box::new(mock_repository));
+        let result = logic.update_environment(input).await;
+
+        assert!(result.is_err());
+        let error = result.err().unwrap();
+        match error {
+            Error::NotFound(eid) => assert_eq!(eid, Uuid::parse_str(ENV_ID).unwrap()),
+            _ => panic!("Expected NotFound error variant"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_delete_environment() {
+        let mut mock_repository = MockEnvironmentRepository::new();
+        const ENV_ID: &str = "51ecc366-f1cd-4d3d-ab73-fa60bad98f27";
+        let id = Uuid::parse_str(ENV_ID).unwrap();
+        mock_repository
+            .expect_delete_environment()
+            .withf(|mock_id| mock_id.eq(&Uuid::parse_str(ENV_ID).unwrap()))
+            .times(1)
+            .returning(move |_| Ok(()));
+
+        let logic = environment_logic(Box::new(mock_repository));
+        let result = logic.delete_environment(id).await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_error_delete_environment() {
+        let mut mock_repository = MockEnvironmentRepository::new();
+        const ENV_ID: &str = "51ecc366-f1cd-4d3d-ab73-fa60bad98f27";
+        let id = Uuid::parse_str(ENV_ID).unwrap();
+        mock_repository
+            .expect_delete_environment()
+            .withf(|mock_id| mock_id.eq(&Uuid::parse_str(ENV_ID).unwrap()))
+            .times(1)
+            .returning(move |_| Err(Error::NotFound(id.clone())));
+
+        let logic = environment_logic(Box::new(mock_repository));
+        let result = logic.delete_environment(id).await;
 
         assert!(result.is_err());
         let error = result.err().unwrap();

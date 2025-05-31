@@ -1,0 +1,23 @@
+services:
+  postgres_server:
+    hostname: postgres_server
+    image: postgres:latest
+    environment:
+      - POSTGRES_PASSWORD="local123"
+      - POSTGRES_DB="feature_toggle"
+    networks:
+      - backend
+    ports:
+      - "5433:5432"
+  feature_toggle_backend:
+    build:
+      context: .
+      dockerfile: feature-toggle-backend/Dockerfile
+    environment:
+      - DATABASE_URL=postgres://postgres:local123@postgres_server:5432/feature_toggle
+    networks:
+      - backend
+    depends_on:
+      - postgres_server
+    ports:
+      - "8000:8000"

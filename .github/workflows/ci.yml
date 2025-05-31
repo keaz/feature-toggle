@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - '*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:latest
+        ports:
+          - 1389:1389
+        options: >
+          --env POSTGRES_PASSWORD="local123"
+          --env POSTGRES_DB="feature_toggle"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Get Postgres container ID
+        id: postgres_container_id
+        run: echo "POSTGRES_CONTAINER_ID=$(docker ps --filter 'ancestor=postgres:latest' -q)" >> $GITHUB_ENV
+
+      - name: Copy LDIF to LDAP container
+        run: docker cp ./data/data.ldif ${{ env.POSTGRES_CONTAINER_ID }}:/tmp/data.ldif
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+
+      - name: Install sqlx-cli
+        run: cargo install sqlx-cli --no-default-features --features postgres
+
+      - name: Run database migrations
+        working-directory: ./feature-toggle-backend
+        run: sqlx migrate run --database-url postgres://postgres:local123@localhost:5432/feature_toggle
+
+      - name: Build
+        env:
+          DATABASE_URL: postgres://postgres:local123@localhost:5432/feature_toggle
+        run: cargo build --verbose
+
+      - name: Run tests
+        run: cargo test --verbose
+
