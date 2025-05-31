@@ -26,8 +26,8 @@ jobs:
         id: postgres_container_id
         run: echo "POSTGRES_CONTAINER_ID=$(docker ps --filter 'ancestor=postgres:latest' -q)" >> $GITHUB_ENV
 
-      - name: Copy LDIF to LDAP container
-        run: docker cp ./data/data.ldif ${{ env.POSTGRES_CONTAINER_ID }}:/tmp/data.ldif
+      - name: Copy SQL to the container
+        run: docker cp ./init.sql ${{ env.POSTGRES_CONTAINER_ID }}:/docker-entrypoint-initdb.d/init.sql
 
       - name: Set up Rust
         uses: actions-rs/toolchain@v1
