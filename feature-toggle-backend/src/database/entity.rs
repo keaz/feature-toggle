@@ -5,4 +5,5 @@ use uuid::Uuid;
 pub struct Environment {
     pub id: Uuid,
     pub name: String,
+    pub active: bool,
 }
