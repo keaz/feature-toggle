@@ -101,6 +101,7 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
     }
 }
 
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::database::environment::MockEnvironmentRepository;

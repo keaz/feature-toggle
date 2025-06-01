@@ -45,6 +45,7 @@ pub struct Environment {
 pub struct Pipeline {
     pub id: ID,
     pub name: String,
+    pub active: bool,
     pub stages: Vec<PipelineStage>,
 }
 
@@ -98,7 +99,9 @@ pub struct UpdateEnvironmentInput {
 }
 
 #[derive(InputObject)]
-pub struct PipelineStageInput {
+pub struct CreateStageInput {
+    pub pipeline_id: ID,
     pub environment_id: ID,
+    pub parent_stage_id: Option<ID>,
     pub order: i32,
 }

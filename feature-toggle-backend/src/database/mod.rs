@@ -1,6 +1,7 @@
 pub mod entity;
 pub mod environment;
 pub mod pipeline;
+mod stage;
 
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
@@ -22,6 +23,8 @@ pub enum Error {
     NotFound(Uuid),
     #[error("Database error occurred")]
     DatabaseError(#[source] sqlx::Error),
+    #[error("Record {0} already exists")]
+    RecordAlreadyExists(String),
 }
 
 pub fn handle_error<T>(id: Option<Uuid>, result: Result<T, sqlx::Error>) -> Result<T, Error> {
