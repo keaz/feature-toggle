@@ -55,7 +55,7 @@ async fn test_update_environment() {
 
     let input = feature_toggle_shared::graphql::UpdateEnvironmentInput {
         id: ID::from("3eef17bc-9e06-411d-b5f4-7a786e68bb96"),
-        name: "Updated Environment".to_string(),
+        name: Some("Updated Environment".to_string()),
         active: Some(false),
     };
     let result = repository.update_environment(input).await;
@@ -73,7 +73,7 @@ async fn test_not_found_update_environment() {
 
     let input = feature_toggle_shared::graphql::UpdateEnvironmentInput {
         id: ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98fca"),
-        name: "Non-existent Environment".to_string(),
+        name: Some("Non-existent Environment".to_string()),
         active: Some(true),
     };
     let result = repository.update_environment(input).await;
@@ -111,4 +111,68 @@ async fn test_not_found_delete_environment() {
         error,
         feature_toggle_backend::database::Error::NotFound(_)
     ));
+}
+
+#[tokio::test]
+async fn test_non_param_get_environments() {
+    let pool = init_pg_pool().await;
+    let repository = environment::environment_repository(pool);
+
+    let result = repository.get_environments(None, None).await;
+
+    assert_eq!(result.is_ok(), true);
+    let environments = result.unwrap();
+    assert!(!environments.is_empty());
+    assert!(
+        environments
+            .iter()
+            .any(|env| env.name == "Test Environment")
+    );
+}
+
+#[tokio::test]
+async fn test_active_param_get_environments() {
+    let pool = init_pg_pool().await;
+    let repository = environment::environment_repository(pool);
+
+    let result = repository.get_environments(None, Some(true)).await;
+
+    assert_eq!(result.is_ok(), true);
+    let environments = result.unwrap();
+    assert!(!environments.is_empty());
+    assert!(environments.iter().all(|env| env.active));
+}
+
+#[tokio::test]
+async fn test_name_param_get_environments() {
+    let pool = init_pg_pool().await;
+    let repository = environment::environment_repository(pool);
+
+    let result = repository
+        .get_environments(Some("Test".to_string()), None)
+        .await;
+
+    assert_eq!(result.is_ok(), true);
+    let environments = result.unwrap();
+    assert!(!environments.is_empty());
+    assert!(environments.iter().all(|env| env.name.contains("Test")));
+}
+
+#[tokio::test]
+async fn test_name_and_active_param_get_environments() {
+    let pool = init_pg_pool().await;
+    let repository = environment::environment_repository(pool);
+
+    let result = repository
+        .get_environments(Some("Test".to_string()), Some(true))
+        .await;
+
+    assert_eq!(result.is_ok(), true);
+    let environments = result.unwrap();
+    assert!(!environments.is_empty());
+    assert!(
+        environments
+            .iter()
+            .all(|env| env.name.contains("Test") && env.active)
+    );
 }

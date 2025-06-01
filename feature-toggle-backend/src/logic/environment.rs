@@ -7,6 +7,13 @@ use uuid::Uuid;
 #[async_trait::async_trait]
 pub trait EnvironmentLogic: Send + Sync {
     async fn get_environment_by_id(&self, env_id: Uuid) -> Result<Environment, Error>;
+
+    async fn get_environments(
+        &self,
+        name: Option<String>,
+        active: Option<bool>,
+    ) -> Result<Vec<Environment>, Error>;
+
     async fn create_environment(&self, input: CreateEnvironmentInput)
     -> Result<Environment, Error>;
     async fn update_environment(&self, input: UpdateEnvironmentInput)
@@ -41,6 +48,22 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
             name: environment.name,
             active: environment.active,
         })
+    }
+
+    async fn get_environments(
+        &self,
+        name: Option<String>,
+        active: Option<bool>,
+    ) -> Result<Vec<Environment>, Error> {
+        let environments = self.repository.get_environments(name, active).await?;
+        Ok(environments
+            .into_iter()
+            .map(|env| Environment {
+                id: ID::from(env.id),
+                name: env.name,
+                active: env.active,
+            })
+            .collect())
     }
 
     async fn create_environment(
@@ -163,13 +186,15 @@ mod tests {
         let mut mock_repository = MockEnvironmentRepository::new();
         let input = UpdateEnvironmentInput {
             id: ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"),
-            name: "Updated Environment".to_string(),
+            name: Some("Updated Environment".to_string()),
             active: Some(true),
         };
         let expected_id = Uuid::parse_str(&input.id).unwrap();
         mock_repository
             .expect_update_environment()
-            .withf(|input| input.id == input.id && input.name == "Updated Environment")
+            .withf(|input| {
+                input.id == input.id && input.name == Some("Updated Environment".to_string())
+            })
             .times(1)
             .returning(move |_| {
                 Ok(crate::database::entity::Environment {
@@ -194,13 +219,15 @@ mod tests {
         const ENV_ID: &str = "51ecc366-f1cd-4d3d-ab73-fa60bad98f27";
         let input = UpdateEnvironmentInput {
             id: ID::from(ENV_ID),
-            name: "Updated Environment".to_string(),
+            name: Some("Updated Environment".to_string()),
             active: Some(true),
         };
         let expected_id = Uuid::parse_str(&input.id).unwrap();
         mock_repository
             .expect_update_environment()
-            .withf(|input| input.id == input.id && input.name == "Updated Environment")
+            .withf(|input| {
+                input.id == input.id && input.name == Some("Updated Environment".to_string())
+            })
             .times(1)
             .returning(move |_| Err(Error::NotFound(expected_id.clone())));
 
@@ -252,5 +279,38 @@ mod tests {
             Error::NotFound(eid) => assert_eq!(eid, id),
             _ => panic!("Expected NotFound error variant"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_get_environments() {
+        let mut mock_repository = MockEnvironmentRepository::new();
+        let expected_id = Uuid::new_v4();
+        mock_repository
+            .expect_get_environments()
+            .withf(|name, active| name.is_none() && active.is_none())
+            .times(1)
+            .returning(move |_, _| {
+                Ok(vec![
+                    crate::database::entity::Environment {
+                        id: expected_id,
+                        name: "Test Environment".to_string(),
+                        active: true,
+                    },
+                    crate::database::entity::Environment {
+                        id: expected_id,
+                        name: "Test Environment".to_string(),
+                        active: true,
+                    },
+                ])
+            });
+
+        let logic = environment_logic(Box::new(mock_repository));
+        let result = logic.get_environments(None, None).await;
+
+        assert!(result.is_ok());
+        let environments = result.unwrap();
+        assert_eq!(environments.len(), 2);
+        assert_eq!(environments[0].id, ID::from(expected_id));
+        assert_eq!(environments[0].name, "Test Environment");
     }
 }

@@ -13,8 +13,7 @@ impl MutationRoot {
         input: CreateEnvironmentInput,
     ) -> GqlResult<Environment> {
         let logic = ctx.data::<Box<dyn EnvironmentLogic>>().unwrap();
-        let result = logic.create_environment(input).await?; //FIXME Handle error appropriately in production code
-        Ok(result)
+        Ok(logic.create_environment(input).await?)
     }
 
     async fn update_environment(
@@ -23,12 +22,7 @@ impl MutationRoot {
         input: UpdateEnvironmentInput,
     ) -> GqlResult<Environment> {
         let logic = ctx.data::<Box<dyn EnvironmentLogic>>().unwrap();
-        let environment = logic.update_environment(input).await?;
-        Ok(Environment {
-            id: environment.id,
-            name: environment.name,
-            active: environment.active,
-        })
+        Ok(logic.update_environment(input).await?)
     }
 
     async fn delete_environment(&self, ctx: &Context<'_>, id: uuid::Uuid) -> GqlResult<bool> {
@@ -43,7 +37,6 @@ impl MutationRoot {
         id: uuid::Uuid,
     ) -> GqlResult<Environment> {
         let logic = ctx.data::<Box<dyn EnvironmentLogic>>().unwrap();
-        let result = logic.get_environment_by_id(id).await?;
-        Ok(result)
+        Ok(logic.get_environment_by_id(id).await?)
     }
 }

@@ -81,13 +81,19 @@ pub struct CreateEnvironmentInput {
 #[derive(InputObject)]
 pub struct CreatePipelineInput {
     pub name: String,
-    pub stages: Vec<PipelineStageInput>,
+}
+
+#[derive(InputObject)]
+pub struct UpdatePipelineInput {
+    pub id: ID,
+    pub name: Option<String>,
+    pub active: Option<bool>,
 }
 
 #[derive(InputObject)]
 pub struct UpdateEnvironmentInput {
     pub id: ID,
-    pub name: String,
+    pub name: Option<String>,
     pub active: Option<bool>,
 }
 

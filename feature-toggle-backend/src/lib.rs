@@ -1,13 +1,14 @@
 pub mod database;
+mod graphql;
 mod logic;
-mod mutation;
 
 use crate::database::init_pg_pool;
-use crate::mutation::MutationRoot;
+use crate::graphql::mutation::MutationRoot;
+use crate::graphql::query::Query;
 use actix_cors::Cors;
 use actix_web::{guard, web, App, HttpRequest, HttpResponse, HttpServer, Result};
 use async_graphql::http::GraphiQLSource;
-use async_graphql::{Context, EmptyMutation, EmptySubscription, Object, Schema};
+use async_graphql::{EmptyMutation, EmptySubscription, Schema};
 use async_graphql_actix_web::{GraphQL, GraphQLSubscription};
 
 pub async fn run() -> std::io::Result<()> {
@@ -69,22 +70,4 @@ async fn index_ws(
     payload: web::Payload,
 ) -> actix_web::Result<HttpResponse> {
     GraphQLSubscription::new(Schema::clone(&*schema)).start(&req, payload)
-}
-
-struct Query;
-
-#[Object]
-impl Query {
-    /// Returns the sum of a and b
-    async fn add(&self, a: i32, b: i32) -> i32 {
-        a + b
-    }
-
-    async fn value_from_db(
-        &self,
-        ctx: &Context<'_>,
-        #[graphql(desc = "Id of object")] id: i64,
-    ) -> String {
-        String::from("Hello World")
-    }
 }

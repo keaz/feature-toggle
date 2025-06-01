@@ -1,5 +1,6 @@
 pub mod entity;
 pub mod environment;
+pub mod pipeline;
 
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
