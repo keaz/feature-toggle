@@ -70,6 +70,10 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
         &self,
         input: CreateEnvironmentInput,
     ) -> Result<Environment, Error> {
+        let input = crate::database::environment::CreateEnvironment {
+            name: input.name,
+        };
+        
         let environment = self.repository.create_environment(input).await?;
         let id = ID::from(environment.id);
         Ok(Environment {
@@ -83,6 +87,12 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
         &self,
         input: UpdateEnvironmentInput,
     ) -> Result<Environment, Error> {
+        let input = crate::database::environment::UpdateEnvironment {
+            id: Uuid::try_from(input.id).unwrap(),
+            name: input.name,
+            active: input.active,
+        };
+        
         let environment = self.repository.update_environment(input).await?;
         let id = ID::from(environment.id);
         Ok(Environment {

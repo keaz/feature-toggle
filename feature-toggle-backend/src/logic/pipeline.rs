@@ -63,6 +63,9 @@ impl PipelineLogic for PipelineLogicImpl {
     }
 
     async fn create_pipeline(&self, input: CreatePipelineInput) -> Result<Pipeline, Error> {
+        let input = crate::database::pipeline::CreatePipeline {
+            name: input.name,
+        };
         let pipeline = self.repository.create_pipeline(input).await?;
         Ok(Pipeline {
             id: pipeline.id.into(),
@@ -73,6 +76,12 @@ impl PipelineLogic for PipelineLogicImpl {
     }
 
     async fn update_pipeline(&self, input: UpdatePipelineInput) -> Result<Pipeline, Error> {
+        
+        let input = crate::database::pipeline::UpdatePipeline {
+            id: Uuid::try_from(input.id).unwrap(),
+            name: input.name,
+            active: input.active,
+        };
         let pipeline = self.repository.update_pipeline(input).await?;
         Ok(Pipeline {
             id: pipeline.id.into(),

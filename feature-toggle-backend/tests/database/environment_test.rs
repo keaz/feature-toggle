@@ -1,4 +1,4 @@
-use async_graphql::ID;
+use feature_toggle_backend::database::environment::{CreateEnvironment, UpdateEnvironment};
 use feature_toggle_backend::database::{environment, init_pg_pool};
 use uuid::Uuid;
 
@@ -37,7 +37,7 @@ async fn test_create_environment() {
     let pool = init_pg_pool().await;
     let repository = environment::environment_repository(pool);
 
-    let input = feature_toggle_shared::graphql::CreateEnvironmentInput {
+    let input = CreateEnvironment {
         name: "New Environment".to_string(),
     };
     let result = repository.create_environment(input).await;
@@ -53,8 +53,8 @@ async fn test_update_environment() {
     let pool = init_pg_pool().await;
     let repository = environment::environment_repository(pool);
 
-    let input = feature_toggle_shared::graphql::UpdateEnvironmentInput {
-        id: ID::from("3eef17bc-9e06-411d-b5f4-7a786e68bb96"),
+    let input = UpdateEnvironment {
+        id: Uuid::parse_str("3eef17bc-9e06-411d-b5f4-7a786e68bb96").unwrap(),
         name: Some("Updated Environment".to_string()),
         active: Some(false),
     };
@@ -71,8 +71,8 @@ async fn test_not_found_update_environment() {
     let pool = init_pg_pool().await;
     let repository = environment::environment_repository(pool);
 
-    let input = feature_toggle_shared::graphql::UpdateEnvironmentInput {
-        id: ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98fca"),
+    let input = UpdateEnvironment {
+        id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98fca").unwrap(),
         name: Some("Non-existent Environment".to_string()),
         active: Some(true),
     };

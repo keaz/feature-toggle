@@ -1,9 +1,19 @@
 use crate::database::entity::Pipeline;
 use crate::database::{handle_error, Error};
-use feature_toggle_shared::graphql::{CreatePipelineInput, UpdatePipelineInput};
 use mockall::automock;
 use sqlx::PgPool;
 use uuid::Uuid;
+
+
+pub struct CreatePipeline {
+    pub name: String,
+}
+
+pub struct UpdatePipeline {
+    pub id: Uuid,
+    pub name: Option<String>,
+    pub active: Option<bool>,
+}
 
 #[automock]
 #[async_trait::async_trait]
@@ -14,8 +24,8 @@ pub trait PipelineRepository: Send + Sync {
         name: Option<String>,
         active: Option<bool>,
     ) -> Result<Vec<Pipeline>, Error>;
-    async fn create_pipeline(&self, input: CreatePipelineInput) -> Result<Pipeline, Error>;
-    async fn update_pipeline(&self, input: UpdatePipelineInput) -> Result<Pipeline, Error>;
+    async fn create_pipeline(&self, input: CreatePipeline) -> Result<Pipeline, Error>;
+    async fn update_pipeline(&self, input: UpdatePipeline) -> Result<Pipeline, Error>;
     async fn delete_pipeline(&self, id: Uuid) -> Result<(), Error>;
 
     fn clone_box(&self) -> Box<dyn PipelineRepository>;
@@ -89,7 +99,7 @@ impl PipelineRepository for PipelineRepositoryImpl {
         handle_error(None, result)
     }
 
-    async fn create_pipeline(&self, input: CreatePipelineInput) -> Result<Pipeline, Error> {
+    async fn create_pipeline(&self, input: CreatePipeline) -> Result<Pipeline, Error> {
         let result = sqlx::query_as::<_, Pipeline>(
             r#"SELECT id, name, active FROM pipelines WHERE name = $1"#,
         )
@@ -132,19 +142,19 @@ impl PipelineRepository for PipelineRepositoryImpl {
         })
     }
 
-    async fn update_pipeline(&self, input: UpdatePipelineInput) -> Result<Pipeline, Error> {
-        let id = Uuid::try_from(input.id).unwrap();
-        let existing_env = self.get_pipeline_by_id(id).await?;
+    async fn update_pipeline(&self, input: UpdatePipeline) -> Result<Pipeline, Error> {
+
+        let existing_env = self.get_pipeline_by_id(input.id).await?;
         let result = sqlx::query!(
             r#"UPDATE pipelines SET name = $1, active = $2 WHERE id = $3 RETURNING id, name, active"#,
             input.name.unwrap_or(existing_env.name),
             input.active.unwrap_or(existing_env.active),
-            id
+            input.id
         )
         .fetch_one(&self.pool)
         .await;
 
-        let pipeline = handle_error(Some(id), result)?;
+        let pipeline = handle_error(Some(input.id), result)?;
         Ok(Pipeline {
             id: pipeline.id,
             name: pipeline.name,

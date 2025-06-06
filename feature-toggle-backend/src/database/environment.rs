@@ -1,9 +1,18 @@
 use crate::database::entity::Environment;
 use crate::database::{handle_error, Error};
-use feature_toggle_shared::graphql::{CreateEnvironmentInput, UpdateEnvironmentInput};
 use mockall::automock;
 use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
+
+pub struct CreateEnvironment {
+    pub name: String,
+}
+
+pub struct UpdateEnvironment {
+    pub id: Uuid,
+    pub name: Option<String>,
+    pub active: Option<bool>,
+}
 
 #[automock]
 #[async_trait::async_trait]
@@ -14,9 +23,9 @@ pub trait EnvironmentRepository: Send + Sync {
         name: Option<String>,
         active: Option<bool>,
     ) -> Result<Vec<Environment>, Error>;
-    async fn create_environment(&self, input: CreateEnvironmentInput)
+    async fn create_environment(&self, input: CreateEnvironment)
     -> Result<Environment, Error>;
-    async fn update_environment(&self, input: UpdateEnvironmentInput)
+    async fn update_environment(&self, input: UpdateEnvironment)
     -> Result<Environment, Error>;
     async fn delete_environment(&self, id: Uuid) -> Result<(), Error>;
 
@@ -92,7 +101,7 @@ impl EnvironmentRepository for EnvironmentRepositoryImpl {
 
     async fn create_environment(
         &self,
-        input: CreateEnvironmentInput,
+        input: CreateEnvironment,
     ) -> Result<Environment, Error> {
         let id = Uuid::new_v4();
         let result = sqlx::query!(
@@ -113,19 +122,18 @@ impl EnvironmentRepository for EnvironmentRepositoryImpl {
 
     async fn update_environment(
         &self,
-        input: UpdateEnvironmentInput,
+        input: UpdateEnvironment,
     ) -> Result<Environment, Error> {
-        let id = Uuid::try_from(input.id).unwrap();
-        let existing_env = self.get_environment_by_id(id).await?;
+        let existing_env = self.get_environment_by_id(input.id).await?;
         let result = sqlx::query!(
             r#"UPDATE environments SET name = $1, active = $2 WHERE id = $3 RETURNING id, name, active"#,
             input.name.unwrap_or(existing_env.name),
             input.active.unwrap_or(existing_env.active),
-            id
+            input.id
         ).fetch_one(&self.pool)
             .await;
 
-        let environment = handle_error(Some(id), result)?;
+        let environment = handle_error(Some(input.id), result)?;
 
         Ok(Environment {
             id: environment.id,
