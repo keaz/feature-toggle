@@ -1,5 +1,5 @@
 use crate::database::entity::Environment;
-use crate::database::{handle_error, Error};
+use crate::database::{Error, handle_error};
 use mockall::automock;
 use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
@@ -23,10 +23,8 @@ pub trait EnvironmentRepository: Send + Sync {
         name: Option<String>,
         active: Option<bool>,
     ) -> Result<Vec<Environment>, Error>;
-    async fn create_environment(&self, input: CreateEnvironment)
-    -> Result<Environment, Error>;
-    async fn update_environment(&self, input: UpdateEnvironment)
-    -> Result<Environment, Error>;
+    async fn create_environment(&self, input: CreateEnvironment) -> Result<Environment, Error>;
+    async fn update_environment(&self, input: UpdateEnvironment) -> Result<Environment, Error>;
     async fn delete_environment(&self, id: Uuid) -> Result<(), Error>;
 
     fn clone_box(&self) -> Box<dyn EnvironmentRepository>;
@@ -99,10 +97,7 @@ impl EnvironmentRepository for EnvironmentRepositoryImpl {
         Ok(environments)
     }
 
-    async fn create_environment(
-        &self,
-        input: CreateEnvironment,
-    ) -> Result<Environment, Error> {
+    async fn create_environment(&self, input: CreateEnvironment) -> Result<Environment, Error> {
         let id = Uuid::new_v4();
         let result = sqlx::query!(
         r#"INSERT INTO environments (id, name, active) VALUES ($1, $2, true) RETURNING id,name,active"#,
@@ -120,10 +115,7 @@ impl EnvironmentRepository for EnvironmentRepositoryImpl {
         })
     }
 
-    async fn update_environment(
-        &self,
-        input: UpdateEnvironment,
-    ) -> Result<Environment, Error> {
+    async fn update_environment(&self, input: UpdateEnvironment) -> Result<Environment, Error> {
         let existing_env = self.get_environment_by_id(input.id).await?;
         let result = sqlx::query!(
             r#"UPDATE environments SET name = $1, active = $2 WHERE id = $3 RETURNING id, name, active"#,

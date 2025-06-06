@@ -6,7 +6,7 @@ use crate::database::init_pg_pool;
 use crate::graphql::mutation::MutationRoot;
 use crate::graphql::query::Query;
 use actix_cors::Cors;
-use actix_web::{guard, web, App, HttpRequest, HttpResponse, HttpServer, Result};
+use actix_web::{App, HttpRequest, HttpResponse, HttpServer, Result, guard, web};
 use async_graphql::http::GraphiQLSource;
 use async_graphql::{EmptyMutation, EmptySubscription, Schema};
 use async_graphql_actix_web::{GraphQL, GraphQLSubscription};
@@ -68,6 +68,6 @@ async fn index_ws(
     schema: web::Data<Schema<Query, EmptyMutation, EmptySubscription>>,
     req: HttpRequest,
     payload: web::Payload,
-) -> actix_web::Result<HttpResponse> {
+) -> Result<HttpResponse> {
     GraphQLSubscription::new(Schema::clone(&*schema)).start(&req, payload)
 }

@@ -1,9 +1,8 @@
 use crate::database::entity::Stage;
-use crate::database::{handle_error, Error};
+use crate::database::{Error, handle_error};
 use mockall::automock;
 use sqlx::PgPool;
 use uuid::Uuid;
-
 
 pub struct CreateStage {
     pub pipeline_id: Uuid,
@@ -77,7 +76,9 @@ impl StageRepository for StageRepositoryImpl {
             if has_where {
                 query_builder.push(" AND ");
             }
-            query_builder.push("parent_stage_id = ").push_bind(parent_stage_id);
+            query_builder
+                .push("parent_stage_id = ")
+                .push_bind(parent_stage_id);
         }
         query_builder.push(" ORDER BY name");
 
@@ -90,13 +91,16 @@ impl StageRepository for StageRepositoryImpl {
     }
 
     async fn create_stage(&self, stage: CreateStage) -> Result<Stage, Error> {
-
-        let existing_stage =self.get_stage(Some(stage.pipeline_id.clone()), Some(stage.environment_id.clone()))
+        let existing_stage = self
+            .get_stage(Some(stage.pipeline_id), Some(stage.environment_id))
             .await?;
 
         if !existing_stage.is_empty() {
-            return Err(Error::RecordAlreadyExists(format!("Stage already exists for pipeline {} and \
-            environment {}", stage.pipeline_id, stage.environment_id)));
+            return Err(Error::RecordAlreadyExists(format!(
+                "Stage already exists for pipeline {} and \
+            environment {}",
+                stage.pipeline_id, stage.environment_id
+            )));
         }
 
         let id = Uuid::new_v4();
@@ -117,12 +121,9 @@ impl StageRepository for StageRepositoryImpl {
     }
 
     async fn delete_pipeline(&self, id: Uuid) -> Result<(), Error> {
-        let result = sqlx::query!(
-            r#"DELETE FROM pipeline_stages WHERE pipeline_id = $1"#,
-            id
-        )
-        .execute(&self.pool)
-        .await;
+        let result = sqlx::query!(r#"DELETE FROM pipeline_stages WHERE pipeline_id = $1"#, id)
+            .execute(&self.pool)
+            .await;
 
         match result {
             Ok(_) => Ok(()),

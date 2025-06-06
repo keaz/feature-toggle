@@ -3,8 +3,8 @@ pub mod environment;
 pub mod pipeline;
 mod stage;
 
-use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use sqlx::postgres::PgPoolOptions;
 use std::env;
 use uuid::Uuid;
 
@@ -28,8 +28,8 @@ pub enum Error {
 }
 
 pub fn handle_error<T>(id: Option<Uuid>, result: Result<T, sqlx::Error>) -> Result<T, Error> {
-    if result.is_ok() {
-        Ok(result.unwrap())
+    if let Ok(record) = result {
+        Ok(record)
     } else {
         let error = result.err().unwrap();
         match error {

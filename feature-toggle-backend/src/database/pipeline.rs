@@ -1,9 +1,8 @@
 use crate::database::entity::Pipeline;
-use crate::database::{handle_error, Error};
+use crate::database::{Error, handle_error};
 use mockall::automock;
 use sqlx::PgPool;
 use uuid::Uuid;
-
 
 pub struct CreatePipeline {
     pub name: String,
@@ -143,7 +142,6 @@ impl PipelineRepository for PipelineRepositoryImpl {
     }
 
     async fn update_pipeline(&self, input: UpdatePipeline) -> Result<Pipeline, Error> {
-
         let existing_env = self.get_pipeline_by_id(input.id).await?;
         let result = sqlx::query!(
             r#"UPDATE pipelines SET name = $1, active = $2 WHERE id = $3 RETURNING id, name, active"#,

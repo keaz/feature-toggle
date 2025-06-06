@@ -1,4 +1,3 @@
-use crate::database::environment::EnvironmentRepository;
 use crate::logic::environment::EnvironmentLogic;
 use async_graphql::{Context, Object, Result as GqlResult};
 use feature_toggle_shared::graphql::{CreateEnvironmentInput, Environment, UpdateEnvironmentInput};
@@ -27,7 +26,7 @@ impl MutationRoot {
 
     async fn delete_environment(&self, ctx: &Context<'_>, id: uuid::Uuid) -> GqlResult<bool> {
         let logic = ctx.data::<Box<dyn EnvironmentLogic>>().unwrap();
-        let _ = logic.delete_environment(id).await?;
+        logic.delete_environment(id).await?;
         Ok(true)
     }
 

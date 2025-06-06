@@ -1,5 +1,5 @@
-use crate::database::pipeline::PipelineRepository;
 use crate::database::Error;
+use crate::database::pipeline::PipelineRepository;
 use feature_toggle_shared::graphql::{CreatePipelineInput, Pipeline, UpdatePipelineInput};
 use uuid::Uuid;
 
@@ -63,9 +63,7 @@ impl PipelineLogic for PipelineLogicImpl {
     }
 
     async fn create_pipeline(&self, input: CreatePipelineInput) -> Result<Pipeline, Error> {
-        let input = crate::database::pipeline::CreatePipeline {
-            name: input.name,
-        };
+        let input = crate::database::pipeline::CreatePipeline { name: input.name };
         let pipeline = self.repository.create_pipeline(input).await?;
         Ok(Pipeline {
             id: pipeline.id.into(),
@@ -76,7 +74,6 @@ impl PipelineLogic for PipelineLogicImpl {
     }
 
     async fn update_pipeline(&self, input: UpdatePipelineInput) -> Result<Pipeline, Error> {
-        
         let input = crate::database::pipeline::UpdatePipeline {
             id: Uuid::try_from(input.id).unwrap(),
             name: input.name,
@@ -104,13 +101,11 @@ impl PipelineLogic for PipelineLogicImpl {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::database::init_pg_pool;
     use crate::database::pipeline::MockPipelineRepository;
     use async_graphql::ID;
 
     #[tokio::test]
     async fn test_get_pipeline_by_id() {
-        let pool = init_pg_pool().await;
         let mut repository = MockPipelineRepository::new();
 
         const ID: &str = "3eef17bc-9e06-411d-b5f4-7a786e68bb96";
@@ -136,7 +131,6 @@ mod test {
 
     #[tokio::test]
     async fn test_get_non_existing_pipeline() {
-        let pool = init_pg_pool().await;
         let mut repository = MockPipelineRepository::new();
 
         const ID: &str = "51ecc366-f1cd-4d3d-ab73-fa60bad98fca";
@@ -157,7 +151,6 @@ mod test {
 
     #[tokio::test]
     async fn test_create_pipeline() {
-        let pool = init_pg_pool().await;
         let mut repository = MockPipelineRepository::new();
 
         let input = CreatePipelineInput {
@@ -186,7 +179,6 @@ mod test {
 
     #[tokio::test]
     async fn test_update_pipeline() {
-        let pool = init_pg_pool().await;
         let mut repository = MockPipelineRepository::new();
 
         const ID: &str = "3eef17bc-9e06-411d-b5f4-7a786e68bb96";
@@ -221,7 +213,6 @@ mod test {
 
     #[tokio::test]
     async fn test_not_existing_pipeline_update() {
-        let pool = init_pg_pool().await;
         let mut repository = MockPipelineRepository::new();
 
         const ID: &str = "51ecc366-f1cd-4d3d-ab73-fa60bad98fca";
@@ -247,7 +238,6 @@ mod test {
 
     #[tokio::test]
     async fn test_delete_pipeline() {
-        let pool = init_pg_pool().await;
         let mut repository = MockPipelineRepository::new();
 
         const ID: &str = "3eef17bc-9e06-411d-b5f4-7a786e68bb96";
@@ -266,7 +256,6 @@ mod test {
 
     #[tokio::test]
     async fn test_delete_non_existing_pipeline() {
-        let pool = init_pg_pool().await;
         let mut repository = MockPipelineRepository::new();
 
         const ID: &str = "51ecc366-f1cd-4d3d-ab73-fa60bad98fca";
@@ -287,7 +276,6 @@ mod test {
 
     #[tokio::test]
     async fn test_get_pipelines() {
-        let pool = init_pg_pool().await;
         let mut repository = MockPipelineRepository::new();
 
         repository

@@ -1,5 +1,5 @@
-use crate::database::environment::EnvironmentRepository;
 use crate::database::Error;
+use crate::database::environment::EnvironmentRepository;
 use async_graphql::ID;
 use feature_toggle_shared::graphql::{CreateEnvironmentInput, Environment, UpdateEnvironmentInput};
 use uuid::Uuid;
@@ -70,10 +70,8 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
         &self,
         input: CreateEnvironmentInput,
     ) -> Result<Environment, Error> {
-        let input = crate::database::environment::CreateEnvironment {
-            name: input.name,
-        };
-        
+        let input = crate::database::environment::CreateEnvironment { name: input.name };
+
         let environment = self.repository.create_environment(input).await?;
         let id = ID::from(environment.id);
         Ok(Environment {
@@ -92,7 +90,7 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
             name: input.name,
             active: input.active,
         };
-        
+
         let environment = self.repository.update_environment(input).await?;
         let id = ID::from(environment.id);
         Ok(Environment {
@@ -127,7 +125,7 @@ mod tests {
             .times(1)
             .returning(move |_| {
                 Ok(crate::database::entity::Environment {
-                    id: id.clone(),
+                    id,
                     name: "Mock Environment".to_string(),
                     active: true,
                 })
@@ -151,7 +149,7 @@ mod tests {
             .expect_get_environment_by_id()
             .withf(|mock_id| mock_id.eq(&Uuid::parse_str(ENV_ID).unwrap()))
             .times(1)
-            .returning(move |_| Err(Error::NotFound(id.clone())));
+            .returning(move |_| Err(Error::NotFound(id)));
 
         let logic = environment_logic(Box::new(mock_repository));
         let result = logic.get_environment_by_id(id).await;
@@ -240,7 +238,7 @@ mod tests {
                 input.id == input.id && input.name == Some("Updated Environment".to_string())
             })
             .times(1)
-            .returning(move |_| Err(Error::NotFound(expected_id.clone())));
+            .returning(move |_| Err(Error::NotFound(expected_id)));
 
         let logic = environment_logic(Box::new(mock_repository));
         let result = logic.update_environment(input).await;
@@ -279,7 +277,7 @@ mod tests {
             .expect_delete_environment()
             .withf(|mock_id| mock_id.eq(&Uuid::parse_str(ENV_ID).unwrap()))
             .times(1)
-            .returning(move |_| Err(Error::NotFound(id.clone())));
+            .returning(move |_| Err(Error::NotFound(id)));
 
         let logic = environment_logic(Box::new(mock_repository));
         let result = logic.delete_environment(id).await;
