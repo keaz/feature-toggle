@@ -10,7 +10,6 @@ pub struct CreateEnvironment {
 }
 
 pub struct UpdateEnvironment {
-    pub id: Uuid,
     pub name: Option<String>,
     pub active: Option<bool>,
 }
@@ -21,11 +20,12 @@ pub trait EnvironmentRepository: Send + Sync {
     async fn get_environment_by_id(&self, env_id: Uuid) -> Result<Environment, Error>;
     async fn get_environments(
         &self,
+        team_id: Uuid,
         name: Option<String>,
         active: Option<bool>,
     ) -> Result<Vec<Environment>, Error>;
-    async fn create_environment(&self, input: CreateEnvironment) -> Result<Environment, Error>;
-    async fn update_environment(&self, input: UpdateEnvironment) -> Result<Environment, Error>;
+    async fn create_environment(&self, team_id: Uuid, input: CreateEnvironment) -> Result<Environment, Error>;
+    async fn update_environment(&self, id: Uuid, input: UpdateEnvironment) -> Result<Environment, Error>;
     async fn delete_environment(&self, id: Uuid) -> Result<(), Error>;
 
     fn clone_box(&self) -> Box<dyn EnvironmentRepository>;
@@ -62,32 +62,24 @@ impl EnvironmentRepository for EnvironmentRepositoryImpl {
         .fetch_one(&self.pool)
         .await;
 
-        handle_error(Some(id), result)
+        handle_error(Some(id.clone()), result)
     }
 
     async fn get_environments(
         &self,
+        team_id: Uuid,
         name: Option<String>,
         active: Option<bool>,
     ) -> Result<Vec<Environment>, Error> {
-        let mut qb = QueryBuilder::<Postgres>::new("SELECT id, name, active FROM environments");
-
-        let mut has_where = false;
-
-        if name.is_some() || active.is_some() {
-            qb.push(" WHERE ");
-        }
+        let mut qb = QueryBuilder::<Postgres>::new("SELECT id, name, active FROM environments WHERE team_id = ");
+        qb.push_bind(team_id);
 
         if let Some(filter_name) = name {
             let pattern = format!("%{}%", filter_name);
             qb.push("name ILIKE ").push_bind(pattern);
-            has_where = true;
         }
 
         if let Some(active_value) = active {
-            if has_where {
-                qb.push(" AND ");
-            }
             qb.push("active = ").push_bind(active_value);
         }
 
@@ -98,13 +90,14 @@ impl EnvironmentRepository for EnvironmentRepositoryImpl {
         Ok(environments)
     }
 
-    async fn create_environment(&self, input: CreateEnvironment) -> Result<Environment, Error> {
+    async fn create_environment(&self, team_id: Uuid, input: CreateEnvironment) -> Result<Environment, Error> {
         let id = Uuid::new_v4();
         let result = sqlx::query!(
-        r#"INSERT INTO environments (id, name, active) VALUES ($1, $2, $3) RETURNING id,name,active"#,
+        r#"INSERT INTO environments (id, name, active, team_id) VALUES ($1, $2, $3, $4) RETURNING id,name,active"#,
         id,
         input.name,
-        input.active
+        input.active,
+        team_id
     )
             .fetch_one(&self.pool)
             .await;
@@ -117,17 +110,17 @@ impl EnvironmentRepository for EnvironmentRepositoryImpl {
         })
     }
 
-    async fn update_environment(&self, input: UpdateEnvironment) -> Result<Environment, Error> {
-        let existing_env = self.get_environment_by_id(input.id).await?;
+    async fn update_environment(&self, id: Uuid, input: UpdateEnvironment) -> Result<Environment, Error> {
+        let existing_env = self.get_environment_by_id(id).await?;
         let result = sqlx::query!(
             r#"UPDATE environments SET name = $1, active = $2 WHERE id = $3 RETURNING id, name, active"#,
             input.name.unwrap_or(existing_env.name),
             input.active.unwrap_or(existing_env.active),
-            input.id
+            id
         ).fetch_one(&self.pool)
             .await;
 
-        let environment = handle_error(Some(input.id), result)?;
+        let environment = handle_error(Some(id), result)?;
 
         Ok(Environment {
             id: environment.id,

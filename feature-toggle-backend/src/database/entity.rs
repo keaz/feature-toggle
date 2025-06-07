@@ -39,3 +39,10 @@ pub enum FeatureType {
     Percentage,
     Contextual,
 }
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
+pub struct Team {
+    pub id: Uuid,
+    pub name: String,
+    pub description: String,
+}

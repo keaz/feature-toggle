@@ -1,2 +1,3 @@
 pub mod environment;
-mod pipeline;
+pub mod pipeline;
+pub mod team;

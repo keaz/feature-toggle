@@ -41,6 +41,7 @@ async fn test_create_environment() {
         name: "New Environment".to_string(),
         active: true,
     };
+    let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
     let result = repository.create_environment(input).await;
 
     assert_eq!(result.is_ok(), true);

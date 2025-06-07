@@ -1,6 +1,8 @@
 use crate::logic::environment::EnvironmentLogic;
-use async_graphql::{Context, Object, Result as GqlResult};
-use feature_toggle_shared::graphql::Environment;
+use crate::logic::team::TeamLogic;
+use async_graphql::{Context, Object, Result as GqlResult, ID};
+use feature_toggle_shared::graphql::{Environment, Team};
+use log::debug;
 use uuid::Uuid;
 
 pub struct Query;
@@ -12,6 +14,7 @@ impl Query {
         ctx: &Context<'_>,
         #[graphql(desc = "Id of object")] id: Uuid,
     ) -> GqlResult<Environment> {
+        debug!("Fetching environment with id: {}", id);
         let repository = ctx.data::<Box<dyn EnvironmentLogic>>().unwrap();
         Ok(repository.get_environment_by_id(id).await?)
     }
@@ -19,10 +22,21 @@ impl Query {
     async fn environments(
         &self,
         ctx: &Context<'_>,
+        #[graphql(desc = "Id of the team")]  team_id: ID,
         #[graphql(desc = "Name of the environment")] name: Option<String>,
         #[graphql(desc = "Active status of the environment")] active: Option<bool>,
     ) -> GqlResult<Vec<Environment>> {
+        debug!("Fetching environments with name: {:?} and active: {:?}", name, active);
         let repository = ctx.data::<Box<dyn EnvironmentLogic>>().unwrap();
-        Ok(repository.get_environments(name, active).await?)
+        Ok(repository.get_environments(team_id, name, active).await?)
+    }
+
+    async fn teams(
+        &self,
+        ctx: &Context<'_>,
+    ) -> GqlResult<Vec<Team>> {
+        debug!("Fetching teams");
+        let repository = ctx.data::<Box<dyn TeamLogic>>().unwrap();
+        Ok(repository.get_teams(None).await?)
     }
 }

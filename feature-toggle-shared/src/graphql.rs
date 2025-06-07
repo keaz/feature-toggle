@@ -57,7 +57,7 @@ pub struct PipelineStage {
 
 // Input types for mutations
 
-#[derive(InputObject)]
+#[derive(InputObject, Debug)]
 pub struct CreateFeatureInput {
     pub name: String,
     pub description: Option<String>,
@@ -67,41 +67,62 @@ pub struct CreateFeatureInput {
     pub dependencies: Vec<ID>,
 }
 
-#[derive(InputObject)]
+#[derive(InputObject, Debug)]
 pub struct ContextRuleInput {
     pub key: String,
     pub value: String,
     pub operator: RuleOperator,
 }
 
-#[derive(InputObject)]
+#[derive(InputObject, Debug)]
 pub struct CreateEnvironmentInput {
     pub name: String,
     pub active: bool,
 }
 
-#[derive(InputObject)]
+#[derive(InputObject, Debug)]
 pub struct CreatePipelineInput {
     pub name: String,
 }
 
-#[derive(InputObject)]
+#[derive(InputObject, Debug)]
 pub struct UpdatePipelineInput {
     pub id: ID,
     pub name: Option<String>,
     pub active: Option<bool>,
 }
 
-#[derive(InputObject)]
+#[derive(InputObject, Debug)]
 pub struct UpdateEnvironmentInput {
     pub name: Option<String>,
     pub active: Option<bool>,
 }
 
-#[derive(InputObject)]
+#[derive(InputObject, Debug)]
 pub struct CreateStageInput {
     pub pipeline_id: ID,
     pub environment_id: ID,
     pub parent_stage_id: Option<ID>,
     pub order: i32,
 }
+
+#[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
+pub struct Team {
+    pub id: ID,
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(InputObject)]
+pub struct CreateTeamInput {
+    pub name: String,
+    pub description: String,
+}
+
+
+#[derive(InputObject)]
+pub struct UpdateTeamInput {
+    pub name: Option<String>,
+    pub description: Option<String>,
+}
+
