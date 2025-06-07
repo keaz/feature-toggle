@@ -77,6 +77,7 @@ pub struct ContextRuleInput {
 #[derive(InputObject)]
 pub struct CreateEnvironmentInput {
     pub name: String,
+    pub active: bool,
 }
 
 #[derive(InputObject)]
@@ -93,7 +94,6 @@ pub struct UpdatePipelineInput {
 
 #[derive(InputObject)]
 pub struct UpdateEnvironmentInput {
-    pub id: ID,
     pub name: Option<String>,
     pub active: Option<bool>,
 }

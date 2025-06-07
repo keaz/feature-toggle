@@ -3,8 +3,9 @@ pub mod environment;
 pub mod pipeline;
 mod stage;
 
-use sqlx::PgPool;
+use crate::Error;
 use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 use std::env;
 use uuid::Uuid;
 
@@ -17,15 +18,6 @@ pub async fn init_pg_pool() -> PgPool {
         .expect("Failed to connect to Postgres")
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("Record does not exists for the id {0}")]
-    NotFound(Uuid),
-    #[error("Database error occurred")]
-    DatabaseError(#[source] sqlx::Error),
-    #[error("Record {0} already exists")]
-    RecordAlreadyExists(String),
-}
 
 pub fn handle_error<T>(id: Option<Uuid>, result: Result<T, sqlx::Error>) -> Result<T, Error> {
     if let Ok(record) = result {

@@ -1,5 +1,5 @@
-use crate::database::Error;
 use crate::database::pipeline::PipelineRepository;
+use crate::Error;
 use feature_toggle_shared::graphql::{CreatePipelineInput, Pipeline, UpdatePipelineInput};
 use uuid::Uuid;
 

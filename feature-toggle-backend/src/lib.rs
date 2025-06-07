@@ -6,10 +6,11 @@ use crate::database::init_pg_pool;
 use crate::graphql::mutation::MutationRoot;
 use crate::graphql::query::Query;
 use actix_cors::Cors;
-use actix_web::{App, HttpRequest, HttpResponse, HttpServer, Result, guard, web};
+use actix_web::{guard, web, App, HttpRequest, HttpResponse, HttpServer, Result};
 use async_graphql::http::GraphiQLSource;
 use async_graphql::{EmptyMutation, EmptySubscription, Schema};
 use async_graphql_actix_web::{GraphQL, GraphQLSubscription};
+use uuid::Uuid;
 
 pub async fn run() -> std::io::Result<()> {
     let db_pool = init_pg_pool().await;
@@ -70,4 +71,17 @@ async fn index_ws(
     payload: web::Payload,
 ) -> Result<HttpResponse> {
     GraphQLSubscription::new(Schema::clone(&*schema)).start(&req, payload)
+}
+
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("Record does not exists for the id {0}")]
+    NotFound(Uuid),
+    #[error("Database error occurred")]
+    DatabaseError(#[source] sqlx::Error),
+    #[error("Record {0} already exists")]
+    RecordAlreadyExists(String),
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 }

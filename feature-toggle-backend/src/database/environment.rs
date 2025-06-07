@@ -1,11 +1,12 @@
 use crate::database::entity::Environment;
-use crate::database::{Error, handle_error};
+use crate::database::{handle_error, Error};
 use mockall::automock;
 use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
 pub struct CreateEnvironment {
     pub name: String,
+    pub active: bool,
 }
 
 pub struct UpdateEnvironment {
@@ -100,9 +101,10 @@ impl EnvironmentRepository for EnvironmentRepositoryImpl {
     async fn create_environment(&self, input: CreateEnvironment) -> Result<Environment, Error> {
         let id = Uuid::new_v4();
         let result = sqlx::query!(
-        r#"INSERT INTO environments (id, name, active) VALUES ($1, $2, true) RETURNING id,name,active"#,
+        r#"INSERT INTO environments (id, name, active) VALUES ($1, $2, $3) RETURNING id,name,active"#,
         id,
-        input.name
+        input.name,
+        input.active
     )
             .fetch_one(&self.pool)
             .await;

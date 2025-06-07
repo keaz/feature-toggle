@@ -28,7 +28,7 @@ async fn test_get_not_found_environment() {
     let error = result.err().unwrap();
     assert!(matches!(
         error,
-        feature_toggle_backend::database::Error::NotFound(_)
+        feature_toggle_backend::Error::NotFound(_)
     ));
 }
 
@@ -39,6 +39,7 @@ async fn test_create_environment() {
 
     let input = CreateEnvironment {
         name: "New Environment".to_string(),
+        active: true,
     };
     let result = repository.create_environment(input).await;
 
@@ -82,7 +83,7 @@ async fn test_not_found_update_environment() {
     let error = result.err().unwrap();
     assert!(matches!(
         error,
-        feature_toggle_backend::database::Error::NotFound(_)
+        feature_toggle_backend::Error::NotFound(_)
     ));
 }
 
@@ -109,7 +110,7 @@ async fn test_not_found_delete_environment() {
     let error = result.err().unwrap();
     assert!(matches!(
         error,
-        feature_toggle_backend::database::Error::NotFound(_)
+        feature_toggle_backend::Error::NotFound(_)
     ));
 }
 

@@ -1,5 +1,5 @@
-use crate::database::Error;
 use crate::database::environment::EnvironmentRepository;
+use crate::Error;
 use async_graphql::ID;
 use feature_toggle_shared::graphql::{CreateEnvironmentInput, Environment, UpdateEnvironmentInput};
 use uuid::Uuid;
@@ -16,7 +16,7 @@ pub trait EnvironmentLogic: Send + Sync {
 
     async fn create_environment(&self, input: CreateEnvironmentInput)
     -> Result<Environment, Error>;
-    async fn update_environment(&self, input: UpdateEnvironmentInput)
+    async fn update_environment(&self, id: ID, input: UpdateEnvironmentInput)
     -> Result<Environment, Error>;
     async fn delete_environment(&self, id: Uuid) -> Result<(), Error>;
 
@@ -70,7 +70,11 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
         &self,
         input: CreateEnvironmentInput,
     ) -> Result<Environment, Error> {
-        let input = crate::database::environment::CreateEnvironment { name: input.name };
+        let input = crate::database::environment::CreateEnvironment { name: input.name, active: input.active };
+
+        if input.name.is_empty() {
+            return Err(Error::InvalidInput("Environment name cannot be empty".to_string()));
+        }
 
         let environment = self.repository.create_environment(input).await?;
         let id = ID::from(environment.id);
@@ -83,10 +87,11 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
 
     async fn update_environment(
         &self,
+        id: ID,
         input: UpdateEnvironmentInput,
     ) -> Result<Environment, Error> {
         let input = crate::database::environment::UpdateEnvironment {
-            id: Uuid::try_from(input.id).unwrap(),
+            id: Uuid::try_from(id).unwrap(),
             name: input.name,
             active: input.active,
         };
@@ -167,6 +172,7 @@ mod tests {
         let mut mock_repository = MockEnvironmentRepository::new();
         let input = CreateEnvironmentInput {
             name: "New Environment".to_string(),
+            active: true,
         };
         let expected_id = Uuid::new_v4();
         mock_repository
@@ -194,11 +200,11 @@ mod tests {
     async fn test_update_environment() {
         let mut mock_repository = MockEnvironmentRepository::new();
         let input = UpdateEnvironmentInput {
-            id: ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"),
             name: Some("Updated Environment".to_string()),
             active: Some(true),
         };
-        let expected_id = Uuid::parse_str(&input.id).unwrap();
+        const ID: &str = "51ecc366-f1cd-4d3d-ab73-fa60bad98f27";
+        let expected_id = Uuid::parse_str(ID).unwrap();
         mock_repository
             .expect_update_environment()
             .withf(|input| {
@@ -214,7 +220,7 @@ mod tests {
             });
 
         let logic = environment_logic(Box::new(mock_repository));
-        let result = logic.update_environment(input).await;
+        let result = logic.update_environment(ID::from(ID), input).await;
 
         assert!(result.is_ok());
         let environment = result.unwrap();
@@ -227,11 +233,10 @@ mod tests {
         let mut mock_repository = MockEnvironmentRepository::new();
         const ENV_ID: &str = "51ecc366-f1cd-4d3d-ab73-fa60bad98f27";
         let input = UpdateEnvironmentInput {
-            id: ID::from(ENV_ID),
             name: Some("Updated Environment".to_string()),
             active: Some(true),
         };
-        let expected_id = Uuid::parse_str(&input.id).unwrap();
+        let expected_id = Uuid::parse_str(ENV_ID).unwrap();
         mock_repository
             .expect_update_environment()
             .withf(|input| {
@@ -241,7 +246,7 @@ mod tests {
             .returning(move |_| Err(Error::NotFound(expected_id)));
 
         let logic = environment_logic(Box::new(mock_repository));
-        let result = logic.update_environment(input).await;
+        let result = logic.update_environment(ID::from(ENV_ID), input).await;
 
         assert!(result.is_err());
         let error = result.err().unwrap();

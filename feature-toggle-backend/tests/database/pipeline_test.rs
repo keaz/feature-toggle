@@ -28,7 +28,7 @@ async fn test_get_non_existing_pipeline() {
     let error = result.err().unwrap();
     assert!(matches!(
         error,
-        feature_toggle_backend::database::Error::NotFound(_)
+        feature_toggle_backend::Error::NotFound(_)
     ));
 }
 
@@ -37,13 +37,13 @@ async fn test_create_pipeline() {
     let pool = init_pg_pool().await;
     let repository = pipeline::pipeline_repository(pool);
 
-    let random_name = format!("New Pipeline {}", uuid::Uuid::new_v4());
+    let random_name = format!("New Pipeline {}", Uuid::new_v4());
     let input = CreatePipeline {
         name: random_name.clone(),
     };
     let result = repository.create_pipeline(input).await;
 
-    assert_eq!(result.is_ok(), true);
+    assert!(result.is_ok());
     let pipeline = result.unwrap();
     assert_eq!(pipeline.name, random_name);
     assert!(pipeline.active);
@@ -63,7 +63,7 @@ async fn test_create_exising_pipeline() {
     let error = result.err().unwrap();
     assert!(matches!(
         error,
-        feature_toggle_backend::database::Error::RecordAlreadyExists(_)
+        feature_toggle_backend::Error::RecordAlreadyExists(_)
     ));
 }
 
@@ -101,7 +101,7 @@ async fn test_update_non_existing_pipeline() {
     let error = result.err().unwrap();
     assert!(matches!(
         error,
-        feature_toggle_backend::database::Error::NotFound(_)
+        feature_toggle_backend::Error::NotFound(_)
     ));
 }
 
@@ -128,7 +128,7 @@ async fn test_delete_non_existing_pipeline() {
     let error = result.err().unwrap();
     assert!(matches!(
         error,
-        feature_toggle_backend::database::Error::NotFound(_)
+        feature_toggle_backend::Error::NotFound(_)
     ));
 }
 
