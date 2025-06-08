@@ -24,8 +24,16 @@ pub trait EnvironmentRepository: Send + Sync {
         name: Option<String>,
         active: Option<bool>,
     ) -> Result<Vec<Environment>, Error>;
-    async fn create_environment(&self, team_id: Uuid, input: CreateEnvironment) -> Result<Environment, Error>;
-    async fn update_environment(&self, id: Uuid, input: UpdateEnvironment) -> Result<Environment, Error>;
+    async fn create_environment(
+        &self,
+        team_id: Uuid,
+        input: CreateEnvironment,
+    ) -> Result<Environment, Error>;
+    async fn update_environment(
+        &self,
+        id: Uuid,
+        input: UpdateEnvironment,
+    ) -> Result<Environment, Error>;
     async fn delete_environment(&self, id: Uuid) -> Result<(), Error>;
 
     fn clone_box(&self) -> Box<dyn EnvironmentRepository>;
@@ -71,16 +79,18 @@ impl EnvironmentRepository for EnvironmentRepositoryImpl {
         name: Option<String>,
         active: Option<bool>,
     ) -> Result<Vec<Environment>, Error> {
-        let mut qb = QueryBuilder::<Postgres>::new("SELECT id, name, active FROM environments WHERE team_id = ");
+        let mut qb = QueryBuilder::<Postgres>::new(
+            "SELECT id, name, active FROM environments WHERE team_id = ",
+        );
         qb.push_bind(team_id);
 
         if let Some(filter_name) = name {
             let pattern = format!("%{}%", filter_name);
-            qb.push("name ILIKE ").push_bind(pattern);
+            qb.push(" AND name ILIKE ").push_bind(pattern);
         }
 
         if let Some(active_value) = active {
-            qb.push("active = ").push_bind(active_value);
+            qb.push(" AND active = ").push_bind(active_value);
         }
 
         let query = qb.build_query_as::<Environment>();
@@ -90,7 +100,22 @@ impl EnvironmentRepository for EnvironmentRepositoryImpl {
         Ok(environments)
     }
 
-    async fn create_environment(&self, team_id: Uuid, input: CreateEnvironment) -> Result<Environment, Error> {
+    async fn create_environment(
+        &self,
+        team_id: Uuid,
+        input: CreateEnvironment,
+    ) -> Result<Environment, Error> {
+        let existing_result = self
+            .get_environments(team_id, Some(input.name.clone()), None)
+            .await;
+        if let Ok(existing_environments) = existing_result {
+            if !existing_environments.is_empty() {
+                return Err(Error::RecordAlreadyExists(format!(
+                    "Environment with name '{}' already exists for team {}",
+                    input.name, team_id
+                )));
+            }
+        }
         let id = Uuid::new_v4();
         let result = sqlx::query!(
         r#"INSERT INTO environments (id, name, active, team_id) VALUES ($1, $2, $3, $4) RETURNING id,name,active"#,
@@ -110,7 +135,11 @@ impl EnvironmentRepository for EnvironmentRepositoryImpl {
         })
     }
 
-    async fn update_environment(&self, id: Uuid, input: UpdateEnvironment) -> Result<Environment, Error> {
+    async fn update_environment(
+        &self,
+        id: Uuid,
+        input: UpdateEnvironment,
+    ) -> Result<Environment, Error> {
         let existing_env = self.get_environment_by_id(id).await?;
         let result = sqlx::query!(
             r#"UPDATE environments SET name = $1, active = $2 WHERE id = $3 RETURNING id, name, active"#,

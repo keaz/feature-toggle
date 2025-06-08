@@ -184,7 +184,7 @@ mod tests {
         let expected_id = Uuid::parse_str(ID).unwrap();
         mock_repository
             .expect_create_environment()
-            .withf(|id, input| id == &expected_id && input.name == "New Environment")
+            .withf(move |id, input| id == &expected_id.clone() && input.name == "New Environment")
             .times(1)
             .returning(move |_, _| {
                 Ok(crate::database::entity::Environment {
@@ -214,8 +214,8 @@ mod tests {
         let expected_id = Uuid::parse_str(ID).unwrap();
         mock_repository
             .expect_update_environment()
-            .withf(|id, input| {
-                id == &expected_id && input.name == Some("Updated Environment".to_string())
+            .withf(move |id, input| {
+                id == &expected_id.clone() && input.name == Some("Updated Environment".to_string())
             })
             .times(1)
             .returning(move |_, _| {
@@ -246,8 +246,8 @@ mod tests {
         let expected_id = Uuid::parse_str(ENV_ID).unwrap();
         mock_repository
             .expect_update_environment()
-            .withf(|id, input| {
-                id == &expected_id && input.name == Some("Updated Environment".to_string())
+            .withf(move |id, input| {
+                id == &expected_id.clone() && input.name == Some("Updated Environment".to_string())
             })
             .times(1)
             .returning(move |_, _| Err(Error::NotFound(expected_id)));

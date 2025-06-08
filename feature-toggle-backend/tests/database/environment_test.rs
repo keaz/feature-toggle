@@ -42,7 +42,7 @@ async fn test_create_environment() {
         active: true,
     };
     let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
-    let result = repository.create_environment(input).await;
+    let result = repository.create_environment(team_id, input).await;
 
     assert_eq!(result.is_ok(), true);
     let environment = result.unwrap();
@@ -51,16 +51,36 @@ async fn test_create_environment() {
 }
 
 #[tokio::test]
+async fn test_create_existing_environment() {
+    let pool = init_pg_pool().await;
+    let repository = environment::environment_repository(pool);
+
+    let input = CreateEnvironment {
+        name: "Test Environment".to_string(),
+        active: true,
+    };
+    let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+    let result = repository.create_environment(team_id, input).await;
+
+    assert!(result.is_err());
+    let error = result.err().unwrap();
+    assert!(matches!(
+        error,
+        feature_toggle_backend::Error::RecordAlreadyExists(_)
+    ));
+}
+
+#[tokio::test]
 async fn test_update_environment() {
     let pool = init_pg_pool().await;
     let repository = environment::environment_repository(pool);
 
+    let id = Uuid::parse_str("3eef17bc-9e06-411d-b5f4-7a786e68bb96").unwrap();
     let input = UpdateEnvironment {
-        id: Uuid::parse_str("3eef17bc-9e06-411d-b5f4-7a786e68bb96").unwrap(),
         name: Some("Updated Environment".to_string()),
         active: Some(false),
     };
-    let result = repository.update_environment(input).await;
+    let result = repository.update_environment(id, input).await;
 
     assert_eq!(result.is_ok(), true);
     let environment = result.unwrap();
@@ -73,12 +93,12 @@ async fn test_not_found_update_environment() {
     let pool = init_pg_pool().await;
     let repository = environment::environment_repository(pool);
 
+    let id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98fca").unwrap();
     let input = UpdateEnvironment {
-        id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98fca").unwrap(),
         name: Some("Non-existent Environment".to_string()),
         active: Some(true),
     };
-    let result = repository.update_environment(input).await;
+    let result = repository.update_environment(id, input).await;
 
     assert_eq!(result.is_err(), true);
     let error = result.err().unwrap();
@@ -120,7 +140,8 @@ async fn test_non_param_get_environments() {
     let pool = init_pg_pool().await;
     let repository = environment::environment_repository(pool);
 
-    let result = repository.get_environments(None, None).await;
+    let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+    let result = repository.get_environments(team_id, None, None).await;
 
     assert_eq!(result.is_ok(), true);
     let environments = result.unwrap();
@@ -137,7 +158,8 @@ async fn test_active_param_get_environments() {
     let pool = init_pg_pool().await;
     let repository = environment::environment_repository(pool);
 
-    let result = repository.get_environments(None, Some(true)).await;
+    let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+    let result = repository.get_environments(team_id, None, Some(true)).await;
 
     assert_eq!(result.is_ok(), true);
     let environments = result.unwrap();
@@ -150,8 +172,9 @@ async fn test_name_param_get_environments() {
     let pool = init_pg_pool().await;
     let repository = environment::environment_repository(pool);
 
+    let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
     let result = repository
-        .get_environments(Some("Test".to_string()), None)
+        .get_environments(team_id, Some("Test".to_string()), None)
         .await;
 
     assert_eq!(result.is_ok(), true);
@@ -165,8 +188,9 @@ async fn test_name_and_active_param_get_environments() {
     let pool = init_pg_pool().await;
     let repository = environment::environment_repository(pool);
 
+    let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
     let result = repository
-        .get_environments(Some("Test".to_string()), Some(true))
+        .get_environments(team_id, Some("Test".to_string()), Some(true))
         .await;
 
     assert_eq!(result.is_ok(), true);

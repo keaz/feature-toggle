@@ -1,3 +1,10 @@
+DELETE
+FROM public.pipelines;
+DELETE
+FROM public.environments;
+DELETE
+FROM public.teams;
+
 INSERT INTO public.teams(id, name, description)
 VALUES ('51ecc366-f1cd-4d3d-ab73-fa60bad98f27', 'Test Team', 'This is a test team'),
        ('3eef17bc-9e06-411d-b5f4-7a786e68bb96', 'Update Team', 'This is a test team'),
