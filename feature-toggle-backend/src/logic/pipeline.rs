@@ -1,5 +1,6 @@
 use crate::database::pipeline::PipelineRepository;
 use crate::Error;
+use async_graphql::ID;
 use feature_toggle_shared::graphql::{CreatePipelineInput, Pipeline, UpdatePipelineInput};
 use uuid::Uuid;
 
@@ -8,13 +9,14 @@ pub trait PipelineLogic: Send + Sync {
     async fn get_pipeline_by_id(&self, env_id: Uuid) -> Result<Pipeline, Error>;
     async fn get_pipelines(
         &self,
+        team_id: ID,
         name: Option<String>,
         active: Option<bool>,
     ) -> Result<Vec<Pipeline>, Error>;
 
-    async fn create_pipeline(&self, input: CreatePipelineInput) -> Result<Pipeline, Error>;
-    async fn update_pipeline(&self, input: UpdatePipelineInput) -> Result<Pipeline, Error>;
-    async fn delete_pipeline(&self, id: Uuid) -> Result<(), Error>;
+    async fn create_pipeline(&self, team_id: ID, input: CreatePipelineInput) -> Result<Pipeline, Error>;
+    async fn update_pipeline(&self, id: ID, input: UpdatePipelineInput) -> Result<Pipeline, Error>;
+    async fn delete_pipeline(&self, id: ID) -> Result<(), Error>;
     fn clone_box(&self) -> Box<dyn PipelineLogic>;
 }
 
@@ -47,10 +49,12 @@ impl PipelineLogic for PipelineLogicImpl {
 
     async fn get_pipelines(
         &self,
+        team_id: ID,
         name: Option<String>,
         active: Option<bool>,
     ) -> Result<Vec<Pipeline>, Error> {
-        let pipelines = self.repository.get_pipelines(name, active).await?;
+        let team_id = Uuid::try_from(team_id).unwrap();
+        let pipelines = self.repository.get_pipelines(team_id, name, active).await?;
         Ok(pipelines
             .into_iter()
             .map(|pipeline| Pipeline {
@@ -62,8 +66,9 @@ impl PipelineLogic for PipelineLogicImpl {
             .collect())
     }
 
-    async fn create_pipeline(&self, input: CreatePipelineInput) -> Result<Pipeline, Error> {
-        let input = crate::database::pipeline::CreatePipeline { name: input.name };
+    async fn create_pipeline(&self, team_id: ID, input: CreatePipelineInput) -> Result<Pipeline, Error> {
+        let team_id = Uuid::try_from(team_id).unwrap();
+        let input = crate::database::pipeline::CreatePipeline { team_id, name: input.name };
         let pipeline = self.repository.create_pipeline(input).await?;
         Ok(Pipeline {
             id: pipeline.id.into(),
@@ -73,9 +78,9 @@ impl PipelineLogic for PipelineLogicImpl {
         })
     }
 
-    async fn update_pipeline(&self, input: UpdatePipelineInput) -> Result<Pipeline, Error> {
+    async fn update_pipeline(&self, id: ID, input: UpdatePipelineInput) -> Result<Pipeline, Error> {
         let input = crate::database::pipeline::UpdatePipeline {
-            id: Uuid::try_from(input.id).unwrap(),
+            id: Uuid::try_from(id).unwrap(),
             name: input.name,
             active: input.active,
         };
@@ -88,8 +93,8 @@ impl PipelineLogic for PipelineLogicImpl {
         })
     }
 
-    async fn delete_pipeline(&self, id: Uuid) -> Result<(), Error> {
-        self.repository.delete_pipeline(id).await?;
+    async fn delete_pipeline(&self, id: ID) -> Result<(), Error> {
+        self.repository.delete_pipeline(Uuid::try_from(id).unwrap()).await?;
         Ok(())
     }
 
@@ -118,6 +123,7 @@ mod test {
                     id: Uuid::parse_str(ID).unwrap(),
                     name: "Test Pipeline".to_string(),
                     active: true,
+                    team_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
                 })
             });
 
@@ -156,20 +162,23 @@ mod test {
         let input = CreatePipelineInput {
             name: "New Pipeline".to_string(),
         };
+        const ID: &str = "3eef17bc-9e06-411d-b5f4-7a786e68bb96";
+        let id = ID::from(ID);
         repository
             .expect_create_pipeline()
             .withf(|input| input.name == "New Pipeline")
             .times(1)
             .returning(move |_| {
                 Ok(crate::database::entity::Pipeline {
-                    id: Uuid::new_v4(),
+                    id: Uuid::parse_str(ID).unwrap(),
                     name: "New Pipeline".to_string(),
                     active: true,
+                    team_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
                 })
             });
 
         let logic = pipeline_logic(Box::new(repository));
-        let result = logic.create_pipeline(input).await;
+        let result = logic.create_pipeline(id, input).await;
 
         assert!(result.is_ok());
         let pipeline = result.unwrap();
@@ -185,25 +194,25 @@ mod test {
         const NAME: &str = "Updated Pipeline";
 
         let input = UpdatePipelineInput {
-            id: ID::from(ID),
             name: Some(NAME.to_string()),
             active: Some(true),
         };
 
         repository
             .expect_update_pipeline()
-            .withf(|input| input.id == input.id && input.name == Some(NAME.to_string()))
+            .withf(|input| input.id == Uuid::parse_str(ID).unwrap() && input.name == Some(NAME.to_string()))
             .times(1)
             .returning(move |_| {
                 Ok(crate::database::entity::Pipeline {
                     id: Uuid::parse_str(ID).unwrap(),
                     name: "Updated Pipeline".to_string(),
                     active: true,
+                    team_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
                 })
             });
 
         let logic = pipeline_logic(Box::new(repository));
-        let result = logic.update_pipeline(input).await;
+        let result = logic.update_pipeline(ID::from(ID), input).await;
 
         assert!(result.is_ok());
         let pipeline = result.unwrap();
@@ -217,7 +226,6 @@ mod test {
 
         const ID: &str = "51ecc366-f1cd-4d3d-ab73-fa60bad98fca";
         let input = UpdatePipelineInput {
-            id: ID::from(ID),
             name: Some("Non-existing Pipeline".to_string()),
             active: Some(false),
         };
@@ -229,7 +237,7 @@ mod test {
             .returning(move |_| Err(Error::NotFound(Uuid::parse_str(ID).unwrap())));
 
         let logic = pipeline_logic(Box::new(repository));
-        let result = logic.update_pipeline(input).await;
+        let result = logic.update_pipeline(ID::from(ID), input).await;
 
         assert!(result.is_err());
         let error = result.err().unwrap();
@@ -248,8 +256,7 @@ mod test {
             .returning(move |_| Ok(()));
 
         let logic = pipeline_logic(Box::new(repository));
-        let id = Uuid::parse_str(ID).unwrap();
-        let result = logic.delete_pipeline(id).await;
+        let result = logic.delete_pipeline(ID::from(ID)).await;
 
         assert!(result.is_ok());
     }
@@ -266,8 +273,7 @@ mod test {
             .returning(move |_| Err(Error::NotFound(Uuid::parse_str(ID).unwrap())));
 
         let logic = pipeline_logic(Box::new(repository));
-        let id = Uuid::parse_str(ID).unwrap();
-        let result = logic.delete_pipeline(id).await;
+        let result = logic.delete_pipeline(ID::from(ID)).await;
 
         assert!(result.is_err());
         let error = result.err().unwrap();
@@ -280,25 +286,28 @@ mod test {
 
         repository
             .expect_get_pipelines()
-            .withf(|name, active| name.is_none() && active.is_none())
+            .withf(|team_id, name, active| name.is_none() && active.is_none())
             .times(1)
-            .returning(move |_, _| {
+            .returning(move |_, _, _| {
                 Ok(vec![
                     crate::database::entity::Pipeline {
                         id: Uuid::new_v4(),
                         name: "Test Pipeline".to_string(),
                         active: true,
+                        team_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
                     },
                     crate::database::entity::Pipeline {
                         id: Uuid::new_v4(),
                         name: "Another Pipeline".to_string(),
                         active: false,
+                        team_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
                     },
                 ])
             });
 
+
         let logic = pipeline_logic(Box::new(repository));
-        let result = logic.get_pipelines(None, None).await;
+        let result = logic.get_pipelines(ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"), None, None).await;
         assert!(result.is_ok());
     }
 }

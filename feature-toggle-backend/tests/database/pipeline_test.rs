@@ -37,8 +37,10 @@ async fn test_create_pipeline() {
     let pool = init_pg_pool().await;
     let repository = pipeline::pipeline_repository(pool);
 
+    let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
     let random_name = format!("New Pipeline {}", Uuid::new_v4());
     let input = CreatePipeline {
+        team_id,
         name: random_name.clone(),
     };
     let result = repository.create_pipeline(input).await;
@@ -53,8 +55,9 @@ async fn test_create_pipeline() {
 async fn test_create_exising_pipeline() {
     let pool = init_pg_pool().await;
     let repository = pipeline::pipeline_repository(pool);
-
+    let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
     let input = CreatePipeline {
+        team_id,
         name: "Existing Pipeline".to_string(),
     };
     let result = repository.create_pipeline(input).await;
@@ -136,8 +139,8 @@ async fn test_delete_non_existing_pipeline() {
 async fn test_get_all_pipelines() {
     let pool = init_pg_pool().await;
     let repository = pipeline::pipeline_repository(pool);
-
-    let result = repository.get_pipelines(None, None).await;
+    let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+    let result = repository.get_pipelines(team_id, None, None).await;
 
     assert_eq!(result.is_ok(), true);
     let pipelines = result.unwrap();
@@ -149,8 +152,9 @@ async fn test_name_get_pipelines() {
     let pool = init_pg_pool().await;
     let repository = pipeline::pipeline_repository(pool);
 
+    let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
     let result = repository
-        .get_pipelines(Some("Test".to_string()), None)
+        .get_pipelines(team_id, Some("Test".to_string()), None)
         .await;
 
     assert_eq!(result.is_ok(), true);
@@ -162,8 +166,8 @@ async fn test_name_get_pipelines() {
 async fn test_inactive_get_pipelines() {
     let pool = init_pg_pool().await;
     let repository = pipeline::pipeline_repository(pool);
-
-    let result = repository.get_pipelines(None, Some(false)).await;
+    let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+    let result = repository.get_pipelines(team_id, None, Some(false)).await;
 
     assert_eq!(result.is_ok(), true);
     let pipelines = result.unwrap();
@@ -176,8 +180,9 @@ async fn test_name_and_active_get_pipelines() {
     let pool = init_pg_pool().await;
     let repository = pipeline::pipeline_repository(pool);
 
+    let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
     let result = repository
-        .get_pipelines(Some("Test".to_string()), Some(true))
+        .get_pipelines(team_id, Some("Test".to_string()), Some(true))
         .await;
 
     assert_eq!(result.is_ok(), true);

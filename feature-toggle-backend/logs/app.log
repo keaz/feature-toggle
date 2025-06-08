@@ -1,0 +1,959 @@
+2025-06-07 13:12:33.333 [INFO] [actix_server::builder] starting 14 workers
+2025-06-07 13:12:33.333 [INFO] [actix_server::server] Tokio runtime found; starting in existing Tokio runtime
+2025-06-07 13:12:33.333 [INFO] [actix_server::server] starting service: "actix-web-service-127.0.0.1:8080", workers: 14, listening on: 127.0.0.1:8080
+2025-06-07 13:12:51.637 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE id = $1\n" rows_affected=1 rows_returned=1 elapsed=1.196417ms elapsed_secs=0.001196417
+2025-06-07 13:12:51.688 [DEBUG] [sqlx::query] summary="DELETE FROM environments WHERE …" db.statement="\n\nDELETE FROM environments WHERE id = $1\n" rows_affected=1 rows_returned=0 elapsed=3.796458ms elapsed_secs=0.003796458
+2025-06-07 13:12:51.688 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (57 ms) [127.0.0.1]
+2025-06-07 13:12:51.693 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments\n" rows_affected=6 rows_returned=6 elapsed=336.334µs elapsed_secs=0.000336334
+2025-06-07 13:12:51.693 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (0 ms) [127.0.0.1]
+2025-06-07 13:14:14.461 [DEBUG] [sqlx::query] summary="INSERT INTO environments (id, …" db.statement="\n\nINSERT INTO environments (id, name, active) VALUES ($1, $2, $3) RETURNING id,name,active\n" rows_affected=1 rows_returned=1 elapsed=2.530416ms elapsed_secs=0.002530416
+2025-06-07 13:14:14.462 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (5 ms) [127.0.0.1]
+2025-06-07 13:14:14.467 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments\n" rows_affected=7 rows_returned=7 elapsed=972.583µs elapsed_secs=0.000972583
+2025-06-07 13:14:14.468 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (3 ms) [127.0.0.1]
+2025-06-07 13:14:49.337 [INFO] [actix_server::server] SIGINT received; starting forced shutdown
+2025-06-07 13:14:49.338 [DEBUG] [actix_server::accept] paused accepting connections on 127.0.0.1:8080
+2025-06-07 13:14:49.338 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:14:49.339 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:14:49.339 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:14:49.339 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:14:49.340 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:14:49.340 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:14:49.340 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:14:49.341 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:14:49.341 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:14:49.341 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:14:49.342 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:14:49.342 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:14:49.342 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:14:49.342 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:14:49.342 [INFO] [actix_server::accept] accept thread stopped
+2025-06-07 13:17:26.512 [INFO] [actix_server::builder] starting 14 workers
+2025-06-07 13:17:26.512 [INFO] [actix_server::server] Tokio runtime found; starting in existing Tokio runtime
+2025-06-07 13:17:26.512 [INFO] [actix_server::server] starting service: "actix-web-service-127.0.0.1:8080", workers: 14, listening on: 127.0.0.1:8080
+2025-06-07 13:17:33.523 [INFO] [feature_toggle_backend::graphql::mutation] Deleting environment with id: 9690d1f8-99f8-4864-89f1-3a6197901951
+2025-06-07 13:17:33.527 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE id = $1\n" rows_affected=1 rows_returned=1 elapsed=2.712083ms elapsed_secs=0.002712083
+2025-06-07 13:17:33.593 [DEBUG] [sqlx::query] summary="DELETE FROM environments WHERE …" db.statement="\n\nDELETE FROM environments WHERE id = $1\n" rows_affected=1 rows_returned=0 elapsed=6.503125ms elapsed_secs=0.006503125
+2025-06-07 13:17:33.593 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (72 ms) [127.0.0.1]
+2025-06-07 13:17:33.598 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-07 13:17:33.598 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments\n" rows_affected=6 rows_returned=6 elapsed=346.583µs elapsed_secs=0.000346583
+2025-06-07 13:17:33.598 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-07 13:18:48.646 [INFO] [actix_server::server] SIGINT received; starting forced shutdown
+2025-06-07 13:18:48.647 [DEBUG] [actix_server::accept] paused accepting connections on 127.0.0.1:8080
+2025-06-07 13:18:48.648 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:18:48.648 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:18:48.648 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:18:48.648 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:18:48.649 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:18:48.649 [INFO] [actix_server::accept] accept thread stopped
+2025-06-07 13:18:48.649 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:18:48.650 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:18:48.650 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:18:48.650 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:18:48.650 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:18:48.650 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:18:48.651 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:18:48.651 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:18:48.651 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:20:17.030 [INFO] [actix_server::builder] starting 14 workers
+2025-06-07 13:20:17.030 [INFO] [actix_server::server] Tokio runtime found; starting in existing Tokio runtime
+2025-06-07 13:20:17.031 [INFO] [actix_server::server] starting service: "actix-web-service-127.0.0.1:8080", workers: 14, listening on: 127.0.0.1:8080
+2025-06-07 13:24:57.050 [INFO] [actix_server::server] SIGINT received; starting forced shutdown
+2025-06-07 13:24:57.051 [DEBUG] [actix_server::accept] paused accepting connections on 127.0.0.1:8080
+2025-06-07 13:24:57.051 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:24:57.051 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:24:57.051 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:24:57.051 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:24:57.052 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:24:57.052 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:24:57.052 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:24:57.052 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:24:57.052 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:24:57.052 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:24:57.053 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:24:57.053 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:24:57.053 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:24:57.053 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 13:24:57.053 [INFO] [actix_server::accept] accept thread stopped
+2025-06-07 22:40:11.643 [INFO] [actix_server::builder] starting 14 workers
+2025-06-07 22:40:11.643 [INFO] [actix_server::server] Tokio runtime found; starting in existing Tokio runtime
+2025-06-07 22:40:11.643 [INFO] [actix_server::server] starting service: "actix-web-service-127.0.0.1:8080", workers: 14, listening on: 127.0.0.1:8080
+2025-06-07 22:40:23.520 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-07 22:40:23.520 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-07 22:40:23.521 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments\n" rows_affected=3 rows_returned=3 elapsed=1.204ms elapsed_secs=0.001204
+2025-06-07 22:40:23.522 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-07 22:40:55.804 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-07 22:40:55.804 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (0 ms) [127.0.0.1]
+2025-06-07 22:40:55.805 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments\n" rows_affected=3 rows_returned=3 elapsed=284.708µs elapsed_secs=0.000284708
+2025-06-07 22:40:55.805 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-07 22:55:43.130 [INFO] [actix_server::server] SIGINT received; starting forced shutdown
+2025-06-07 22:55:43.132 [DEBUG] [actix_server::accept] paused accepting connections on 127.0.0.1:8080
+2025-06-07 22:55:43.132 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 22:55:43.132 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 22:55:43.132 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 22:55:43.133 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 22:55:43.133 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 22:55:43.134 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 22:55:43.134 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 22:55:43.134 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 22:55:43.134 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 22:55:43.135 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 22:55:43.135 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 22:55:43.135 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 22:55:43.136 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 22:55:43.136 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 22:55:43.136 [INFO] [actix_server::accept] accept thread stopped
+2025-06-07 23:28:17.748 [INFO] [actix_server::builder] starting 14 workers
+2025-06-07 23:28:17.748 [INFO] [actix_server::server] Tokio runtime found; starting in existing Tokio runtime
+2025-06-07 23:28:17.748 [INFO] [actix_server::server] starting service: "actix-web-service-127.0.0.1:8080", workers: 14, listening on: 127.0.0.1:8080
+2025-06-07 23:28:25.839 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-07 23:28:25.839 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-07 23:28:53.157 [INFO] [actix_server::server] SIGINT received; starting forced shutdown
+2025-06-07 23:28:53.158 [DEBUG] [actix_server::accept] paused accepting connections on 127.0.0.1:8080
+2025-06-07 23:28:53.158 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 23:28:53.158 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 23:28:53.158 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 23:28:53.158 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 23:28:53.159 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 23:28:53.159 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 23:28:53.159 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 23:28:53.159 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 23:28:53.159 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 23:28:53.159 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 23:28:53.159 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 23:28:53.159 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 23:28:53.159 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 23:28:53.159 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 23:28:53.159 [INFO] [actix_server::accept] accept thread stopped
+2025-06-07 23:28:58.890 [INFO] [actix_server::builder] starting 14 workers
+2025-06-07 23:28:58.890 [INFO] [actix_server::server] Tokio runtime found; starting in existing Tokio runtime
+2025-06-07 23:28:58.890 [INFO] [actix_server::server] starting service: "actix-web-service-127.0.0.1:8080", workers: 14, listening on: 127.0.0.1:8080
+2025-06-07 23:29:01.378 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-07 23:29:01.378 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-07 23:29:33.354 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-07 23:29:33.354 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-07 23:32:23.385 [INFO] [actix_server::server] SIGINT received; starting forced shutdown
+2025-06-07 23:32:23.386 [DEBUG] [actix_server::accept] paused accepting connections on 127.0.0.1:8080
+2025-06-07 23:32:23.386 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 23:32:23.387 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 23:32:23.387 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 23:32:23.387 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 23:32:23.388 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 23:32:23.388 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 23:32:23.388 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 23:32:23.389 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 23:32:23.389 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 23:32:23.389 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 23:32:23.389 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 23:32:23.389 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 23:32:23.389 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 23:32:23.389 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-07 23:32:23.389 [INFO] [actix_server::accept] accept thread stopped
+2025-06-07 23:33:25.378 [INFO] [actix_server::builder] starting 14 workers
+2025-06-07 23:33:25.378 [INFO] [actix_server::server] Tokio runtime found; starting in existing Tokio runtime
+2025-06-07 23:33:25.378 [INFO] [actix_server::server] starting service: "actix-web-service-127.0.0.1:8080", workers: 14, listening on: 127.0.0.1:8080
+2025-06-07 23:33:30.939 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-07 23:33:30.939 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-07 23:33:30.940 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=4 rows_returned=4 elapsed=1.2525ms elapsed_secs=0.0012525
+2025-06-07 23:33:30.941 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (4 ms) [127.0.0.1]
+2025-06-07 23:33:45.814 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (0 ms) [127.0.0.1]
+2025-06-08 00:01:01.051 [INFO] [actix_server::server] SIGINT received; starting forced shutdown
+2025-06-08 00:01:01.053 [DEBUG] [actix_server::accept] paused accepting connections on 127.0.0.1:8080
+2025-06-08 00:01:01.054 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:01:01.054 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:01:01.054 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:01:01.055 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:01:01.055 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:01:01.055 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:01:01.055 [INFO] [actix_server::accept] accept thread stopped
+2025-06-08 00:01:01.055 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:01:01.056 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:01:01.056 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:01:01.057 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:01:01.057 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:01:01.057 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:01:01.057 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:01:01.058 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:08:28.385 [INFO] [actix_server::builder] starting 14 workers
+2025-06-08 00:08:28.386 [INFO] [actix_server::server] Tokio runtime found; starting in existing Tokio runtime
+2025-06-08 00:08:28.386 [INFO] [actix_server::server] starting service: "actix-web-service-127.0.0.1:8080", workers: 14, listening on: 127.0.0.1:8080
+2025-06-08 00:08:34.502 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 00:08:34.502 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 00:08:34.504 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=4 rows_returned=4 elapsed=1.318542ms elapsed_secs=0.001318542
+2025-06-08 00:08:34.505 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (5 ms) [127.0.0.1]
+2025-06-08 00:08:46.794 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (0 ms) [127.0.0.1]
+2025-06-08 00:08:50.386 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (0 ms) [127.0.0.1]
+2025-06-08 00:08:50.387 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 00:08:50.387 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=4 rows_returned=4 elapsed=244.25µs elapsed_secs=0.00024425
+2025-06-08 00:08:50.388 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 00:10:11.239 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 00:12:41.243 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (0 ms) [127.0.0.1]
+2025-06-08 00:13:21.170 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 00:13:21.171 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=4 rows_returned=4 elapsed=423.917µs elapsed_secs=0.000423917
+2025-06-08 00:13:21.172 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 00:13:21.262 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 00:14:02.219 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (0 ms) [127.0.0.1]
+2025-06-08 00:14:13.946 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (0 ms) [127.0.0.1]
+2025-06-08 00:16:14.629 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 00:16:14.630 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=4 rows_returned=4 elapsed=321.959µs elapsed_secs=0.000321959
+2025-06-08 00:16:14.630 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 00:16:14.721 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 00:16:26.914 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 00:16:26.915 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=4 rows_returned=4 elapsed=231.959µs elapsed_secs=0.000231959
+2025-06-08 00:16:26.915 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (0 ms) [127.0.0.1]
+2025-06-08 00:16:27.013 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (0 ms) [127.0.0.1]
+2025-06-08 00:17:05.203 [DEBUG] [handlebars::render] Rendering helper: "if", params: [PathAndJson { relative_path: Some("title"), value: Context(Null, ["title"]) }], hash: {}
+2025-06-08 00:17:05.204 [DEBUG] [handlebars::render] Rendering value: Path(Relative(([Named("version")], "version")))
+2025-06-08 00:17:05.204 [DEBUG] [handlebars::render] Rendering helper: "if", params: [PathAndJson { relative_path: Some("plugins"), value: Context(Array [], ["plugins"]) }], hash: {}
+2025-06-08 00:17:05.204 [DEBUG] [handlebars::render] Rendering value: Path(Relative(([Named("version")], "version")))
+2025-06-08 00:17:05.204 [DEBUG] [handlebars::render] Rendering helper: "if", params: [PathAndJson { relative_path: Some("plugins"), value: Context(Array [], ["plugins"]) }], hash: {}
+2025-06-08 00:17:05.204 [DEBUG] [handlebars::render] Rendering value: Path(Relative(([Named("credentials")], "credentials")))
+2025-06-08 00:17:05.204 [DEBUG] [handlebars::render] Rendering helper: "if", params: [PathAndJson { relative_path: Some("plugins"), value: Context(Array [], ["plugins"]) }], hash: {}
+2025-06-08 00:17:05.204 [DEBUG] [handlebars::render] Rendering value: Path(Relative(([Named("endpoint")], "endpoint")))
+2025-06-08 00:17:05.204 [DEBUG] [handlebars::render] Rendering helper: "if", params: [PathAndJson { relative_path: Some("subscription_endpoint"), value: Context(String("/graphql"), ["subscription_endpoint"]) }], hash: {}
+2025-06-08 00:17:05.204 [DEBUG] [handlebars::render] Rendering value: Path(Relative(([Named("subscription_endpoint")], "subscription_endpoint")))
+2025-06-08 00:17:05.204 [DEBUG] [handlebars::render] Rendering helper: "if", params: [PathAndJson { relative_path: Some("headers"), value: Context(Null, ["headers"]) }], hash: {}
+2025-06-08 00:17:05.204 [DEBUG] [handlebars::render] Rendering helper: "if", params: [PathAndJson { relative_path: Some("ws_connection_params"), value: Context(Null, ["ws_connection_params"]) }], hash: {}
+2025-06-08 00:17:05.204 [DEBUG] [handlebars::render] Rendering helper: "if", params: [PathAndJson { relative_path: Some("plugins"), value: Context(Array [], ["plugins"]) }], hash: {}
+2025-06-08 00:17:05.204 [INFO] [feature_toggle_backend::middleware::access_log] GET /graphql -> 200 (17 ms) [127.0.0.1]
+2025-06-08 00:17:06.044 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (18 ms) [127.0.0.1]
+2025-06-08 00:17:47.311 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (0 ms) [127.0.0.1]
+2025-06-08 00:17:57.241 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (0 ms) [127.0.0.1]
+2025-06-08 00:18:14.252 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (0 ms) [127.0.0.1]
+2025-06-08 00:18:19.311 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 00:18:19.312 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=4 rows_returned=4 elapsed=244.208µs elapsed_secs=0.000244208
+2025-06-08 00:18:19.312 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 00:18:19.402 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (0 ms) [127.0.0.1]
+2025-06-08 00:18:39.309 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 00:18:39.311 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=2 rows_returned=2 elapsed=1.531333ms elapsed_secs=0.001531333
+2025-06-08 00:18:39.312 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (3 ms) [127.0.0.1]
+2025-06-08 00:18:50.133 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 00:18:50.134 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=0 rows_returned=0 elapsed=399.125µs elapsed_secs=0.000399125
+2025-06-08 00:18:50.134 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (3 ms) [127.0.0.1]
+2025-06-08 00:18:52.257 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 00:18:52.258 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=0 rows_returned=0 elapsed=487.25µs elapsed_secs=0.00048725
+2025-06-08 00:18:52.259 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (3 ms) [127.0.0.1]
+2025-06-08 00:18:54.238 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 00:18:54.239 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=0 rows_returned=0 elapsed=380.959µs elapsed_secs=0.000380959
+2025-06-08 00:18:54.239 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 00:22:33.401 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 00:22:34.709 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 00:22:41.479 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 00:23:22.352 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 00:23:52.187 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 00:26:21.355 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 00:26:21.356 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=4 rows_returned=4 elapsed=282.583µs elapsed_secs=0.000282583
+2025-06-08 00:26:21.356 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 00:26:21.446 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 00:26:21.447 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=2 rows_returned=2 elapsed=463.708µs elapsed_secs=0.000463708
+2025-06-08 00:26:21.447 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 00:26:25.400 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 00:26:25.401 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=0 rows_returned=0 elapsed=368.125µs elapsed_secs=0.000368125
+2025-06-08 00:26:25.402 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 00:26:30.383 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 00:27:34.645 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 00:29:16.121 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 00:29:16.122 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=0 rows_returned=0 elapsed=385.75µs elapsed_secs=0.00038575
+2025-06-08 00:29:16.123 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (3 ms) [127.0.0.1]
+2025-06-08 00:29:26.549 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 00:30:22.831 [INFO] [feature_toggle_backend::graphql::mutation] Creating environment with input: CreateEnvironmentInput { name: "Jamesx", active: true }
+2025-06-08 00:30:22.833 [DEBUG] [sqlx::query] summary="INSERT INTO environments (id, …" db.statement="\n\nINSERT INTO environments (id, name, active, team_id) VALUES ($1, $2, $3, $4) RETURNING id,name,active\n" rows_affected=1 rows_returned=1 elapsed=1.880833ms elapsed_secs=0.001880833
+2025-06-08 00:30:22.834 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (3 ms) [127.0.0.1]
+2025-06-08 00:30:22.843 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 00:30:22.843 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=1 rows_returned=1 elapsed=176.459µs elapsed_secs=0.000176459
+2025-06-08 00:30:22.844 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 00:31:32.894 [INFO] [actix_server::server] SIGINT received; starting forced shutdown
+2025-06-08 00:31:32.895 [DEBUG] [actix_server::accept] paused accepting connections on 127.0.0.1:8080
+2025-06-08 00:31:32.895 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:31:32.895 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:31:32.895 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:31:32.895 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:31:32.896 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:31:32.896 [INFO] [actix_server::accept] accept thread stopped
+2025-06-08 00:31:32.896 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:31:32.896 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:31:32.896 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:31:32.897 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:31:32.897 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:31:32.897 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:31:32.897 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:31:32.897 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:31:32.897 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:31:40.821 [INFO] [actix_server::builder] starting 14 workers
+2025-06-08 00:31:40.821 [INFO] [actix_server::server] Tokio runtime found; starting in existing Tokio runtime
+2025-06-08 00:31:40.821 [INFO] [actix_server::server] starting service: "actix-web-service-127.0.0.1:8080", workers: 14, listening on: 127.0.0.1:8080
+2025-06-08 00:31:43.511 [INFO] [actix_server::server] SIGINT received; starting forced shutdown
+2025-06-08 00:31:43.512 [DEBUG] [actix_server::accept] paused accepting connections on 127.0.0.1:8080
+2025-06-08 00:31:43.512 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:31:43.512 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:31:43.512 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:31:43.512 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:31:43.512 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:31:43.512 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:31:43.513 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:31:43.513 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:31:43.513 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:31:43.513 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:31:43.513 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:31:43.513 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:31:43.513 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 00:31:43.513 [INFO] [actix_server::accept] accept thread stopped
+2025-06-08 00:31:43.513 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 10:43:03.644 [INFO] [actix_server::builder] starting 14 workers
+2025-06-08 10:43:03.644 [INFO] [actix_server::server] Tokio runtime found; starting in existing Tokio runtime
+2025-06-08 10:43:03.644 [INFO] [actix_server::server] starting service: "actix-web-service-127.0.0.1:8080", workers: 14, listening on: 127.0.0.1:8080
+2025-06-08 10:43:10.123 [INFO] [actix_server::server] SIGINT received; starting forced shutdown
+2025-06-08 10:43:10.124 [DEBUG] [actix_server::accept] paused accepting connections on 127.0.0.1:8080
+2025-06-08 10:43:10.124 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 10:43:10.124 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 10:43:10.124 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 10:43:10.124 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 10:43:10.125 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 10:43:10.125 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 10:43:10.125 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 10:43:10.125 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 10:43:10.125 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 10:43:10.125 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 10:43:10.125 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 10:43:10.126 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 10:43:10.126 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 10:43:10.126 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 10:43:10.126 [INFO] [actix_server::accept] accept thread stopped
+2025-06-08 10:43:42.488 [INFO] [actix_server::builder] starting 14 workers
+2025-06-08 10:43:42.488 [INFO] [actix_server::server] Tokio runtime found; starting in existing Tokio runtime
+2025-06-08 10:43:42.488 [INFO] [actix_server::server] starting service: "actix-web-service-127.0.0.1:8080", workers: 14, listening on: 127.0.0.1:8080
+2025-06-08 10:43:47.480 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 10:43:47.483 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=4 rows_returned=4 elapsed=2.145ms elapsed_secs=0.002145
+2025-06-08 10:43:47.484 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (4 ms) [127.0.0.1]
+2025-06-08 10:43:50.486 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 10:43:50.489 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=2 rows_returned=2 elapsed=2.526084ms elapsed_secs=0.002526084
+2025-06-08 10:43:50.490 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (3 ms) [127.0.0.1]
+2025-06-08 10:43:53.149 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 10:43:53.151 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=1 rows_returned=1 elapsed=496.584µs elapsed_secs=0.000496584
+2025-06-08 10:43:53.151 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (3 ms) [127.0.0.1]
+2025-06-08 10:43:54.789 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 10:43:54.789 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=0 rows_returned=0 elapsed=374.791µs elapsed_secs=0.000374791
+2025-06-08 10:43:54.790 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 10:44:14.719 [INFO] [feature_toggle_backend::graphql::mutation] Creating environment with input: CreateEnvironmentInput { name: "Another one", active: true }
+2025-06-08 10:44:14.724 [DEBUG] [sqlx::query] summary="INSERT INTO environments (id, …" db.statement="\n\nINSERT INTO environments (id, name, active, team_id) VALUES ($1, $2, $3, $4) RETURNING id,name,active\n" rows_affected=1 rows_returned=1 elapsed=3.91875ms elapsed_secs=0.00391875
+2025-06-08 10:44:14.724 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (7 ms) [127.0.0.1]
+2025-06-08 10:44:14.729 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 10:44:14.730 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=1 rows_returned=1 elapsed=363.417µs elapsed_secs=0.000363417
+2025-06-08 10:44:14.730 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 10:44:17.146 [INFO] [feature_toggle_backend::graphql::mutation] Deleting environment with id: ID("bf73f10d-1ed3-4d35-94cf-91ecb7855e36")
+2025-06-08 10:44:17.148 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE id = $1\n" rows_affected=1 rows_returned=1 elapsed=759µs elapsed_secs=0.000759
+2025-06-08 10:44:17.222 [DEBUG] [sqlx::query] summary="DELETE FROM environments WHERE …" db.statement="\n\nDELETE FROM environments WHERE id = $1\n" rows_affected=1 rows_returned=0 elapsed=7.723958ms elapsed_secs=0.007723958
+2025-06-08 10:44:17.222 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (76 ms) [127.0.0.1]
+2025-06-08 10:44:17.227 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 10:44:17.228 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=0 rows_returned=0 elapsed=405.875µs elapsed_secs=0.000405875
+2025-06-08 10:44:17.228 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 11:11:41.154 [INFO] [actix_server::server] SIGINT received; starting forced shutdown
+2025-06-08 11:11:41.155 [DEBUG] [actix_server::accept] paused accepting connections on 127.0.0.1:8080
+2025-06-08 11:11:41.155 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 11:11:41.155 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 11:11:41.156 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 11:11:41.156 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 11:11:41.156 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 11:11:41.157 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 11:11:41.157 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 11:11:41.158 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 11:11:41.158 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 11:11:41.158 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 11:11:41.158 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 11:11:41.158 [INFO] [actix_server::accept] accept thread stopped
+2025-06-08 11:11:41.159 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 11:11:41.159 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 11:11:41.159 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 11:27:16.215 [INFO] [actix_server::builder] starting 14 workers
+2025-06-08 11:27:16.215 [INFO] [actix_server::server] Tokio runtime found; starting in existing Tokio runtime
+2025-06-08 11:27:16.216 [INFO] [actix_server::server] starting service: "actix-web-service-127.0.0.1:8080", workers: 14, listening on: 127.0.0.1:8080
+2025-06-08 11:27:18.936 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 11:27:18.938 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=1.16975ms elapsed_secs=0.00116975
+2025-06-08 11:27:18.938 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (4 ms) [127.0.0.1]
+2025-06-08 11:27:18.958 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 11:27:18.959 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=3 rows_returned=3 elapsed=894.333µs elapsed_secs=0.000894333
+2025-06-08 11:27:18.960 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 11:27:21.101 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 11:27:21.102 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=0 rows_returned=0 elapsed=359.417µs elapsed_secs=0.000359417
+2025-06-08 11:27:21.102 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 11:27:22.940 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 11:27:22.940 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=232.458µs elapsed_secs=0.000232458
+2025-06-08 11:27:22.940 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 11:27:22.963 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 11:27:22.963 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=0 rows_returned=0 elapsed=269.916µs elapsed_secs=0.000269916
+2025-06-08 11:27:22.964 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 11:27:23.596 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 11:27:23.597 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=352.708µs elapsed_secs=0.000352708
+2025-06-08 11:27:23.597 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 11:27:23.623 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 11:27:23.624 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=0 rows_returned=0 elapsed=322.125µs elapsed_secs=0.000322125
+2025-06-08 11:27:23.624 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 11:27:29.704 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 11:27:29.705 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=3 rows_returned=3 elapsed=623.917µs elapsed_secs=0.000623917
+2025-06-08 11:27:29.706 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (3 ms) [127.0.0.1]
+2025-06-08 11:27:33.623 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 11:27:33.624 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=374.709µs elapsed_secs=0.000374709
+2025-06-08 11:27:33.624 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 11:27:33.647 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 11:27:33.648 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=3 rows_returned=3 elapsed=279.125µs elapsed_secs=0.000279125
+2025-06-08 11:27:33.648 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 11:27:34.238 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 11:27:34.239 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=296.666µs elapsed_secs=0.000296666
+2025-06-08 11:27:34.239 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 11:27:34.265 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 11:27:34.266 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=3 rows_returned=3 elapsed=299.25µs elapsed_secs=0.00029925
+2025-06-08 11:27:34.266 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 11:27:42.134 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 11:27:42.135 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=0 rows_returned=0 elapsed=174.25µs elapsed_secs=0.00017425
+2025-06-08 11:27:42.135 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 11:27:52.586 [INFO] [feature_toggle_backend::graphql::mutation] Creating environment with input: CreateEnvironmentInput { name: "New Environment", active: true }
+2025-06-08 11:27:52.587 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1 AND name ILIKE $2\n" rows_affected=0 rows_returned=0 elapsed=1.04775ms elapsed_secs=0.00104775
+2025-06-08 11:27:52.662 [DEBUG] [sqlx::query] summary="INSERT INTO environments (id, …" db.statement="\n\nINSERT INTO environments (id, name, active, team_id) VALUES ($1, $2, $3, $4) RETURNING id,name,active\n" rows_affected=1 rows_returned=1 elapsed=5.456917ms elapsed_secs=0.005456917
+2025-06-08 11:27:52.662 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (78 ms) [127.0.0.1]
+2025-06-08 11:27:52.669 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 11:27:52.670 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=1 rows_returned=1 elapsed=427.709µs elapsed_secs=0.000427709
+2025-06-08 11:27:52.670 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 11:27:55.782 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 11:27:55.783 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=557.625µs elapsed_secs=0.000557625
+2025-06-08 11:27:55.783 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 11:27:55.805 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 11:27:55.806 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=1 rows_returned=1 elapsed=188.625µs elapsed_secs=0.000188625
+2025-06-08 11:27:55.806 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 11:27:56.353 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 11:27:56.353 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=352.291µs elapsed_secs=0.000352291
+2025-06-08 11:27:56.354 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 11:27:56.375 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 11:27:56.376 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=1 rows_returned=1 elapsed=180.25µs elapsed_secs=0.00018025
+2025-06-08 11:27:56.376 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 11:28:04.197 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 11:28:04.198 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=3 rows_returned=3 elapsed=1.165542ms elapsed_secs=0.001165542
+2025-06-08 11:28:04.199 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (3 ms) [127.0.0.1]
+2025-06-08 11:39:01.419 [DEBUG] [handlebars::render] Rendering helper: "if", params: [PathAndJson { relative_path: Some("title"), value: Context(Null, ["title"]) }], hash: {}
+2025-06-08 11:39:01.420 [DEBUG] [handlebars::render] Rendering value: Path(Relative(([Named("version")], "version")))
+2025-06-08 11:39:01.420 [DEBUG] [handlebars::render] Rendering helper: "if", params: [PathAndJson { relative_path: Some("plugins"), value: Context(Array [], ["plugins"]) }], hash: {}
+2025-06-08 11:39:01.420 [DEBUG] [handlebars::render] Rendering value: Path(Relative(([Named("version")], "version")))
+2025-06-08 11:39:01.420 [DEBUG] [handlebars::render] Rendering helper: "if", params: [PathAndJson { relative_path: Some("plugins"), value: Context(Array [], ["plugins"]) }], hash: {}
+2025-06-08 11:39:01.420 [DEBUG] [handlebars::render] Rendering value: Path(Relative(([Named("credentials")], "credentials")))
+2025-06-08 11:39:01.420 [DEBUG] [handlebars::render] Rendering helper: "if", params: [PathAndJson { relative_path: Some("plugins"), value: Context(Array [], ["plugins"]) }], hash: {}
+2025-06-08 11:39:01.429 [DEBUG] [handlebars::render] Rendering value: Path(Relative(([Named("endpoint")], "endpoint")))
+2025-06-08 11:39:01.429 [DEBUG] [handlebars::render] Rendering helper: "if", params: [PathAndJson { relative_path: Some("subscription_endpoint"), value: Context(String("/graphql"), ["subscription_endpoint"]) }], hash: {}
+2025-06-08 11:39:01.429 [DEBUG] [handlebars::render] Rendering value: Path(Relative(([Named("subscription_endpoint")], "subscription_endpoint")))
+2025-06-08 11:39:01.429 [DEBUG] [handlebars::render] Rendering helper: "if", params: [PathAndJson { relative_path: Some("headers"), value: Context(Null, ["headers"]) }], hash: {}
+2025-06-08 11:39:01.434 [DEBUG] [handlebars::render] Rendering helper: "if", params: [PathAndJson { relative_path: Some("ws_connection_params"), value: Context(Null, ["ws_connection_params"]) }], hash: {}
+2025-06-08 11:39:01.435 [DEBUG] [handlebars::render] Rendering helper: "if", params: [PathAndJson { relative_path: Some("plugins"), value: Context(Array [], ["plugins"]) }], hash: {}
+2025-06-08 11:39:01.435 [INFO] [feature_toggle_backend::middleware::access_log] GET /graphql -> 200 (37 ms) [127.0.0.1]
+2025-06-08 11:39:04.259 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (16 ms) [127.0.0.1]
+2025-06-08 11:40:44.529 [INFO] [actix_server::server] SIGINT received; starting forced shutdown
+2025-06-08 11:40:44.530 [DEBUG] [actix_server::accept] paused accepting connections on 127.0.0.1:8080
+2025-06-08 11:40:44.530 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 11:40:44.530 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 11:40:44.531 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 11:40:44.531 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 11:40:44.531 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 11:40:44.531 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 11:40:44.531 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 11:40:44.531 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 11:40:44.532 [INFO] [actix_server::accept] accept thread stopped
+2025-06-08 11:40:44.532 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 11:40:44.532 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 11:40:44.532 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 11:40:44.533 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 11:40:44.533 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 11:40:44.533 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 11:40:58.367 [INFO] [actix_server::builder] starting 14 workers
+2025-06-08 11:40:58.367 [INFO] [actix_server::server] Tokio runtime found; starting in existing Tokio runtime
+2025-06-08 11:40:58.367 [INFO] [actix_server::server] starting service: "actix-web-service-127.0.0.1:8080", workers: 14, listening on: 127.0.0.1:8080
+2025-06-08 11:42:44.881 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 11:42:44.884 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=2.089834ms elapsed_secs=0.002089834
+2025-06-08 11:42:44.884 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (5 ms) [127.0.0.1]
+2025-06-08 11:42:44.947 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 11:42:44.948 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=3 rows_returned=3 elapsed=932.833µs elapsed_secs=0.000932833
+2025-06-08 11:42:44.948 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 11:43:24.905 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 11:43:24.906 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=225.875µs elapsed_secs=0.000225875
+2025-06-08 11:43:24.906 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 11:43:24.968 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 11:43:24.970 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=3 rows_returned=3 elapsed=550.75µs elapsed_secs=0.00055075
+2025-06-08 11:43:24.970 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 11:43:31.133 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 11:43:31.133 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=1 rows_returned=1 elapsed=363.25µs elapsed_secs=0.00036325
+2025-06-08 11:43:31.134 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 11:43:33.329 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 11:43:33.330 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=318.958µs elapsed_secs=0.000318958
+2025-06-08 11:43:33.330 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 11:43:33.371 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 11:43:33.372 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=1 rows_returned=1 elapsed=331.542µs elapsed_secs=0.000331542
+2025-06-08 11:43:33.372 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 11:43:33.852 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 11:43:33.852 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=214.125µs elapsed_secs=0.000214125
+2025-06-08 11:43:33.853 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 11:43:33.874 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 11:43:33.875 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=1 rows_returned=1 elapsed=291.916µs elapsed_secs=0.000291916
+2025-06-08 11:43:33.875 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 11:43:43.553 [INFO] [feature_toggle_backend::graphql::mutation] Creating environment with input: CreateEnvironmentInput { name: "New Environment", active: true }
+2025-06-08 11:43:43.554 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1 AND name ILIKE $2\n" rows_affected=1 rows_returned=1 elapsed=715.625µs elapsed_secs=0.000715625
+2025-06-08 11:43:43.554 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (3 ms) [127.0.0.1]
+2025-06-08 11:43:43.558 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 11:43:43.559 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=1 rows_returned=1 elapsed=299.334µs elapsed_secs=0.000299334
+2025-06-08 11:43:43.559 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 11:43:57.529 [INFO] [feature_toggle_backend::graphql::mutation] Creating environment with input: CreateEnvironmentInput { name: "New Environment", active: true }
+2025-06-08 11:43:57.530 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1 AND name ILIKE $2\n" rows_affected=1 rows_returned=1 elapsed=496.708µs elapsed_secs=0.000496708
+2025-06-08 11:43:57.530 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (3 ms) [127.0.0.1]
+2025-06-08 11:43:57.541 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 11:43:57.542 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=1 rows_returned=1 elapsed=256µs elapsed_secs=0.000256
+2025-06-08 11:43:57.542 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 11:44:07.886 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 11:44:07.887 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=244.042µs elapsed_secs=0.000244042
+2025-06-08 11:44:07.887 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 11:44:07.958 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 11:44:07.959 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=1 rows_returned=1 elapsed=341.708µs elapsed_secs=0.000341708
+2025-06-08 11:44:07.959 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 11:44:21.357 [INFO] [feature_toggle_backend::graphql::mutation] Creating environment with input: CreateEnvironmentInput { name: "New Environment", active: true }
+2025-06-08 11:44:21.358 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1 AND name ILIKE $2\n" rows_affected=1 rows_returned=1 elapsed=463.75µs elapsed_secs=0.00046375
+2025-06-08 11:44:21.358 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (3 ms) [127.0.0.1]
+2025-06-08 11:44:21.370 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 11:44:21.371 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=1 rows_returned=1 elapsed=338.708µs elapsed_secs=0.000338708
+2025-06-08 11:44:21.371 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 11:45:53.994 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 11:45:53.995 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=202.625µs elapsed_secs=0.000202625
+2025-06-08 11:45:53.995 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 11:45:54.065 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 11:45:54.065 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=1 rows_returned=1 elapsed=187.417µs elapsed_secs=0.000187417
+2025-06-08 11:45:54.066 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 11:46:06.657 [INFO] [feature_toggle_backend::graphql::mutation] Creating environment with input: CreateEnvironmentInput { name: "New Environment", active: true }
+2025-06-08 11:46:06.658 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1 AND name ILIKE $2\n" rows_affected=1 rows_returned=1 elapsed=340.917µs elapsed_secs=0.000340917
+2025-06-08 11:46:06.658 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (3 ms) [127.0.0.1]
+2025-06-08 11:46:06.668 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 11:46:06.668 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=1 rows_returned=1 elapsed=171.542µs elapsed_secs=0.000171542
+2025-06-08 11:46:06.668 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 11:50:21.523 [INFO] [feature_toggle_backend::graphql::mutation] Creating environment with input: CreateEnvironmentInput { name: "New Environment", active: true }
+2025-06-08 11:50:21.525 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1 AND name ILIKE $2\n" rows_affected=1 rows_returned=1 elapsed=591.666µs elapsed_secs=0.000591666
+2025-06-08 11:50:21.525 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (3 ms) [127.0.0.1]
+2025-06-08 11:50:21.535 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 11:50:21.536 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=1 rows_returned=1 elapsed=219.375µs elapsed_secs=0.000219375
+2025-06-08 11:50:21.536 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 11:51:09.221 [INFO] [feature_toggle_backend::graphql::mutation] Creating environment with input: CreateEnvironmentInput { name: "New Environment", active: true }
+2025-06-08 11:51:09.223 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1 AND name ILIKE $2\n" rows_affected=1 rows_returned=1 elapsed=629.833µs elapsed_secs=0.000629833
+2025-06-08 11:51:09.223 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (3 ms) [127.0.0.1]
+2025-06-08 11:51:09.231 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 11:51:09.232 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=1 rows_returned=1 elapsed=256.375µs elapsed_secs=0.000256375
+2025-06-08 11:51:09.232 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 11:52:14.227 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 11:52:14.228 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=243.792µs elapsed_secs=0.000243792
+2025-06-08 11:52:14.228 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (0 ms) [127.0.0.1]
+2025-06-08 11:52:14.284 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 11:52:14.285 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=1 rows_returned=1 elapsed=259.459µs elapsed_secs=0.000259459
+2025-06-08 11:52:14.285 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 11:52:23.040 [INFO] [feature_toggle_backend::graphql::mutation] Creating environment with input: CreateEnvironmentInput { name: "New Environment", active: true }
+2025-06-08 11:52:23.041 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1 AND name ILIKE $2\n" rows_affected=1 rows_returned=1 elapsed=284.375µs elapsed_secs=0.000284375
+2025-06-08 11:52:23.041 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 11:52:23.053 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 11:52:23.054 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=1 rows_returned=1 elapsed=242.084µs elapsed_secs=0.000242084
+2025-06-08 11:52:23.054 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 11:52:30.463 [INFO] [feature_toggle_backend::graphql::mutation] Creating environment with input: CreateEnvironmentInput { name: "New Environment", active: true }
+2025-06-08 11:52:30.464 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1 AND name ILIKE $2\n" rows_affected=1 rows_returned=1 elapsed=453.917µs elapsed_secs=0.000453917
+2025-06-08 11:52:30.464 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (3 ms) [127.0.0.1]
+2025-06-08 11:52:30.469 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 11:52:30.469 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=1 rows_returned=1 elapsed=316.958µs elapsed_secs=0.000316958
+2025-06-08 11:52:30.470 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 12:03:06.673 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 12:03:06.676 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=470.417µs elapsed_secs=0.000470417
+2025-06-08 12:03:06.677 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (4 ms) [127.0.0.1]
+2025-06-08 12:03:06.800 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 12:03:06.801 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=1 rows_returned=1 elapsed=368.917µs elapsed_secs=0.000368917
+2025-06-08 12:03:06.801 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 12:18:52.171 [INFO] [feature_toggle_backend::graphql::mutation] Creating environment with input: CreateEnvironmentInput { name: "New Environment", active: true }
+2025-06-08 12:18:52.172 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1 AND name ILIKE $2\n" rows_affected=1 rows_returned=1 elapsed=196.25µs elapsed_secs=0.00019625
+2025-06-08 12:18:52.172 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 12:18:52.178 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 12:18:52.178 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=1 rows_returned=1 elapsed=185.041µs elapsed_secs=0.000185041
+2025-06-08 12:18:52.178 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 12:20:12.901 [INFO] [feature_toggle_backend::graphql::mutation] Creating environment with input: CreateEnvironmentInput { name: "Yet another env", active: true }
+2025-06-08 12:20:12.902 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1 AND name ILIKE $2\n" rows_affected=0 rows_returned=0 elapsed=401.625µs elapsed_secs=0.000401625
+2025-06-08 12:20:12.980 [DEBUG] [sqlx::query] summary="INSERT INTO environments (id, …" db.statement="\n\nINSERT INTO environments (id, name, active, team_id) VALUES ($1, $2, $3, $4) RETURNING id,name,active\n" rows_affected=1 rows_returned=1 elapsed=5.475959ms elapsed_secs=0.005475959
+2025-06-08 12:20:12.980 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (80 ms) [127.0.0.1]
+2025-06-08 12:20:12.989 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 12:20:12.989 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=2 rows_returned=2 elapsed=347.5µs elapsed_secs=0.0003475
+2025-06-08 12:20:12.990 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 12:20:38.349 [INFO] [feature_toggle_backend::graphql::mutation] Creating environment with input: CreateEnvironmentInput { name: "Hi env", active: true }
+2025-06-08 12:20:38.351 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1 AND name ILIKE $2\n" rows_affected=0 rows_returned=0 elapsed=1.548667ms elapsed_secs=0.001548667
+2025-06-08 12:20:38.353 [DEBUG] [sqlx::query] summary="INSERT INTO environments (id, …" db.statement="\n\nINSERT INTO environments (id, name, active, team_id) VALUES ($1, $2, $3, $4) RETURNING id,name,active\n" rows_affected=1 rows_returned=1 elapsed=1.862167ms elapsed_secs=0.001862167
+2025-06-08 12:20:38.354 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (6 ms) [127.0.0.1]
+2025-06-08 12:20:38.357 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 12:20:38.358 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=3 rows_returned=3 elapsed=768.75µs elapsed_secs=0.00076875
+2025-06-08 12:20:38.359 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 12:22:10.575 [INFO] [feature_toggle_backend::graphql::mutation] Creating environment with input: CreateEnvironmentInput { name: "Hey rich", active: true }
+2025-06-08 12:22:10.576 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1 AND name ILIKE $2\n" rows_affected=0 rows_returned=0 elapsed=376.125µs elapsed_secs=0.000376125
+2025-06-08 12:22:10.578 [DEBUG] [sqlx::query] summary="INSERT INTO environments (id, …" db.statement="\n\nINSERT INTO environments (id, name, active, team_id) VALUES ($1, $2, $3, $4) RETURNING id,name,active\n" rows_affected=1 rows_returned=1 elapsed=1.308834ms elapsed_secs=0.001308834
+2025-06-08 12:22:10.578 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (4 ms) [127.0.0.1]
+2025-06-08 12:22:10.581 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 12:22:10.582 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=4 rows_returned=4 elapsed=426.333µs elapsed_secs=0.000426333
+2025-06-08 12:22:10.583 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 12:22:19.391 [INFO] [feature_toggle_backend::graphql::mutation] Creating environment with input: CreateEnvironmentInput { name: "Hey rich", active: true }
+2025-06-08 12:22:19.392 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1 AND name ILIKE $2\n" rows_affected=1 rows_returned=1 elapsed=488.875µs elapsed_secs=0.000488875
+2025-06-08 12:22:19.392 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 12:22:19.397 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 12:22:19.398 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=4 rows_returned=4 elapsed=321.25µs elapsed_secs=0.00032125
+2025-06-08 12:22:19.399 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 12:26:00.717 [INFO] [feature_toggle_backend::graphql::mutation] Creating environment with input: CreateEnvironmentInput { name: "Hi env", active: true }
+2025-06-08 12:26:00.719 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1 AND name ILIKE $2\n" rows_affected=1 rows_returned=1 elapsed=1.522916ms elapsed_secs=0.001522916
+2025-06-08 12:26:00.719 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (4 ms) [127.0.0.1]
+2025-06-08 12:26:00.725 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 12:26:00.726 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=4 rows_returned=4 elapsed=980.083µs elapsed_secs=0.000980083
+2025-06-08 12:26:00.727 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (3 ms) [127.0.0.1]
+2025-06-08 12:26:47.011 [INFO] [feature_toggle_backend::graphql::mutation] Creating environment with input: CreateEnvironmentInput { name: "XX", active: true }
+2025-06-08 12:26:47.013 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1 AND name ILIKE $2\n" rows_affected=0 rows_returned=0 elapsed=527.458µs elapsed_secs=0.000527458
+2025-06-08 12:26:47.086 [DEBUG] [sqlx::query] summary="INSERT INTO environments (id, …" db.statement="\n\nINSERT INTO environments (id, name, active, team_id) VALUES ($1, $2, $3, $4) RETURNING id,name,active\n" rows_affected=1 rows_returned=1 elapsed=5.851709ms elapsed_secs=0.005851709
+2025-06-08 12:26:47.087 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (76 ms) [127.0.0.1]
+2025-06-08 12:26:52.328 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 12:26:52.329 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=525µs elapsed_secs=0.000525
+2025-06-08 12:26:52.329 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 12:26:52.366 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 12:26:52.368 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=5 rows_returned=5 elapsed=1.126625ms elapsed_secs=0.001126625
+2025-06-08 12:26:52.368 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (3 ms) [127.0.0.1]
+2025-06-08 12:27:27.140 [INFO] [feature_toggle_backend::graphql::mutation] Creating environment with input: CreateEnvironmentInput { name: "ZZZ", active: true }
+2025-06-08 12:27:27.141 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1 AND name ILIKE $2\n" rows_affected=0 rows_returned=0 elapsed=376.709µs elapsed_secs=0.000376709
+2025-06-08 12:27:27.143 [DEBUG] [sqlx::query] summary="INSERT INTO environments (id, …" db.statement="\n\nINSERT INTO environments (id, name, active, team_id) VALUES ($1, $2, $3, $4) RETURNING id,name,active\n" rows_affected=1 rows_returned=1 elapsed=1.038208ms elapsed_secs=0.001038208
+2025-06-08 12:27:27.143 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (4 ms) [127.0.0.1]
+2025-06-08 12:27:31.094 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 12:27:31.097 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=2.030292ms elapsed_secs=0.002030292
+2025-06-08 12:27:31.098 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (3 ms) [127.0.0.1]
+2025-06-08 12:27:31.115 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 12:27:31.121 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=6 rows_returned=6 elapsed=380.917µs elapsed_secs=0.000380917
+2025-06-08 12:27:31.121 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (6 ms) [127.0.0.1]
+2025-06-08 13:24:48.236 [INFO] [feature_toggle_backend::graphql::mutation] Creating environment with input: CreateEnvironmentInput { name: "aaaa", active: true }
+2025-06-08 13:24:48.238 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1 AND name ILIKE $2\n" rows_affected=0 rows_returned=0 elapsed=454.625µs elapsed_secs=0.000454625
+2025-06-08 13:24:48.239 [DEBUG] [sqlx::query] summary="INSERT INTO environments (id, …" db.statement="\n\nINSERT INTO environments (id, name, active, team_id) VALUES ($1, $2, $3, $4) RETURNING id,name,active\n" rows_affected=1 rows_returned=1 elapsed=546.583µs elapsed_secs=0.000546583
+2025-06-08 13:24:48.239 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (4 ms) [127.0.0.1]
+2025-06-08 13:24:48.243 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 13:24:48.243 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=7 rows_returned=7 elapsed=393.709µs elapsed_secs=0.000393709
+2025-06-08 13:24:48.243 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 13:27:02.559 [INFO] [feature_toggle_backend::graphql::mutation] Deleting environment with id: ID("de9a659d-765b-4390-8a53-255a27b47295")
+2025-06-08 13:27:02.561 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE id = $1\n" rows_affected=1 rows_returned=1 elapsed=723.542µs elapsed_secs=0.000723542
+2025-06-08 13:27:02.564 [DEBUG] [sqlx::query] summary="DELETE FROM environments WHERE …" db.statement="\n\nDELETE FROM environments WHERE id = $1\n" rows_affected=1 rows_returned=0 elapsed=3.191959ms elapsed_secs=0.003191959
+2025-06-08 13:27:02.565 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (6 ms) [127.0.0.1]
+2025-06-08 13:27:02.568 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 13:27:02.569 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=6 rows_returned=6 elapsed=468.459µs elapsed_secs=0.000468459
+2025-06-08 13:27:02.569 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 13:27:08.691 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 13:27:08.693 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=3 rows_returned=3 elapsed=466.958µs elapsed_secs=0.000466958
+2025-06-08 13:27:08.693 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 13:27:28.063 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (0 ms) [127.0.0.1]
+2025-06-08 13:33:52.516 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (0 ms) [127.0.0.1]
+2025-06-08 13:41:13.667 [INFO] [actix_server::server] SIGINT received; starting forced shutdown
+2025-06-08 13:41:13.669 [DEBUG] [actix_server::accept] paused accepting connections on 127.0.0.1:8080
+2025-06-08 13:41:13.669 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 13:41:13.669 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 13:41:13.669 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 13:41:13.670 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 13:41:13.670 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 13:41:13.670 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 13:41:13.670 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 13:41:13.671 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 13:41:13.671 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 13:41:13.671 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 13:41:13.671 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 13:41:13.671 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 13:41:13.671 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 13:41:13.672 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 13:41:13.672 [INFO] [actix_server::accept] accept thread stopped
+2025-06-08 13:47:08.498 [INFO] [actix_server::builder] starting 14 workers
+2025-06-08 13:47:08.498 [INFO] [actix_server::server] Tokio runtime found; starting in existing Tokio runtime
+2025-06-08 13:47:08.498 [INFO] [actix_server::server] starting service: "actix-web-service-127.0.0.1:8080", workers: 14, listening on: 127.0.0.1:8080
+2025-06-08 14:04:55.899 [INFO] [actix_server::server] SIGINT received; starting forced shutdown
+2025-06-08 14:04:55.901 [DEBUG] [actix_server::accept] paused accepting connections on 127.0.0.1:8080
+2025-06-08 14:04:55.902 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 14:04:55.902 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 14:04:55.903 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 14:04:55.903 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 14:04:55.903 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 14:04:55.903 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 14:04:55.904 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 14:04:55.905 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 14:04:55.905 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 14:04:55.905 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 14:04:55.905 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 14:04:55.905 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 14:04:55.906 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 14:04:55.906 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 14:04:55.906 [INFO] [actix_server::accept] accept thread stopped
+2025-06-08 14:05:14.693 [INFO] [actix_server::builder] starting 14 workers
+2025-06-08 14:05:14.693 [INFO] [actix_server::server] Tokio runtime found; starting in existing Tokio runtime
+2025-06-08 14:05:14.693 [INFO] [actix_server::server] starting service: "actix-web-service-127.0.0.1:8080", workers: 14, listening on: 127.0.0.1:8080
+2025-06-08 14:06:05.479 [INFO] [actix_server::server] SIGINT received; starting forced shutdown
+2025-06-08 14:06:05.479 [DEBUG] [actix_server::accept] paused accepting connections on 127.0.0.1:8080
+2025-06-08 14:06:05.479 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 14:06:05.479 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 14:06:05.479 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 14:06:05.479 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 14:06:05.479 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 14:06:05.479 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 14:06:05.479 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 14:06:05.479 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 14:06:05.479 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 14:06:05.480 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 14:06:05.480 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 14:06:05.480 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 14:06:05.480 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 14:06:05.480 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 14:06:05.480 [INFO] [actix_server::accept] accept thread stopped
+2025-06-08 14:06:09.263 [INFO] [actix_server::builder] starting 14 workers
+2025-06-08 14:06:09.263 [INFO] [actix_server::server] Tokio runtime found; starting in existing Tokio runtime
+2025-06-08 14:06:09.263 [INFO] [actix_server::server] starting service: "actix-web-service-127.0.0.1:8080", workers: 14, listening on: 127.0.0.1:8080
+2025-06-08 14:42:57.212 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 14:42:57.212 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 14:42:57.248 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=1.939042ms elapsed_secs=0.001939042
+2025-06-08 14:42:57.248 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (36 ms) [127.0.0.1]
+2025-06-08 14:42:58.974 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 14:42:58.974 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 14:42:58.979 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=765µs elapsed_secs=0.000765
+2025-06-08 14:42:58.979 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (5 ms) [127.0.0.1]
+2025-06-08 15:52:52.555 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 15:52:52.625 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=3 rows_returned=3 elapsed=1.688334ms elapsed_secs=0.001688334
+2025-06-08 15:52:52.625 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (71 ms) [127.0.0.1]
+2025-06-08 15:52:55.839 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 15:52:55.840 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=0 rows_returned=0 elapsed=594.292µs elapsed_secs=0.000594292
+2025-06-08 15:52:55.840 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (3 ms) [127.0.0.1]
+2025-06-08 15:52:59.352 [INFO] [feature_toggle_backend::graphql::mutation] Creating environment with input: CreateEnvironmentInput { name: "xxx", active: true }
+2025-06-08 15:52:59.354 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1 AND name ILIKE $2\n" rows_affected=0 rows_returned=0 elapsed=1.344042ms elapsed_secs=0.001344042
+2025-06-08 15:52:59.427 [DEBUG] [sqlx::query] summary="INSERT INTO environments (id, …" db.statement="\n\nINSERT INTO environments (id, name, active, team_id) VALUES ($1, $2, $3, $4) RETURNING id,name,active\n" rows_affected=1 rows_returned=1 elapsed=5.449542ms elapsed_secs=0.005449542
+2025-06-08 15:52:59.428 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (78 ms) [127.0.0.1]
+2025-06-08 15:52:59.435 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 15:52:59.435 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=1 rows_returned=1 elapsed=336.083µs elapsed_secs=0.000336083
+2025-06-08 15:52:59.435 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 15:53:07.409 [INFO] [feature_toggle_backend::graphql::mutation] Creating environment with input: CreateEnvironmentInput { name: "qqq", active: true }
+2025-06-08 15:53:07.411 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1 AND name ILIKE $2\n" rows_affected=0 rows_returned=0 elapsed=1.762333ms elapsed_secs=0.001762333
+2025-06-08 15:53:07.414 [DEBUG] [sqlx::query] summary="INSERT INTO environments (id, …" db.statement="\n\nINSERT INTO environments (id, name, active, team_id) VALUES ($1, $2, $3, $4) RETURNING id,name,active\n" rows_affected=1 rows_returned=1 elapsed=2.539542ms elapsed_secs=0.002539542
+2025-06-08 15:53:07.414 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (7 ms) [127.0.0.1]
+2025-06-08 15:53:07.417 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 15:53:07.418 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=2 rows_returned=2 elapsed=694µs elapsed_secs=0.000694
+2025-06-08 15:53:07.418 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 15:53:10.814 [INFO] [feature_toggle_backend::graphql::mutation] Deleting environment with id: ID("83805378-1770-43f2-b664-83c69d721367")
+2025-06-08 15:53:10.817 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE id = $1\n" rows_affected=1 rows_returned=1 elapsed=1.849ms elapsed_secs=0.001849
+2025-06-08 15:53:10.821 [DEBUG] [sqlx::query] summary="DELETE FROM environments WHERE …" db.statement="\n\nDELETE FROM environments WHERE id = $1\n" rows_affected=1 rows_returned=0 elapsed=3.556333ms elapsed_secs=0.003556333
+2025-06-08 15:53:10.821 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (8 ms) [127.0.0.1]
+2025-06-08 15:53:13.327 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 15:53:13.328 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=734.459µs elapsed_secs=0.000734459
+2025-06-08 15:53:13.329 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 15:53:13.365 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 15:53:13.366 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=1 rows_returned=1 elapsed=307.958µs elapsed_secs=0.000307958
+2025-06-08 15:53:13.366 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 15:54:03.450 [INFO] [feature_toggle_backend::graphql::mutation] Creating environment with input: CreateEnvironmentInput { name: "www", active: true }
+2025-06-08 15:54:03.450 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1 AND name ILIKE $2\n" rows_affected=0 rows_returned=0 elapsed=415.125µs elapsed_secs=0.000415125
+2025-06-08 15:54:03.452 [DEBUG] [sqlx::query] summary="INSERT INTO environments (id, …" db.statement="\n\nINSERT INTO environments (id, name, active, team_id) VALUES ($1, $2, $3, $4) RETURNING id,name,active\n" rows_affected=1 rows_returned=1 elapsed=935.292µs elapsed_secs=0.000935292
+2025-06-08 15:54:03.452 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (4 ms) [127.0.0.1]
+2025-06-08 15:54:03.456 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 15:54:03.456 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=2 rows_returned=2 elapsed=213.458µs elapsed_secs=0.000213458
+2025-06-08 15:54:03.456 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 15:54:06.147 [INFO] [feature_toggle_backend::graphql::mutation] Deleting environment with id: ID("19382418-19eb-4b40-8710-c131e563fa02")
+2025-06-08 15:54:06.150 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE id = $1\n" rows_affected=1 rows_returned=1 elapsed=1.448583ms elapsed_secs=0.001448583
+2025-06-08 15:54:06.153 [DEBUG] [sqlx::query] summary="DELETE FROM environments WHERE …" db.statement="\n\nDELETE FROM environments WHERE id = $1\n" rows_affected=1 rows_returned=0 elapsed=2.704333ms elapsed_secs=0.002704333
+2025-06-08 15:54:06.154 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (7 ms) [127.0.0.1]
+2025-06-08 15:54:08.344 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 15:54:08.346 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=781.708µs elapsed_secs=0.000781708
+2025-06-08 15:54:08.346 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 15:54:08.367 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 15:54:08.368 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=1 rows_returned=1 elapsed=311.083µs elapsed_secs=0.000311083
+2025-06-08 15:54:08.368 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 15:54:11.775 [INFO] [feature_toggle_backend::graphql::mutation] Creating environment with input: CreateEnvironmentInput { name: "cccc", active: true }
+2025-06-08 15:54:11.776 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1 AND name ILIKE $2\n" rows_affected=0 rows_returned=0 elapsed=509.167µs elapsed_secs=0.000509167
+2025-06-08 15:54:11.778 [DEBUG] [sqlx::query] summary="INSERT INTO environments (id, …" db.statement="\n\nINSERT INTO environments (id, name, active, team_id) VALUES ($1, $2, $3, $4) RETURNING id,name,active\n" rows_affected=1 rows_returned=1 elapsed=1.056ms elapsed_secs=0.001056
+2025-06-08 15:54:11.778 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (4 ms) [127.0.0.1]
+2025-06-08 15:54:11.782 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 15:54:11.782 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=2 rows_returned=2 elapsed=336.625µs elapsed_secs=0.000336625
+2025-06-08 15:54:11.783 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 15:55:29.341 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 15:55:29.342 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=225µs elapsed_secs=0.000225
+2025-06-08 15:55:29.342 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 15:55:29.364 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 15:55:29.364 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=2 rows_returned=2 elapsed=249.25µs elapsed_secs=0.00024925
+2025-06-08 15:55:29.365 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 15:55:42.785 [INFO] [feature_toggle_backend::graphql::mutation] Deleting environment with id: ID("a0646035-5694-4157-a719-1b572e632988")
+2025-06-08 15:55:42.786 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE id = $1\n" rows_affected=1 rows_returned=1 elapsed=406.459µs elapsed_secs=0.000406459
+2025-06-08 15:55:42.788 [DEBUG] [sqlx::query] summary="DELETE FROM environments WHERE …" db.statement="\n\nDELETE FROM environments WHERE id = $1\n" rows_affected=1 rows_returned=0 elapsed=1.336208ms elapsed_secs=0.001336208
+2025-06-08 15:55:42.788 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (4 ms) [127.0.0.1]
+2025-06-08 15:57:24.032 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 15:57:24.033 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=325.625µs elapsed_secs=0.000325625
+2025-06-08 15:57:24.033 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 15:57:24.086 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 15:57:24.087 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=1 rows_returned=1 elapsed=503.084µs elapsed_secs=0.000503084
+2025-06-08 15:57:24.088 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 15:57:28.818 [INFO] [feature_toggle_backend::graphql::mutation] Creating environment with input: CreateEnvironmentInput { name: "vvv", active: true }
+2025-06-08 15:57:28.819 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1 AND name ILIKE $2\n" rows_affected=0 rows_returned=0 elapsed=444.625µs elapsed_secs=0.000444625
+2025-06-08 15:57:28.821 [DEBUG] [sqlx::query] summary="INSERT INTO environments (id, …" db.statement="\n\nINSERT INTO environments (id, name, active, team_id) VALUES ($1, $2, $3, $4) RETURNING id,name,active\n" rows_affected=1 rows_returned=1 elapsed=1.131875ms elapsed_secs=0.001131875
+2025-06-08 15:57:28.821 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (5 ms) [127.0.0.1]
+2025-06-08 15:57:28.828 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 15:57:28.829 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=2 rows_returned=2 elapsed=402.458µs elapsed_secs=0.000402458
+2025-06-08 15:57:28.829 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 15:57:30.987 [INFO] [feature_toggle_backend::graphql::mutation] Deleting environment with id: ID("604fb641-a5bc-4aa7-97c6-9f0d2e2b8603")
+2025-06-08 15:57:30.988 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE id = $1\n" rows_affected=1 rows_returned=1 elapsed=399.708µs elapsed_secs=0.000399708
+2025-06-08 15:57:30.990 [DEBUG] [sqlx::query] summary="DELETE FROM environments WHERE …" db.statement="\n\nDELETE FROM environments WHERE id = $1\n" rows_affected=1 rows_returned=0 elapsed=1.211875ms elapsed_secs=0.001211875
+2025-06-08 15:57:30.990 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (3 ms) [127.0.0.1]
+2025-06-08 15:57:31.000 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 15:57:31.001 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=1 rows_returned=1 elapsed=428.792µs elapsed_secs=0.000428792
+2025-06-08 15:57:31.002 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 16:02:35.726 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 16:02:35.727 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=365.083µs elapsed_secs=0.000365083
+2025-06-08 16:02:35.727 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 16:02:35.828 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 16:02:35.829 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=1 rows_returned=1 elapsed=242.209µs elapsed_secs=0.000242209
+2025-06-08 16:02:35.829 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 16:02:42.563 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 16:02:42.564 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=568.625µs elapsed_secs=0.000568625
+2025-06-08 16:02:42.564 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 16:02:42.610 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 16:02:42.611 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=1 rows_returned=1 elapsed=446.375µs elapsed_secs=0.000446375
+2025-06-08 16:02:42.611 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 16:04:57.313 [DEBUG] [handlebars::render] Rendering helper: "if", params: [PathAndJson { relative_path: Some("title"), value: Context(Null, ["title"]) }], hash: {}
+2025-06-08 16:04:57.313 [DEBUG] [handlebars::render] Rendering value: Path(Relative(([Named("version")], "version")))
+2025-06-08 16:04:57.313 [DEBUG] [handlebars::render] Rendering helper: "if", params: [PathAndJson { relative_path: Some("plugins"), value: Context(Array [], ["plugins"]) }], hash: {}
+2025-06-08 16:04:57.313 [DEBUG] [handlebars::render] Rendering value: Path(Relative(([Named("version")], "version")))
+2025-06-08 16:04:57.313 [DEBUG] [handlebars::render] Rendering helper: "if", params: [PathAndJson { relative_path: Some("plugins"), value: Context(Array [], ["plugins"]) }], hash: {}
+2025-06-08 16:04:57.314 [DEBUG] [handlebars::render] Rendering value: Path(Relative(([Named("credentials")], "credentials")))
+2025-06-08 16:04:57.314 [DEBUG] [handlebars::render] Rendering helper: "if", params: [PathAndJson { relative_path: Some("plugins"), value: Context(Array [], ["plugins"]) }], hash: {}
+2025-06-08 16:04:57.314 [DEBUG] [handlebars::render] Rendering value: Path(Relative(([Named("endpoint")], "endpoint")))
+2025-06-08 16:04:57.314 [DEBUG] [handlebars::render] Rendering helper: "if", params: [PathAndJson { relative_path: Some("subscription_endpoint"), value: Context(String("/graphql"), ["subscription_endpoint"]) }], hash: {}
+2025-06-08 16:04:57.314 [DEBUG] [handlebars::render] Rendering value: Path(Relative(([Named("subscription_endpoint")], "subscription_endpoint")))
+2025-06-08 16:04:57.314 [DEBUG] [handlebars::render] Rendering helper: "if", params: [PathAndJson { relative_path: Some("headers"), value: Context(Null, ["headers"]) }], hash: {}
+2025-06-08 16:04:57.314 [DEBUG] [handlebars::render] Rendering helper: "if", params: [PathAndJson { relative_path: Some("ws_connection_params"), value: Context(Null, ["ws_connection_params"]) }], hash: {}
+2025-06-08 16:04:57.314 [DEBUG] [handlebars::render] Rendering helper: "if", params: [PathAndJson { relative_path: Some("plugins"), value: Context(Array [], ["plugins"]) }], hash: {}
+2025-06-08 16:04:57.314 [INFO] [feature_toggle_backend::middleware::access_log] GET /graphql -> 200 (22 ms) [127.0.0.1]
+2025-06-08 16:04:58.687 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (17 ms) [127.0.0.1]
+2025-06-08 16:06:11.736 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 16:06:11.737 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=664.042µs elapsed_secs=0.000664042
+2025-06-08 16:06:11.738 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 16:06:11.835 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 16:06:11.835 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=1 rows_returned=1 elapsed=343.833µs elapsed_secs=0.000343833
+2025-06-08 16:06:11.836 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 16:06:27.569 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 16:06:27.569 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=364.667µs elapsed_secs=0.000364667
+2025-06-08 16:06:27.570 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 16:06:27.617 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 16:06:27.618 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=1 rows_returned=1 elapsed=253.292µs elapsed_secs=0.000253292
+2025-06-08 16:06:27.618 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 16:06:32.596 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 16:06:32.597 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=367µs elapsed_secs=0.000367
+2025-06-08 16:06:32.597 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 16:06:32.651 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 16:06:32.652 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=1 rows_returned=1 elapsed=355.916µs elapsed_secs=0.000355916
+2025-06-08 16:06:32.652 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 16:06:44.559 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 16:06:44.560 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=194.625µs elapsed_secs=0.000194625
+2025-06-08 16:06:44.560 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 16:06:44.612 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 16:06:44.613 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=1 rows_returned=1 elapsed=209.542µs elapsed_secs=0.000209542
+2025-06-08 16:06:44.613 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 16:06:58.573 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 16:06:58.573 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=394.708µs elapsed_secs=0.000394708
+2025-06-08 16:06:58.574 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 16:06:58.621 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 16:06:58.621 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=1 rows_returned=1 elapsed=254.583µs elapsed_secs=0.000254583
+2025-06-08 16:06:58.621 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 16:07:03.577 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 16:07:03.577 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=198.833µs elapsed_secs=0.000198833
+2025-06-08 16:07:03.578 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 16:07:03.629 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 16:07:03.630 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=1 rows_returned=1 elapsed=226.541µs elapsed_secs=0.000226541
+2025-06-08 16:07:03.630 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 16:07:32.263 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 16:07:32.264 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=498.666µs elapsed_secs=0.000498666
+2025-06-08 16:07:32.264 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 16:07:32.291 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 16:07:32.305 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=1 rows_returned=1 elapsed=581.541µs elapsed_secs=0.000581541
+2025-06-08 16:07:32.305 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (19 ms) [127.0.0.1]
+2025-06-08 16:15:02.564 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (0 ms) [127.0.0.1]
+2025-06-08 16:15:20.746 [DEBUG] [feature_toggle_backend::graphql::query] Fetching pipelines for team with id: ID("3eef17bc-9e06-411d-b5f4-7a786e68bb96")
+2025-06-08 16:15:20.748 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM pipelines ORDER BY name\n" rows_affected=5 rows_returned=5 elapsed=1.666167ms elapsed_secs=0.001666167
+2025-06-08 16:15:20.748 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (3 ms) [127.0.0.1]
+2025-06-08 16:15:28.193 [DEBUG] [feature_toggle_backend::graphql::query] Fetching pipelines for team with id: ID("51ecc366-f1cd-4d3d-ab73-fa60bad98f27")
+2025-06-08 16:15:28.195 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM pipelines ORDER BY name\n" rows_affected=5 rows_returned=5 elapsed=1.695083ms elapsed_secs=0.001695083
+2025-06-08 16:15:28.196 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (3 ms) [127.0.0.1]
+2025-06-08 16:19:07.446 [INFO] [actix_server::server] SIGINT received; starting forced shutdown
+2025-06-08 16:19:07.446 [DEBUG] [actix_server::accept] paused accepting connections on 127.0.0.1:8080
+2025-06-08 16:19:07.446 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 16:19:07.447 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 16:19:07.447 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 16:19:07.447 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 16:19:07.447 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 16:19:07.448 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 16:19:07.448 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 16:19:07.448 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 16:19:07.448 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 16:19:07.448 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 16:19:07.449 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 16:19:07.449 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 16:19:07.449 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 16:19:07.449 [INFO] [actix_server::accept] accept thread stopped
+2025-06-08 16:19:07.449 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 22:44:30.373 [INFO] [actix_server::builder] starting 14 workers
+2025-06-08 22:44:30.373 [INFO] [actix_server::server] Tokio runtime found; starting in existing Tokio runtime
+2025-06-08 22:44:30.373 [INFO] [actix_server::server] starting service: "actix-web-service-127.0.0.1:8080", workers: 14, listening on: 127.0.0.1:8080
+2025-06-08 22:44:59.497 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 22:45:13.083 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 22:45:13.085 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=1.507ms elapsed_secs=0.001507
+2025-06-08 22:45:13.085 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (3 ms) [127.0.0.1]
+2025-06-08 22:45:13.120 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 22:45:13.121 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=3 rows_returned=3 elapsed=1.158708ms elapsed_secs=0.001158708
+2025-06-08 22:45:13.122 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 22:45:15.178 [DEBUG] [feature_toggle_backend::graphql::query] Fetching pipelines for team with id: ID("51ecc366-f1cd-4d3d-ab73-fa60bad98f27")
+2025-06-08 22:45:15.180 [DEBUG] [sqlx::query] summary="SELECT id, name, active, …" db.statement="\n\nSELECT id, name, active, team_id FROM pipelines WHERE team_id = $1 ORDER BY name\n" rows_affected=5 rows_returned=5 elapsed=1.154833ms elapsed_secs=0.001154833
+2025-06-08 22:45:15.180 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (3 ms) [127.0.0.1]
+2025-06-08 22:45:19.297 [DEBUG] [feature_toggle_backend::graphql::query] Fetching pipelines for team with id: ID("ed7ee903-6319-4421-9aa4-65eb59d8b4e5")
+2025-06-08 22:45:19.299 [DEBUG] [sqlx::query] summary="SELECT id, name, active, …" db.statement="\n\nSELECT id, name, active, team_id FROM pipelines WHERE team_id = $1 ORDER BY name\n" rows_affected=0 rows_returned=0 elapsed=606.5µs elapsed_secs=0.0006065
+2025-06-08 22:45:19.299 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (3 ms) [127.0.0.1]
+2025-06-08 22:45:21.283 [DEBUG] [feature_toggle_backend::graphql::query] Fetching pipelines for team with id: ID("3eef17bc-9e06-411d-b5f4-7a786e68bb96")
+2025-06-08 22:45:21.284 [DEBUG] [sqlx::query] summary="SELECT id, name, active, …" db.statement="\n\nSELECT id, name, active, team_id FROM pipelines WHERE team_id = $1 ORDER BY name\n" rows_affected=0 rows_returned=0 elapsed=560.5µs elapsed_secs=0.0005605
+2025-06-08 22:45:21.285 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (3 ms) [127.0.0.1]
+2025-06-08 22:54:54.389 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 22:54:54.390 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=373.917µs elapsed_secs=0.000373917
+2025-06-08 22:54:54.390 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 22:54:54.433 [DEBUG] [feature_toggle_backend::graphql::query] Fetching pipelines for team with id: ID("51ecc366-f1cd-4d3d-ab73-fa60bad98f27")
+2025-06-08 22:54:54.434 [DEBUG] [sqlx::query] summary="SELECT id, name, active, …" db.statement="\n\nSELECT id, name, active, team_id FROM pipelines WHERE team_id = $1 ORDER BY name\n" rows_affected=5 rows_returned=5 elapsed=421.125µs elapsed_secs=0.000421125
+2025-06-08 22:54:54.434 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 22:55:53.165 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 22:55:53.166 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=368.875µs elapsed_secs=0.000368875
+2025-06-08 22:55:53.166 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 22:59:07.414 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 22:59:07.414 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=288.666µs elapsed_secs=0.000288666
+2025-06-08 22:59:07.415 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 23:00:45.634 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 23:00:45.634 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=290.042µs elapsed_secs=0.000290042
+2025-06-08 23:00:45.635 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 23:02:18.180 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 23:02:18.180 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=236.25µs elapsed_secs=0.00023625
+2025-06-08 23:02:18.180 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 23:07:09.689 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 23:07:09.689 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=353.709µs elapsed_secs=0.000353709
+2025-06-08 23:07:09.690 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 23:08:51.386 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-08 23:08:51.387 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=3 rows_returned=3 elapsed=298.125µs elapsed_secs=0.000298125
+2025-06-08 23:08:51.387 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 23:08:59.026 [DEBUG] [feature_toggle_backend::graphql::query] Fetching pipelines for team with id: ID("51ecc366-f1cd-4d3d-ab73-fa60bad98f27")
+2025-06-08 23:08:59.027 [DEBUG] [sqlx::query] summary="SELECT id, name, active, …" db.statement="\n\nSELECT id, name, active, team_id FROM pipelines WHERE team_id = $1 ORDER BY name\n" rows_affected=5 rows_returned=5 elapsed=356.833µs elapsed_secs=0.000356833
+2025-06-08 23:08:59.027 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 23:09:06.016 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (0 ms) [127.0.0.1]
+2025-06-08 23:11:32.578 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 23:11:32.579 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=290.375µs elapsed_secs=0.000290375
+2025-06-08 23:11:32.579 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-08 23:17:26.774 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 23:17:26.775 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=304.084µs elapsed_secs=0.000304084
+2025-06-08 23:17:26.776 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-08 23:18:36.635 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-08 23:18:36.692 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=1.193458ms elapsed_secs=0.001193458
+2025-06-08 23:18:36.692 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (58 ms) [127.0.0.1]
+2025-06-08 23:20:05.899 [INFO] [actix_server::server] SIGINT received; starting forced shutdown
+2025-06-08 23:20:05.901 [DEBUG] [actix_server::accept] paused accepting connections on 127.0.0.1:8080
+2025-06-08 23:20:05.901 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 23:20:05.901 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 23:20:05.901 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 23:20:05.901 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 23:20:05.902 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 23:20:05.902 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 23:20:05.902 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 23:20:05.902 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 23:20:05.902 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 23:20:05.902 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 23:20:05.902 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 23:20:05.903 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 23:20:05.903 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 23:20:05.903 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-08 23:20:05.904 [INFO] [actix_server::accept] accept thread stopped
