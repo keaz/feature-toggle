@@ -1,5 +1,5 @@
-use crate::database::pipeline::PipelineRepository;
-use crate::Error;
+use crate::database::pipeline::{CreateStage, PipelineRepository, UpdatePipeline};
+use crate::{Error, database::pipeline::CreatePipeline};
 use async_graphql::ID;
 use feature_toggle_shared::graphql::{CreatePipelineInput, Pipeline, UpdatePipelineInput};
 use uuid::Uuid;
@@ -14,7 +14,11 @@ pub trait PipelineLogic: Send + Sync {
         active: Option<bool>,
     ) -> Result<Vec<Pipeline>, Error>;
 
-    async fn create_pipeline(&self, team_id: ID, input: CreatePipelineInput) -> Result<Pipeline, Error>;
+    async fn create_pipeline(
+        &self,
+        team_id: ID,
+        input: CreatePipelineInput,
+    ) -> Result<Pipeline, Error>;
     async fn update_pipeline(&self, id: ID, input: UpdatePipelineInput) -> Result<Pipeline, Error>;
     async fn delete_pipeline(&self, id: ID) -> Result<(), Error>;
     fn clone_box(&self) -> Box<dyn PipelineLogic>;
@@ -33,6 +37,41 @@ pub fn pipeline_logic(repository: Box<dyn PipelineRepository>) -> Box<dyn Pipeli
 #[derive(Clone)]
 struct PipelineLogicImpl {
     repository: Box<dyn PipelineRepository>,
+}
+
+impl PipelineLogicImpl {
+    fn map_to_create_pipeline(team_id: Uuid, input: CreatePipelineInput) -> CreatePipeline {
+        CreatePipeline {
+            team_id,
+            name: input.name,
+            stages: input
+                .stages
+                .into_iter()
+                .map(|stage| CreateStage {
+                    environment_id: Uuid::try_from(stage.environment_id).unwrap(),
+                    parent_stage_id: stage.parent_stage_id.map(|id| Uuid::try_from(id).unwrap()),
+                    order: stage.order,
+                })
+                .collect(),
+        }
+    }
+
+    fn map_to_update_pipeline(id: ID, input: UpdatePipelineInput) -> UpdatePipeline {
+        UpdatePipeline {
+            id: Uuid::try_from(id).unwrap(),
+            name: input.name,
+            active: input.active,
+            stages: input
+                .stages
+                .into_iter()
+                .map(|stage| CreateStage {
+                    environment_id: Uuid::try_from(stage.environment_id).unwrap(),
+                    parent_stage_id: stage.parent_stage_id.map(|id| Uuid::try_from(id).unwrap()),
+                    order: stage.order,
+                })
+                .collect(),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -66,9 +105,13 @@ impl PipelineLogic for PipelineLogicImpl {
             .collect())
     }
 
-    async fn create_pipeline(&self, team_id: ID, input: CreatePipelineInput) -> Result<Pipeline, Error> {
+    async fn create_pipeline(
+        &self,
+        team_id: ID,
+        input: CreatePipelineInput,
+    ) -> Result<Pipeline, Error> {
         let team_id = Uuid::try_from(team_id).unwrap();
-        let input = crate::database::pipeline::CreatePipeline { team_id, name: input.name };
+        let input = Self::map_to_create_pipeline(team_id, input);
         let pipeline = self.repository.create_pipeline(input).await?;
         Ok(Pipeline {
             id: pipeline.id.into(),
@@ -79,11 +122,7 @@ impl PipelineLogic for PipelineLogicImpl {
     }
 
     async fn update_pipeline(&self, id: ID, input: UpdatePipelineInput) -> Result<Pipeline, Error> {
-        let input = crate::database::pipeline::UpdatePipeline {
-            id: Uuid::try_from(id).unwrap(),
-            name: input.name,
-            active: input.active,
-        };
+        let input = Self::map_to_update_pipeline(id, input);
         let pipeline = self.repository.update_pipeline(input).await?;
         Ok(Pipeline {
             id: pipeline.id.into(),
@@ -94,7 +133,9 @@ impl PipelineLogic for PipelineLogicImpl {
     }
 
     async fn delete_pipeline(&self, id: ID) -> Result<(), Error> {
-        self.repository.delete_pipeline(Uuid::try_from(id).unwrap()).await?;
+        self.repository
+            .delete_pipeline(Uuid::try_from(id).unwrap())
+            .await?;
         Ok(())
     }
 
@@ -161,6 +202,7 @@ mod test {
 
         let input = CreatePipelineInput {
             name: "New Pipeline".to_string(),
+            stages: vec![],
         };
         const ID: &str = "3eef17bc-9e06-411d-b5f4-7a786e68bb96";
         let id = ID::from(ID);
@@ -200,7 +242,9 @@ mod test {
 
         repository
             .expect_update_pipeline()
-            .withf(|input| input.id == Uuid::parse_str(ID).unwrap() && input.name == Some(NAME.to_string()))
+            .withf(|input| {
+                input.id == Uuid::parse_str(ID).unwrap() && input.name == Some(NAME.to_string())
+            })
             .times(1)
             .returning(move |_| {
                 Ok(crate::database::entity::Pipeline {
@@ -305,9 +349,10 @@ mod test {
                 ])
             });
 
-
         let logic = pipeline_logic(Box::new(repository));
-        let result = logic.get_pipelines(ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"), None, None).await;
+        let result = logic
+            .get_pipelines(ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"), None, None)
+            .await;
         assert!(result.is_ok());
     }
 }

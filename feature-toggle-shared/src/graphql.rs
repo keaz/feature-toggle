@@ -1,4 +1,4 @@
-use async_graphql::{Enum, InputObject, SimpleObject, ID};
+use async_graphql::{Enum, ID, InputObject, SimpleObject};
 use serde::{Deserialize, Serialize};
 
 #[derive(Enum, Copy, Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
@@ -51,12 +51,15 @@ pub struct Pipeline {
 
 #[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
 pub struct PipelineStage {
+    id: ID,
     pub environment: Environment,
     pub order: i32,
+    pub parent_stage_id: Option<Box<PipelineStage>>,
+    pub child_stages: Vec<PipelineStage>,
+    pub team: Option<Team>,
 }
 
 // Input types for mutations
-
 #[derive(InputObject, Debug)]
 pub struct CreateFeatureInput {
     pub name: String,
@@ -83,19 +86,7 @@ pub struct CreateEnvironmentInput {
 #[derive(InputObject, Debug)]
 pub struct CreatePipelineInput {
     pub name: String,
-}
-
-#[derive(InputObject, Debug)]
-pub struct UpdatePipelineInput {
-    pub id: ID,
-    pub name: Option<String>,
-    pub active: Option<bool>,
-}
-
-#[derive(InputObject, Debug)]
-pub struct UpdateEnvironmentInput {
-    pub name: Option<String>,
-    pub active: Option<bool>,
+    pub stages: Vec<CreateStageInput>,
 }
 
 #[derive(InputObject, Debug)]
@@ -104,6 +95,19 @@ pub struct CreateStageInput {
     pub environment_id: ID,
     pub parent_stage_id: Option<ID>,
     pub order: i32,
+}
+
+#[derive(InputObject, Debug)]
+pub struct UpdatePipelineInput {
+    pub name: Option<String>,
+    pub active: Option<bool>,
+    pub stages: Vec<CreateStageInput>,
+}
+
+#[derive(InputObject, Debug)]
+pub struct UpdateEnvironmentInput {
+    pub name: Option<String>,
+    pub active: Option<bool>,
 }
 
 #[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
@@ -119,10 +123,8 @@ pub struct CreateTeamInput {
     pub description: String,
 }
 
-
 #[derive(InputObject)]
 pub struct UpdateTeamInput {
     pub name: Option<String>,
     pub description: Option<String>,
 }
-

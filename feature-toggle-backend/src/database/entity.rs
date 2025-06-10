@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub const SENTINEL_UUID: Uuid = Uuid::nil();
+
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
 pub struct Environment {
     pub id: Uuid,
@@ -14,9 +16,10 @@ pub struct Pipeline {
     pub name: String,
     pub active: bool,
     pub team_id: Uuid,
+    pub stages: Vec<Stage>,
 }
 
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone, Copy)]
 pub struct Stage {
     pub id: Uuid,
     pub pipeline_id: Uuid,

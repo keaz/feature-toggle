@@ -957,3 +957,203 @@
 2025-06-08 23:20:05.903 [INFO] [actix_server::worker] shutting down idle worker
 2025-06-08 23:20:05.903 [INFO] [actix_server::worker] shutting down idle worker
 2025-06-08 23:20:05.904 [INFO] [actix_server::accept] accept thread stopped
+2025-06-09 22:10:54.046 [INFO] [actix_server::builder] starting 14 workers
+2025-06-09 22:10:54.046 [INFO] [actix_server::server] Tokio runtime found; starting in existing Tokio runtime
+2025-06-09 22:10:54.047 [INFO] [actix_server::server] starting service: "actix-web-service-127.0.0.1:8080", workers: 14, listening on: 127.0.0.1:8080
+2025-06-09 22:11:00.119 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-09 22:11:00.120 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=1.224791ms elapsed_secs=0.001224791
+2025-06-09 22:11:00.120 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (3 ms) [127.0.0.1]
+2025-06-09 22:11:06.592 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-09 22:11:06.593 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=396.917µs elapsed_secs=0.000396917
+2025-06-09 22:11:06.593 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-09 22:11:07.807 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-09 22:11:07.807 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=251.291µs elapsed_secs=0.000251291
+2025-06-09 22:11:07.807 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-09 22:17:34.367 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-09 22:17:34.368 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=261.625µs elapsed_secs=0.000261625
+2025-06-09 22:17:34.368 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-09 22:18:27.153 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-09 22:18:27.153 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=300.375µs elapsed_secs=0.000300375
+2025-06-09 22:18:27.154 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-09 22:18:28.057 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-09 22:18:28.058 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=255.875µs elapsed_secs=0.000255875
+2025-06-09 22:18:28.058 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-09 22:18:33.272 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-09 22:18:33.275 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=3 rows_returned=3 elapsed=2.0505ms elapsed_secs=0.0020505
+2025-06-09 22:18:33.275 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (3 ms) [127.0.0.1]
+2025-06-09 22:18:34.114 [DEBUG] [feature_toggle_backend::graphql::query] Fetching pipelines for team with id: ID("51ecc366-f1cd-4d3d-ab73-fa60bad98f27")
+2025-06-09 22:18:34.115 [DEBUG] [sqlx::query] summary="SELECT id, name, active, …" db.statement="\n\nSELECT id, name, active, team_id FROM pipelines WHERE team_id = $1 ORDER BY name\n" rows_affected=5 rows_returned=5 elapsed=1.171833ms elapsed_secs=0.001171833
+2025-06-09 22:18:34.116 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-09 22:19:09.811 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-09 22:19:09.812 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=255.042µs elapsed_secs=0.000255042
+2025-06-09 22:19:09.812 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-09 22:20:47.565 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-09 22:20:47.566 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=237.25µs elapsed_secs=0.00023725
+2025-06-09 22:20:47.566 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-09 22:20:48.405 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-09 22:20:48.406 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=305.167µs elapsed_secs=0.000305167
+2025-06-09 22:20:48.406 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-09 22:20:56.853 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-09 22:20:56.855 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=568.333µs elapsed_secs=0.000568333
+2025-06-09 22:20:56.855 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-09 22:26:40.542 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-09 22:26:40.543 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=224.042µs elapsed_secs=0.000224042
+2025-06-09 22:26:40.543 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-09 22:27:44.289 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-09 22:27:44.290 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=318.458µs elapsed_secs=0.000318458
+2025-06-09 22:27:44.290 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-09 22:30:58.097 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-09 22:30:58.097 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=255.75µs elapsed_secs=0.00025575
+2025-06-09 22:30:58.097 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (0 ms) [127.0.0.1]
+2025-06-09 22:31:00.389 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-09 22:31:00.390 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=3 rows_returned=3 elapsed=463.959µs elapsed_secs=0.000463959
+2025-06-09 22:31:00.390 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-09 22:31:01.265 [DEBUG] [feature_toggle_backend::graphql::query] Fetching pipelines for team with id: ID("51ecc366-f1cd-4d3d-ab73-fa60bad98f27")
+2025-06-09 22:31:01.266 [DEBUG] [sqlx::query] summary="SELECT id, name, active, …" db.statement="\n\nSELECT id, name, active, team_id FROM pipelines WHERE team_id = $1 ORDER BY name\n" rows_affected=5 rows_returned=5 elapsed=540.667µs elapsed_secs=0.000540667
+2025-06-09 22:31:01.267 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-09 22:31:21.955 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-09 22:31:21.956 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=330.458µs elapsed_secs=0.000330458
+2025-06-09 22:31:21.956 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-09 22:31:26.295 [DEBUG] [feature_toggle_backend::graphql::query] Fetching pipelines for team with id: ID("51ecc366-f1cd-4d3d-ab73-fa60bad98f27")
+2025-06-09 22:31:26.296 [DEBUG] [sqlx::query] summary="SELECT id, name, active, …" db.statement="\n\nSELECT id, name, active, team_id FROM pipelines WHERE team_id = $1 ORDER BY name\n" rows_affected=5 rows_returned=5 elapsed=597.875µs elapsed_secs=0.000597875
+2025-06-09 22:31:26.297 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-09 22:31:27.878 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-09 22:31:27.879 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=3 rows_returned=3 elapsed=489.917µs elapsed_secs=0.000489917
+2025-06-09 22:31:27.880 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (3 ms) [127.0.0.1]
+2025-06-09 22:32:44.793 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-09 22:32:44.793 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=370.959µs elapsed_secs=0.000370959
+2025-06-09 22:32:44.794 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-09 22:50:41.225 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-09 22:50:41.226 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=327.958µs elapsed_secs=0.000327958
+2025-06-09 22:50:41.226 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-09 22:50:41.257 [DEBUG] [feature_toggle_backend::graphql::query] Fetching pipelines for team with id: ID("51ecc366-f1cd-4d3d-ab73-fa60bad98f27")
+2025-06-09 22:50:41.320 [DEBUG] [sqlx::query] summary="SELECT id, name, active, …" db.statement="\n\nSELECT id, name, active, team_id FROM pipelines WHERE team_id = $1 ORDER BY name\n" rows_affected=5 rows_returned=5 elapsed=2.19975ms elapsed_secs=0.00219975
+2025-06-09 22:50:41.320 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (64 ms) [127.0.0.1]
+2025-06-09 22:58:28.612 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-09 22:58:28.614 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=803.709µs elapsed_secs=0.000803709
+2025-06-09 22:58:28.614 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-09 22:58:28.644 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-09 22:58:28.646 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=3 rows_returned=3 elapsed=1.156292ms elapsed_secs=0.001156292
+2025-06-09 22:58:28.646 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-09 22:58:30.026 [DEBUG] [feature_toggle_backend::graphql::query] Fetching pipelines for team with id: ID("51ecc366-f1cd-4d3d-ab73-fa60bad98f27")
+2025-06-09 22:58:30.027 [DEBUG] [sqlx::query] summary="SELECT id, name, active, …" db.statement="\n\nSELECT id, name, active, team_id FROM pipelines WHERE team_id = $1 ORDER BY name\n" rows_affected=5 rows_returned=5 elapsed=595.875µs elapsed_secs=0.000595875
+2025-06-09 22:58:30.028 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (3 ms) [127.0.0.1]
+2025-06-10 05:11:28.448 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-10 05:11:28.511 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=1.490583ms elapsed_secs=0.001490583
+2025-06-10 05:11:28.511 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (63 ms) [127.0.0.1]
+2025-06-10 05:11:28.553 [DEBUG] [feature_toggle_backend::graphql::query] Fetching pipelines for team with id: ID("51ecc366-f1cd-4d3d-ab73-fa60bad98f27")
+2025-06-10 05:11:28.556 [DEBUG] [sqlx::query] summary="SELECT id, name, active, …" db.statement="\n\nSELECT id, name, active, team_id FROM pipelines WHERE team_id = $1 ORDER BY name\n" rows_affected=5 rows_returned=5 elapsed=1.978667ms elapsed_secs=0.001978667
+2025-06-10 05:11:28.556 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-10 05:11:30.444 [DEBUG] [feature_toggle_backend::graphql::query] Fetching environments with name: None and active: None
+2025-06-10 05:11:30.446 [DEBUG] [sqlx::query] summary="SELECT id, name, active …" db.statement="\n\nSELECT id, name, active FROM environments WHERE team_id = $1\n" rows_affected=3 rows_returned=3 elapsed=1.00425ms elapsed_secs=0.00100425
+2025-06-10 05:11:30.446 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-10 05:16:20.740 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-10 05:16:20.741 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=271.417µs elapsed_secs=0.000271417
+2025-06-10 05:16:20.741 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-10 05:19:29.803 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-10 05:19:29.804 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=314.083µs elapsed_secs=0.000314083
+2025-06-10 05:19:29.804 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-10 05:19:55.246 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-10 05:19:55.246 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=369.5µs elapsed_secs=0.0003695
+2025-06-10 05:19:55.247 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-10 05:35:05.408 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-10 05:35:05.409 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=338.834µs elapsed_secs=0.000338834
+2025-06-10 05:35:05.409 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-10 05:37:10.488 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-10 05:37:10.489 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=358.583µs elapsed_secs=0.000358583
+2025-06-10 05:37:10.489 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-10 05:39:18.487 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-10 05:39:18.488 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=212.166µs elapsed_secs=0.000212166
+2025-06-10 05:39:18.488 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-10 05:39:23.550 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-10 05:39:23.551 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=356.917µs elapsed_secs=0.000356917
+2025-06-10 05:39:23.552 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-10 05:39:29.526 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-10 05:39:29.527 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=486.666µs elapsed_secs=0.000486666
+2025-06-10 05:39:29.528 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-10 05:39:40.483 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-10 05:39:40.483 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=283µs elapsed_secs=0.000283
+2025-06-10 05:39:40.484 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-10 05:46:08.568 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-10 05:46:08.569 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=208.25µs elapsed_secs=0.00020825
+2025-06-10 05:46:08.569 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-10 05:46:46.767 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-10 05:46:46.821 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=2.268041ms elapsed_secs=0.002268041
+2025-06-10 05:46:46.821 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (54 ms) [127.0.0.1]
+2025-06-10 05:46:56.485 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-10 05:46:56.486 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=415.291µs elapsed_secs=0.000415291
+2025-06-10 05:46:56.487 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-10 05:51:13.938 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-10 05:51:13.938 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=271.292µs elapsed_secs=0.000271292
+2025-06-10 05:51:13.939 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-10 05:59:41.853 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-10 05:59:41.854 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=363.875µs elapsed_secs=0.000363875
+2025-06-10 05:59:41.854 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-10 06:06:57.316 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-10 06:06:57.316 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=370.292µs elapsed_secs=0.000370292
+2025-06-10 06:06:57.317 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-10 06:07:35.196 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-10 06:07:35.197 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=328.375µs elapsed_secs=0.000328375
+2025-06-10 06:07:35.197 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-10 06:10:34.053 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-10 06:10:34.053 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=237.292µs elapsed_secs=0.000237292
+2025-06-10 06:10:34.053 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-10 06:11:26.759 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-10 06:11:26.760 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=380.916µs elapsed_secs=0.000380916
+2025-06-10 06:11:26.760 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-10 06:12:21.831 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-10 06:12:21.832 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=324.958µs elapsed_secs=0.000324958
+2025-06-10 06:12:21.832 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-10 06:13:20.083 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-10 06:13:20.083 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=352.625µs elapsed_secs=0.000352625
+2025-06-10 06:13:20.084 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-10 06:24:17.988 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-10 06:24:17.989 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=439µs elapsed_secs=0.000439
+2025-06-10 06:24:17.990 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-10 06:27:19.501 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-10 06:27:19.557 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=1.51175ms elapsed_secs=0.00151175
+2025-06-10 06:27:19.557 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (57 ms) [127.0.0.1]
+2025-06-10 06:28:06.245 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-10 06:28:06.246 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=246.083µs elapsed_secs=0.000246083
+2025-06-10 06:28:06.246 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-10 06:35:51.864 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-10 06:35:51.865 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=203.542µs elapsed_secs=0.000203542
+2025-06-10 06:35:51.865 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-10 06:41:13.526 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-10 06:41:13.527 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=378.958µs elapsed_secs=0.000378958
+2025-06-10 06:41:13.527 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-10 06:44:46.306 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-10 06:44:46.306 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=379.833µs elapsed_secs=0.000379833
+2025-06-10 06:44:46.307 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-10 06:53:04.454 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-10 06:53:04.455 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=221.041µs elapsed_secs=0.000221041
+2025-06-10 06:53:04.455 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-10 06:55:16.450 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-10 06:55:16.450 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=267.667µs elapsed_secs=0.000267667
+2025-06-10 06:55:16.451 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-10 06:56:46.868 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-10 06:56:46.868 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=317.917µs elapsed_secs=0.000317917
+2025-06-10 06:56:46.869 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (1 ms) [127.0.0.1]
+2025-06-10 07:12:05.520 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-10 07:12:05.577 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=1.630708ms elapsed_secs=0.001630708
+2025-06-10 07:12:05.577 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (57 ms) [127.0.0.1]
+2025-06-10 07:28:18.302 [DEBUG] [feature_toggle_backend::graphql::query] Fetching teams
+2025-06-10 07:28:18.303 [DEBUG] [sqlx::query] summary="SELECT id, name, description …" db.statement="\n\nSELECT id, name, description FROM teams\n" rows_affected=3 rows_returned=3 elapsed=421.916µs elapsed_secs=0.000421916
+2025-06-10 07:28:18.304 [INFO] [feature_toggle_backend::middleware::access_log] POST /graphql -> 200 (2 ms) [127.0.0.1]
+2025-06-10 11:09:40.149 [INFO] [actix_server::server] SIGINT received; starting forced shutdown
+2025-06-10 11:09:40.150 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-10 11:09:40.151 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-10 11:09:40.151 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-10 11:09:40.151 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-10 11:09:40.151 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-10 11:09:40.151 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-10 11:09:40.152 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-10 11:09:40.152 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-10 11:09:40.153 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-10 11:09:40.153 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-10 11:09:40.153 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-10 11:09:40.154 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-10 11:09:40.154 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-10 11:09:40.154 [INFO] [actix_server::worker] shutting down idle worker
+2025-06-10 11:09:40.154 [DEBUG] [actix_server::accept] paused accepting connections on 127.0.0.1:8080
+2025-06-10 11:09:40.154 [INFO] [actix_server::accept] accept thread stopped

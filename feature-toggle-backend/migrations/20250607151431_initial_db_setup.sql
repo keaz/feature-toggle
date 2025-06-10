@@ -29,9 +29,9 @@ CREATE TABLE pipeline_stages
     pipeline_id     UUID NOT NULL REFERENCES pipelines (id) ON DELETE CASCADE,
     environment_id UUID NOT NULL REFERENCES environments (id) ON DELETE CASCADE,
     order_index     INT  NOT NULL,                        -- for linear flow
-    parent_stage_id UUID REFERENCES pipeline_stages (id), -- for DAG/forking
+    parent_stage_id UUID REFERENCES pipeline_stages (id) ON DELETE CASCADE, -- for DAG/forking
     team_id        UUID NOT NULL REFERENCES teams (id) ON DELETE CASCADE,
-    UNIQUE (pipeline_id, environment_id)
+    UNIQUE (team_id, pipeline_id, environment_id)
 );
 
 

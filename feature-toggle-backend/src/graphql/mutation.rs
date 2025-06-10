@@ -45,4 +45,15 @@ impl MutationRoot {
             description: input.description,
         })
     }
+
+    async fn create_pipeline(
+        &self,
+        ctx: &Context<'_>,
+        team_id: ID,
+        input: feature_toggle_shared::graphql::CreatePipelineInput,
+    ) -> GqlResult<feature_toggle_shared::graphql::Pipeline> {
+        info!("Creating pipeline with input: {:?}", input);
+
+        panic!("Implement")
+    }
 }
