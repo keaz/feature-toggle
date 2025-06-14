@@ -24,7 +24,7 @@ pub struct Stage {
     pub id: Uuid,
     pub pipeline_id: Uuid,
     pub environment_id: Uuid,
-    pub order_index: i8,
+    pub order_index: i32,
     pub parent_stage_id: Option<Uuid>,
 }
 

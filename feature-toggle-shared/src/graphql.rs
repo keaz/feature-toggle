@@ -101,7 +101,16 @@ pub struct CreateStageInput {
 pub struct UpdatePipelineInput {
     pub name: Option<String>,
     pub active: Option<bool>,
-    pub stages: Vec<CreateStageInput>,
+    pub stages: Vec<UpdateStageInput>,
+}
+
+#[derive(InputObject, Debug)]
+pub struct UpdateStageInput {
+    pub id: ID,
+    pub pipeline_id: ID,
+    pub environment_id: ID,
+    pub parent_stage_id: Option<ID>,
+    pub order: i32,
 }
 
 #[derive(InputObject, Debug)]

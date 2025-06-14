@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
-use crate::database::entity::{Pipeline, SENTINEL_UUID, Stage};
-use crate::database::{Error, handle_error};
+use crate::database::entity::{Pipeline, Stage, SENTINEL_UUID};
+use crate::database::{handle_error, Error};
 use mockall::automock;
 use sqlx::postgres::PgQueryResult;
-use sqlx::{PgConnection, PgPool, Postgres, Transaction};
+use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder, Transaction};
 use uuid::Uuid;
 
 pub struct CreatePipeline {
@@ -14,7 +14,6 @@ pub struct CreatePipeline {
 }
 
 pub struct CreateStage {
-    pub pipeline_id: Uuid,
     pub environment_id: Uuid,
     pub order_index: i32,
     pub parent_stage_id: Option<Uuid>,
@@ -43,9 +42,9 @@ struct PipelineWithStageRow {
     team_id: Uuid,
 
     stage_id: Option<Uuid>,
-    pipeline_id_stage: Option<Uuid>, // alias in query if needed
+    pipeline_id_stage: Option<Uuid>,
     environment_id: Option<Uuid>,
-    order_index: Option<i8>,
+    order_index: Option<i32>,
     parent_stage_id: Option<Uuid>,
 }
 
@@ -99,8 +98,8 @@ impl PipelineRepositoryImpl {
 
     async fn get_stage(
         &self,
-        pipeline_id: Option<Uuid>,
-        parent_stage_id: Option<Uuid>,
+        pipeline_id: Option<&Uuid>,
+        parent_stage_id: Option<&Uuid>,
     ) -> Result<Vec<Stage>, Error> {
         let mut query_builder = sqlx::QueryBuilder::new(
             r#"SELECT id, pipeline_id, environment_id, order_index, parent_stage_id FROM pipeline_stages"#,
@@ -136,6 +135,8 @@ impl PipelineRepositoryImpl {
 
     async fn create_stage(
         &self,
+        pipeline_id: &Uuid,
+        team_id: &Uuid,
         stages: Vec<CreateStage>,
         tx: &mut PgConnection,
     ) -> Result<PgQueryResult, Error> {
@@ -145,7 +146,11 @@ impl PipelineRepositoryImpl {
         let ids: &[Uuid] = &stages.iter().map(|_| Uuid::new_v4()).collect::<Vec<Uuid>>();
         let pipeline_ids: &[Uuid] = &stages
             .iter()
-            .map(|stage| stage.pipeline_id)
+            .map(|_| pipeline_id.to_owned())
+            .collect::<Vec<Uuid>>();
+        let team_ids: &[Uuid] = &stages
+            .iter()
+            .map(|_| team_id.to_owned())
             .collect::<Vec<Uuid>>();
         let environment_ids: &[Uuid] = &stages
             .iter()
@@ -161,17 +166,19 @@ impl PipelineRepositoryImpl {
             .collect::<Vec<Uuid>>()[..];
 
         let result = sqlx::query!(
-            r#"INSERT INTO pipeline_stages (id, pipeline_id, environment_id, order_index, parent_stage_id)
+            r#"INSERT INTO pipeline_stages (id, pipeline_id, environment_id, order_index, parent_stage_id, team_id)
                SELECT unnest($1::uuid[]) AS id,
                unnest($2::uuid[]) AS pipeline_id,
                unnest($3::uuid[]) AS environment_id,
                unnest($4::int[]) AS order_index,
-               unnest($5::uuid[]) AS parent_stage_id"#,
+               unnest($5::uuid[]) AS parent_stage_id,
+               unnest($6::uuid[]) AS team_id"#,
             ids,
             pipeline_ids,
             environment_ids,
             order_indices,
-            parent_stage_ids
+            parent_stage_ids,
+            team_ids,
         )
         .execute(&mut *tx)
         .await;
@@ -181,23 +188,86 @@ impl PipelineRepositoryImpl {
 
     async fn update_pipeline_stage(
         &self,
-        input: UpdateCreateStage,
+        pipeline_id: &Uuid,
+        input: Vec<UpdateCreateStage>,
         tx: &mut PgConnection,
     ) -> Result<PgQueryResult, Error> {
         // #FIXME: This function should be update to delete any removed stages and update existing ones.
-        let existing_stage = self.get_stage_by_id(input.id).await?;
-        let result = sqlx::query!(
-            r#"UPDATE pipeline_stages SET environment_id = $1, order_index = $2, parent_stage_id = $3
-               WHERE id = $4 "#,
-            input.environment_id,
-            input.order_index,
-            input.parent_stage_id,
-            input.id
-        )
-        .execute(&mut *tx)
-        .await;
+        let input_ids = input
+            .into_iter()
+            .map(|update| update.id)
+            .collect::<Vec<Uuid>>();
+        let existing_stages = self.get_stage(Some(pipeline_id), None).await?;
+        let mut stages_to_update = Vec::new();
+        let mut stages_to_delete = Vec::new();
 
-        handle_error(Some(input.id), result)
+        for stage in existing_stages {
+            if input_ids.contains(&stage.id) {
+                stages_to_update.push(stage.clone());
+            } else {
+                stages_to_delete.push(stage.id);
+            }
+        }
+
+        let placeholders: Vec<_> = std::iter::repeat("?")
+            .take(stages_to_delete.len())
+            .collect();
+        // Deleting any removed nodes
+        let query = format!(
+            "DELETE FROM pipeline_stages WHERE id IN ({})",
+            placeholders.join(", ")
+        );
+
+        let query_with_params = sqlx::query(&query).bind(stages_to_delete);
+        let delete_result = query_with_params.execute(&mut *tx).await;
+        handle_error(None, delete_result)?;
+
+        let mut builder = QueryBuilder::<Postgres>::new("UPDATE pipeline_stages SET ");
+        builder.push("environment_id = CASE id ");
+        for u in &stages_to_update {
+            builder
+                .push("WHEN ")
+                .push_bind(u.id)
+                .push(" THEN ")
+                .push_bind(u.environment_id)
+                .push(" ");
+        }
+        builder.push("END, ");
+
+        builder.push("order_index = CASE id ");
+        for u in &stages_to_update {
+            builder
+                .push("WHEN ")
+                .push_bind(u.id)
+                .push(" THEN ")
+                .push_bind(u.order_index)
+                .push(" ");
+        }
+        builder.push("END, ");
+
+        builder.push("parent_stage_id = CASE id ");
+        for u in &stages_to_update {
+            builder
+                .push("WHEN ")
+                .push_bind(u.id)
+                .push(" THEN ")
+                .push_bind(u.parent_stage_id)
+                .push(" ");
+        }
+        builder.push("END ");
+
+        builder.push("WHERE id IN (");
+        let mut separated = builder.separated(", ");
+        for u in &stages_to_update {
+            separated.push_bind(u.id);
+        }
+        builder.push(")");
+
+        let query = builder.build();
+        let update_result = query.execute(tx).await;
+        handle_error(None, update_result)?;
+
+        Ok(PgQueryResult::default())
     }
 
     async fn delete_pipeline_stage(&self, id: Uuid) -> Result<(), Error> {
@@ -243,7 +313,7 @@ impl PipelineRepository for PipelineRepositoryImpl {
     async fn get_pipeline_by_id(&self, id: Uuid) -> Result<Pipeline, Error> {
         let result = sqlx::query_as::<_, PipelineWithStageRow>(
             r#"SELECT p.id as pipeline_id, p.name as pipeline_name, p.active, p.team_id, 
-            s.id as stage_id, s.pipeline_id, s.environment_id, s.order_index, 
+            s.id as stage_id, s.pipeline_id, s.environment_id, s.order_index,
             s.parent_stage_id FROM pipelines p LEFT JOIN stages s ON s.pipeline_id = p.id WHERE id = $1"#,
         )
         .bind(id)
@@ -266,8 +336,8 @@ impl PipelineRepository for PipelineRepositoryImpl {
     ) -> Result<Vec<Pipeline>, Error> {
         let mut query_builder = sqlx::QueryBuilder::new(
             r#"SELECT p.id as pipeline_id, p.name as pipeline_name, p.active, p.team_id, 
-            s.id as stage_id, s.pipeline_id, s.environment_id, s.order_index, 
-            s.parent_stage_id FROM pipelines p LEFT JOIN stages s ON s.pipeline_id = p.id"#,
+            s.id as stage_id, s.pipeline_id as pipeline_id_stage, s.environment_id, s.order_index,
+            s.parent_stage_id FROM pipelines p LEFT JOIN pipeline_stages s ON s.pipeline_id = p.id"#,
         );
         query_builder.push(" WHERE p.team_id = ").push_bind(team_id);
 
@@ -315,7 +385,7 @@ impl PipelineRepository for PipelineRepositoryImpl {
 
     async fn create_pipeline(&self, input: CreatePipeline) -> Result<Uuid, Error> {
         let existing_pipeline = self
-            .get_pipelines(input.team_id.clone(), Some(input.name.clone()), None)
+            .get_pipelines(input.team_id, Some(input.name.clone()), None)
             .await;
 
         if let Ok(existing_pipeline) = existing_pipeline {
@@ -341,11 +411,13 @@ impl PipelineRepository for PipelineRepositoryImpl {
         let handled_error = handle_error(None, result);
         match handled_error {
             Ok(saved_pipeline) => {
-                self.create_stage(input.stages, &mut tx).await;
-                let _ = tx.commit().await;
-                if let Err(e) = self.delete_pipeline(saved_pipeline.id).await {
-                    return Err(e);
+                let stages = self.create_stage(&id, &input.team_id, input.stages, &mut tx).await;
+                if stages.is_err() {
+                    let _ = tx.rollback().await;
+                    return Err(stages.err().unwrap());
                 }
+                let _ = tx.commit().await;
+                self.delete_pipeline(saved_pipeline.id).await?;
                 Ok(saved_pipeline.id)
             }
             Err(e) => {
@@ -356,22 +428,40 @@ impl PipelineRepository for PipelineRepositoryImpl {
     }
 
     async fn update_pipeline(&self, input: UpdatePipeline) -> Result<Pipeline, Error> {
+        let tx = self.pool.begin().await;
+        if tx.is_err() {
+            return Err(Error::DatabaseError(tx.err().unwrap()));
+        }
+        let mut tx = tx.unwrap();
+
         let existing_env = self.get_pipeline_by_id(input.id).await?;
         let result = sqlx::query!(
-            r#"UPDATE pipelines SET name = $1, active = $2 WHERE id = $3 RETURNING id, name, active, team_id"#,
+            r#"UPDATE pipelines SET name = $1, active = $2 WHERE id = $3"#,
             input.name.unwrap_or(existing_env.name),
             input.active.unwrap_or(existing_env.active),
             input.id
-        ).fetch_one(&self.pool)
+        )
+            .execute(&mut *tx)
         .await;
 
-        let pipeline = handle_error(Some(input.id), result)?;
-        Ok(Pipeline {
-            id: pipeline.id,
-            name: pipeline.name,
-            active: pipeline.active,
-            team_id: pipeline.team_id,
-        })
+        if result.is_err() {
+            let _ = tx.rollback().await;
+            return Err(Error::DatabaseError(result.err().unwrap()));
+        }
+
+        self.update_pipeline_stage(&input.id, input.stages, &mut *tx);
+
+        let result = handle_error(Some(input.id), result);
+        match result {
+            Ok(_) => {
+                let _ = tx.commit().await;
+                self.get_pipeline_by_id(input.id).await
+            }
+            Err(e) => {
+                let _ = tx.rollback().await;
+                Err(e)
+            }
+        }
     }
 
     async fn delete_pipeline(&self, id: Uuid) -> Result<(), Error> {

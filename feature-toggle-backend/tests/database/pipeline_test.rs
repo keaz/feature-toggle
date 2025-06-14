@@ -1,4 +1,6 @@
-use feature_toggle_backend::database::pipeline::{CreatePipeline, UpdatePipeline};
+use std::vec;
+
+use feature_toggle_backend::database::pipeline::{CreatePipeline, CreateStage, UpdatePipeline};
 use feature_toggle_backend::database::{init_pg_pool, pipeline};
 use uuid::Uuid;
 
@@ -26,10 +28,7 @@ async fn test_get_non_existing_pipeline() {
 
     assert_eq!(result.is_err(), true);
     let error = result.err().unwrap();
-    assert!(matches!(
-        error,
-        feature_toggle_backend::Error::NotFound(_)
-    ));
+    assert!(matches!(error, feature_toggle_backend::Error::NotFound(_)));
 }
 
 #[tokio::test]
@@ -42,13 +41,29 @@ async fn test_create_pipeline() {
     let input = CreatePipeline {
         team_id,
         name: random_name.clone(),
+        stages: vec![
+            CreateStage {
+                environment_id: Uuid::parse_str("3eef17bc-9e06-411d-b5f4-7a786e68bb96").unwrap(),
+                order_index: 0,
+                parent_stage_id: None,
+            },
+            CreateStage {
+                environment_id: Uuid::parse_str("3eef17bc-9e06-411d-b5f4-7a786e68bb97").unwrap(),
+                order_index: 1,
+                parent_stage_id: None,
+            },
+            CreateStage {
+                environment_id: Uuid::parse_str("3eef17bc-9e06-411d-b5f4-7a786e68bb98").unwrap(),
+                order_index: 0,
+                parent_stage_id: Some(
+                    Uuid::parse_str("3eef17bc-9e06-411d-b5f4-7a786e68bb96").unwrap(),
+                ),
+            },
+        ],
     };
     let result = repository.create_pipeline(input).await;
 
     assert!(result.is_ok());
-    let pipeline = result.unwrap();
-    assert_eq!(pipeline.name, random_name);
-    assert!(pipeline.active);
 }
 
 #[tokio::test]
@@ -59,6 +74,7 @@ async fn test_create_exising_pipeline() {
     let input = CreatePipeline {
         team_id,
         name: "Existing Pipeline".to_string(),
+        stages: vec![],
     };
     let result = repository.create_pipeline(input).await;
 
@@ -79,6 +95,7 @@ async fn test_update_pipeline() {
         id: Uuid::parse_str("3eef17bc-9e06-411d-b5f4-7a786e68bb96").unwrap(),
         name: Some("Updated Pipeline".to_string()),
         active: Some(false),
+        stages: vec![],
     };
     let result = repository.update_pipeline(input).await;
 
@@ -97,15 +114,13 @@ async fn test_update_non_existing_pipeline() {
         id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98fca").unwrap(),
         name: Some("Non-existing Pipeline".to_string()),
         active: Some(true),
+        stages: vec![],
     };
     let result = repository.update_pipeline(input).await;
 
     assert_eq!(result.is_err(), true);
     let error = result.err().unwrap();
-    assert!(matches!(
-        error,
-        feature_toggle_backend::Error::NotFound(_)
-    ));
+    assert!(matches!(error, feature_toggle_backend::Error::NotFound(_)));
 }
 
 #[tokio::test]
@@ -129,10 +144,7 @@ async fn test_delete_non_existing_pipeline() {
 
     assert_eq!(result.is_err(), true);
     let error = result.err().unwrap();
-    assert!(matches!(
-        error,
-        feature_toggle_backend::Error::NotFound(_)
-    ));
+    assert!(matches!(error, feature_toggle_backend::Error::NotFound(_)));
 }
 
 #[tokio::test]

@@ -1,8 +1,11 @@
-use crate::database::pipeline::{CreateStage, PipelineRepository, UpdatePipeline};
+use crate::database::pipeline::{
+    CreateStage, PipelineRepository, UpdateCreateStage, UpdatePipeline,
+};
 use crate::{Error, database::pipeline::CreatePipeline};
 use async_graphql::ID;
 use feature_toggle_shared::graphql::{CreatePipelineInput, Pipeline, UpdatePipelineInput};
 use uuid::Uuid;
+use uuid::timestamp::UUID_TICKS_BETWEEN_EPOCHS;
 
 #[async_trait::async_trait]
 pub trait PipelineLogic: Send + Sync {
@@ -14,11 +17,7 @@ pub trait PipelineLogic: Send + Sync {
         active: Option<bool>,
     ) -> Result<Vec<Pipeline>, Error>;
 
-    async fn create_pipeline(
-        &self,
-        team_id: ID,
-        input: CreatePipelineInput,
-    ) -> Result<Pipeline, Error>;
+    async fn create_pipeline(&self, team_id: ID, input: CreatePipelineInput) -> Result<ID, Error>;
     async fn update_pipeline(&self, id: ID, input: UpdatePipelineInput) -> Result<Pipeline, Error>;
     async fn delete_pipeline(&self, id: ID) -> Result<(), Error>;
     fn clone_box(&self) -> Box<dyn PipelineLogic>;
@@ -50,26 +49,29 @@ impl PipelineLogicImpl {
                 .map(|stage| CreateStage {
                     environment_id: Uuid::try_from(stage.environment_id).unwrap(),
                     parent_stage_id: stage.parent_stage_id.map(|id| Uuid::try_from(id).unwrap()),
-                    order: stage.order,
+                    order_index: stage.order,
                 })
                 .collect(),
         }
     }
 
     fn map_to_update_pipeline(id: ID, input: UpdatePipelineInput) -> UpdatePipeline {
+        let id = Uuid::try_from(id).unwrap();
         UpdatePipeline {
-            id: Uuid::try_from(id).unwrap(),
+            id: id.clone(),
             name: input.name,
             active: input.active,
             stages: input
                 .stages
                 .into_iter()
-                .map(|stage| CreateStage {
+                .map(|stage| UpdateCreateStage {
+                    id: Uuid::try_from(id).unwrap(),
+                    pipeline_id: id.clone(),
                     environment_id: Uuid::try_from(stage.environment_id).unwrap(),
                     parent_stage_id: stage.parent_stage_id.map(|id| Uuid::try_from(id).unwrap()),
-                    order: stage.order,
+                    order_index: stage.order,
                 })
-                .collect(),
+                .collect::<Vec<UpdateCreateStage>>(),
         }
     }
 }
@@ -105,20 +107,11 @@ impl PipelineLogic for PipelineLogicImpl {
             .collect())
     }
 
-    async fn create_pipeline(
-        &self,
-        team_id: ID,
-        input: CreatePipelineInput,
-    ) -> Result<Pipeline, Error> {
+    async fn create_pipeline(&self, team_id: ID, input: CreatePipelineInput) -> Result<ID, Error> {
         let team_id = Uuid::try_from(team_id).unwrap();
         let input = Self::map_to_create_pipeline(team_id, input);
         let pipeline = self.repository.create_pipeline(input).await?;
-        Ok(Pipeline {
-            id: pipeline.id.into(),
-            name: pipeline.name,
-            active: pipeline.active,
-            stages: vec![],
-        })
+        Ok(ID::from(pipeline.to_string()))
     }
 
     async fn update_pipeline(&self, id: ID, input: UpdatePipelineInput) -> Result<Pipeline, Error> {
@@ -149,6 +142,7 @@ mod test {
     use super::*;
     use crate::database::pipeline::MockPipelineRepository;
     use async_graphql::ID;
+    use feature_toggle_shared::graphql::UpdateStageInput;
 
     #[tokio::test]
     async fn test_get_pipeline_by_id() {
@@ -165,6 +159,7 @@ mod test {
                     name: "Test Pipeline".to_string(),
                     active: true,
                     team_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
+                    stages: vec![],
                 })
             });
 
@@ -205,27 +200,22 @@ mod test {
             stages: vec![],
         };
         const ID: &str = "3eef17bc-9e06-411d-b5f4-7a786e68bb96";
-        let id = ID::from(ID);
+        // let id = ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27");
+        let id = Uuid::parse_str(ID).unwrap();
         repository
             .expect_create_pipeline()
             .withf(|input| input.name == "New Pipeline")
             .times(1)
-            .returning(move |_| {
-                Ok(crate::database::entity::Pipeline {
-                    id: Uuid::parse_str(ID).unwrap(),
-                    name: "New Pipeline".to_string(),
-                    active: true,
-                    team_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
-                })
-            });
+            .returning(move |_| Ok(id));
 
         let logic = pipeline_logic(Box::new(repository));
-        let result = logic.create_pipeline(id, input).await;
+        let result = logic
+            .create_pipeline(ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"), input)
+            .await;
 
         assert!(result.is_ok());
-        let pipeline = result.unwrap();
-        assert_eq!(pipeline.name, "New Pipeline");
-        assert!(pipeline.active);
+        let pipeline_id = result.unwrap();
+        assert_eq!(pipeline_id, ID::from(ID));
     }
 
     #[tokio::test]
@@ -235,9 +225,18 @@ mod test {
         const ID: &str = "3eef17bc-9e06-411d-b5f4-7a786e68bb96";
         const NAME: &str = "Updated Pipeline";
 
+        let stages = vec![UpdateStageInput {
+            id: ID::from("3eef17bc-9e06-411d-b5f4-7a786e68bb96"),
+            environment_id: ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"),
+            parent_stage_id: None,
+            order: 1,
+            pipeline_id: ID::from(ID),
+        }];
+
         let input = UpdatePipelineInput {
             name: Some(NAME.to_string()),
             active: Some(true),
+            stages: stages,
         };
 
         repository
@@ -252,6 +251,14 @@ mod test {
                     name: "Updated Pipeline".to_string(),
                     active: true,
                     team_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
+                    stages: vec![crate::database::entity::Stage {
+                        id: Uuid::parse_str(ID).unwrap(),
+                        pipeline_id: Uuid::parse_str(ID).unwrap(),
+                        environment_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27")
+                            .unwrap(),
+                        order_index: 1,
+                        parent_stage_id: None,
+                    }],
                 })
             });
 
@@ -272,6 +279,13 @@ mod test {
         let input = UpdatePipelineInput {
             name: Some("Non-existing Pipeline".to_string()),
             active: Some(false),
+            stages: vec![UpdateStageInput {
+                id: ID::from(ID),
+                environment_id: ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"),
+                parent_stage_id: None,
+                order: 1,
+                pipeline_id: ID::from(ID),
+            }],
         };
 
         repository
@@ -339,12 +353,14 @@ mod test {
                         name: "Test Pipeline".to_string(),
                         active: true,
                         team_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
+                        stages: vec![],
                     },
                     crate::database::entity::Pipeline {
                         id: Uuid::new_v4(),
                         name: "Another Pipeline".to_string(),
                         active: false,
                         team_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
+                        stages: vec![],
                     },
                 ])
             });

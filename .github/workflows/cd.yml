@@ -1,12 +1,12 @@
-name: CI
+name: CD
 
 on:
   push:
-    branches:
-      - '*'
+    tags:
+      - 'v*'
 
 jobs:
-  build:
+  build-and-release:
     runs-on: ubuntu-latest
 
     services:
@@ -14,9 +14,6 @@ jobs:
         image: postgres:latest
         ports:
           - 5432:5432
-        options: >
-          --env POSTGRES_PASSWORD="local123"
-          --env POSTGRES_DB="feature_toggle"
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: local123
@@ -49,9 +46,46 @@ jobs:
       - name: Build
         env:
           DATABASE_URL: postgres://postgres:local123@localhost:5432/feature_toggle
-        run: cargo build --verbose
+        run: cargo build --release --verbose
 
       - name: Run tests
         env:
           DATABASE_URL: postgres://postgres:local123@localhost:5432/feature_toggle
         run: cargo test --verbose
+
+      - name: Create artifact directory
+        run: mkdir -p artifacts
+
+      - name: Copy binary to artifacts
+        run: |
+          cp target/release/feature-toggle-backend artifacts/
+          cp -r feature-toggle-backend/migrations artifacts/
+          cp init.sql artifacts/
+          cp Dockerfile artifacts/
+          cp docker-compose.yml artifacts/
+          tar -czvf feature-toggle-release.tar.gz artifacts/
+
+      - name: Get the version
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: Release ${{ steps.get_version.outputs.VERSION }}
+          draft: false
+          prerelease: false
+
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./feature-toggle-release.tar.gz
+          asset_name: feature-toggle-release.tar.gz
+          asset_content_type: application/gzip

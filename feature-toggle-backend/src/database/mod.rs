@@ -25,6 +25,7 @@ pub fn handle_error<T>(id: Option<Uuid>, result: Result<T, sqlx::Error>) -> Resu
         Ok(record)
     } else {
         let error = result.err().unwrap();
+        let x = error.to_string();
         match error {
             sqlx::Error::RowNotFound => Err(Error::NotFound(id.unwrap())),
             _ => Err(Error::DatabaseError(error)),
