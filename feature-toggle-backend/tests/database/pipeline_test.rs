@@ -32,32 +32,74 @@ async fn test_get_non_existing_pipeline() {
 }
 
 #[tokio::test]
-async fn test_create_pipeline() {
+async fn test_create_pipeline_without_stages() {
     let pool = init_pg_pool().await;
     let repository = pipeline::pipeline_repository(pool);
 
     let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
-    let random_name = format!("New Pipeline {}", Uuid::new_v4());
+    let random_name = format!("Without Stages {}", Uuid::new_v4());
+    let input = CreatePipeline {
+        team_id,
+        name: random_name.clone(),
+        stages: vec![],
+    };
+    let result = repository.create_pipeline(input).await;
+
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn test_create_pipeline_with_stages() {
+    let pool = init_pg_pool().await;
+    let repository = pipeline::pipeline_repository(pool);
+
+    let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+    let random_name = format!("With Stages {}", Uuid::new_v4());
+    let parent = CreateStage {
+        id: Some(Uuid::parse_str("3eef17bc-9e06-411d-b5f4-7a786e68bb96").unwrap()),
+        environment_id: Uuid::parse_str("3eef17bc-9e06-411d-b5f4-7a786e68bb96").unwrap(),
+        order_index: 0,
+        parent_stage: None,
+    };
     let input = CreatePipeline {
         team_id,
         name: random_name.clone(),
         stages: vec![
+            parent.clone(),
             CreateStage {
-                environment_id: Uuid::parse_str("3eef17bc-9e06-411d-b5f4-7a786e68bb96").unwrap(),
-                order_index: 0,
-                parent_stage_id: None,
-            },
-            CreateStage {
-                environment_id: Uuid::parse_str("3eef17bc-9e06-411d-b5f4-7a786e68bb97").unwrap(),
+                id: Some(Uuid::parse_str("3eef17bc-9e06-411d-b5f4-7a786e68bb97").unwrap()),
+                environment_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
                 order_index: 1,
-                parent_stage_id: None,
+                parent_stage: Some(Box::new(parent)),
             },
+        ],
+    };
+    let result = repository.create_pipeline(input).await;
+
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn test_create_pipeline_with_stages_parent() {
+    let pool = init_pg_pool().await;
+    let repository = pipeline::pipeline_repository(pool);
+
+    let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+    let random_name = format!("With Stages {}", Uuid::new_v4());
+    let parent_stage_id = CreateStage {
+        environment_id: Uuid::parse_str("3eef17bc-9e06-411d-b5f4-7a786e68bb96").unwrap(),
+        order_index: 0,
+        parent_stage_id: None,
+    };
+    let input = CreatePipeline {
+        team_id,
+        name: random_name.clone(),
+        stages: vec![
+            parent_stage_id,
             CreateStage {
-                environment_id: Uuid::parse_str("3eef17bc-9e06-411d-b5f4-7a786e68bb98").unwrap(),
+                environment_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
                 order_index: 0,
-                parent_stage_id: Some(
-                    Uuid::parse_str("3eef17bc-9e06-411d-b5f4-7a786e68bb96").unwrap(),
-                ),
+                parent_stage_id: Some(Box::new(parent_stage_id)),
             },
         ],
     };

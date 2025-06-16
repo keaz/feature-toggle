@@ -1,6 +1,6 @@
+use crate::graphql::schema::{CreateEnvironmentInput, CreatePipelineInput, CreateTeamInput, Environment, Pipeline, Team, UpdateEnvironmentInput};
 use crate::logic::environment::EnvironmentLogic;
 use async_graphql::{Context, Object, Result as GqlResult, ID};
-use feature_toggle_shared::graphql::{CreateEnvironmentInput, CreateTeamInput, Environment, Team, UpdateEnvironmentInput};
 use log::{debug, info};
 use uuid::Uuid;
 
@@ -50,8 +50,8 @@ impl MutationRoot {
         &self,
         ctx: &Context<'_>,
         team_id: ID,
-        input: feature_toggle_shared::graphql::CreatePipelineInput,
-    ) -> GqlResult<feature_toggle_shared::graphql::Pipeline> {
+        input: CreatePipelineInput,
+    ) -> GqlResult<Pipeline> {
         info!("Creating pipeline with input: {:?}", input);
 
         panic!("Implement")

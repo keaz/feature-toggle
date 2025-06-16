@@ -1,8 +1,8 @@
+use crate::graphql::schema::{Environment, Pipeline, Team};
 use crate::logic::environment::EnvironmentLogic;
 use crate::logic::pipeline::PipelineLogic;
 use crate::logic::team::TeamLogic;
 use async_graphql::{Context, Object, Result as GqlResult, ID};
-use feature_toggle_shared::graphql::{Environment, Team};
 use log::debug;
 use uuid::Uuid;
 
@@ -47,7 +47,7 @@ impl Query {
         #[graphql(desc = "Id of the team")] team_id: ID,
         #[graphql(desc = "Name of the environment")] name: Option<String>,
         #[graphql(desc = "Active status of the environment")] active: Option<bool>,
-    ) -> GqlResult<Vec<feature_toggle_shared::graphql::Pipeline>> {
+    ) -> GqlResult<Vec<Pipeline>> {
         debug!("Fetching pipelines for team with id: {:?}", team_id);
         let logic = ctx.data::<Box<dyn PipelineLogic>>().unwrap();
         Ok(logic.get_pipelines(team_id, name, active).await?)

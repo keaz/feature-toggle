@@ -1,7 +1,7 @@
 use crate::database::environment::EnvironmentRepository;
+use crate::graphql::schema::{CreateEnvironmentInput, Environment, UpdateEnvironmentInput};
 use crate::Error;
 use async_graphql::ID;
-use feature_toggle_shared::graphql::{CreateEnvironmentInput, Environment, UpdateEnvironmentInput};
 use uuid::Uuid;
 
 #[async_trait::async_trait]

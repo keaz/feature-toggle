@@ -1,10 +1,9 @@
-use std::collections::HashMap;
-
-use crate::database::entity::{Pipeline, Stage, SENTINEL_UUID};
+use crate::database::entity::{Pipeline, Stage};
 use crate::database::{handle_error, Error};
 use mockall::automock;
 use sqlx::postgres::PgQueryResult;
 use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder, Transaction};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 pub struct CreatePipeline {
@@ -13,10 +12,23 @@ pub struct CreatePipeline {
     pub stages: Vec<CreateStage>,
 }
 
+#[derive(Debug, Clone)]
 pub struct CreateStage {
+    pub id: Option<Uuid>, // For internal use, not part of the input
     pub environment_id: Uuid,
     pub order_index: i32,
-    pub parent_stage_id: Option<Uuid>,
+    pub parent_stage: Option<Box<CreateStage>>,
+}
+
+impl CreateStage {
+    pub fn new(environment_id: Uuid, order_index: i32, parent_stage: Option<Box<CreateStage>>) -> Self {
+        Self {
+            id: None,
+            environment_id,
+            order_index,
+            parent_stage,
+        }
+    }
 }
 
 pub struct UpdatePipeline {
@@ -85,13 +97,22 @@ impl PipelineRepositoryImpl {
         Self { pool }
     }
 
+    async fn is_pipeline_exists_id(&self, id: Uuid) -> Result<Option<Uuid>, Error> {
+        let result = sqlx::query_scalar!(
+            r#"SELECT id FROM pipelines WHERE id = $1"#, id
+        ).fetch_optional(&self.pool)
+            .await;
+
+        handle_error(Some(id), result)
+    }
+
     async fn get_stage_by_id(&self, id: Uuid) -> Result<Stage, Error> {
         let result = sqlx::query_as::<_, Stage>(
             r#"SELECT id, pipeline_id , environment_id, order_index, parent_stage_id FROM pipeline_stages WHERE id = $1"#,
         )
-        .bind(id)
-        .fetch_one(&self.pool)
-        .await;
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await;
 
         handle_error(Some(id), result)
     }
@@ -137,13 +158,15 @@ impl PipelineRepositoryImpl {
         &self,
         pipeline_id: &Uuid,
         team_id: &Uuid,
-        stages: Vec<CreateStage>,
+        mut stages: Vec<CreateStage>,
         tx: &mut PgConnection,
     ) -> Result<PgQueryResult, Error> {
         if stages.is_empty() {
             return Ok(PgQueryResult::default());
         }
-        let ids: &[Uuid] = &stages.iter().map(|_| Uuid::new_v4()).collect::<Vec<Uuid>>();
+
+        stages.iter_mut().for_each(|stage| { stage.id = Some(Uuid::new_v4()); });
+        let ids: &[Uuid] = &stages.iter().map(|stage| stage.id.unwrap()).collect::<Vec<Uuid>>();
         let pipeline_ids: &[Uuid] = &stages
             .iter()
             .map(|_| pipeline_id.to_owned())
@@ -160,10 +183,14 @@ impl PipelineRepositoryImpl {
             .iter()
             .map(|stage| stage.order_index)
             .collect::<Vec<i32>>();
+        let parent_stage_ids = &stages.iter()
+            .map(|stage| stage.parent_stage.as_ref().map(|s| s.id.unwrap()))
+            .collect::<Vec<Option<Uuid>>>();
+
         let parent_stage_ids = &stages
             .iter()
-            .map(|stage| stage.parent_stage_id.unwrap_or(SENTINEL_UUID))
-            .collect::<Vec<Uuid>>()[..];
+            .map(|stage| stage.parent_stage.as_ref().map(|s| s.id.unwrap()))
+            .collect::<Vec<Option<Uuid>>>()[..];
 
         let result = sqlx::query!(
             r#"INSERT INTO pipeline_stages (id, pipeline_id, environment_id, order_index, parent_stage_id, team_id)
@@ -171,13 +198,13 @@ impl PipelineRepositoryImpl {
                unnest($2::uuid[]) AS pipeline_id,
                unnest($3::uuid[]) AS environment_id,
                unnest($4::int[]) AS order_index,
-               unnest($5::uuid[]) AS parent_stage_id,
+               unnest($5::uuid[]) AS parent_stage_id ,
                unnest($6::uuid[]) AS team_id"#,
             ids,
             pipeline_ids,
             environment_ids,
             order_indices,
-            parent_stage_ids,
+            parent_stage_ids as &[Option<Uuid>],
             team_ids,
         )
         .execute(&mut *tx)
@@ -209,8 +236,7 @@ impl PipelineRepositoryImpl {
             }
         }
 
-        let placeholders: Vec<_> = std::iter::repeat("?")
-            .take(stages_to_delete.len())
+        let placeholders: Vec<_> = std::iter::repeat_n("?", stages_to_delete.len())
             .collect();
         // Deleting any removed nodes
         let query = format!(
@@ -313,8 +339,8 @@ impl PipelineRepository for PipelineRepositoryImpl {
     async fn get_pipeline_by_id(&self, id: Uuid) -> Result<Pipeline, Error> {
         let result = sqlx::query_as::<_, PipelineWithStageRow>(
             r#"SELECT p.id as pipeline_id, p.name as pipeline_name, p.active, p.team_id, 
-            s.id as stage_id, s.pipeline_id, s.environment_id, s.order_index,
-            s.parent_stage_id FROM pipelines p LEFT JOIN stages s ON s.pipeline_id = p.id WHERE id = $1"#,
+            s.id as stage_id, s.pipeline_id as pipeline_id_stage, s.environment_id, s.order_index,
+            s.parent_stage_id FROM pipelines p LEFT JOIN pipeline_stages s ON s.pipeline_id = p.id WHERE p.id = $1"#,
         )
         .bind(id)
         .fetch_all(&self.pool)
@@ -411,7 +437,7 @@ impl PipelineRepository for PipelineRepositoryImpl {
         let handled_error = handle_error(None, result);
         match handled_error {
             Ok(saved_pipeline) => {
-                let stages = self.create_stage(&id, &input.team_id, input.stages, &mut tx).await;
+                let stages = self.create_stage(&id, &input.team_id, vec![], &mut tx).await; // #FIXME: This should be updated to handle stages from input
                 if stages.is_err() {
                     let _ = tx.rollback().await;
                     return Err(stages.err().unwrap());
@@ -465,7 +491,10 @@ impl PipelineRepository for PipelineRepositoryImpl {
     }
 
     async fn delete_pipeline(&self, id: Uuid) -> Result<(), Error> {
-        self.get_pipeline_by_id(id).await?;
+        if self.is_pipeline_exists_id(id).await?.is_none() {
+            return Err(Error::NotFound(id));
+        }
+
         let result = sqlx::query!("DELETE FROM pipelines WHERE id = $1", id)
             .execute(&self.pool)
             .await;

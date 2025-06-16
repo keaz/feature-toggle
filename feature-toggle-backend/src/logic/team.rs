@@ -1,7 +1,7 @@
 use crate::database::team::TeamRepository;
+use crate::graphql::schema::{CreateTeamInput, Team, UpdateTeamInput};
 use crate::Error;
 use async_graphql::ID;
-use feature_toggle_shared::graphql::{CreateTeamInput, Team, UpdateTeamInput};
 use uuid::Uuid;
 
 #[async_trait::async_trait]

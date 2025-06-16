@@ -1,11 +1,8 @@
-use crate::database::pipeline::{
-    CreateStage, PipelineRepository, UpdateCreateStage, UpdatePipeline,
-};
-use crate::{Error, database::pipeline::CreatePipeline};
+use crate::database::pipeline::{CreatePipeline, CreateStage, PipelineRepository, UpdateCreateStage, UpdatePipeline};
+use crate::graphql::schema::{CreatePipelineInput, Pipeline, UpdatePipelineInput};
+use crate::Error;
 use async_graphql::ID;
-use feature_toggle_shared::graphql::{CreatePipelineInput, Pipeline, UpdatePipelineInput};
 use uuid::Uuid;
-use uuid::timestamp::UUID_TICKS_BETWEEN_EPOCHS;
 
 #[async_trait::async_trait]
 pub trait PipelineLogic: Send + Sync {
@@ -39,22 +36,6 @@ struct PipelineLogicImpl {
 }
 
 impl PipelineLogicImpl {
-    fn map_to_create_pipeline(team_id: Uuid, input: CreatePipelineInput) -> CreatePipeline {
-        CreatePipeline {
-            team_id,
-            name: input.name,
-            stages: input
-                .stages
-                .into_iter()
-                .map(|stage| CreateStage {
-                    environment_id: Uuid::try_from(stage.environment_id).unwrap(),
-                    parent_stage_id: stage.parent_stage_id.map(|id| Uuid::try_from(id).unwrap()),
-                    order_index: stage.order,
-                })
-                .collect(),
-        }
-    }
-
     fn map_to_update_pipeline(id: ID, input: UpdatePipelineInput) -> UpdatePipeline {
         let id = Uuid::try_from(id).unwrap();
         UpdatePipeline {
@@ -109,7 +90,7 @@ impl PipelineLogic for PipelineLogicImpl {
 
     async fn create_pipeline(&self, team_id: ID, input: CreatePipelineInput) -> Result<ID, Error> {
         let team_id = Uuid::try_from(team_id).unwrap();
-        let input = Self::map_to_create_pipeline(team_id, input);
+        let input = map_to_create_pipeline(team_id, input);
         let pipeline = self.repository.create_pipeline(input).await?;
         Ok(ID::from(pipeline.to_string()))
     }
@@ -137,12 +118,147 @@ impl PipelineLogic for PipelineLogicImpl {
     }
 }
 
+fn map_to_create_pipeline(team_id: Uuid, input: CreatePipelineInput) -> CreatePipeline {
+    let mut pipeline = CreatePipeline {
+        team_id,
+        name: input.name.clone(),
+        stages: vec![],
+    };
+
+    let relationships = input.relationships;
+
+    let mut stages = input.stages
+        .into_iter()
+        .map(|stage| {
+            CreateStage::new(Uuid::try_from(stage.environment_id.clone()).unwrap(), stage.order, None)
+        })
+        .collect::<Vec<CreateStage>>();
+
+    let cloned_stages = stages.clone();
+    let relationships_map = relationships.iter().map(|relationship| {
+        let stage = cloned_stages.iter().find(|stage| {
+            stage.order_index == relationship.source_id
+        });
+        (relationship.source_id, relationship.target_id, stage.unwrap()) // Stage should always be present
+    }).collect::<Vec<(i32, i32, &CreateStage)>>();
+
+    for (_, target_id, stage) in relationships_map {
+        if let Some(target_stage) = stages.iter_mut().find(|s| s.order_index == target_id) {
+            target_stage.parent_stage = Some(Box::new(stage.clone()));
+        }
+    }
+
+    pipeline.stages = stages;
+    pipeline
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
     use crate::database::pipeline::MockPipelineRepository;
+    use crate::graphql::schema::{CreateRelationshipInput, CreateStageInput, UpdateStageInput};
     use async_graphql::ID;
-    use feature_toggle_shared::graphql::UpdateStageInput;
+
+    #[test]
+    pub fn test_map_to_create_pipeline_with_single_stage() {
+        let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+        let input = CreatePipelineInput {
+            name: "Test Pipeline".to_string(),
+            stages: vec![
+                CreateStageInput {
+                    environment_id: ID::from("3eef17bc-9e06-411d-b5f4-7a786e68bb96"),
+                    order: 0,
+                    position: "".to_string()
+                },
+            ],
+            relationships: vec![],
+        };
+        let create_pipeline = map_to_create_pipeline(team_id, input);
+        assert_eq!(create_pipeline.name, "Test Pipeline");
+        assert_eq!(create_pipeline.team_id, team_id);
+        assert_eq!(create_pipeline.stages.len(), 1);
+        assert!(create_pipeline.stages[0].parent_stage.is_none());
+    }
+
+    #[test]
+    pub fn test_map_to_create_pipeline_with_relationships() {
+        let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+        let relationships = vec![
+            CreateRelationshipInput {
+                source_id: 0,
+                target_id: 1,
+            },
+            CreateRelationshipInput {
+                source_id: 1,
+                target_id: 2,
+            },
+            CreateRelationshipInput {
+                source_id: 0,
+                target_id: 3,
+            },
+            CreateRelationshipInput {
+                source_id: 3,
+                target_id: 4,
+            }
+        ];
+        let input = CreatePipelineInput {
+            name: "Test Pipeline".to_string(),
+            stages: vec![
+                CreateStageInput {
+                    environment_id: ID::from("e74a6c91-33b7-467f-b2ec-b01434a0bc96"),
+                    order: 0,
+                    position: "".to_string()
+                },
+                CreateStageInput {
+                    environment_id: ID::from("81cf8b7d-4945-4a30-96a2-e27559e97fac"),
+                    order: 1,
+                    position: "".to_string()
+                },
+                CreateStageInput {
+                    environment_id: ID::from("13728519-a82b-4987-b82a-3fb57652388f"),
+                    order: 2,
+                    position: "".to_string()
+                },
+                CreateStageInput {
+                    environment_id: ID::from("cb1d22be-bc57-4626-abf2-7534de556586"),
+                    order: 3,
+                    position: "".to_string()
+                },
+                CreateStageInput {
+                    environment_id: ID::from("06f28625-df1d-499f-a4ee-5629a8b6a169"),
+                    order: 4,
+                    position: "".to_string()
+                }
+            ],
+            relationships,
+        };
+        let create_pipeline = map_to_create_pipeline(team_id, input);
+        assert_eq!(create_pipeline.name, "Test Pipeline");
+        assert_eq!(create_pipeline.team_id, team_id);
+        let stages = create_pipeline.stages;
+        assert_eq!(stages.len(), 5);
+        assert!(stages[0].parent_stage.is_none());
+
+        let parent_stage = &stages.get(1).unwrap().parent_stage;
+        assert!(parent_stage.is_some());
+        let parent_stage = parent_stage.as_ref().unwrap();
+        assert_eq!(parent_stage.environment_id, Uuid::parse_str("e74a6c91-33b7-467f-b2ec-b01434a0bc96").unwrap());
+
+        let parent_stage = &stages.get(2).unwrap().parent_stage;
+        assert!(parent_stage.is_some());
+        let parent_stage = parent_stage.as_ref().unwrap();
+        assert_eq!(parent_stage.environment_id, Uuid::parse_str("81cf8b7d-4945-4a30-96a2-e27559e97fac").unwrap());
+
+        let parent_stage = &stages.get(3).unwrap().parent_stage;
+        assert!(parent_stage.is_some());
+        let parent_stage = parent_stage.as_ref().unwrap();
+        assert_eq!(parent_stage.environment_id, Uuid::parse_str("e74a6c91-33b7-467f-b2ec-b01434a0bc96").unwrap());
+
+        let parent_stage = &stages.get(4).unwrap().parent_stage;
+        assert!(parent_stage.is_some());
+        let parent_stage = parent_stage.as_ref().unwrap();
+        assert_eq!(parent_stage.environment_id, Uuid::parse_str("cb1d22be-bc57-4626-abf2-7534de556586").unwrap());
+    }
 
     #[tokio::test]
     async fn test_get_pipeline_by_id() {
@@ -195,9 +311,11 @@ mod test {
     async fn test_create_pipeline() {
         let mut repository = MockPipelineRepository::new();
 
+        let relationships = vec![];
         let input = CreatePipelineInput {
             name: "New Pipeline".to_string(),
             stages: vec![],
+            relationships,
         };
         const ID: &str = "3eef17bc-9e06-411d-b5f4-7a786e68bb96";
         // let id = ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27");
