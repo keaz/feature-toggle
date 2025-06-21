@@ -19,7 +19,7 @@ pub struct CreateFeature {
 
 #[derive(Debug, Clone)]
 pub struct CreateFeatureStage {
-    pub id: Uuid, // For internal use, not part of the input
+    pub id: Uuid,
     pub environment_id: Uuid,
     pub order_index: i32,
     pub parent_stage: Option<Box<CreateFeatureStage>>,
@@ -285,13 +285,109 @@ impl FeatureRepositoryImpl {
         input: Vec<CreateFeatureStage>,
         tx: &mut PgConnection,
     ) -> Result<PgQueryResult, Error> {
-        // Delete existing stages
-        self.delete_feature_stage(feature_id.to_owned()).await?;
+        let existing_stages = self.get_feature_stages(Some(feature_id), None).await?;
+        if existing_stages.is_empty() {
+            return self.create_feature_stage(feature_id, input, tx).await;
+        }
 
-        // Create new stages
-        self.create_feature_stage(feature_id, input, tx).await?;
+        let updates = input.iter().filter(|stage| {
+            existing_stages.iter().any(|s| s.id == stage.id)
+        }).collect::<Vec<&CreateFeatureStage>>();
+
+        if updates.is_empty() {
+            // That means all stages are new, so we can delete existing stages and create new ones
+            self.delete_feature_stage(feature_id.to_owned()).await?;
+            self.create_feature_stage(feature_id, input, tx).await?;
+
+            return Ok(PgQueryResult::default());
+        }
+
+        self.delete_existing_stages(&existing_stages, &updates, tx).await?;
+
+        if !updates.is_empty() {
+            self.update_existing_stages(&updates, tx).await?;
+        }
+
+        let to_insert = input
+            .iter()
+            .filter(|stage| !existing_stages.iter().any(|s| s.id == stage.id))
+            .cloned()
+            .collect::<Vec<CreateFeatureStage>>();
+
+        if !to_insert.is_empty() {
+            self.create_feature_stage(feature_id, to_insert, tx).await?;
+        }
 
         Ok(PgQueryResult::default())
+    }
+
+    async fn update_existing_stages(&self,
+                                    updates: &Vec<&CreateFeatureStage>,
+                                    tx: &mut PgConnection,
+    ) -> Result<PgQueryResult, Error> {
+        for stage in updates {
+            let parent_stage_id = stage.parent_stage.as_ref().map(|p| p.id);
+
+            let result = sqlx::query!(
+                r#"UPDATE features_pipeline_stages
+                   SET environment_id = $1,
+                       order_index = $2,
+                       parent_stage_id = $3,
+                       position = $4,
+                       enabled = $5
+                   WHERE id = $6"#,
+                stage.environment_id,
+                stage.order_index,
+                parent_stage_id,
+                &stage.position,
+                stage.enabled,
+                stage.id
+            )
+                .execute(&mut *tx)
+                .await;
+
+            handle_error(None, result)?;
+        }
+
+        Ok(PgQueryResult::default())
+    }
+
+    async fn delete_existing_stages(
+        &self,
+        existing_stages: &[FeaturePipelineStage],
+        updates: &Vec<&CreateFeatureStage>,
+        tx: &mut PgConnection,
+    ) -> Result<PgQueryResult, Error> {
+        let to_delete = existing_stages
+            .iter()
+            .filter(|s| !updates.iter().any(|u| u.id == s.id))
+            .map(|s| s.id)
+            .collect::<Vec<Uuid>>();
+
+        if !to_delete.is_empty() {
+            self.delete_stages_by_ids(to_delete, tx).await?;
+        }
+
+        Ok(PgQueryResult::default())
+    }
+
+    async fn delete_stages_by_ids(
+        &self,
+        stage_ids: Vec<Uuid>,
+        tx: &mut PgConnection,
+    ) -> Result<PgQueryResult, Error> {
+        if stage_ids.is_empty() {
+            return Ok(PgQueryResult::default());
+        }
+
+        let result = sqlx::query!(
+            r#"DELETE FROM features_pipeline_stages WHERE id = ANY($1)"#,
+            &stage_ids[..]
+        )
+            .execute(&mut *tx)
+            .await;
+
+        handle_error(None, result)
     }
 
     async fn update_feature_dependencies(
@@ -335,7 +431,7 @@ impl FeatureRepositoryImpl {
         let feature = &features[0];
         let stages = &features
             .clone()
-            .split_off(1)
+            .split_off(0)
             .into_iter()
             .filter_map(|r| {
                 r.stage_id.map(|id| FeaturePipelineStage {

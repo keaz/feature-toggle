@@ -202,7 +202,6 @@ impl PipelineRepositoryImpl {
         input: Vec<CreateStage>,
         tx: &mut PgConnection,
     ) -> Result<PgQueryResult, Error> {
-        // #FIXME: This function should be update to delete any removed stages and update existing ones.
         self.delete_pipeline_stage(pipeline_id.to_owned()).await?;
 
         self.create_stage(pipeline_id, input, tx).await?;
@@ -225,7 +224,7 @@ impl PipelineRepositoryImpl {
         let pipeline = &pipelines[0];
         let stages = &pipelines
             .clone()
-            .split_off(1)
+            .split_off(0)
             .into_iter()
             .filter_map(|r| {
                 r.stage_id.map(|id| Stage {
@@ -352,6 +351,7 @@ impl PipelineRepository for PipelineRepositoryImpl {
         match handled_error {
             Ok(saved_pipeline) => {
                 let stages = self.create_stage(&id, input.stages, &mut tx).await;
+                //#FIXME: need to save relationships here
                 if stages.is_err() {
                     let _ = tx.rollback().await;
                     return Err(stages.err().unwrap());

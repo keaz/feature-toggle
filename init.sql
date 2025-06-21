@@ -63,7 +63,10 @@ VALUES ('51ecc366-f1cd-4d3d-ab73-fa60bad98f27', 'Test Feature', 'This is a test 
        ('3eef17bc-9e06-411d-b5f4-7a786e68bb97', 'Delete Feature', 'This is a feature to delete', 'Simple', '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', now()),
        ('4eef17bc-9e06-411d-b5f4-7a786e68bb98', 'Existing Feature', 'This is an existing feature', 'Simple', '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', now()),
        ('5eef17bc-9e06-411d-b5f4-7a786e68bb99', 'Test Contextual Feature', 'This is a contextual feature', 'Contextual', '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', now()),
-       ('6eef17bc-9e06-411d-b5f4-7a786e68bb91', 'Dependency Feature', 'This is a dependency feature', 'Simple', '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', now())
+       ('6eef17bc-9e06-411d-b5f4-7a786e68bb91', 'Dependency Feature', 'This is a dependency feature', 'Simple',
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', now()),
+       ('6eef17bc-9e06-411d-b5f4-7a786e68bb81', 'Another feature', 'This is a dependency feature', 'Simple',
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', now())
 ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO public.features_pipeline_stages(id, feature_id, environment_id, parent_stage_id, order_index, position, enabled)
@@ -72,6 +75,8 @@ VALUES ('51ecc366-f1cd-4d3d-ab73-fa60bad98f27', '51ecc366-f1cd-4d3d-ab73-fa60bad
        ('1ab6ca79-a4fc-44ba-87e2-12884edf17f7', '3eef17bc-9e06-411d-b5f4-7a786e68bb96',
         '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', NULL, 0, '{ "x": 250, "y": 250 }', true),
        ('3eef17bc-9e06-411d-b5f4-7a786e68bb96', '5eef17bc-9e06-411d-b5f4-7a786e68bb99',
+        '78ccc5d7-e1bb-4e41-b6ef-02adf5c0d017', NULL, 0, '{ "x": 250, "y": 250 }', true),
+       ('6eef17bc-9e06-411d-b5f4-7a786e68bb81', '6eef17bc-9e06-411d-b5f4-7a786e68bb81',
         '78ccc5d7-e1bb-4e41-b6ef-02adf5c0d017', NULL, 0, '{ "x": 250, "y": 250 }', true)
 ON CONFLICT (id) DO NOTHING;
 
