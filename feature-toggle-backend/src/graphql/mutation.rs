@@ -1,7 +1,8 @@
-use crate::graphql::schema::{CreateEnvironmentInput, CreatePipelineInput, CreateTeamInput, Environment, Pipeline, Team, UpdateEnvironmentInput};
+use crate::graphql::schema::{CreateEnvironmentInput, CreatePipelineInput, CreateTeamInput, Environment, Pipeline, Team, UpdateEnvironmentInput, UpdatePipelineInput};
 use crate::logic::environment::EnvironmentLogic;
+use crate::logic::pipeline::PipelineLogic;
 use async_graphql::{Context, Object, Result as GqlResult, ID};
-use log::{debug, info};
+use log::info;
 use uuid::Uuid;
 
 pub struct MutationRoot;
@@ -51,9 +52,33 @@ impl MutationRoot {
         ctx: &Context<'_>,
         team_id: ID,
         input: CreatePipelineInput,
-    ) -> GqlResult<Pipeline> {
+    ) -> GqlResult<ID> {
         info!("Creating pipeline with input: {:?}", input);
+        let logic = ctx.data::<Box<dyn PipelineLogic>>().unwrap();
+        let pipeline_id = logic.create_pipeline(team_id, input).await?;
+        Ok(pipeline_id)
+    }
 
-        panic!("Implement")
+    async fn update_pipeline(
+        &self,
+        ctx: &Context<'_>,
+        id: ID,
+        input: UpdatePipelineInput,
+    ) -> GqlResult<Pipeline> {
+        info!("Updating pipeline with input: {:?}", input);
+        let logic = ctx.data::<Box<dyn PipelineLogic>>().unwrap();
+        let pipeline = logic.update_pipeline(id, input).await?;
+        Ok(pipeline)
+    }
+
+    async fn delete_pipeline(
+        &self,
+        ctx: &Context<'_>,
+        id: ID,
+    ) -> GqlResult<bool> {
+        info!("Updating pipeline with input: {:?}", id);
+        let logic = ctx.data::<Box<dyn PipelineLogic>>().unwrap();
+        logic.delete_pipeline(id).await?;
+        Ok(true)
     }
 }

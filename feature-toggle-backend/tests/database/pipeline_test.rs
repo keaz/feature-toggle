@@ -56,10 +56,11 @@ async fn test_create_pipeline_with_stages() {
     let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
     let random_name = format!("With Stages {}", Uuid::new_v4());
     let parent = CreateStage {
-        id: Some(Uuid::parse_str("3eef17bc-9e06-411d-b5f4-7a786e68bb96").unwrap()),
+        id: Uuid::new_v4(),
         environment_id: Uuid::parse_str("3eef17bc-9e06-411d-b5f4-7a786e68bb96").unwrap(),
         order_index: 0,
         parent_stage: None,
+        position: String::from("{ x: 250, y: 250 }"),
     };
     let input = CreatePipeline {
         team_id,
@@ -67,10 +68,11 @@ async fn test_create_pipeline_with_stages() {
         stages: vec![
             parent.clone(),
             CreateStage {
-                id: Some(Uuid::parse_str("3eef17bc-9e06-411d-b5f4-7a786e68bb97").unwrap()),
+                id: Uuid::new_v4(),
                 environment_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
                 order_index: 1,
                 parent_stage: Some(Box::new(parent)),
+                position: String::from("{ x: 500, y: 500 }"),
             },
         ],
     };
@@ -87,19 +89,23 @@ async fn test_create_pipeline_with_stages_parent() {
     let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
     let random_name = format!("With Stages {}", Uuid::new_v4());
     let parent_stage_id = CreateStage {
+        id: Uuid::new_v4(),
         environment_id: Uuid::parse_str("3eef17bc-9e06-411d-b5f4-7a786e68bb96").unwrap(),
         order_index: 0,
-        parent_stage_id: None,
+        parent_stage: None,
+        position: String::from("{ x: 250, y: 250 }"),
     };
     let input = CreatePipeline {
         team_id,
         name: random_name.clone(),
         stages: vec![
-            parent_stage_id,
+            parent_stage_id.clone(),
             CreateStage {
+                id: Uuid::new_v4(),
                 environment_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
                 order_index: 0,
-                parent_stage_id: Some(Box::new(parent_stage_id)),
+                parent_stage: Some(Box::new(parent_stage_id)),
+                position: String::from("{ x: 500, y: 500 }"),
             },
         ],
     };

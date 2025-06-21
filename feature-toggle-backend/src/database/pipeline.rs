@@ -2,10 +2,11 @@ use crate::database::entity::{Pipeline, Stage};
 use crate::database::{handle_error, Error};
 use mockall::automock;
 use sqlx::postgres::PgQueryResult;
-use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder, Transaction};
+use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use std::collections::HashMap;
 use uuid::Uuid;
 
+#[derive(Debug, Clone)]
 pub struct CreatePipeline {
     pub team_id: Uuid,
     pub name: String,
@@ -14,19 +15,21 @@ pub struct CreatePipeline {
 
 #[derive(Debug, Clone)]
 pub struct CreateStage {
-    pub id: Option<Uuid>, // For internal use, not part of the input
+    pub id: Uuid, // For internal use, not part of the input
     pub environment_id: Uuid,
     pub order_index: i32,
     pub parent_stage: Option<Box<CreateStage>>,
+    pub position: String,
 }
 
 impl CreateStage {
-    pub fn new(environment_id: Uuid, order_index: i32, parent_stage: Option<Box<CreateStage>>) -> Self {
+    pub fn new(id: Uuid, environment_id: Uuid, order_index: i32, parent_stage: Option<Box<CreateStage>>, position: String) -> Self {
         Self {
-            id: None,
+            id,
             environment_id,
             order_index,
             parent_stage,
+            position
         }
     }
 }
@@ -35,15 +38,7 @@ pub struct UpdatePipeline {
     pub id: Uuid,
     pub name: Option<String>,
     pub active: Option<bool>,
-    pub stages: Vec<UpdateCreateStage>,
-}
-
-pub struct UpdateCreateStage {
-    pub id: Uuid,
-    pub pipeline_id: Uuid,
-    pub environment_id: Uuid,
-    pub order_index: i32,
-    pub parent_stage_id: Option<Uuid>,
+    pub stages: Vec<CreateStage>,
 }
 
 #[derive(Debug, sqlx::FromRow, Clone)]
@@ -106,17 +101,6 @@ impl PipelineRepositoryImpl {
         handle_error(Some(id), result)
     }
 
-    async fn get_stage_by_id(&self, id: Uuid) -> Result<Stage, Error> {
-        let result = sqlx::query_as::<_, Stage>(
-            r#"SELECT id, pipeline_id , environment_id, order_index, parent_stage_id FROM pipeline_stages WHERE id = $1"#,
-        )
-            .bind(id)
-            .fetch_one(&self.pool)
-            .await;
-
-        handle_error(Some(id), result)
-    }
-
     async fn get_stage(
         &self,
         pipeline_id: Option<&Uuid>,
@@ -132,8 +116,8 @@ impl PipelineRepositoryImpl {
         }
 
         if let Some(pipeline_id) = pipeline_id {
-            query_builder.push(" pipeline_id ILIKE ");
-            query_builder.push_bind(format!("%{}%", pipeline_id));
+            query_builder.push(" pipeline_id = ");
+            query_builder.push_bind(pipeline_id);
             has_where = true;
         }
         if let Some(parent_stage_id) = parent_stage_id {
@@ -144,7 +128,6 @@ impl PipelineRepositoryImpl {
                 .push("parent_stage_id = ")
                 .push_bind(parent_stage_id);
         }
-        query_builder.push(" ORDER BY name");
 
         let result = query_builder
             .build_query_as::<Stage>()
@@ -157,24 +140,20 @@ impl PipelineRepositoryImpl {
     async fn create_stage(
         &self,
         pipeline_id: &Uuid,
-        team_id: &Uuid,
-        mut stages: Vec<CreateStage>,
+        stages: Vec<CreateStage>,
         tx: &mut PgConnection,
     ) -> Result<PgQueryResult, Error> {
         if stages.is_empty() {
             return Ok(PgQueryResult::default());
         }
 
-        stages.iter_mut().for_each(|stage| { stage.id = Some(Uuid::new_v4()); });
-        let ids: &[Uuid] = &stages.iter().map(|stage| stage.id.unwrap()).collect::<Vec<Uuid>>();
+        // stages.iter_mut().for_each(|stage| { stage.id = Some(Uuid::new_v4()); });
+        let ids: &[Uuid] = &stages.iter().map(|stage| stage.id).collect::<Vec<Uuid>>();
         let pipeline_ids: &[Uuid] = &stages
             .iter()
             .map(|_| pipeline_id.to_owned())
             .collect::<Vec<Uuid>>();
-        let team_ids: &[Uuid] = &stages
-            .iter()
-            .map(|_| team_id.to_owned())
-            .collect::<Vec<Uuid>>();
+
         let environment_ids: &[Uuid] = &stages
             .iter()
             .map(|stage| stage.environment_id)
@@ -183,29 +162,33 @@ impl PipelineRepositoryImpl {
             .iter()
             .map(|stage| stage.order_index)
             .collect::<Vec<i32>>();
-        let parent_stage_ids = &stages.iter()
-            .map(|stage| stage.parent_stage.as_ref().map(|s| s.id.unwrap()))
-            .collect::<Vec<Option<Uuid>>>();
 
         let parent_stage_ids = &stages
             .iter()
-            .map(|stage| stage.parent_stage.as_ref().map(|s| s.id.unwrap()))
+            .map(|stage| stage.parent_stage.as_ref().map(|s| s.id))
             .collect::<Vec<Option<Uuid>>>()[..];
 
+        let positions = &stages.iter()
+            .map(|stage| stage.position.clone())
+            .collect::<Vec<String>>();
+
+        let xx = format!("parent_stage_ids {:?}", parent_stage_ids);
+        let yy = format!("ids {:?}", ids);
         let result = sqlx::query!(
-            r#"INSERT INTO pipeline_stages (id, pipeline_id, environment_id, order_index, parent_stage_id, team_id)
+            r#"INSERT INTO pipeline_stages (id, pipeline_id, environment_id, order_index, parent_stage_id, position)
                SELECT unnest($1::uuid[]) AS id,
                unnest($2::uuid[]) AS pipeline_id,
                unnest($3::uuid[]) AS environment_id,
                unnest($4::int[]) AS order_index,
                unnest($5::uuid[]) AS parent_stage_id ,
-               unnest($6::uuid[]) AS team_id"#,
+               unnest($6::varchar[]) AS position
+               "#,
             ids,
             pipeline_ids,
             environment_ids,
             order_indices,
             parent_stage_ids as &[Option<Uuid>],
-            team_ids,
+            positions,
         )
         .execute(&mut *tx)
         .await;
@@ -216,82 +199,13 @@ impl PipelineRepositoryImpl {
     async fn update_pipeline_stage(
         &self,
         pipeline_id: &Uuid,
-        input: Vec<UpdateCreateStage>,
+        input: Vec<CreateStage>,
         tx: &mut PgConnection,
     ) -> Result<PgQueryResult, Error> {
         // #FIXME: This function should be update to delete any removed stages and update existing ones.
-        let input_ids = input
-            .into_iter()
-            .map(|update| update.id)
-            .collect::<Vec<Uuid>>();
-        let existing_stages = self.get_stage(Some(pipeline_id), None).await?;
-        let mut stages_to_update = Vec::new();
-        let mut stages_to_delete = Vec::new();
+        self.delete_pipeline_stage(pipeline_id.to_owned()).await?;
 
-        for stage in existing_stages {
-            if input_ids.contains(&stage.id) {
-                stages_to_update.push(stage.clone());
-            } else {
-                stages_to_delete.push(stage.id);
-            }
-        }
-
-        let placeholders: Vec<_> = std::iter::repeat_n("?", stages_to_delete.len())
-            .collect();
-        // Deleting any removed nodes
-        let query = format!(
-            "DELETE FROM pipeline_stages WHERE id IN ({})",
-            placeholders.join(", ")
-        );
-
-        let query_with_params = sqlx::query(&query).bind(stages_to_delete);
-        let delete_result = query_with_params.execute(&mut *tx).await;
-        handle_error(None, delete_result)?;
-
-        let mut builder = QueryBuilder::<Postgres>::new("UPDATE pipeline_stages SET ");
-        builder.push("environment_id = CASE id ");
-        for u in &stages_to_update {
-            builder
-                .push("WHEN ")
-                .push_bind(u.id)
-                .push(" THEN ")
-                .push_bind(u.environment_id)
-                .push(" ");
-        }
-        builder.push("END, ");
-
-        builder.push("order_index = CASE id ");
-        for u in &stages_to_update {
-            builder
-                .push("WHEN ")
-                .push_bind(u.id)
-                .push(" THEN ")
-                .push_bind(u.order_index)
-                .push(" ");
-        }
-        builder.push("END, ");
-
-        builder.push("parent_stage_id = CASE id ");
-        for u in &stages_to_update {
-            builder
-                .push("WHEN ")
-                .push_bind(u.id)
-                .push(" THEN ")
-                .push_bind(u.parent_stage_id)
-                .push(" ");
-        }
-        builder.push("END ");
-
-        builder.push("WHERE id IN (");
-        let mut separated = builder.separated(", ");
-        for u in &stages_to_update {
-            separated.push_bind(u.id);
-        }
-        builder.push(")");
-
-        let query = builder.build();
-        let update_result = query.execute(tx).await;
-        handle_error(None, update_result)?;
+        self.create_stage(pipeline_id, input, tx).await?;
 
         Ok(PgQueryResult::default())
     }
@@ -437,13 +351,12 @@ impl PipelineRepository for PipelineRepositoryImpl {
         let handled_error = handle_error(None, result);
         match handled_error {
             Ok(saved_pipeline) => {
-                let stages = self.create_stage(&id, &input.team_id, vec![], &mut tx).await; // #FIXME: This should be updated to handle stages from input
+                let stages = self.create_stage(&id, input.stages, &mut tx).await;
                 if stages.is_err() {
                     let _ = tx.rollback().await;
                     return Err(stages.err().unwrap());
                 }
                 let _ = tx.commit().await;
-                self.delete_pipeline(saved_pipeline.id).await?;
                 Ok(saved_pipeline.id)
             }
             Err(e) => {
@@ -475,7 +388,11 @@ impl PipelineRepository for PipelineRepositoryImpl {
             return Err(Error::DatabaseError(result.err().unwrap()));
         }
 
-        self.update_pipeline_stage(&input.id, input.stages, &mut *tx);
+        let stage_result = self.update_pipeline_stage(&input.id, input.stages, &mut tx).await;
+        if stage_result.is_err() {
+            let _ = tx.rollback().await;
+            return Err(stage_result.err().unwrap());
+        }
 
         let result = handle_error(Some(input.id), result);
         match result {

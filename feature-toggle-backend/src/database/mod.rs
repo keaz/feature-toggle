@@ -3,6 +3,7 @@ pub mod environment;
 pub mod pipeline;
 mod stage;
 pub mod team;
+mod feature;
 
 use crate::Error;
 use sqlx::postgres::PgPoolOptions;

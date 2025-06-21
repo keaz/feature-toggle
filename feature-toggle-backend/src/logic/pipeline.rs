@@ -1,5 +1,5 @@
-use crate::database::pipeline::{CreatePipeline, CreateStage, PipelineRepository, UpdateCreateStage, UpdatePipeline};
-use crate::graphql::schema::{CreatePipelineInput, Pipeline, UpdatePipelineInput};
+use crate::database::pipeline::{CreatePipeline, CreateStage, PipelineRepository, UpdatePipeline};
+use crate::graphql::schema::{CreatePipelineInput, CreateRelationshipInput, CreateStageInput, Pipeline, UpdatePipelineInput};
 use crate::Error;
 use async_graphql::ID;
 use uuid::Uuid;
@@ -38,22 +38,17 @@ struct PipelineLogicImpl {
 impl PipelineLogicImpl {
     fn map_to_update_pipeline(id: ID, input: UpdatePipelineInput) -> UpdatePipeline {
         let id = Uuid::try_from(id).unwrap();
-        UpdatePipeline {
-            id: id.clone(),
+        let mut update = UpdatePipeline {
+            id,
             name: input.name,
             active: input.active,
-            stages: input
-                .stages
-                .into_iter()
-                .map(|stage| UpdateCreateStage {
-                    id: Uuid::try_from(id).unwrap(),
-                    pipeline_id: id.clone(),
-                    environment_id: Uuid::try_from(stage.environment_id).unwrap(),
-                    parent_stage_id: stage.parent_stage_id.map(|id| Uuid::try_from(id).unwrap()),
-                    order_index: stage.order,
-                })
-                .collect::<Vec<UpdateCreateStage>>(),
-        }
+            stages: vec![],
+        };
+
+
+        let stages = get_stages_to_create(input.stages, input.relationships);
+
+        update
     }
 }
 
@@ -125,12 +120,33 @@ fn map_to_create_pipeline(team_id: Uuid, input: CreatePipelineInput) -> CreatePi
         stages: vec![],
     };
 
-    let relationships = input.relationships;
+    let stages = get_stages_to_create(input.stages, input.relationships);
+    pipeline.stages = stages;
+    pipeline
+}
 
-    let mut stages = input.stages
+
+fn map_to_update_pipeline(id: ID, input: UpdatePipelineInput) -> UpdatePipeline {
+    let mut pipeline = UpdatePipeline {
+        id: Uuid::try_from(id).unwrap(),
+        name: input.name.clone(),
+        stages: vec![],
+        active: Some(true),
+    };
+
+    let stages = get_stages_to_create(input.stages, input.relationships);
+    pipeline.stages = stages;
+    pipeline
+}
+
+fn get_stages_to_create(
+    stages: Vec<CreateStageInput>,
+    relationships: Vec<CreateRelationshipInput>,
+) -> Vec<CreateStage> {
+    let mut stages = stages
         .into_iter()
         .map(|stage| {
-            CreateStage::new(Uuid::try_from(stage.environment_id.clone()).unwrap(), stage.order, None)
+            CreateStage::new(Uuid::new_v4(), Uuid::try_from(stage.environment_id.clone()).unwrap(), stage.order_index, None, stage.position)
         })
         .collect::<Vec<CreateStage>>();
 
@@ -148,15 +164,14 @@ fn map_to_create_pipeline(team_id: Uuid, input: CreatePipelineInput) -> CreatePi
         }
     }
 
-    pipeline.stages = stages;
-    pipeline
+    stages
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
     use crate::database::pipeline::MockPipelineRepository;
-    use crate::graphql::schema::{CreateRelationshipInput, CreateStageInput, UpdateStageInput};
+    use crate::graphql::schema::{CreateRelationshipInput, CreateStageInput};
     use async_graphql::ID;
 
     #[test]
@@ -167,7 +182,7 @@ mod test {
             stages: vec![
                 CreateStageInput {
                     environment_id: ID::from("3eef17bc-9e06-411d-b5f4-7a786e68bb96"),
-                    order: 0,
+                    order_index: 0,
                     position: "".to_string()
                 },
             ],
@@ -206,27 +221,27 @@ mod test {
             stages: vec![
                 CreateStageInput {
                     environment_id: ID::from("e74a6c91-33b7-467f-b2ec-b01434a0bc96"),
-                    order: 0,
+                    order_index: 0,
                     position: "".to_string()
                 },
                 CreateStageInput {
                     environment_id: ID::from("81cf8b7d-4945-4a30-96a2-e27559e97fac"),
-                    order: 1,
+                    order_index: 1,
                     position: "".to_string()
                 },
                 CreateStageInput {
                     environment_id: ID::from("13728519-a82b-4987-b82a-3fb57652388f"),
-                    order: 2,
+                    order_index: 2,
                     position: "".to_string()
                 },
                 CreateStageInput {
                     environment_id: ID::from("cb1d22be-bc57-4626-abf2-7534de556586"),
-                    order: 3,
+                    order_index: 3,
                     position: "".to_string()
                 },
                 CreateStageInput {
                     environment_id: ID::from("06f28625-df1d-499f-a4ee-5629a8b6a169"),
-                    order: 4,
+                    order_index: 4,
                     position: "".to_string()
                 }
             ],
@@ -343,18 +358,17 @@ mod test {
         const ID: &str = "3eef17bc-9e06-411d-b5f4-7a786e68bb96";
         const NAME: &str = "Updated Pipeline";
 
-        let stages = vec![UpdateStageInput {
-            id: ID::from("3eef17bc-9e06-411d-b5f4-7a786e68bb96"),
+        let stages = vec![CreateStageInput {
             environment_id: ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"),
-            parent_stage_id: None,
-            order: 1,
-            pipeline_id: ID::from(ID),
+            order_index: 0,
+            position: "".to_string()
         }];
 
         let input = UpdatePipelineInput {
             name: Some(NAME.to_string()),
             active: Some(true),
-            stages: stages,
+            stages,
+            relationships: vec![]
         };
 
         repository
@@ -374,7 +388,7 @@ mod test {
                         pipeline_id: Uuid::parse_str(ID).unwrap(),
                         environment_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27")
                             .unwrap(),
-                        order_index: 1,
+                        order_index: 0,
                         parent_stage_id: None,
                     }],
                 })
@@ -397,13 +411,8 @@ mod test {
         let input = UpdatePipelineInput {
             name: Some("Non-existing Pipeline".to_string()),
             active: Some(false),
-            stages: vec![UpdateStageInput {
-                id: ID::from(ID),
-                environment_id: ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"),
-                parent_stage_id: None,
-                order: 1,
-                pipeline_id: ID::from(ID),
-            }],
+            stages: vec![],
+            relationships: vec![]
         };
 
         repository

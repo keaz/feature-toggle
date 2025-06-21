@@ -99,7 +99,7 @@ pub struct CreateRelationshipInput {
 #[derive(InputObject, Debug, Clone)]
 pub struct CreateStageInput {
     pub environment_id: ID,
-    pub order: i32,
+    pub order_index: i32,
     pub position: String,
 }
 
@@ -107,7 +107,8 @@ pub struct CreateStageInput {
 pub struct UpdatePipelineInput {
     pub name: Option<String>,
     pub active: Option<bool>,
-    pub stages: Vec<UpdateStageInput>,
+    pub stages: Vec<CreateStageInput>,
+    pub relationships: Vec<CreateRelationshipInput>,
 }
 
 #[derive(InputObject, Debug)]
