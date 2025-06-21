@@ -1,5 +1,6 @@
-use crate::graphql::schema::{CreateEnvironmentInput, CreatePipelineInput, CreateTeamInput, Environment, Pipeline, Team, UpdateEnvironmentInput, UpdatePipelineInput};
+use crate::graphql::schema::{CreateEnvironmentInput, CreateFeatureInput, CreatePipelineInput, CreateTeamInput, Environment, Feature, Pipeline, Team, UpdateEnvironmentInput, UpdatePipelineInput};
 use crate::logic::environment::EnvironmentLogic;
+use crate::logic::feature::FeatureLogic;
 use crate::logic::pipeline::PipelineLogic;
 use async_graphql::{Context, Object, Result as GqlResult, ID};
 use log::info;
@@ -76,9 +77,44 @@ impl MutationRoot {
         ctx: &Context<'_>,
         id: ID,
     ) -> GqlResult<bool> {
-        info!("Updating pipeline with input: {:?}", id);
+        info!("Deleting pipeline with id: {:?}", id);
         let logic = ctx.data::<Box<dyn PipelineLogic>>().unwrap();
         logic.delete_pipeline(id).await?;
+        Ok(true)
+    }
+
+    async fn create_feature(
+        &self,
+        ctx: &Context<'_>,
+        team_id: ID,
+        input: CreateFeatureInput,
+    ) -> GqlResult<ID> {
+        info!("Creating feature with input: {:?}", input);
+        let logic = ctx.data::<Box<dyn FeatureLogic>>().unwrap();
+        let feature_id = logic.create_feature(team_id, input).await?;
+        Ok(feature_id)
+    }
+
+    async fn update_feature(
+        &self,
+        ctx: &Context<'_>,
+        id: ID,
+        input: CreateFeatureInput,
+    ) -> GqlResult<Feature> {
+        info!("Updating feature with input: {:?}", input);
+        let logic = ctx.data::<Box<dyn FeatureLogic>>().unwrap();
+        let feature = logic.update_feature(id, input).await?;
+        Ok(feature)
+    }
+
+    async fn delete_feature(
+        &self,
+        ctx: &Context<'_>,
+        id: ID,
+    ) -> GqlResult<bool> {
+        info!("Deleting feature with id: {:?}", id);
+        let logic = ctx.data::<Box<dyn FeatureLogic>>().unwrap();
+        logic.delete_feature(id).await?;
         Ok(true)
     }
 }

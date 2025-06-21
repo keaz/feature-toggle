@@ -1,9 +1,9 @@
 pub mod entity;
 pub mod environment;
+pub mod feature;
 pub mod pipeline;
 mod stage;
 pub mod team;
-mod feature;
 
 use crate::Error;
 use sqlx::postgres::PgPoolOptions;

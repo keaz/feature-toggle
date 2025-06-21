@@ -1,0 +1,341 @@
+use crate::database::entity::FeatureType as EntityFeatureType;
+use crate::database::feature::{CreateFeature, FeatureRepository, UpdateFeature};
+use crate::graphql::schema::{CreateFeatureInput, Feature, FeatureType as GraphQLFeatureType};
+use crate::Error;
+use async_graphql::ID;
+use uuid::Uuid;
+
+#[async_trait::async_trait]
+pub trait FeatureLogic: Send + Sync {
+    async fn get_feature_by_id(&self, id: Uuid) -> Result<Feature, Error>;
+    async fn get_features(
+        &self,
+        team_id: ID,
+        name: Option<String>,
+        feature_type: Option<GraphQLFeatureType>,
+    ) -> Result<Vec<Feature>, Error>;
+
+    async fn create_feature(&self, team_id: ID, input: CreateFeatureInput) -> Result<ID, Error>;
+    async fn update_feature(&self, id: ID, input: CreateFeatureInput) -> Result<Feature, Error>;
+    async fn delete_feature(&self, id: ID) -> Result<(), Error>;
+    fn clone_box(&self) -> Box<dyn FeatureLogic>;
+}
+
+impl Clone for Box<dyn FeatureLogic> {
+    fn clone(&self) -> Box<dyn FeatureLogic> {
+        self.clone_box()
+    }
+}
+
+pub fn feature_logic(repository: Box<dyn FeatureRepository>) -> Box<dyn FeatureLogic> {
+    Box::new(FeatureLogicImpl { repository })
+}
+
+#[derive(Clone)]
+struct FeatureLogicImpl {
+    repository: Box<dyn FeatureRepository>,
+}
+
+impl FeatureLogicImpl {
+    fn map_graphql_to_entity_feature_type(feature_type: GraphQLFeatureType) -> EntityFeatureType {
+        match feature_type {
+            GraphQLFeatureType::Simple => EntityFeatureType::Simple,
+            GraphQLFeatureType::Contextual => EntityFeatureType::Contextual,
+        }
+    }
+
+    fn map_entity_to_graphql_feature_type(feature_type: EntityFeatureType) -> GraphQLFeatureType {
+        match feature_type {
+            EntityFeatureType::Simple => GraphQLFeatureType::Simple,
+            EntityFeatureType::Contextual => GraphQLFeatureType::Contextual,
+        }
+    }
+
+    fn map_to_create_feature(team_id: Uuid, input: CreateFeatureInput) -> CreateFeature {
+        let feature_type = Self::map_graphql_to_entity_feature_type(input.feature_type);
+        
+        // For now, we're not handling stages or dependencies from the GraphQL input
+        // This would need to be expanded based on the GraphQL schema
+        CreateFeature {
+            team_id,
+            name: input.name,
+            description: input.description,
+            feature_type,
+            stages: vec![],
+            dependencies: vec![],
+        }
+    }
+
+    fn map_to_update_feature(id: ID, input: CreateFeatureInput) -> UpdateFeature {
+        let id = Uuid::try_from(id).unwrap();
+        let feature_type = Some(Self::map_graphql_to_entity_feature_type(input.feature_type));
+        
+        // For now, we're not handling stages or dependencies from the GraphQL input
+        // This would need to be expanded based on the GraphQL schema
+        UpdateFeature {
+            id,
+            name: Some(input.name),
+            description: input.description,
+            feature_type,
+            stages: vec![],
+            dependencies: vec![],
+        }
+    }
+
+    fn map_entity_to_graphql_feature(feature: crate::database::entity::Feature) -> Feature {
+        Feature {
+            id: feature.id.into(),
+            name: feature.name,
+            description: feature.description,
+            feature_type: Self::map_entity_to_graphql_feature_type(feature.feature_type),
+            enabled: None, // This would need to be determined based on the feature's stages
+            rules: None,   // This would need to be determined based on the feature's type
+            dependencies: feature.dependencies.into_iter().map(|d| d.depends_on_id.into()).collect(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl FeatureLogic for FeatureLogicImpl {
+    async fn get_feature_by_id(&self, id: Uuid) -> Result<Feature, Error> {
+        let feature = self.repository.get_feature_by_id(id).await?;
+        Ok(Self::map_entity_to_graphql_feature(feature))
+    }
+
+    async fn get_features(
+        &self,
+        team_id: ID,
+        name: Option<String>,
+        feature_type: Option<GraphQLFeatureType>,
+    ) -> Result<Vec<Feature>, Error> {
+        let team_id = Uuid::try_from(team_id).unwrap();
+        let entity_feature_type = feature_type.map(Self::map_graphql_to_entity_feature_type);
+        let features = self.repository.get_features(team_id, name, entity_feature_type).await?;
+        
+        Ok(features
+            .into_iter()
+            .map(Self::map_entity_to_graphql_feature)
+            .collect())
+    }
+
+    async fn create_feature(&self, team_id: ID, input: CreateFeatureInput) -> Result<ID, Error> {
+        let team_id = Uuid::try_from(team_id).unwrap();
+        let input = Self::map_to_create_feature(team_id, input);
+        let feature_id = self.repository.create_feature(input).await?;
+        Ok(ID::from(feature_id.to_string()))
+    }
+
+    async fn update_feature(&self, id: ID, input: CreateFeatureInput) -> Result<Feature, Error> {
+        let input = Self::map_to_update_feature(id, input);
+        let feature = self.repository.update_feature(input).await?;
+        Ok(Self::map_entity_to_graphql_feature(feature))
+    }
+
+    async fn delete_feature(&self, id: ID) -> Result<(), Error> {
+        self.repository
+            .delete_feature(Uuid::try_from(id).unwrap())
+            .await?;
+        Ok(())
+    }
+
+    fn clone_box(&self) -> Box<dyn FeatureLogic> {
+        Box::new(self.clone())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::database::entity::Feature as EntityFeature;
+    use crate::database::feature::MockFeatureRepository;
+
+    #[tokio::test]
+    async fn test_get_feature_by_id() {
+        let mut repository = MockFeatureRepository::new();
+
+        const ID: &str = "3eef17bc-9e06-411d-b5f4-7a786e68bb96";
+        repository
+            .expect_get_feature_by_id()
+            .withf(|mock_id| mock_id.eq(&Uuid::parse_str(ID).unwrap()))
+            .times(1)
+            .returning(move |_| {
+                Ok(EntityFeature {
+                    id: Uuid::parse_str(ID).unwrap(),
+                    name: "Test Feature".to_string(),
+                    description: Some("Test description".to_string()),
+                    feature_type: EntityFeatureType::Simple,
+                    team_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
+                    created_at: chrono::Utc::now(),
+                    stages: vec![],
+                    dependencies: vec![],
+                })
+            });
+
+        let logic = feature_logic(Box::new(repository));
+        let id = Uuid::parse_str(ID).unwrap();
+        let result = logic.get_feature_by_id(id).await;
+        
+        assert!(result.is_ok());
+        let feature = result.unwrap();
+        assert_eq!(feature.id.to_string(), ID);
+        assert_eq!(feature.name, "Test Feature");
+        assert_eq!(feature.description, Some("Test description".to_string()));
+        assert!(matches!(feature.feature_type, GraphQLFeatureType::Simple));
+    }
+
+    #[tokio::test]
+    async fn test_get_non_existing_feature() {
+        let mut repository = MockFeatureRepository::new();
+
+        const ID: &str = "51ecc366-f1cd-4d3d-ab73-fa60bad98fca";
+        repository
+            .expect_get_feature_by_id()
+            .withf(|mock_id| mock_id.eq(&Uuid::parse_str(ID).unwrap()))
+            .times(1)
+            .returning(move |_| Err(Error::NotFound(Uuid::parse_str(ID).unwrap())));
+
+        let logic = feature_logic(Box::new(repository));
+        let id = Uuid::parse_str(ID).unwrap();
+        let result = logic.get_feature_by_id(id).await;
+
+        assert!(result.is_err());
+        let error = result.err().unwrap();
+        assert!(matches!(error, Error::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn test_create_feature() {
+        let mut repository = MockFeatureRepository::new();
+
+        let input = CreateFeatureInput {
+            name: "New Feature".to_string(),
+            description: Some("New feature description".to_string()),
+            feature_type: GraphQLFeatureType::Simple,
+            enabled: Some(true),
+            rules: None,
+            dependencies: vec![],
+        };
+        
+        const ID: &str = "3eef17bc-9e06-411d-b5f4-7a786e68bb96";
+        let id = Uuid::parse_str(ID).unwrap();
+        repository
+            .expect_create_feature()
+            .withf(|input| input.name == "New Feature")
+            .times(1)
+            .returning(move |_| Ok(id));
+
+        let logic = feature_logic(Box::new(repository));
+        let result = logic
+            .create_feature(ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"), input)
+            .await;
+
+        assert!(result.is_ok());
+        let feature_id = result.unwrap();
+        assert_eq!(feature_id, ID::from(ID));
+    }
+
+    #[tokio::test]
+    async fn test_update_feature() {
+        let mut repository = MockFeatureRepository::new();
+
+        const ID: &str = "3eef17bc-9e06-411d-b5f4-7a786e68bb96";
+        const NAME: &str = "Updated Feature";
+
+        let input = CreateFeatureInput {
+            name: NAME.to_string(),
+            description: Some("Updated description".to_string()),
+            feature_type: GraphQLFeatureType::Contextual,
+            enabled: Some(true),
+            rules: None,
+            dependencies: vec![],
+        };
+
+        repository
+            .expect_update_feature()
+            .withf(|input| {
+                input.id == Uuid::parse_str(ID).unwrap() && input.name == Some(NAME.to_string())
+            })
+            .times(1)
+            .returning(move |_| {
+                Ok(EntityFeature {
+                    id: Uuid::parse_str(ID).unwrap(),
+                    name: NAME.to_string(),
+                    description: Some("Updated description".to_string()),
+                    feature_type: EntityFeatureType::Contextual,
+                    team_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
+                    created_at: chrono::Utc::now(),
+                    stages: vec![],
+                    dependencies: vec![],
+                })
+            });
+
+        let logic = feature_logic(Box::new(repository));
+        let result = logic.update_feature(ID::from(ID), input).await;
+
+        assert!(result.is_ok());
+        let feature = result.unwrap();
+        assert_eq!(feature.name, NAME);
+        assert_eq!(feature.description, Some("Updated description".to_string()));
+        assert!(matches!(feature.feature_type, GraphQLFeatureType::Contextual));
+    }
+
+    #[tokio::test]
+    async fn test_delete_feature() {
+        let mut repository = MockFeatureRepository::new();
+
+        const ID: &str = "3eef17bc-9e06-411d-b5f4-7a786e68bb96";
+        repository
+            .expect_delete_feature()
+            .withf(|mock_id| mock_id.eq(&Uuid::parse_str(ID).unwrap()))
+            .times(1)
+            .returning(move |_| Ok(()));
+
+        let logic = feature_logic(Box::new(repository));
+        let result = logic.delete_feature(ID::from(ID)).await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_get_features() {
+        let mut repository = MockFeatureRepository::new();
+
+        repository
+            .expect_get_features()
+            .withf(|team_id, name, feature_type| name.is_none() && feature_type.is_none())
+            .times(1)
+            .returning(move |_, _, _| {
+                Ok(vec![
+                    EntityFeature {
+                        id: Uuid::new_v4(),
+                        name: "Test Feature".to_string(),
+                        description: Some("Test description".to_string()),
+                        feature_type: EntityFeatureType::Simple,
+                        team_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
+                        created_at: chrono::Utc::now(),
+                        stages: vec![],
+                        dependencies: vec![],
+                    },
+                    EntityFeature {
+                        id: Uuid::new_v4(),
+                        name: "Another Feature".to_string(),
+                        description: Some("Another description".to_string()),
+                        feature_type: EntityFeatureType::Contextual,
+                        team_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
+                        created_at: chrono::Utc::now(),
+                        stages: vec![],
+                        dependencies: vec![],
+                    },
+                ])
+            });
+
+        let logic = feature_logic(Box::new(repository));
+        let result = logic
+            .get_features(ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"), None, None)
+            .await;
+            
+        assert!(result.is_ok());
+        let features = result.unwrap();
+        assert_eq!(features.len(), 2);
+    }
+}

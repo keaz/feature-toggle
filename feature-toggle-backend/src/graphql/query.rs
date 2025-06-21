@@ -1,5 +1,6 @@
-use crate::graphql::schema::{Environment, Pipeline, Team};
+use crate::graphql::schema::{Environment, Feature, FeatureType, Pipeline, Team};
 use crate::logic::environment::EnvironmentLogic;
+use crate::logic::feature::FeatureLogic;
 use crate::logic::pipeline::PipelineLogic;
 use crate::logic::team::TeamLogic;
 use async_graphql::{Context, Object, Result as GqlResult, ID};
@@ -51,5 +52,27 @@ impl Query {
         debug!("Fetching pipelines for team with id: {:?}", team_id);
         let logic = ctx.data::<Box<dyn PipelineLogic>>().unwrap();
         Ok(logic.get_pipelines(team_id, name, active).await?)
+    }
+
+    async fn feature(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Id of the feature")] id: Uuid,
+    ) -> GqlResult<Feature> {
+        debug!("Fetching feature with id: {}", id);
+        let logic = ctx.data::<Box<dyn FeatureLogic>>().unwrap();
+        Ok(logic.get_feature_by_id(id).await?)
+    }
+
+    async fn features(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Id of the team")] team_id: ID,
+        #[graphql(desc = "Name of the feature")] name: Option<String>,
+        #[graphql(desc = "Type of the feature")] feature_type: Option<FeatureType>,
+    ) -> GqlResult<Vec<Feature>> {
+        debug!("Fetching features for team with id: {:?}", team_id);
+        let logic = ctx.data::<Box<dyn FeatureLogic>>().unwrap();
+        Ok(logic.get_features(team_id, name, feature_type).await?)
     }
 }

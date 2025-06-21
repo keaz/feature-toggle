@@ -34,6 +34,7 @@ pub async fn run() -> std::io::Result<()> {
     let environment_logic = logic::environment::environment_logic(environment_repository.clone());
     let team_logic = logic::team::team_logic(database::team::team_repository(db_pool.clone()));
     let pipeline_logic = logic::pipeline::pipeline_logic(database::pipeline::pipeline_repository(db_pool.clone()));
+    let feature_logic = logic::feature::feature_logic(database::feature::feature_repository(db_pool.clone()));
 
     HttpServer::new(move || {
         let schema = Schema::build(Query, MutationRoot, EmptySubscription)
@@ -41,6 +42,7 @@ pub async fn run() -> std::io::Result<()> {
             .data(environment_logic.clone())
             .data(team_logic.clone())
             .data(pipeline_logic.clone())
+            .data(feature_logic.clone())
             .finish();
 
         let cors = Cors::default()

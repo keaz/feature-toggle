@@ -1,3 +1,4 @@
 pub mod environment;
+pub mod feature;
 pub mod pipeline;
 pub mod team;

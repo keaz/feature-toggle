@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -34,13 +35,32 @@ pub struct Feature {
     pub name: String,
     pub description: Option<String>,
     pub feature_type: FeatureType,
-    pub pipeline_id: Uuid,
+    pub team_id: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub stages: Vec<FeaturePipelineStage>,
+    pub dependencies: Vec<FeatureDependency>,
+}
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
+pub struct FeaturePipelineStage {
+    pub id: Uuid,
+    pub feature_id: Uuid,
+    pub environment_id: Uuid,
+    pub order_index: i32,
+    pub parent_stage_id: Option<Uuid>,
+    pub position: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
+pub struct FeatureDependency {
+    pub feature_id: Uuid,
+    pub depends_on_id: Uuid,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum FeatureType {
-    Boolean,
-    Percentage,
+    Simple,
     Contextual,
 }
 

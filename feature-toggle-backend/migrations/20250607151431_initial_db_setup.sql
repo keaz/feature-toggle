@@ -50,9 +50,9 @@ CREATE TABLE features
 CREATE TABLE features_pipeline_stages
 (
     id              UUID PRIMARY KEY,
-    feature_id      UUID         NOT NULL REFERENCES pipelines (id) ON DELETE CASCADE,
+    feature_id      UUID         NOT NULL REFERENCES features (id) ON DELETE CASCADE,
     environment_id  UUID         NOT NULL REFERENCES environments (id) ON DELETE CASCADE,
-    parent_stage_id UUID REFERENCES pipeline_stages (id) ON DELETE CASCADE, -- for DAG/forking
+    parent_stage_id UUID REFERENCES features_pipeline_stages (id) ON DELETE CASCADE, -- for DAG/forking
     order_index     INT          NOT NULL,
     position        VARCHAR(100) NOT NULL,
     enabled         BOOLEAN      NOT NULL DEFAULT true,
