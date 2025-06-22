@@ -2,8 +2,10 @@ use crate::database::environment::EnvironmentRepository;
 use crate::graphql::schema::{CreateEnvironmentInput, Environment, UpdateEnvironmentInput};
 use crate::Error;
 use async_graphql::ID;
+use mockall::automock;
 use uuid::Uuid;
 
+#[automock]
 #[async_trait::async_trait]
 pub trait EnvironmentLogic: Send + Sync {
     async fn get_environment_by_id(&self, env_id: Uuid) -> Result<Environment, Error>;

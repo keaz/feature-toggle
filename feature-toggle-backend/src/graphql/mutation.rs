@@ -1,4 +1,4 @@
-use crate::graphql::schema::{CreateEnvironmentInput, CreateFeatureInput, CreatePipelineInput, CreateTeamInput, Environment, Feature, Pipeline, Team, UpdateEnvironmentInput, UpdatePipelineInput};
+use crate::graphql::schema::{CreateEnvironmentInput, CreateFeatureInput, CreatePipelineInput, CreateTeamInput, Environment, Feature, Pipeline, Team, UpdateEnvironmentInput, UpdateFeatureInput, UpdatePipelineInput};
 use crate::logic::environment::EnvironmentLogic;
 use crate::logic::feature::FeatureLogic;
 use crate::logic::pipeline::PipelineLogic;
@@ -99,7 +99,7 @@ impl MutationRoot {
         &self,
         ctx: &Context<'_>,
         id: ID,
-        input: CreateFeatureInput,
+        input: UpdateFeatureInput,
     ) -> GqlResult<Feature> {
         info!("Updating feature with input: {:?}", input);
         let logic = ctx.data::<Box<dyn FeatureLogic>>().unwrap();

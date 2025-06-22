@@ -27,13 +27,13 @@ pub enum Error {
 }
 
 pub async fn run() -> std::io::Result<()> {
-    setup_logger().unwrap();
+    // setup_logger().unwrap();
 
     let db_pool = init_pg_pool().await;
     let environment_repository = database::environment::environment_repository(db_pool.clone());
     let environment_logic = logic::environment::environment_logic(environment_repository.clone());
     let team_logic = logic::team::team_logic(database::team::team_repository(db_pool.clone()));
-    let pipeline_logic = logic::pipeline::pipeline_logic(database::pipeline::pipeline_repository(db_pool.clone()));
+    let pipeline_logic = logic::pipeline::pipeline_logic(database::pipeline::pipeline_repository(db_pool.clone()), environment_logic.clone());
     let feature_logic = logic::feature::feature_logic(database::feature::feature_repository(db_pool.clone()));
 
     HttpServer::new(move || {

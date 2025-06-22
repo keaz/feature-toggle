@@ -47,16 +47,22 @@ pub struct Pipeline {
     pub name: String,
     pub active: bool,
     pub stages: Vec<PipelineStage>,
+    pub relationships: Vec<PipelineRelationship>,
+}
+
+#[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
+pub struct PipelineRelationship {
+    pub source_id: ID,
+    pub target_id: ID,
 }
 
 #[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
 pub struct PipelineStage {
-    id: ID,
+    pub id: ID,
     pub environment: Environment,
     pub order: i32,
-    pub parent_stage_id: Option<Box<PipelineStage>>,
-    pub child_stages: Vec<PipelineStage>,
-    pub team: Option<Team>,
+    // pub parent_stage_id: Option<Box<PipelineStage>>,
+    // pub child_stages: Vec<PipelineStage>,
 }
 
 // Input types for mutations
@@ -68,6 +74,29 @@ pub struct CreateFeatureInput {
     pub enabled: Option<bool>,
     pub rules: Option<Vec<ContextRuleInput>>,
     pub dependencies: Vec<ID>,
+    pub relationships: Vec<CreateRelationshipInput>,
+    pub stages: Vec<CreateFeatureStageInput>,
+}
+
+#[derive(InputObject, Debug)]
+pub struct UpdateFeatureInput {
+    pub id: ID,
+    pub name: String,
+    pub description: Option<String>,
+    pub feature_type: FeatureType,
+    pub enabled: Option<bool>,
+    pub rules: Option<Vec<ContextRuleInput>>,
+    pub dependencies: Vec<ID>,
+    pub relationships: Vec<CreateRelationshipInput>,
+    pub stages: Vec<CreateFeatureStageInput>,
+}
+
+#[derive(InputObject, Debug, Clone)]
+pub struct CreateFeatureStageInput {
+    pub id: Option<ID>,
+    pub environment_id: ID,
+    pub order_index: i32,
+    pub position: String,
 }
 
 #[derive(InputObject, Debug)]

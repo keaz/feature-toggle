@@ -1,6 +1,6 @@
 use crate::database::entity::FeatureType as EntityFeatureType;
-use crate::database::feature::{CreateFeature, FeatureRepository, UpdateFeature};
-use crate::graphql::schema::{CreateFeatureInput, Feature, FeatureType as GraphQLFeatureType};
+use crate::database::feature::{CreateFeature, CreateFeatureStage, FeatureRepository, UpdateFeature};
+use crate::graphql::schema::{CreateFeatureInput, CreateFeatureStageInput, CreateRelationshipInput, Feature, FeatureType as GraphQLFeatureType, UpdateFeatureInput};
 use crate::Error;
 use async_graphql::ID;
 use uuid::Uuid;
@@ -16,7 +16,7 @@ pub trait FeatureLogic: Send + Sync {
     ) -> Result<Vec<Feature>, Error>;
 
     async fn create_feature(&self, team_id: ID, input: CreateFeatureInput) -> Result<ID, Error>;
-    async fn update_feature(&self, id: ID, input: CreateFeatureInput) -> Result<Feature, Error>;
+    async fn update_feature(&self, id: ID, input: UpdateFeatureInput) -> Result<Feature, Error>;
     async fn delete_feature(&self, id: ID) -> Result<(), Error>;
     fn clone_box(&self) -> Box<dyn FeatureLogic>;
 }
@@ -53,25 +53,65 @@ impl FeatureLogicImpl {
 
     fn map_to_create_feature(team_id: Uuid, input: CreateFeatureInput) -> CreateFeature {
         let feature_type = Self::map_graphql_to_entity_feature_type(input.feature_type);
-        
-        // For now, we're not handling stages or dependencies from the GraphQL input
-        // This would need to be expanded based on the GraphQL schema
+
+        let stages = Self::get_create_stages_to_create(
+            input.stages,
+            input.relationships,
+        );
         CreateFeature {
             team_id,
             name: input.name,
             description: input.description,
             feature_type,
-            stages: vec![],
-            dependencies: vec![],
+            stages,
+            dependencies: vec![], //#FIXME: For now, we're not handling dependencies from the GraphQL input
         }
     }
 
-    fn map_to_update_feature(id: ID, input: CreateFeatureInput) -> UpdateFeature {
+    fn get_create_stages_to_create(
+        stages: Vec<CreateFeatureStageInput>,
+        relationships: Vec<CreateRelationshipInput>,
+    ) -> Vec<CreateFeatureStage> {
+        let mut stages = stages
+            .into_iter()
+            .map(|stage| {
+                CreateFeatureStage {
+                    id: stage.id.map_or_else(Uuid::new_v4, |id| Uuid::try_from(id).unwrap()),
+                    environment_id: Uuid::try_from(stage.environment_id.clone()).unwrap(),
+                    order_index: stage.order_index,
+                    position: stage.position,
+                    enabled: true,
+                    parent_stage: None,
+                }
+            })
+            .collect::<Vec<CreateFeatureStage>>();
+
+        //#FIXME: this duplicate logic should be refactored, this is in both pipeline.rs and feature.rs
+        let cloned_stages = stages.clone();
+        let relationships_map = relationships.iter().map(|relationship| {
+            let stage = cloned_stages.iter().find(|stage| {
+                stage.order_index == relationship.source_id
+            });
+            (relationship.source_id, relationship.target_id, stage.unwrap()) // Stage should always be present
+        }).collect::<Vec<(i32, i32, &CreateFeatureStage)>>();
+
+        for (_, target_id, stage) in relationships_map {
+            if let Some(target_stage) = stages.iter_mut().find(|s| s.order_index == target_id) {
+                target_stage.parent_stage = Some(Box::new(stage.clone()));
+            }
+        }
+
+        stages
+    }
+
+    fn map_to_update_feature(id: ID, input: UpdateFeatureInput) -> UpdateFeature {
         let id = Uuid::try_from(id).unwrap();
         let feature_type = Some(Self::map_graphql_to_entity_feature_type(input.feature_type));
-        
-        // For now, we're not handling stages or dependencies from the GraphQL input
-        // This would need to be expanded based on the GraphQL schema
+
+        let stages = Self::get_create_stages_to_create(
+            input.stages,
+            input.relationships,
+        );
         UpdateFeature {
             id,
             name: Some(input.name),
@@ -125,7 +165,7 @@ impl FeatureLogic for FeatureLogicImpl {
         Ok(ID::from(feature_id.to_string()))
     }
 
-    async fn update_feature(&self, id: ID, input: CreateFeatureInput) -> Result<Feature, Error> {
+    async fn update_feature(&self, id: ID, input: UpdateFeatureInput) -> Result<Feature, Error> {
         let input = Self::map_to_update_feature(id, input);
         let feature = self.repository.update_feature(input).await?;
         Ok(Self::map_entity_to_graphql_feature(feature))
@@ -148,6 +188,54 @@ mod test {
     use super::*;
     use crate::database::entity::Feature as EntityFeature;
     use crate::database::feature::MockFeatureRepository;
+
+    #[test]
+    fn test_get_create_stages_to_create() {
+        let stages = create_dummy_stages();
+
+        let relationships = vec![];
+
+        let result = FeatureLogicImpl::get_create_stages_to_create(stages, relationships);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].order_index, 0);
+        assert_eq!(result[1].order_index, 1);
+    }
+
+    #[test]
+    fn test_get_create_stages_to_create_with_relationships() {
+        let stages = create_dummy_stages();
+
+        let relationships = vec![
+            CreateRelationshipInput {
+                source_id: 0,
+                target_id: 1,
+            },
+        ];
+
+        let result = FeatureLogicImpl::get_create_stages_to_create(stages, relationships);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].order_index, 0);
+        assert_eq!(result[1].order_index, 1);
+        assert!(result[1].parent_stage.is_some());
+    }
+
+    fn create_dummy_stages() -> Vec<CreateFeatureStageInput> {
+        let stages = vec![
+            CreateFeatureStageInput {
+                id: None,
+                environment_id: ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"),
+                order_index: 0,
+                position: "top".to_string(),
+            },
+            CreateFeatureStageInput {
+                id: Some(ID::from("3eef17bc-9e06-411d-b5f4-7a786e68bb96")),
+                environment_id: ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"),
+                order_index: 1,
+                position: "bottom".to_string(),
+            },
+        ];
+        stages
+    }
 
     #[tokio::test]
     async fn test_get_feature_by_id() {
@@ -214,6 +302,8 @@ mod test {
             enabled: Some(true),
             rules: None,
             dependencies: vec![],
+            relationships: vec![],
+            stages: vec![]
         };
         
         const ID: &str = "3eef17bc-9e06-411d-b5f4-7a786e68bb96";
@@ -241,13 +331,16 @@ mod test {
         const ID: &str = "3eef17bc-9e06-411d-b5f4-7a786e68bb96";
         const NAME: &str = "Updated Feature";
 
-        let input = CreateFeatureInput {
+        let input = UpdateFeatureInput {
+            id: ID::from(ID),
             name: NAME.to_string(),
             description: Some("Updated description".to_string()),
             feature_type: GraphQLFeatureType::Contextual,
             enabled: Some(true),
             rules: None,
             dependencies: vec![],
+            relationships: vec![],
+            stages: vec![]
         };
 
         repository

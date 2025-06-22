@@ -50,8 +50,14 @@ impl Query {
         #[graphql(desc = "Active status of the environment")] active: Option<bool>,
     ) -> GqlResult<Vec<Pipeline>> {
         debug!("Fetching pipelines for team with id: {:?}", team_id);
+
+        let mut fields = vec![];
+        if ctx.look_ahead().field("stages").exists() {
+            fields.push("stages".to_string());
+        }
+
         let logic = ctx.data::<Box<dyn PipelineLogic>>().unwrap();
-        Ok(logic.get_pipelines(team_id, name, active).await?)
+        Ok(logic.get_pipelines(team_id, name, active, fields).await?)
     }
 
     async fn feature(

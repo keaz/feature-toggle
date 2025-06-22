@@ -1,7 +1,10 @@
+use crate::database::environment::EnvironmentRepository;
 use crate::database::pipeline::{CreatePipeline, CreateStage, PipelineRepository, UpdatePipeline};
-use crate::graphql::schema::{CreatePipelineInput, CreateRelationshipInput, CreateStageInput, Pipeline, UpdatePipelineInput};
+use crate::graphql::schema::{CreatePipelineInput, CreateRelationshipInput, CreateStageInput, Pipeline, PipelineStage, UpdatePipelineInput};
+use crate::logic::environment::EnvironmentLogic;
 use crate::Error;
 use async_graphql::ID;
+use std::collections::HashMap;
 use uuid::Uuid;
 
 #[async_trait::async_trait]
@@ -12,6 +15,7 @@ pub trait PipelineLogic: Send + Sync {
         team_id: ID,
         name: Option<String>,
         active: Option<bool>,
+        fields: Vec<String>,
     ) -> Result<Vec<Pipeline>, Error>;
 
     async fn create_pipeline(&self, team_id: ID, input: CreatePipelineInput) -> Result<ID, Error>;
@@ -26,13 +30,14 @@ impl Clone for Box<dyn PipelineLogic> {
     }
 }
 
-pub fn pipeline_logic(repository: Box<dyn PipelineRepository>) -> Box<dyn PipelineLogic> {
-    Box::new(PipelineLogicImpl { repository })
+pub fn pipeline_logic(repository: Box<dyn PipelineRepository>, environment_logic: Box<dyn EnvironmentLogic>) -> Box<dyn PipelineLogic> {
+    Box::new(PipelineLogicImpl { repository, environment_logic })
 }
 
 #[derive(Clone)]
 struct PipelineLogicImpl {
     repository: Box<dyn PipelineRepository>,
+    environment_logic: Box<dyn EnvironmentLogic>
 }
 
 impl PipelineLogicImpl {
@@ -45,9 +50,7 @@ impl PipelineLogicImpl {
             stages: vec![],
         };
 
-
-        let stages = get_stages_to_create(input.stages, input.relationships);
-
+        update.stages = get_stages_to_create(input.stages, input.relationships);
         update
     }
 }
@@ -56,11 +59,13 @@ impl PipelineLogicImpl {
 impl PipelineLogic for PipelineLogicImpl {
     async fn get_pipeline_by_id(&self, env_id: Uuid) -> Result<Pipeline, Error> {
         let pipeline = self.repository.get_pipeline_by_id(env_id).await?;
+        //
         Ok(Pipeline {
             id: pipeline.id.into(),
             name: pipeline.name,
             active: pipeline.active,
-            stages: vec![],
+            stages: vec![], //#FIXME: Stages are not included in this mapping
+            relationships: vec![], // #FIXME: Relationships are not included in this mapping
         })
     }
 
@@ -69,16 +74,43 @@ impl PipelineLogic for PipelineLogicImpl {
         team_id: ID,
         name: Option<String>,
         active: Option<bool>,
+        fields: Vec<String>,
     ) -> Result<Vec<Pipeline>, Error> {
         let team_id = Uuid::try_from(team_id).unwrap();
         let pipelines = self.repository.get_pipelines(team_id, name, active).await?;
+        let has_stage = fields.contains(&"stages".to_string());
+
+        let mut environment_map = HashMap::new();
+        for pipeline in &pipelines {
+            for stage in &pipeline.stages {
+                if has_stage && !environment_map.contains_key(&stage.environment_id) {
+                    let environment = self.environment_logic.get_environment_by_id(stage.environment_id).await?;
+                    environment_map.insert(stage.environment_id, environment);
+                }
+            }
+        }
+
         Ok(pipelines
             .into_iter()
-            .map(|pipeline| Pipeline {
-                id: pipeline.id.into(),
-                name: pipeline.name,
-                active: pipeline.active,
-                stages: vec![],
+            .map(|pipeline| {
+                let stages = if has_stage {
+                    pipeline.stages.iter().map(|stage| {
+                        PipelineStage {
+                            id: stage.id.into(),
+                            environment: environment_map.get(&stage.environment_id).unwrap().to_owned(),
+                            order: stage.order_index,
+                        }
+                    }).collect()
+                } else {
+                    vec![]
+                };
+                Pipeline {
+                    id: pipeline.id.into(),
+                    name: pipeline.name,
+                    active: pipeline.active,
+                    stages,
+                    relationships: vec![], // Relationships are not included in this mapping
+                }
             })
             .collect())
     }
@@ -97,7 +129,8 @@ impl PipelineLogic for PipelineLogicImpl {
             id: pipeline.id.into(),
             name: pipeline.name,
             active: pipeline.active,
-            stages: vec![],
+            stages: vec![], //#FIXME: Stages are not included in this mapping
+            relationships: vec![], //#FIXME: Relationships are not included in this mapping
         })
     }
 
@@ -118,20 +151,6 @@ fn map_to_create_pipeline(team_id: Uuid, input: CreatePipelineInput) -> CreatePi
         team_id,
         name: input.name.clone(),
         stages: vec![],
-    };
-
-    let stages = get_stages_to_create(input.stages, input.relationships);
-    pipeline.stages = stages;
-    pipeline
-}
-
-
-fn map_to_update_pipeline(id: ID, input: UpdatePipelineInput) -> UpdatePipeline {
-    let mut pipeline = UpdatePipeline {
-        id: Uuid::try_from(id).unwrap(),
-        name: input.name.clone(),
-        stages: vec![],
-        active: Some(true),
     };
 
     let stages = get_stages_to_create(input.stages, input.relationships);
@@ -172,6 +191,7 @@ mod test {
     use super::*;
     use crate::database::pipeline::MockPipelineRepository;
     use crate::graphql::schema::{CreateRelationshipInput, CreateStageInput};
+    use crate::logic::environment::MockEnvironmentLogic;
     use async_graphql::ID;
 
     #[test]
@@ -278,6 +298,7 @@ mod test {
     #[tokio::test]
     async fn test_get_pipeline_by_id() {
         let mut repository = MockPipelineRepository::new();
+        let environment_repo = MockEnvironmentLogic::new();
 
         const ID: &str = "3eef17bc-9e06-411d-b5f4-7a786e68bb96";
         repository
@@ -294,7 +315,7 @@ mod test {
                 })
             });
 
-        let logic = pipeline_logic(Box::new(repository));
+        let logic = pipeline_logic(Box::new(repository), Box::new(environment_repo));
         let id = Uuid::parse_str(ID).unwrap();
         let result = logic.get_pipeline_by_id(id).await;
         assert!(result.is_ok());
@@ -305,7 +326,7 @@ mod test {
     #[tokio::test]
     async fn test_get_non_existing_pipeline() {
         let mut repository = MockPipelineRepository::new();
-
+        let environment_repo = MockEnvironmentLogic::new();
         const ID: &str = "51ecc366-f1cd-4d3d-ab73-fa60bad98fca";
         repository
             .expect_get_pipeline_by_id()
@@ -313,7 +334,7 @@ mod test {
             .times(1)
             .returning(move |_| Err(Error::NotFound(Uuid::parse_str(ID).unwrap())));
 
-        let logic = pipeline_logic(Box::new(repository));
+        let logic = pipeline_logic(Box::new(repository), Box::new(environment_repo));
         let id = Uuid::parse_str(ID).unwrap();
         let result = logic.get_pipeline_by_id(id).await;
 
@@ -325,6 +346,7 @@ mod test {
     #[tokio::test]
     async fn test_create_pipeline() {
         let mut repository = MockPipelineRepository::new();
+        let environment_repo = MockEnvironmentLogic::new();
 
         let relationships = vec![];
         let input = CreatePipelineInput {
@@ -341,7 +363,7 @@ mod test {
             .times(1)
             .returning(move |_| Ok(id));
 
-        let logic = pipeline_logic(Box::new(repository));
+        let logic = pipeline_logic(Box::new(repository), Box::new(environment_repo));
         let result = logic
             .create_pipeline(ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"), input)
             .await;
@@ -354,6 +376,7 @@ mod test {
     #[tokio::test]
     async fn test_update_pipeline() {
         let mut repository = MockPipelineRepository::new();
+        let environment_repo = MockEnvironmentLogic::new();
 
         const ID: &str = "3eef17bc-9e06-411d-b5f4-7a786e68bb96";
         const NAME: &str = "Updated Pipeline";
@@ -394,7 +417,7 @@ mod test {
                 })
             });
 
-        let logic = pipeline_logic(Box::new(repository));
+        let logic = pipeline_logic(Box::new(repository), Box::new(environment_repo));
         let result = logic.update_pipeline(ID::from(ID), input).await;
 
         assert!(result.is_ok());
@@ -406,6 +429,7 @@ mod test {
     #[tokio::test]
     async fn test_not_existing_pipeline_update() {
         let mut repository = MockPipelineRepository::new();
+        let environment_repo = MockEnvironmentLogic::new();
 
         const ID: &str = "51ecc366-f1cd-4d3d-ab73-fa60bad98fca";
         let input = UpdatePipelineInput {
@@ -421,7 +445,7 @@ mod test {
             .times(1)
             .returning(move |_| Err(Error::NotFound(Uuid::parse_str(ID).unwrap())));
 
-        let logic = pipeline_logic(Box::new(repository));
+        let logic = pipeline_logic(Box::new(repository), Box::new(environment_repo));
         let result = logic.update_pipeline(ID::from(ID), input).await;
 
         assert!(result.is_err());
@@ -432,6 +456,7 @@ mod test {
     #[tokio::test]
     async fn test_delete_pipeline() {
         let mut repository = MockPipelineRepository::new();
+        let environment_repo = MockEnvironmentLogic::new();
 
         const ID: &str = "3eef17bc-9e06-411d-b5f4-7a786e68bb96";
         repository
@@ -440,7 +465,7 @@ mod test {
             .times(1)
             .returning(move |_| Ok(()));
 
-        let logic = pipeline_logic(Box::new(repository));
+        let logic = pipeline_logic(Box::new(repository), Box::new(environment_repo));
         let result = logic.delete_pipeline(ID::from(ID)).await;
 
         assert!(result.is_ok());
@@ -449,6 +474,7 @@ mod test {
     #[tokio::test]
     async fn test_delete_non_existing_pipeline() {
         let mut repository = MockPipelineRepository::new();
+        let environment_repo = MockEnvironmentLogic::new();
 
         const ID: &str = "51ecc366-f1cd-4d3d-ab73-fa60bad98fca";
         repository
@@ -457,7 +483,7 @@ mod test {
             .times(1)
             .returning(move |_| Err(Error::NotFound(Uuid::parse_str(ID).unwrap())));
 
-        let logic = pipeline_logic(Box::new(repository));
+        let logic = pipeline_logic(Box::new(repository), Box::new(environment_repo));
         let result = logic.delete_pipeline(ID::from(ID)).await;
 
         assert!(result.is_err());
@@ -468,6 +494,7 @@ mod test {
     #[tokio::test]
     async fn test_get_pipelines() {
         let mut repository = MockPipelineRepository::new();
+        let environment_repo = MockEnvironmentLogic::new();
 
         repository
             .expect_get_pipelines()
@@ -492,9 +519,9 @@ mod test {
                 ])
             });
 
-        let logic = pipeline_logic(Box::new(repository));
+        let logic = pipeline_logic(Box::new(repository), Box::new(environment_repo));
         let result = logic
-            .get_pipelines(ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"), None, None)
+            .get_pipelines(ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"), None, None, vec![])
             .await;
         assert!(result.is_ok());
     }
