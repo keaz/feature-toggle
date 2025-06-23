@@ -27,7 +27,7 @@ pub enum Error {
 }
 
 pub async fn run() -> std::io::Result<()> {
-    // setup_logger().unwrap();
+    setup_logger().unwrap();
 
     let db_pool = init_pg_pool().await;
     let environment_repository = database::environment::environment_repository(db_pool.clone());

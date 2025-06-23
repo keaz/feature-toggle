@@ -50,10 +50,10 @@ pub struct Pipeline {
     pub relationships: Vec<PipelineRelationship>,
 }
 
-#[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
+#[derive(SimpleObject, Clone, Debug, Serialize, Deserialize, Copy)]
 pub struct PipelineRelationship {
-    pub source_id: ID,
-    pub target_id: ID,
+    pub source_id: i32,
+    pub target_id: i32,
 }
 
 #[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]

@@ -1,6 +1,6 @@
 use crate::database::environment::EnvironmentRepository;
 use crate::database::pipeline::{CreatePipeline, CreateStage, PipelineRepository, UpdatePipeline};
-use crate::graphql::schema::{CreatePipelineInput, CreateRelationshipInput, CreateStageInput, Pipeline, PipelineStage, UpdatePipelineInput};
+use crate::graphql::schema::{CreatePipelineInput, CreateRelationshipInput, CreateStageInput, Environment, Pipeline, PipelineRelationship, PipelineStage, UpdatePipelineInput};
 use crate::logic::environment::EnvironmentLogic;
 use crate::Error;
 use async_graphql::ID;
@@ -53,19 +53,69 @@ impl PipelineLogicImpl {
         update.stages = get_stages_to_create(input.stages, input.relationships);
         update
     }
+
+    async fn get_environment_map(&self, pipelines: &Vec<crate::database::entity::Pipeline>, has_stage: bool) -> Result<HashMap<Uuid, Environment>, Error> {
+        let mut environment_map = HashMap::new();
+        for pipeline in pipelines {
+            for stage in &pipeline.stages {
+                if has_stage && !environment_map.contains_key(&stage.environment_id) {
+                    let environment = self.environment_logic.get_environment_by_id(stage.environment_id).await?;
+                    environment_map.insert(stage.environment_id, environment);
+                }
+            }
+        }
+        Ok(environment_map)
+    }
+
+    fn map_stages(has_stage: bool, environment_map: &HashMap<Uuid, Environment>, pipeline: &crate::database::entity::Pipeline) -> Vec<PipelineStage> {
+        if has_stage {
+            pipeline.stages.iter().map(|stage| {
+                PipelineStage {
+                    id: stage.id.into(),
+                    environment: environment_map.get(&stage.environment_id).unwrap().to_owned(),
+                    order: stage.order_index,
+                }
+            }).collect()
+        } else {
+            vec![]
+        }
+    }
+
+    fn create_relationships(has_stage: bool, pipeline: &crate::database::entity::Pipeline) -> Vec<PipelineRelationship> {
+        if !has_stage {
+            return vec![];
+        }
+        let mut relationships = vec![];
+        pipeline.stages.iter().filter(|stage| stage.parent_stage_id.is_some()).for_each(|stage| {
+            pipeline.stages.iter().filter(|stage_inner| {
+                stage.parent_stage_id.unwrap() == stage_inner.id
+            }).for_each(|stage_inner| {
+                relationships.push(PipelineRelationship {
+                    source_id: stage_inner.order_index,
+                    target_id: stage.order_index,
+                });
+            });
+        });
+
+        relationships
+    }
 }
 
 #[async_trait::async_trait]
 impl PipelineLogic for PipelineLogicImpl {
     async fn get_pipeline_by_id(&self, env_id: Uuid) -> Result<Pipeline, Error> {
         let pipeline = self.repository.get_pipeline_by_id(env_id).await?;
-        //
+        let pipelines = vec![pipeline.clone()]; // Wrap in a vector to reuse the same logic
+        let environment_map = self.get_environment_map(&pipelines, true).await?;
+        let stages = Self::map_stages(true, &environment_map, &pipeline);
+        let relationships = Self::create_relationships(true, &pipeline);
+
         Ok(Pipeline {
             id: pipeline.id.into(),
             name: pipeline.name,
             active: pipeline.active,
-            stages: vec![], //#FIXME: Stages are not included in this mapping
-            relationships: vec![], // #FIXME: Relationships are not included in this mapping
+            stages,
+            relationships,
         })
     }
 
@@ -80,40 +130,24 @@ impl PipelineLogic for PipelineLogicImpl {
         let pipelines = self.repository.get_pipelines(team_id, name, active).await?;
         let has_stage = fields.contains(&"stages".to_string());
 
-        let mut environment_map = HashMap::new();
-        for pipeline in &pipelines {
-            for stage in &pipeline.stages {
-                if has_stage && !environment_map.contains_key(&stage.environment_id) {
-                    let environment = self.environment_logic.get_environment_by_id(stage.environment_id).await?;
-                    environment_map.insert(stage.environment_id, environment);
-                }
-            }
-        }
+        let environment_map = self.get_environment_map(&pipelines, has_stage).await?;
 
         Ok(pipelines
             .into_iter()
             .map(|pipeline| {
-                let stages = if has_stage {
-                    pipeline.stages.iter().map(|stage| {
-                        PipelineStage {
-                            id: stage.id.into(),
-                            environment: environment_map.get(&stage.environment_id).unwrap().to_owned(),
-                            order: stage.order_index,
-                        }
-                    }).collect()
-                } else {
-                    vec![]
-                };
+                let stages = Self::map_stages(has_stage, &environment_map, &pipeline);
+                let relationships = Self::create_relationships(has_stage, &pipeline);
                 Pipeline {
                     id: pipeline.id.into(),
                     name: pipeline.name,
                     active: pipeline.active,
                     stages,
-                    relationships: vec![], // Relationships are not included in this mapping
+                    relationships
                 }
             })
             .collect())
     }
+
 
     async fn create_pipeline(&self, team_id: ID, input: CreatePipelineInput) -> Result<ID, Error> {
         let team_id = Uuid::try_from(team_id).unwrap();
@@ -169,6 +203,7 @@ fn get_stages_to_create(
         })
         .collect::<Vec<CreateStage>>();
 
+    //#FIXME: This code is duplicated and should be refactored
     let cloned_stages = stages.clone();
     let relationships_map = relationships.iter().map(|relationship| {
         let stage = cloned_stages.iter().find(|stage| {
@@ -193,6 +228,84 @@ mod test {
     use crate::graphql::schema::{CreateRelationshipInput, CreateStageInput};
     use crate::logic::environment::MockEnvironmentLogic;
     use async_graphql::ID;
+
+    #[test]
+    pub fn test_map_stages_empty_environment() {
+        let environment_map = HashMap::new();
+        let pipeline = crate::database::entity::Pipeline {
+            id: Uuid::new_v4(),
+            name: "Test Pipeline".to_string(),
+            active: true,
+            team_id: Uuid::new_v4(),
+            stages: vec![],
+        };
+        let stages = PipelineLogicImpl::map_stages(false, &environment_map, &pipeline);
+        assert!(stages.is_empty());
+    }
+
+    #[test]
+    pub fn test_map_stages_with_environment() {
+        let environment_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+        let environment = Environment {
+            id: environment_id.into(),
+            name: "Test Environment".to_string(),
+            active: true,
+        };
+        let mut environment_map = HashMap::new();
+        environment_map.insert(environment_id, environment);
+
+        let pipeline = crate::database::entity::Pipeline {
+            id: Uuid::new_v4(),
+            name: "Test Pipeline".to_string(),
+            active: true,
+            team_id: Uuid::new_v4(),
+            stages: vec![
+                crate::database::entity::Stage {
+                    id: Uuid::new_v4(),
+                    pipeline_id: Uuid::new_v4(),
+                    environment_id,
+                    order_index: 0,
+                    parent_stage_id: None,
+                },
+            ],
+        };
+
+        let stages = PipelineLogicImpl::map_stages(true, &environment_map, &pipeline);
+        assert_eq!(stages.len(), 1);
+        assert_eq!(stages[0].environment.id, ID::from(environment_id));
+    }
+
+    #[test]
+    fn test_create_relationships_wth_parent() {
+        let parent_id = Uuid::new_v4();
+        let pipeline = crate::database::entity::Pipeline {
+            id: Uuid::new_v4(),
+            name: "Test Pipeline".to_string(),
+            active: true,
+            team_id: Uuid::new_v4(),
+            stages: vec![
+                crate::database::entity::Stage {
+                    id: parent_id,
+                    pipeline_id: Uuid::new_v4(),
+                    environment_id: Uuid::new_v4(),
+                    order_index: 0,
+                    parent_stage_id: None,
+                },
+                crate::database::entity::Stage {
+                    id: Uuid::new_v4(),
+                    pipeline_id: Uuid::new_v4(),
+                    environment_id: Uuid::new_v4(),
+                    order_index: 1,
+                    parent_stage_id: Some(parent_id),
+                },
+            ],
+        };
+
+        let relationships = PipelineLogicImpl::create_relationships(true, &pipeline);
+        assert_eq!(relationships.len(), 1);
+        assert_eq!(relationships[0].source_id, 0);
+        assert_eq!(relationships[0].target_id, 1);
+    }
 
     #[test]
     pub fn test_map_to_create_pipeline_with_single_stage() {
@@ -409,8 +522,7 @@ mod test {
                     stages: vec![crate::database::entity::Stage {
                         id: Uuid::parse_str(ID).unwrap(),
                         pipeline_id: Uuid::parse_str(ID).unwrap(),
-                        environment_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27")
-                            .unwrap(),
+                        environment_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
                         order_index: 0,
                         parent_stage_id: None,
                     }],
