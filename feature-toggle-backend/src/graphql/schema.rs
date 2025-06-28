@@ -60,7 +60,8 @@ pub struct PipelineRelationship {
 pub struct PipelineStage {
     pub id: ID,
     pub environment: Environment,
-    pub order: i32,
+    pub order_index: i32,
+    pub position: String,
     // pub parent_stage_id: Option<Box<PipelineStage>>,
     // pub child_stages: Vec<PipelineStage>,
 }

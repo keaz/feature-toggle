@@ -20,13 +20,14 @@ pub struct Pipeline {
     pub stages: Vec<Stage>,
 }
 
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone, Copy)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
 pub struct Stage {
     pub id: Uuid,
     pub pipeline_id: Uuid,
     pub environment_id: Uuid,
     pub order_index: i32,
     pub parent_stage_id: Option<Uuid>,
+    pub position: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]

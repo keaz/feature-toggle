@@ -73,7 +73,8 @@ impl PipelineLogicImpl {
                 PipelineStage {
                     id: stage.id.into(),
                     environment: environment_map.get(&stage.environment_id).unwrap().to_owned(),
-                    order: stage.order_index,
+                    order_index: stage.order_index,
+                    position: stage.position.clone(),
                 }
             }).collect()
         } else {
@@ -266,6 +267,7 @@ mod test {
                     environment_id,
                     order_index: 0,
                     parent_stage_id: None,
+                    position: "".to_string()
                 },
             ],
         };
@@ -290,6 +292,7 @@ mod test {
                     environment_id: Uuid::new_v4(),
                     order_index: 0,
                     parent_stage_id: None,
+                    position: "".to_string()
                 },
                 crate::database::entity::Stage {
                     id: Uuid::new_v4(),
@@ -297,6 +300,7 @@ mod test {
                     environment_id: Uuid::new_v4(),
                     order_index: 1,
                     parent_stage_id: Some(parent_id),
+                    position: "".to_string()
                 },
             ],
         };
@@ -525,6 +529,7 @@ mod test {
                         environment_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
                         order_index: 0,
                         parent_stage_id: None,
+                        position: "".to_string()
                     }],
                 })
             });

@@ -53,6 +53,7 @@ struct PipelineWithStageRow {
     environment_id: Option<Uuid>,
     order_index: Option<i32>,
     parent_stage_id: Option<Uuid>,
+    position: String,
 }
 
 #[automock]
@@ -233,6 +234,7 @@ impl PipelineRepositoryImpl {
                     environment_id: r.environment_id.unwrap(),
                     order_index: r.order_index.unwrap(),
                     parent_stage_id: r.parent_stage_id,
+                    position: r.position
                 })
             })
             .collect::<Vec<Stage>>();
@@ -253,7 +255,7 @@ impl PipelineRepository for PipelineRepositoryImpl {
         let result = sqlx::query_as::<_, PipelineWithStageRow>(
             r#"SELECT p.id as pipeline_id, p.name as pipeline_name, p.active, p.team_id, 
             s.id as stage_id, s.pipeline_id as pipeline_id_stage, s.environment_id, s.order_index,
-            s.parent_stage_id FROM pipelines p LEFT JOIN pipeline_stages s ON s.pipeline_id = p.id WHERE p.id = $1"#,
+            s.parent_stage_id, s.position FROM pipelines p LEFT JOIN pipeline_stages s ON s.pipeline_id = p.id WHERE p.id = $1"#,
         )
         .bind(id)
         .fetch_all(&self.pool)
@@ -276,7 +278,7 @@ impl PipelineRepository for PipelineRepositoryImpl {
         let mut query_builder = sqlx::QueryBuilder::new(
             r#"SELECT p.id as pipeline_id, p.name as pipeline_name, p.active, p.team_id, 
             s.id as stage_id, s.pipeline_id as pipeline_id_stage, s.environment_id, s.order_index,
-            s.parent_stage_id FROM pipelines p LEFT JOIN pipeline_stages s ON s.pipeline_id = p.id"#,
+            s.parent_stage_id, s.position FROM pipelines p LEFT JOIN pipeline_stages s ON s.pipeline_id = p.id"#,
         );
         query_builder.push(" WHERE p.team_id = ").push_bind(team_id);
 
@@ -315,11 +317,14 @@ impl PipelineRepository for PipelineRepositoryImpl {
                     environment_id: row.environment_id.unwrap(),
                     order_index: row.order_index.unwrap(),
                     parent_stage_id: row.parent_stage_id,
+                    position: row.position
                 });
             }
         }
 
-        Ok(map.into_values().collect())
+        let mut pipelines = map.into_values().collect::<Vec<Pipeline>>();
+        pipelines.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(pipelines)
     }
 
     async fn create_pipeline(&self, input: CreatePipeline) -> Result<Uuid, Error> {

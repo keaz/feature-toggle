@@ -60,6 +60,13 @@ impl Query {
         Ok(logic.get_pipelines(team_id, name, active, fields).await?)
     }
 
+    async fn pipeline(&self, ctx: &Context<'_>,
+                      #[graphql(desc = "Id of the Pipeline")] id: Uuid) -> GqlResult<Pipeline> {
+        debug!("Fetching pipeline with id: {}", id);
+        let logic = ctx.data::<Box<dyn PipelineLogic>>().unwrap();
+        Ok(logic.get_pipeline_by_id(id).await?)
+    }
+
     async fn feature(
         &self,
         ctx: &Context<'_>,
