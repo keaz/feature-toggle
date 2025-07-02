@@ -9,6 +9,7 @@ use crate::graphql::query::Query;
 use crate::middleware::access_log::AccessLogger;
 use actix_cors::Cors;
 use actix_web::{guard, web, App, HttpRequest, HttpResponse, HttpServer, Result};
+use async_graphql::extensions::ApolloTracing;
 use async_graphql::http::GraphiQLSource;
 use async_graphql::{EmptyMutation, EmptySubscription, Schema};
 use async_graphql_actix_web::{GraphQL, GraphQLSubscription};
@@ -43,6 +44,7 @@ pub async fn run() -> std::io::Result<()> {
             .data(team_logic.clone())
             .data(pipeline_logic.clone())
             .data(feature_logic.clone())
+            .extension(ApolloTracing)
             .finish();
 
         let cors = Cors::default()
