@@ -61,8 +61,8 @@ impl Query {
     }
 
     async fn pipeline(&self, ctx: &Context<'_>,
-                      #[graphql(desc = "Id of the Pipeline")] id: Uuid) -> GqlResult<Pipeline> {
-        debug!("Fetching pipeline with id: {}", id);
+                      #[graphql(desc = "Id of the Pipeline")] id: ID) -> GqlResult<Pipeline> {
+        debug!("Fetching pipeline with id: {id:?}");
         let logic = ctx.data::<Box<dyn PipelineLogic>>().unwrap();
         Ok(logic.get_pipeline_by_id(id).await?)
     }

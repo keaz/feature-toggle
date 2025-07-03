@@ -1,4 +1,5 @@
 use crate::graphql::schema::{CreateEnvironmentInput, CreateFeatureInput, CreatePipelineInput, CreateTeamInput, Environment, Feature, Pipeline, Team, UpdateEnvironmentInput, UpdateFeatureInput, UpdatePipelineInput};
+use crate::graphql::validator::InputValidator;
 use crate::logic::environment::EnvironmentLogic;
 use crate::logic::feature::FeatureLogic;
 use crate::logic::pipeline::PipelineLogic;
@@ -27,13 +28,13 @@ impl MutationRoot {
         id: ID,
         input: UpdateEnvironmentInput,
     ) -> GqlResult<Environment> {
-        info!("Updating environment with id: {:?} and input: {:?}", id, input);
+        info!("Updating environment with id: {id:?} and input: {input:?}");
         let logic = ctx.data::<Box<dyn EnvironmentLogic>>().unwrap();
         Ok(logic.update_environment(id, input).await?)
     }
 
     async fn delete_environment(&self, ctx: &Context<'_>, id: ID) -> GqlResult<bool> {
-        info!("Deleting environment with id: {:?}", id);
+        info!("Deleting environment with id: {id:?}");
         let logic = ctx.data::<Box<dyn EnvironmentLogic>>().unwrap();
         logic.delete_environment(id).await?;
         Ok(true)
@@ -51,10 +52,12 @@ impl MutationRoot {
     async fn create_pipeline(
         &self,
         ctx: &Context<'_>,
+        #[graphql(desc = "Team id")]
         team_id: ID,
         input: CreatePipelineInput,
     ) -> GqlResult<ID> {
-        info!("Creating pipeline with input: {:?}", input);
+        info!("Creating pipeline with input: {input:?}");
+        input.validate(None, Some(team_id.clone()), ctx).await?;
         let logic = ctx.data::<Box<dyn PipelineLogic>>().unwrap();
         let pipeline_id = logic.create_pipeline(team_id, input).await?;
         Ok(pipeline_id)
@@ -63,10 +66,12 @@ impl MutationRoot {
     async fn update_pipeline(
         &self,
         ctx: &Context<'_>,
-        id: ID,
+        #[graphql(desc = "Team id")] team_id: ID,
+        #[graphql(desc = "Id of the current pipeline")] id: ID,
         input: UpdatePipelineInput,
     ) -> GqlResult<Pipeline> {
-        info!("Updating pipeline with input: {:?}", input);
+        info!("Updating pipeline with input: {input:?}");
+        input.validate(Some(id.clone()), Some(team_id), ctx).await?;
         let logic = ctx.data::<Box<dyn PipelineLogic>>().unwrap();
         let pipeline = logic.update_pipeline(id, input).await?;
         Ok(pipeline)

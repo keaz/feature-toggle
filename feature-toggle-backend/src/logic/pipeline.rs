@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 #[async_trait::async_trait]
 pub trait PipelineLogic: Send + Sync {
-    async fn get_pipeline_by_id(&self, env_id: Uuid) -> Result<Pipeline, Error>;
+    async fn get_pipeline_by_id(&self, env_id: ID) -> Result<Pipeline, Error>;
     async fn get_pipelines(
         &self,
         team_id: ID,
@@ -104,8 +104,9 @@ impl PipelineLogicImpl {
 
 #[async_trait::async_trait]
 impl PipelineLogic for PipelineLogicImpl {
-    async fn get_pipeline_by_id(&self, env_id: Uuid) -> Result<Pipeline, Error> {
-        let pipeline = self.repository.get_pipeline_by_id(env_id).await?;
+    async fn get_pipeline_by_id(&self, env_id: ID) -> Result<Pipeline, Error> {
+        let pipeline_id = Uuid::try_from(env_id).unwrap();
+        let pipeline = self.repository.get_pipeline_by_id(pipeline_id).await?;
         let pipelines = vec![pipeline.clone()]; // Wrap in a vector to reuse the same logic
         let environment_map = self.get_environment_map(&pipelines, true).await?;
         let stages = Self::map_stages(true, &environment_map, &pipeline);
@@ -434,7 +435,7 @@ mod test {
 
         let logic = pipeline_logic(Box::new(repository), Box::new(environment_repo));
         let id = Uuid::parse_str(ID).unwrap();
-        let result = logic.get_pipeline_by_id(id).await;
+        let result = logic.get_pipeline_by_id(ID::from(ID)).await;
         assert!(result.is_ok());
         let pipeline = result.unwrap();
         assert_eq!(pipeline.id.to_string(), ID);
@@ -452,8 +453,7 @@ mod test {
             .returning(move |_| Err(Error::NotFound(Uuid::parse_str(ID).unwrap())));
 
         let logic = pipeline_logic(Box::new(repository), Box::new(environment_repo));
-        let id = Uuid::parse_str(ID).unwrap();
-        let result = logic.get_pipeline_by_id(id).await;
+        let result = logic.get_pipeline_by_id(ID::from(ID)).await;
 
         assert!(result.is_err());
         let error = result.err().unwrap();

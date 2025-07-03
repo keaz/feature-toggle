@@ -62,8 +62,6 @@ pub struct PipelineStage {
     pub environment: Environment,
     pub order_index: i32,
     pub position: String,
-    // pub parent_stage_id: Option<Box<PipelineStage>>,
-    // pub child_stages: Vec<PipelineStage>,
 }
 
 // Input types for mutations
@@ -132,7 +130,6 @@ pub struct CreatePipelineInput {
     pub name: String,
     #[graphql(validator(min_items = 1))]
     pub stages: Vec<CreateStageInput>,
-    // #[graphql(validator(min_items = 1))]
     pub relationships: Vec<CreateRelationshipInput>,
 }
 
