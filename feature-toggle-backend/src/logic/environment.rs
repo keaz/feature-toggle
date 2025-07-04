@@ -8,7 +8,7 @@ use uuid::Uuid;
 #[automock]
 #[async_trait::async_trait]
 pub trait EnvironmentLogic: Send + Sync {
-    async fn get_environment_by_id(&self, env_id: Uuid) -> Result<Environment, Error>;
+    async fn get_environment_by_id(&self, env_id: ID) -> Result<Environment, Error>;
 
     async fn get_environments(
         &self,
@@ -17,10 +17,16 @@ pub trait EnvironmentLogic: Send + Sync {
         active: Option<bool>,
     ) -> Result<Vec<Environment>, Error>;
 
-    async fn create_environment(&self, team_id: ID, input: CreateEnvironmentInput)
-    -> Result<Environment, Error>;
-    async fn update_environment(&self, id: ID, input: UpdateEnvironmentInput)
-    -> Result<Environment, Error>;
+    async fn create_environment(
+        &self,
+        team_id: ID,
+        input: CreateEnvironmentInput,
+    ) -> Result<Environment, Error>;
+    async fn update_environment(
+        &self,
+        id: ID,
+        input: UpdateEnvironmentInput,
+    ) -> Result<Environment, Error>;
     async fn delete_environment(&self, id: ID) -> Result<(), Error>;
 
     fn clone_box(&self) -> Box<dyn EnvironmentLogic>;
@@ -43,13 +49,14 @@ struct EnvironmentLogicImpl {
 
 #[async_trait::async_trait]
 impl EnvironmentLogic for EnvironmentLogicImpl {
-    async fn get_environment_by_id(&self, env_id: Uuid) -> Result<Environment, Error> {
-        let environment = self.repository.get_environment_by_id(env_id).await?;
+    async fn get_environment_by_id(&self, env_id: ID) -> Result<Environment, Error> {
+        let environment = self.repository.get_environment_by_id(Uuid::try_from(env_id).unwrap()).await?;
         let id = ID::from(environment.id);
         Ok(Environment {
             id,
             name: environment.name,
             active: environment.active,
+            team_id: ID::from(environment.team_id),
         })
     }
 
@@ -60,13 +67,17 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
         active: Option<bool>,
     ) -> Result<Vec<Environment>, Error> {
         let team_id = Uuid::try_from(team_id).unwrap();
-        let environments = self.repository.get_environments(team_id, name, active).await?;
+        let environments = self
+            .repository
+            .get_environments(team_id, name, active)
+            .await?;
         Ok(environments
             .into_iter()
             .map(|env| Environment {
                 id: ID::from(env.id),
                 name: env.name,
                 active: env.active,
+                team_id: ID::from(env.team_id),
             })
             .collect())
     }
@@ -76,10 +87,15 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
         team_id: ID,
         input: CreateEnvironmentInput,
     ) -> Result<Environment, Error> {
-        let input = crate::database::environment::CreateEnvironment { name: input.name, active: input.active };
+        let input = crate::database::environment::CreateEnvironment {
+            name: input.name,
+            active: input.active,
+        };
 
         if input.name.is_empty() {
-            return Err(Error::InvalidInput("Environment name cannot be empty".to_string()));
+            return Err(Error::InvalidInput(
+                "Environment name cannot be empty".to_string(),
+            ));
         }
 
         let team_id = Uuid::try_from(team_id).unwrap();
@@ -89,6 +105,7 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
             id,
             name: environment.name,
             active: environment.active,
+            team_id: ID::from(environment.team_id),
         })
     }
 
@@ -109,6 +126,7 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
             id,
             name: environment.name,
             active: environment.active,
+            team_id: ID::from(environment.team_id),
         })
     }
 
@@ -141,11 +159,12 @@ mod tests {
                     id,
                     name: "Mock Environment".to_string(),
                     active: true,
+                    team_id: Uuid::new_v4(), // Mock team ID
                 })
             });
 
         let logic = environment_logic(Box::new(mock_repository));
-        let result = logic.get_environment_by_id(id).await;
+        let result = logic.get_environment_by_id(ID::try_from(ENV_ID).unwrap()).await;
 
         assert!(result.is_ok());
         let environment = result.unwrap();
@@ -165,7 +184,7 @@ mod tests {
             .returning(move |_| Err(Error::NotFound(id)));
 
         let logic = environment_logic(Box::new(mock_repository));
-        let result = logic.get_environment_by_id(id).await;
+        let result = logic.get_environment_by_id(ID::try_from(ENV_ID).unwrap()).await;
 
         assert!(result.is_err());
         let error = result.err().unwrap();
@@ -193,11 +212,14 @@ mod tests {
                     id: expected_id,
                     name: "New Environment".to_string(),
                     active: true,
+                    team_id: Uuid::new_v4(),
                 })
             });
 
         let logic = environment_logic(Box::new(mock_repository));
-        let result = logic.create_environment(ID::try_from(ID).unwrap(), input).await;
+        let result = logic
+            .create_environment(ID::from(ID), input)
+            .await;
 
         assert!(result.is_ok());
         let environment = result.unwrap();
@@ -225,6 +247,7 @@ mod tests {
                     id: expected_id,
                     name: "Updated Environment".to_string(),
                     active: true,
+                    team_id: Uuid::new_v4(),
                 })
             });
 
@@ -277,7 +300,9 @@ mod tests {
             .returning(move |_| Ok(()));
 
         let logic = environment_logic(Box::new(mock_repository));
-        let result = logic.delete_environment(ID::try_from(ENV_ID).unwrap()).await;
+        let result = logic
+            .delete_environment(ID::from(ENV_ID))
+            .await;
 
         assert!(result.is_ok());
     }
@@ -294,7 +319,9 @@ mod tests {
             .returning(move |_| Err(Error::NotFound(id)));
 
         let logic = environment_logic(Box::new(mock_repository));
-        let result = logic.delete_environment(ID::try_from(ENV_ID).unwrap()).await;
+        let result = logic
+            .delete_environment(ID::from(ENV_ID))
+            .await;
 
         assert!(result.is_err());
         let error = result.err().unwrap();
@@ -308,7 +335,7 @@ mod tests {
     async fn test_get_environments() {
         let mut mock_repository = MockEnvironmentRepository::new();
         let expected_id = Uuid::new_v4();
-        let team_id = ID::try_from(expected_id).unwrap();
+        let team_id = ID::from(expected_id);
         mock_repository
             .expect_get_environments()
             .withf(|team, name, active| name.is_none() && active.is_none())
@@ -319,11 +346,13 @@ mod tests {
                         id: expected_id,
                         name: "Test Environment".to_string(),
                         active: true,
+                        team_id: Uuid::new_v4(),
                     },
                     crate::database::entity::Environment {
                         id: expected_id,
                         name: "Test Environment".to_string(),
                         active: true,
+                        team_id: Uuid::new_v4(),
                     },
                 ])
             });

@@ -64,13 +64,13 @@ impl EnvironmentRepositoryImpl {
 impl EnvironmentRepository for EnvironmentRepositoryImpl {
     async fn get_environment_by_id(&self, id: Uuid) -> Result<Environment, Error> {
         let result = sqlx::query_as::<_, Environment>(
-            r#"SELECT id, name, active FROM environments WHERE id = $1"#,
+            r#"SELECT id, name, active, team_id FROM environments WHERE id = $1"#,
         )
         .bind(id)
         .fetch_one(&self.pool)
         .await;
 
-        handle_error(Some(id.clone()), result)
+        handle_error(Some(id), result)
     }
 
     async fn get_environments(
@@ -80,12 +80,12 @@ impl EnvironmentRepository for EnvironmentRepositoryImpl {
         active: Option<bool>,
     ) -> Result<Vec<Environment>, Error> {
         let mut qb = QueryBuilder::<Postgres>::new(
-            "SELECT id, name, active FROM environments WHERE team_id = ",
+            "SELECT id, name, active, team_id FROM environments WHERE team_id = ",
         );
         qb.push_bind(team_id);
 
         if let Some(filter_name) = name {
-            let pattern = format!("%{}%", filter_name);
+            let pattern = format!("%{filter_name}%");
             qb.push(" AND name ILIKE ").push_bind(pattern);
         }
 
@@ -118,7 +118,7 @@ impl EnvironmentRepository for EnvironmentRepositoryImpl {
         }
         let id = Uuid::new_v4();
         let result = sqlx::query!(
-        r#"INSERT INTO environments (id, name, active, team_id) VALUES ($1, $2, $3, $4) RETURNING id,name,active"#,
+        r#"INSERT INTO environments (id, name, active, team_id) VALUES ($1, $2, $3, $4) RETURNING id,name,active, team_id"#,
         id,
         input.name,
         input.active,
@@ -132,6 +132,7 @@ impl EnvironmentRepository for EnvironmentRepositoryImpl {
             id: handled_error.id,
             name: handled_error.name,
             active: handled_error.active,
+            team_id: handled_error.team_id,
         })
     }
 
@@ -142,7 +143,7 @@ impl EnvironmentRepository for EnvironmentRepositoryImpl {
     ) -> Result<Environment, Error> {
         let existing_env = self.get_environment_by_id(id).await?;
         let result = sqlx::query!(
-            r#"UPDATE environments SET name = $1, active = $2 WHERE id = $3 RETURNING id, name, active"#,
+            r#"UPDATE environments SET name = $1, active = $2 WHERE id = $3 RETURNING id, name, active,team_id"#,
             input.name.unwrap_or(existing_env.name),
             input.active.unwrap_or(existing_env.active),
             id
@@ -155,6 +156,7 @@ impl EnvironmentRepository for EnvironmentRepositoryImpl {
             id: environment.id,
             name: environment.name,
             active: environment.active,
+            team_id: environment.team_id
         })
     }
 

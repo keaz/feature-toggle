@@ -23,13 +23,19 @@ pub struct CreateStage {
 }
 
 impl CreateStage {
-    pub fn new(id: Uuid, environment_id: Uuid, order_index: i32, parent_stage: Option<Box<CreateStage>>, position: String) -> Self {
+    pub fn new(
+        id: Uuid,
+        environment_id: Uuid,
+        order_index: i32,
+        parent_stage: Option<Box<CreateStage>>,
+        position: String,
+    ) -> Self {
         Self {
             id,
             environment_id,
             order_index,
             parent_stage,
-            position
+            position,
         }
     }
 }
@@ -94,48 +100,11 @@ impl PipelineRepositoryImpl {
     }
 
     async fn is_pipeline_exists_id(&self, id: Uuid) -> Result<Option<Uuid>, Error> {
-        let result = sqlx::query_scalar!(
-            r#"SELECT id FROM pipelines WHERE id = $1"#, id
-        ).fetch_optional(&self.pool)
+        let result = sqlx::query_scalar!(r#"SELECT id FROM pipelines WHERE id = $1"#, id)
+            .fetch_optional(&self.pool)
             .await;
 
         handle_error(Some(id), result)
-    }
-
-    async fn get_stage(
-        &self,
-        pipeline_id: Option<&Uuid>,
-        parent_stage_id: Option<&Uuid>,
-    ) -> Result<Vec<Stage>, Error> {
-        let mut query_builder = sqlx::QueryBuilder::new(
-            r#"SELECT id, pipeline_id, environment_id, order_index, parent_stage_id FROM pipeline_stages"#,
-        );
-
-        let mut has_where = false;
-        if pipeline_id.is_some() || parent_stage_id.is_some() {
-            query_builder.push(" WHERE ");
-        }
-
-        if let Some(pipeline_id) = pipeline_id {
-            query_builder.push(" pipeline_id = ");
-            query_builder.push_bind(pipeline_id);
-            has_where = true;
-        }
-        if let Some(parent_stage_id) = parent_stage_id {
-            if has_where {
-                query_builder.push(" AND ");
-            }
-            query_builder
-                .push("parent_stage_id = ")
-                .push_bind(parent_stage_id);
-        }
-
-        let result = query_builder
-            .build_query_as::<Stage>()
-            .fetch_all(&self.pool)
-            .await;
-
-        handle_error(None, result)
     }
 
     async fn create_stage(
@@ -169,12 +138,11 @@ impl PipelineRepositoryImpl {
             .map(|stage| stage.parent_stage.as_ref().map(|s| s.id))
             .collect::<Vec<Option<Uuid>>>()[..];
 
-        let positions = &stages.iter()
+        let positions = &stages
+            .iter()
             .map(|stage| stage.position.clone())
             .collect::<Vec<String>>();
 
-        let xx = format!("parent_stage_ids {:?}", parent_stage_ids);
-        let yy = format!("ids {:?}", ids);
         let result = sqlx::query!(
             r#"INSERT INTO pipeline_stages (id, pipeline_id, environment_id, order_index, parent_stage_id, position)
                SELECT unnest($1::uuid[]) AS id,
@@ -234,7 +202,7 @@ impl PipelineRepositoryImpl {
                     environment_id: r.environment_id.unwrap(),
                     order_index: r.order_index.unwrap(),
                     parent_stage_id: r.parent_stage_id,
-                    position: r.position
+                    position: r.position,
                 })
             })
             .collect::<Vec<Stage>>();
@@ -284,7 +252,7 @@ impl PipelineRepository for PipelineRepositoryImpl {
 
         if let Some(name) = name {
             query_builder.push(" AND p.name ILIKE ");
-            query_builder.push_bind(format!("%{}%", name));
+            query_builder.push_bind(format!("%{name}%"));
         }
         if let Some(active_value) = active {
             query_builder
@@ -317,7 +285,7 @@ impl PipelineRepository for PipelineRepositoryImpl {
                     environment_id: row.environment_id.unwrap(),
                     order_index: row.order_index.unwrap(),
                     parent_stage_id: row.parent_stage_id,
-                    position: row.position
+                    position: row.position,
                 });
             }
         }
@@ -356,7 +324,6 @@ impl PipelineRepository for PipelineRepositoryImpl {
         match handled_error {
             Ok(saved_pipeline) => {
                 let stages = self.create_stage(&id, input.stages, &mut tx).await;
-                //#FIXME: need to save relationships here
                 if stages.is_err() {
                     let _ = tx.rollback().await;
                     return Err(stages.err().unwrap());
@@ -393,12 +360,16 @@ impl PipelineRepository for PipelineRepositoryImpl {
             return Err(Error::DatabaseError(result.err().unwrap()));
         }
 
-        let stage_result = self.update_pipeline_stage(&input.id, input.stages, &mut tx).await;
-        if stage_result.is_err() {
-            let _ = tx.rollback().await;
-            return Err(stage_result.err().unwrap());
-        }
+        if !input.stages.is_empty() {
+            let stage_result = self
+                .update_pipeline_stage(&input.id, input.stages, &mut tx)
+                .await;
 
+            if stage_result.is_err() {
+                let _ = tx.rollback().await;
+                return Err(stage_result.err().unwrap());
+            }
+        }
         let result = handle_error(Some(input.id), result);
         match result {
             Ok(_) => {

@@ -8,7 +8,7 @@ use crate::graphql::mutation::MutationRoot;
 use crate::graphql::query::Query;
 use crate::middleware::access_log::AccessLogger;
 use actix_cors::Cors;
-use actix_web::{guard, web, App, HttpRequest, HttpResponse, HttpServer, Result};
+use actix_web::{App, HttpRequest, HttpResponse, HttpServer, Result, guard, web};
 use async_graphql::extensions::ApolloTracing;
 use async_graphql::http::GraphiQLSource;
 use async_graphql::{EmptyMutation, EmptySubscription, Schema};
@@ -34,8 +34,12 @@ pub async fn run() -> std::io::Result<()> {
     let environment_repository = database::environment::environment_repository(db_pool.clone());
     let environment_logic = logic::environment::environment_logic(environment_repository.clone());
     let team_logic = logic::team::team_logic(database::team::team_repository(db_pool.clone()));
-    let pipeline_logic = logic::pipeline::pipeline_logic(database::pipeline::pipeline_repository(db_pool.clone()), environment_logic.clone());
-    let feature_logic = logic::feature::feature_logic(database::feature::feature_repository(db_pool.clone()));
+    let pipeline_logic = logic::pipeline::pipeline_logic(
+        database::pipeline::pipeline_repository(db_pool.clone()),
+        environment_logic.clone(),
+    );
+    let feature_logic =
+        logic::feature::feature_logic(database::feature::feature_repository(db_pool.clone()));
 
     HttpServer::new(move || {
         let schema = Schema::build(Query, MutationRoot, EmptySubscription)
@@ -97,7 +101,6 @@ async fn index_ws(
 ) -> Result<HttpResponse> {
     GraphQLSubscription::new(Schema::clone(&*schema)).start(&req, payload)
 }
-
 
 fn setup_logger() -> Result<(), Box<dyn std::error::Error>> {
     log4rs::init_file("log4rs.yaml", Default::default())?;

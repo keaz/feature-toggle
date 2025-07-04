@@ -1,8 +1,6 @@
-use crate::graphql::schema::{
-    CreatePipelineInput, CreateRelationshipInput, CreateStageInput, UpdatePipelineInput,
-};
-use crate::graphql::validator::CreateInputValidator;
-use crate::logic::pipeline::PipelineLogic;
+use crate::graphql::schema::{CreateEnvironmentInput, CreateRelationshipInput, CreateStageInput, UpdateEnvironmentInput};
+use crate::graphql::validator::{CreateInputValidator, UpdateInputValidator};
+use crate::logic::environment::EnvironmentLogic;
 use async_graphql::{Context, Error, Result, ID};
 use std::collections::HashMap;
 
@@ -49,56 +47,46 @@ fn validate_duplicate_environment_and_index(stages: &[CreateStageInput]) -> Resu
     Ok(())
 }
 
-impl CreateInputValidator for CreatePipelineInput {
+impl CreateInputValidator for CreateEnvironmentInput {
     async fn validate(
         &self,
         team_id: Option<ID>,
         ctx: &Context<'_>,
     ) -> Result<(), Error> {
-        let logic = ctx.data::<Box<dyn PipelineLogic>>()?;
-        let pipelines = logic
-            .get_pipelines(
-                team_id.unwrap(),
-                Some(self.name.clone()),
-                Some(true),
-                vec![],
-            )
+        let logic = ctx.data::<Box<dyn EnvironmentLogic>>()?;
+        let environments = logic
+            .get_environments(team_id.unwrap(), Some(self.name.clone()), None)
             .await?;
-        if !pipelines.is_empty() {
+
+        if !environments.is_empty() {
             return Err(Error::new(format!(
-                "Pipeline with name '{}' already exists",
+                "Environment with name '{:?}' already exists",
                 self.name
             )));
         }
-
-        validate_relationships_and_stages(&self.stages, &self.relationships)?;
-        validate_duplicate_environment_and_index(&self.stages)?;
 
         Ok(())
     }
 }
 
-impl CreateInputValidator for UpdatePipelineInput {
+impl UpdateInputValidator for UpdateEnvironmentInput {
     async fn validate(
         &self,
         id: Option<ID>,
         ctx: &Context<'_>,
     ) -> Result<(), Error> {
-        let logic = ctx.data::<Box<dyn PipelineLogic>>()?;
-        let pipeline = logic.get_pipeline_by_id(id.clone().unwrap()).await?;
-        let pipelines = logic
-            .get_pipelines(pipeline.team_id, self.name.clone(), self.active, vec![])
+        let logic = ctx.data::<Box<dyn EnvironmentLogic>>()?;
+        let environment = logic.get_environment_by_id(id.clone().unwrap()).await?;
+        let environments = logic
+            .get_environments(environment.team_id, self.name.clone(), None)
             .await?;
-        
-        if !pipelines.is_empty() && pipelines.iter().any(|p| p.id != id.clone().unwrap()) {
+
+        if !environments.is_empty() {
             return Err(Error::new(format!(
                 "Pipeline with name '{:?}' already exists",
                 self.name
             )));
         }
-
-        validate_relationships_and_stages(&self.stages, &self.relationships)?;
-        validate_duplicate_environment_and_index(&self.stages)?;
 
         Ok(())
     }

@@ -1,5 +1,5 @@
 use crate::database::entity::{Feature, FeatureDependency, FeaturePipelineStage, FeatureType};
-use crate::database::{handle_error, Error};
+use crate::database::{Error, handle_error};
 use chrono::{DateTime, Utc};
 use mockall::automock;
 use sqlx::postgres::PgQueryResult;
@@ -118,9 +118,8 @@ impl FeatureRepositoryImpl {
     }
 
     async fn is_feature_exists_id(&self, id: Uuid) -> Result<Option<Uuid>, Error> {
-        let result = sqlx::query_scalar!(
-            r#"SELECT id FROM features WHERE id = $1"#, id
-        ).fetch_optional(&self.pool)
+        let result = sqlx::query_scalar!(r#"SELECT id FROM features WHERE id = $1"#, id)
+            .fetch_optional(&self.pool)
             .await;
 
         handle_error(Some(id), result)
@@ -171,8 +170,8 @@ impl FeatureRepositoryImpl {
             r#"SELECT feature_id, depends_on_id FROM feature_dependencies WHERE feature_id = $1"#,
             feature_id
         )
-            .fetch_all(&self.pool)
-            .await;
+        .fetch_all(&self.pool)
+        .await;
 
         let rows = handle_error(Some(*feature_id), result)?;
         let dependencies = rows
@@ -216,11 +215,13 @@ impl FeatureRepositoryImpl {
             .map(|stage| stage.parent_stage.as_ref().map(|s| s.id))
             .collect::<Vec<Option<Uuid>>>()[..];
 
-        let positions = &stages.iter()
+        let positions = &stages
+            .iter()
             .map(|stage| stage.position.clone())
             .collect::<Vec<String>>();
 
-        let enabled_values = &stages.iter()
+        let enabled_values = &stages
+            .iter()
             .map(|stage| stage.enabled)
             .collect::<Vec<bool>>();
 
@@ -273,8 +274,8 @@ impl FeatureRepositoryImpl {
             feature_ids,
             depends_on_ids,
         )
-            .execute(&mut *tx)
-            .await;
+        .execute(&mut *tx)
+        .await;
 
         handle_error(None, result)
     }
@@ -290,9 +291,10 @@ impl FeatureRepositoryImpl {
             return self.create_feature_stage(feature_id, input, tx).await;
         }
 
-        let updates = input.iter().filter(|stage| {
-            existing_stages.iter().any(|s| s.id == stage.id)
-        }).collect::<Vec<&CreateFeatureStage>>();
+        let updates = input
+            .iter()
+            .filter(|stage| existing_stages.iter().any(|s| s.id == stage.id))
+            .collect::<Vec<&CreateFeatureStage>>();
 
         if updates.is_empty() {
             // That means all stages are new, so we can delete existing stages and create new ones
@@ -302,7 +304,8 @@ impl FeatureRepositoryImpl {
             return Ok(PgQueryResult::default());
         }
 
-        self.delete_existing_stages(&existing_stages, &updates, tx).await?;
+        self.delete_existing_stages(&existing_stages, &updates, tx)
+            .await?;
 
         if !updates.is_empty() {
             self.update_existing_stages(&updates, tx).await?;
@@ -321,9 +324,10 @@ impl FeatureRepositoryImpl {
         Ok(PgQueryResult::default())
     }
 
-    async fn update_existing_stages(&self,
-                                    updates: &Vec<&CreateFeatureStage>,
-                                    tx: &mut PgConnection,
+    async fn update_existing_stages(
+        &self,
+        updates: &Vec<&CreateFeatureStage>,
+        tx: &mut PgConnection,
     ) -> Result<PgQueryResult, Error> {
         for stage in updates {
             let parent_stage_id = stage.parent_stage.as_ref().map(|p| p.id);
@@ -343,8 +347,8 @@ impl FeatureRepositoryImpl {
                 stage.enabled,
                 stage.id
             )
-                .execute(&mut *tx)
-                .await;
+            .execute(&mut *tx)
+            .await;
 
             handle_error(None, result)?;
         }
@@ -384,8 +388,8 @@ impl FeatureRepositoryImpl {
             r#"DELETE FROM features_pipeline_stages WHERE id = ANY($1)"#,
             &stage_ids[..]
         )
-            .execute(&mut *tx)
-            .await;
+        .execute(&mut *tx)
+        .await;
 
         handle_error(None, result)
     }
@@ -397,18 +401,23 @@ impl FeatureRepositoryImpl {
         tx: &mut PgConnection,
     ) -> Result<PgQueryResult, Error> {
         // Delete existing dependencies
-        self.delete_feature_dependencies(feature_id.to_owned()).await?;
+        self.delete_feature_dependencies(feature_id.to_owned())
+            .await?;
 
         // Create new dependencies
-        self.create_feature_dependencies(feature_id, dependencies, tx).await?;
+        self.create_feature_dependencies(feature_id, dependencies, tx)
+            .await?;
 
         Ok(PgQueryResult::default())
     }
 
     async fn delete_feature_stage(&self, id: Uuid) -> Result<(), Error> {
-        let result = sqlx::query!(r#"DELETE FROM features_pipeline_stages WHERE feature_id = $1"#, id)
-            .execute(&self.pool)
-            .await;
+        let result = sqlx::query!(
+            r#"DELETE FROM features_pipeline_stages WHERE feature_id = $1"#,
+            id
+        )
+        .execute(&self.pool)
+        .await;
 
         match result {
             Ok(_) => Ok(()),
@@ -417,9 +426,12 @@ impl FeatureRepositoryImpl {
     }
 
     async fn delete_feature_dependencies(&self, id: Uuid) -> Result<(), Error> {
-        let result = sqlx::query!(r#"DELETE FROM feature_dependencies WHERE feature_id = $1"#, id)
-            .execute(&self.pool)
-            .await;
+        let result = sqlx::query!(
+            r#"DELETE FROM feature_dependencies WHERE feature_id = $1"#,
+            id
+        )
+        .execute(&self.pool)
+        .await;
 
         match result {
             Ok(_) => Ok(()),
@@ -506,7 +518,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
 
         if let Some(name) = name {
             query_builder.push(" AND f.name ILIKE ");
-            query_builder.push_bind(format!("%{}%", name));
+            query_builder.push_bind(format!("%{name}%"));
         }
         if let Some(feature_type_value) = feature_type {
             let feature_type_str = match feature_type_value {
@@ -541,7 +553,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
                     description: row.description.clone(),
                     feature_type,
                     team_id: row.team_id,
-                    created_at: row.created_at.clone(),
+                    created_at: row.created_at,
                     stages: vec![],
                     dependencies: vec![],
                 }
@@ -605,8 +617,8 @@ impl FeatureRepository for FeatureRepositoryImpl {
             feature_type_str,
             input.team_id
         )
-            .fetch_one(&mut *tx)
-            .await;
+        .fetch_one(&mut *tx)
+        .await;
 
         let handled_error = handle_error(None, result);
         match handled_error {
@@ -619,7 +631,9 @@ impl FeatureRepository for FeatureRepositoryImpl {
                 }
 
                 // Create dependencies
-                let dependencies = self.create_feature_dependencies(&id, input.dependencies, &mut tx).await;
+                let dependencies = self
+                    .create_feature_dependencies(&id, input.dependencies, &mut tx)
+                    .await;
                 if dependencies.is_err() {
                     let _ = tx.rollback().await;
                     return Err(dependencies.err().unwrap());
@@ -656,8 +670,8 @@ impl FeatureRepository for FeatureRepositoryImpl {
             feature_type_str,
             input.id
         )
-            .execute(&mut *tx)
-            .await;
+        .execute(&mut *tx)
+        .await;
 
         if result.is_err() {
             let _ = tx.rollback().await;
@@ -665,14 +679,18 @@ impl FeatureRepository for FeatureRepositoryImpl {
         }
 
         // Update stages
-        let stage_result = self.update_feature_stage(&input.id, input.stages, &mut tx).await;
+        let stage_result = self
+            .update_feature_stage(&input.id, input.stages, &mut tx)
+            .await;
         if stage_result.is_err() {
             let _ = tx.rollback().await;
             return Err(stage_result.err().unwrap());
         }
 
         // Update dependencies
-        let dependencies_result = self.update_feature_dependencies(&input.id, input.dependencies, &mut tx).await;
+        let dependencies_result = self
+            .update_feature_dependencies(&input.id, input.dependencies, &mut tx)
+            .await;
         if dependencies_result.is_err() {
             let _ = tx.rollback().await;
             return Err(dependencies_result.err().unwrap());

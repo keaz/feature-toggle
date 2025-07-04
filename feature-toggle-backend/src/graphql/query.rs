@@ -14,9 +14,9 @@ impl Query {
     async fn environment(
         &self,
         ctx: &Context<'_>,
-        #[graphql(desc = "Id of object")] id: Uuid,
+        #[graphql(desc = "Id of object")] id: ID,
     ) -> GqlResult<Environment> {
-        debug!("Fetching environment with id: {}", id);
+        debug!("Fetching environment with id: {id:?}");
         let repository = ctx.data::<Box<dyn EnvironmentLogic>>().unwrap();
         Ok(repository.get_environment_by_id(id).await?)
     }
@@ -24,19 +24,18 @@ impl Query {
     async fn environments(
         &self,
         ctx: &Context<'_>,
-        #[graphql(desc = "Id of the team")]  team_id: ID,
+        #[graphql(desc = "Id of the team")] team_id: ID,
         #[graphql(desc = "Name of the environment")] name: Option<String>,
         #[graphql(desc = "Active status of the environment")] active: Option<bool>,
     ) -> GqlResult<Vec<Environment>> {
-        debug!("Fetching environments with name: {:?} and active: {:?}", name, active);
+        debug!(
+            "Fetching environments with name: {name:?} and active: {active:?}"
+        );
         let repository = ctx.data::<Box<dyn EnvironmentLogic>>().unwrap();
         Ok(repository.get_environments(team_id, name, active).await?)
     }
 
-    async fn teams(
-        &self,
-        ctx: &Context<'_>,
-    ) -> GqlResult<Vec<Team>> {
+    async fn teams(&self, ctx: &Context<'_>) -> GqlResult<Vec<Team>> {
         debug!("Fetching teams");
         let repository = ctx.data::<Box<dyn TeamLogic>>().unwrap();
         Ok(repository.get_teams(None).await?)
@@ -49,7 +48,7 @@ impl Query {
         #[graphql(desc = "Name of the environment")] name: Option<String>,
         #[graphql(desc = "Active status of the environment")] active: Option<bool>,
     ) -> GqlResult<Vec<Pipeline>> {
-        debug!("Fetching pipelines for team with id: {:?}", team_id);
+        debug!("Fetching pipelines for team with id: {team_id:?}");
 
         let mut fields = vec![];
         if ctx.look_ahead().field("stages").exists() {
@@ -60,8 +59,11 @@ impl Query {
         Ok(logic.get_pipelines(team_id, name, active, fields).await?)
     }
 
-    async fn pipeline(&self, ctx: &Context<'_>,
-                      #[graphql(desc = "Id of the Pipeline")] id: ID) -> GqlResult<Pipeline> {
+    async fn pipeline(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Id of the Pipeline")] id: ID,
+    ) -> GqlResult<Pipeline> {
         debug!("Fetching pipeline with id: {id:?}");
         let logic = ctx.data::<Box<dyn PipelineLogic>>().unwrap();
         Ok(logic.get_pipeline_by_id(id).await?)
@@ -72,7 +74,7 @@ impl Query {
         ctx: &Context<'_>,
         #[graphql(desc = "Id of the feature")] id: Uuid,
     ) -> GqlResult<Feature> {
-        debug!("Fetching feature with id: {}", id);
+        debug!("Fetching feature with id: {id}");
         let logic = ctx.data::<Box<dyn FeatureLogic>>().unwrap();
         Ok(logic.get_feature_by_id(id).await?)
     }
@@ -84,7 +86,7 @@ impl Query {
         #[graphql(desc = "Name of the feature")] name: Option<String>,
         #[graphql(desc = "Type of the feature")] feature_type: Option<FeatureType>,
     ) -> GqlResult<Vec<Feature>> {
-        debug!("Fetching features for team with id: {:?}", team_id);
+        debug!("Fetching features for team with id: {team_id:?}");
         let logic = ctx.data::<Box<dyn FeatureLogic>>().unwrap();
         Ok(logic.get_features(team_id, name, feature_type).await?)
     }

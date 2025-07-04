@@ -1,6 +1,6 @@
+use crate::Error;
 use crate::database::team::TeamRepository;
 use crate::graphql::schema::{CreateTeamInput, Team, UpdateTeamInput};
-use crate::Error;
 use async_graphql::ID;
 use uuid::Uuid;
 
@@ -8,15 +8,10 @@ use uuid::Uuid;
 pub trait TeamLogic: Send + Sync {
     async fn get_team_by_id(&self, env_id: Uuid) -> Result<Team, Error>;
 
-    async fn get_teams(
-        &self,
-        name: Option<String>,
-    ) -> Result<Vec<Team>, Error>;
+    async fn get_teams(&self, name: Option<String>) -> Result<Vec<Team>, Error>;
 
-    async fn create_team(&self, input: CreateTeamInput)
-                         -> Result<Team, Error>;
-    async fn update_team(&self, id: ID, input: UpdateTeamInput)
-                         -> Result<Team, Error>;
+    async fn create_team(&self, input: CreateTeamInput) -> Result<Team, Error>;
+    async fn update_team(&self, id: ID, input: UpdateTeamInput) -> Result<Team, Error>;
     async fn delete_team(&self, id: Uuid) -> Result<(), Error>;
 
     fn clone_box(&self) -> Box<dyn TeamLogic>;
@@ -49,10 +44,7 @@ impl TeamLogic for TeamLogicImpl {
         })
     }
 
-    async fn get_teams(
-        &self,
-        name: Option<String>,
-    ) -> Result<Vec<Team>, Error> {
+    async fn get_teams(&self, name: Option<String>) -> Result<Vec<Team>, Error> {
         let teams = self.repository.get_teams(name).await?;
         Ok(teams
             .into_iter()
@@ -64,11 +56,11 @@ impl TeamLogic for TeamLogicImpl {
             .collect())
     }
 
-    async fn create_team(
-        &self,
-        input: CreateTeamInput,
-    ) -> Result<Team, Error> {
-        let input = crate::database::team::CreateTeam { name: input.name, description: input.description };
+    async fn create_team(&self, input: CreateTeamInput) -> Result<Team, Error> {
+        let input = crate::database::team::CreateTeam {
+            name: input.name,
+            description: input.description,
+        };
 
         if input.name.is_empty() {
             return Err(Error::InvalidInput("Team name cannot be empty".to_string()));
@@ -83,11 +75,7 @@ impl TeamLogic for TeamLogicImpl {
         })
     }
 
-    async fn update_team(
-        &self,
-        id: ID,
-        input: UpdateTeamInput,
-    ) -> Result<Team, Error> {
+    async fn update_team(&self, id: ID, input: UpdateTeamInput) -> Result<Team, Error> {
         let input = crate::database::team::UpdateTeam {
             id: Uuid::try_from(id).unwrap(),
             name: input.name,
@@ -205,9 +193,7 @@ mod tests {
         let expected_id = Uuid::parse_str(ID).unwrap();
         mock_repository
             .expect_update_team()
-            .withf(|input| {
-                input.id == input.id && input.name == Some("Updated Team".to_string())
-            })
+            .withf(|input| input.id == input.id && input.name == Some("Updated Team".to_string()))
             .times(1)
             .returning(move |_| {
                 Ok(crate::database::entity::Team {
@@ -237,9 +223,7 @@ mod tests {
         let expected_id = Uuid::parse_str(ENV_ID).unwrap();
         mock_repository
             .expect_update_team()
-            .withf(|input| {
-                input.id == input.id && input.name == Some("Updated Team".to_string())
-            })
+            .withf(|input| input.id == input.id && input.name == Some("Updated Team".to_string()))
             .times(1)
             .returning(move |_| Err(Error::NotFound(expected_id)));
 

@@ -38,6 +38,7 @@ pub struct ContextRule {
 pub struct Environment {
     pub id: ID,
     pub name: String,
+    pub team_id: ID,
     pub active: bool,
 }
 
@@ -46,6 +47,7 @@ pub struct Pipeline {
     pub id: ID,
     pub name: String,
     pub active: bool,
+    pub team_id: ID,
     pub stages: Vec<PipelineStage>,
     pub relationships: Vec<PipelineRelationship>,
 }

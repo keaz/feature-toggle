@@ -12,7 +12,7 @@ async fn test_get_existing_pipeline() {
     let id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
     let result = repository.get_pipeline_by_id(id).await;
 
-    assert_eq!(result.is_ok(), true);
+    assert!(result.is_ok());
     let pipeline = result.unwrap();
     assert_eq!(pipeline.id, id);
     assert_eq!(pipeline.name, "Test Pipeline");
@@ -26,7 +26,7 @@ async fn test_get_non_existing_pipeline() {
     let id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98fca").unwrap();
     let result = repository.get_pipeline_by_id(id).await;
 
-    assert_eq!(result.is_err(), true);
+    assert!(result.is_err());
     let error = result.err().unwrap();
     assert!(matches!(error, feature_toggle_backend::Error::NotFound(_)));
 }
@@ -126,7 +126,7 @@ async fn test_create_exising_pipeline() {
     };
     let result = repository.create_pipeline(input).await;
 
-    assert_eq!(result.is_err(), true);
+    assert!(result.is_err());
     let error = result.err().unwrap();
     assert!(matches!(
         error,
@@ -147,7 +147,7 @@ async fn test_update_pipeline() {
     };
     let result = repository.update_pipeline(input).await;
 
-    assert_eq!(result.is_ok(), true);
+    assert!(result.is_ok());
     let pipeline = result.unwrap();
     assert_eq!(pipeline.name, "Updated Pipeline");
     assert!(!pipeline.active);
@@ -166,7 +166,7 @@ async fn test_update_non_existing_pipeline() {
     };
     let result = repository.update_pipeline(input).await;
 
-    assert_eq!(result.is_err(), true);
+    assert!(result.is_err());
     let error = result.err().unwrap();
     assert!(matches!(error, feature_toggle_backend::Error::NotFound(_)));
 }
@@ -179,7 +179,7 @@ async fn test_delete_pipeline() {
     let id = Uuid::parse_str("3eef17bc-9e06-411d-b5f4-7a786e68bb97").unwrap();
     let result = repository.delete_pipeline(id).await;
 
-    assert_eq!(result.is_ok(), true);
+    assert!(result.is_ok());
 }
 
 #[tokio::test]
@@ -190,7 +190,7 @@ async fn test_delete_non_existing_pipeline() {
     let id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98fca").unwrap();
     let result = repository.delete_pipeline(id).await;
 
-    assert_eq!(result.is_err(), true);
+    assert!(result.is_err());
     let error = result.err().unwrap();
     assert!(matches!(error, feature_toggle_backend::Error::NotFound(_)));
 }
@@ -202,7 +202,7 @@ async fn test_get_all_pipelines() {
     let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
     let result = repository.get_pipelines(team_id, None, None).await;
 
-    assert_eq!(result.is_ok(), true);
+    assert!(result.is_ok());
     let pipelines = result.unwrap();
     assert!(!pipelines.is_empty());
 }
@@ -217,7 +217,7 @@ async fn test_name_get_pipelines() {
         .get_pipelines(team_id, Some("Test".to_string()), None)
         .await;
 
-    assert_eq!(result.is_ok(), true);
+    assert!(result.is_ok());
     let pipelines = result.unwrap();
     assert!(pipelines.iter().all(|p| p.name.starts_with("Test")));
 }
@@ -229,10 +229,10 @@ async fn test_inactive_get_pipelines() {
     let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
     let result = repository.get_pipelines(team_id, None, Some(false)).await;
 
-    assert_eq!(result.is_ok(), true);
+    assert!(result.is_ok());
     let pipelines = result.unwrap();
     assert!(!pipelines.is_empty());
-    assert!(pipelines.iter().all(|p| p.active == false));
+    assert!(pipelines.iter().all(|p| !p.active));
 }
 
 #[tokio::test]
@@ -245,11 +245,11 @@ async fn test_name_and_active_get_pipelines() {
         .get_pipelines(team_id, Some("Test".to_string()), Some(true))
         .await;
 
-    assert_eq!(result.is_ok(), true);
+    assert!(result.is_ok());
     let pipelines = result.unwrap();
     assert!(
         pipelines
             .iter()
-            .all(|p| p.name.starts_with("Test") && p.active == true)
+            .all(|p| p.name.starts_with("Test") && p.active)
     );
 }

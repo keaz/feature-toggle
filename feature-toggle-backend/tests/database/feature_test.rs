@@ -19,8 +19,14 @@ async fn test_get_existing_feature() {
     assert_eq!(feature.name, "Test Feature");
     assert_eq!(feature.stages.len(), 1);
     let stage = feature.stages.first().unwrap();
-    assert_eq!(stage.id, Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap());
-    assert_eq!(stage.environment_id, Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap());
+    assert_eq!(
+        stage.id,
+        Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap()
+    );
+    assert_eq!(
+        stage.environment_id,
+        Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap()
+    );
     assert_eq!(stage.order_index, 0);
     assert_eq!(stage.position, "{ \"x\": 250, \"y\": 250 }");
     assert!(stage.enabled);
@@ -38,7 +44,6 @@ async fn test_get_non_existing_feature() {
     let error = result.err().unwrap();
     assert!(matches!(error, feature_toggle_backend::Error::NotFound(_)));
 }
-
 
 #[tokio::test]
 async fn test_create_feature_without_stages() {
@@ -195,16 +200,14 @@ async fn test_update_feature_with_existing_stages() {
         name: Some("Another feature Updated Feature".to_string()),
         description: Some("Updated description".to_string()),
         feature_type: Some(FeatureType::Contextual),
-        stages: vec![
-            CreateFeatureStage {
-                id: Uuid::parse_str("4eef17bc-9e06-411d-b5f4-7a786e68bb98").unwrap(),
-                environment_id: Uuid::parse_str("78ccc5d7-e1bb-4e41-b6ef-02adf5c0d017").unwrap(),
-                order_index: 0,
-                parent_stage: None,
-                position: String::from("{ x: 200, y: 200 }"),
-                enabled: false,
-            }
-        ],
+        stages: vec![CreateFeatureStage {
+            id: Uuid::parse_str("4eef17bc-9e06-411d-b5f4-7a786e68bb98").unwrap(),
+            environment_id: Uuid::parse_str("78ccc5d7-e1bb-4e41-b6ef-02adf5c0d017").unwrap(),
+            order_index: 0,
+            parent_stage: None,
+            position: String::from("{ x: 200, y: 200 }"),
+            enabled: false,
+        }],
         dependencies: vec![],
     };
     let result = repository.update_feature(input).await;
@@ -216,8 +219,14 @@ async fn test_update_feature_with_existing_stages() {
     assert!(matches!(feature.feature_type, FeatureType::Contextual));
     assert_eq!(feature.stages.len(), 1);
     let stage = feature.stages.first().unwrap();
-    assert_eq!(stage.id, Uuid::parse_str("4eef17bc-9e06-411d-b5f4-7a786e68bb98").unwrap());
-    assert_eq!(stage.environment_id, Uuid::parse_str("78ccc5d7-e1bb-4e41-b6ef-02adf5c0d017").unwrap());
+    assert_eq!(
+        stage.id,
+        Uuid::parse_str("4eef17bc-9e06-411d-b5f4-7a786e68bb98").unwrap()
+    );
+    assert_eq!(
+        stage.environment_id,
+        Uuid::parse_str("78ccc5d7-e1bb-4e41-b6ef-02adf5c0d017").unwrap()
+    );
     assert_eq!(stage.order_index, 0);
     assert_eq!(stage.position, "{ x: 200, y: 200 }");
     assert!(!stage.enabled);
@@ -238,7 +247,7 @@ async fn test_update_non_existing_feature() {
     };
     let result = repository.update_feature(input).await;
 
-    assert_eq!(result.is_err(), true);
+    assert!(result.is_err());
     let error = result.err().unwrap();
     assert!(matches!(error, feature_toggle_backend::Error::NotFound(_)));
 }
@@ -251,7 +260,7 @@ async fn test_delete_feature() {
     let id = Uuid::parse_str("3eef17bc-9e06-411d-b5f4-7a786e68bb97").unwrap();
     let result = repository.delete_feature(id).await;
 
-    assert_eq!(result.is_ok(), true);
+    assert!(result.is_ok());
 }
 
 #[tokio::test]
@@ -262,7 +271,7 @@ async fn test_delete_non_existing_feature() {
     let id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98fca").unwrap();
     let result = repository.delete_feature(id).await;
 
-    assert_eq!(result.is_err(), true);
+    assert!(result.is_err());
     let error = result.err().unwrap();
     assert!(matches!(error, feature_toggle_backend::Error::NotFound(_)));
 }
@@ -274,7 +283,7 @@ async fn test_get_all_features() {
     let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
     let result = repository.get_features(team_id, None, None).await;
 
-    assert_eq!(result.is_ok(), true);
+    assert!(result.is_ok());
     let features = result.unwrap();
     assert!(!features.is_empty());
 }
@@ -289,7 +298,7 @@ async fn test_name_get_features() {
         .get_features(team_id, Some("Test".to_string()), None)
         .await;
 
-    assert_eq!(result.is_ok(), true);
+    assert!(result.is_ok());
     let features = result.unwrap();
     assert!(features.iter().all(|p| p.name.contains("Test")));
 }
@@ -299,12 +308,18 @@ async fn test_feature_type_get_features() {
     let pool = init_pg_pool().await;
     let repository = feature::feature_repository(pool);
     let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
-    let result = repository.get_features(team_id, None, Some(FeatureType::Simple)).await;
+    let result = repository
+        .get_features(team_id, None, Some(FeatureType::Simple))
+        .await;
 
-    assert_eq!(result.is_ok(), true);
+    assert!(result.is_ok());
     let features = result.unwrap();
     assert!(!features.is_empty());
-    assert!(features.iter().all(|p| matches!(p.feature_type, FeatureType::Simple)));
+    assert!(
+        features
+            .iter()
+            .all(|p| matches!(p.feature_type, FeatureType::Simple))
+    );
 }
 
 #[tokio::test]
@@ -317,7 +332,7 @@ async fn test_name_and_feature_type_get_features() {
         .get_features(team_id, Some("Test".to_string()), Some(FeatureType::Simple))
         .await;
 
-    assert_eq!(result.is_ok(), true);
+    assert!(result.is_ok());
     let features = result.unwrap();
     assert!(
         features
@@ -386,21 +401,27 @@ async fn test_create_feature_with_stages_verification() {
     let parent_stage = feature.stages.iter().find(|s| s.id == parent_stage_id);
     assert!(parent_stage.is_some());
     let parent_stage = parent_stage.unwrap();
-    assert_eq!(parent_stage.environment_id, Uuid::parse_str("3eef17bc-9e06-411d-b5f4-7a786e68bb96").unwrap());
+    assert_eq!(
+        parent_stage.environment_id,
+        Uuid::parse_str("3eef17bc-9e06-411d-b5f4-7a786e68bb96").unwrap()
+    );
     assert_eq!(parent_stage.order_index, 0);
     assert_eq!(parent_stage.parent_stage_id, None);
     assert_eq!(parent_stage.position, "{ x: 250, y: 250 }");
-    assert_eq!(parent_stage.enabled, true);
+    assert!(parent_stage.enabled);
 
     // Find child stage
     let child_stage = feature.stages.iter().find(|s| s.id == child_stage_id);
     assert!(child_stage.is_some());
     let child_stage = child_stage.unwrap();
-    assert_eq!(child_stage.environment_id, Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap());
+    assert_eq!(
+        child_stage.environment_id,
+        Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap()
+    );
     assert_eq!(child_stage.order_index, 1);
     assert_eq!(child_stage.parent_stage_id, Some(parent_stage_id));
     assert_eq!(child_stage.position, "{ x: 500, y: 500 }");
-    assert_eq!(child_stage.enabled, true);
+    assert!(child_stage.enabled);
 }
 
 #[tokio::test]
@@ -463,7 +484,7 @@ async fn test_update_feature_with_stages() {
         order_index: 0,
         parent_stage: None,
         position: String::from("{ x: 150, y: 150 }"), // Updated position
-        enabled: false, // Updated enabled status
+        enabled: false,                               // Updated enabled status
     };
 
     // Create a new stage3 (new stage)
@@ -482,7 +503,7 @@ async fn test_update_feature_with_stages() {
     // - stage3 will be inserted (new stage)
     let update_input = UpdateFeature {
         id: feature_id,
-        name: Some(format!("{} - Updated", random_name)),
+        name: Some(format!("{random_name} - Updated")),
         description: Some("Updated description".to_string()),
         feature_type: Some(FeatureType::Contextual),
         stages: vec![updated_stage1, new_stage3],
@@ -496,9 +517,15 @@ async fn test_update_feature_with_stages() {
     let updated_feature = update_result.unwrap();
 
     // Verify feature was updated
-    assert_eq!(updated_feature.name, format!("{} - Updated", random_name));
-    assert_eq!(updated_feature.description, Some("Updated description".to_string()));
-    assert!(matches!(updated_feature.feature_type, FeatureType::Contextual));
+    assert_eq!(updated_feature.name, format!("{random_name} - Updated"));
+    assert_eq!(
+        updated_feature.description,
+        Some("Updated description".to_string())
+    );
+    assert!(matches!(
+        updated_feature.feature_type,
+        FeatureType::Contextual
+    ));
 
     // Verify stages
     assert_eq!(updated_feature.stages.len(), 2); // Should have 2 stages now
@@ -508,7 +535,7 @@ async fn test_update_feature_with_stages() {
     assert!(updated_stage1.is_some());
     let updated_stage1 = updated_stage1.unwrap();
     assert_eq!(updated_stage1.position, "{ x: 150, y: 150 }"); // Verify position was updated
-    assert_eq!(updated_stage1.enabled, false); // Verify enabled status was updated
+    assert!(!updated_stage1.enabled); // Verify enabled status was updated
 
     // Verify stage2 was deleted (should not exist)
     let deleted_stage2 = updated_feature.stages.iter().find(|s| s.id == stage2_id);
@@ -518,8 +545,11 @@ async fn test_update_feature_with_stages() {
     let new_stage3 = updated_feature.stages.iter().find(|s| s.id == stage3_id);
     assert!(new_stage3.is_some());
     let new_stage3 = new_stage3.unwrap();
-    assert_eq!(new_stage3.environment_id, Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap());
+    assert_eq!(
+        new_stage3.environment_id,
+        Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap()
+    );
     assert_eq!(new_stage3.order_index, 2);
     assert_eq!(new_stage3.position, "{ x: 300, y: 300 }");
-    assert_eq!(new_stage3.enabled, true);
+    assert!(new_stage3.enabled);
 }

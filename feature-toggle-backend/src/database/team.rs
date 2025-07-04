@@ -1,5 +1,5 @@
 use crate::database::entity::Team;
-use crate::database::{handle_error, Error};
+use crate::database::{Error, handle_error};
 use mockall::automock;
 use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
@@ -19,10 +19,7 @@ pub struct UpdateTeam {
 #[async_trait::async_trait]
 pub trait TeamRepository: Send + Sync {
     async fn get_team_by_id(&self, env_id: Uuid) -> Result<Team, Error>;
-    async fn get_teams(
-        &self,
-        name: Option<String>,
-    ) -> Result<Vec<Team>, Error>;
+    async fn get_teams(&self, name: Option<String>) -> Result<Vec<Team>, Error>;
     async fn create_team(&self, input: CreateTeam) -> Result<Team, Error>;
     async fn update_team(&self, input: UpdateTeam) -> Result<Team, Error>;
     async fn delete_team(&self, id: Uuid) -> Result<(), Error>;
@@ -53,25 +50,21 @@ impl TeamRepositoryImpl {
 #[async_trait::async_trait]
 impl TeamRepository for TeamRepositoryImpl {
     async fn get_team_by_id(&self, id: Uuid) -> Result<Team, Error> {
-        let result = sqlx::query_as::<_, Team>(
-            r#"SELECT id, name, description FROM teams WHERE id = $1"#,
-        )
-            .bind(id)
-            .fetch_one(&self.pool)
-            .await;
+        let result =
+            sqlx::query_as::<_, Team>(r#"SELECT id, name, description FROM teams WHERE id = $1"#)
+                .bind(id)
+                .fetch_one(&self.pool)
+                .await;
 
         handle_error(Some(id), result)
     }
 
-    async fn get_teams(
-        &self,
-        name: Option<String>,
-    ) -> Result<Vec<Team>, Error> {
+    async fn get_teams(&self, name: Option<String>) -> Result<Vec<Team>, Error> {
         let mut qb = QueryBuilder::<Postgres>::new("SELECT id, name, description FROM teams");
 
         if let Some(filter_name) = name {
             qb.push(" WHERE ");
-            let pattern = format!("%{}%", filter_name);
+            let pattern = format!("%{filter_name}%");
             qb.push("name ILIKE ").push_bind(pattern);
         }
 

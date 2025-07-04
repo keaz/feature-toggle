@@ -1,6 +1,8 @@
-use crate::database::environment::EnvironmentRepository;
 use crate::database::pipeline::{CreatePipeline, CreateStage, PipelineRepository, UpdatePipeline};
-use crate::graphql::schema::{CreatePipelineInput, CreateRelationshipInput, CreateStageInput, Environment, Pipeline, PipelineRelationship, PipelineStage, UpdatePipelineInput};
+use crate::graphql::schema::{
+    CreatePipelineInput, CreateRelationshipInput, CreateStageInput, Environment, Pipeline,
+    PipelineRelationship, PipelineStage, UpdatePipelineInput,
+};
 use crate::logic::environment::EnvironmentLogic;
 use crate::Error;
 use async_graphql::ID;
@@ -30,14 +32,20 @@ impl Clone for Box<dyn PipelineLogic> {
     }
 }
 
-pub fn pipeline_logic(repository: Box<dyn PipelineRepository>, environment_logic: Box<dyn EnvironmentLogic>) -> Box<dyn PipelineLogic> {
-    Box::new(PipelineLogicImpl { repository, environment_logic })
+pub fn pipeline_logic(
+    repository: Box<dyn PipelineRepository>,
+    environment_logic: Box<dyn EnvironmentLogic>,
+) -> Box<dyn PipelineLogic> {
+    Box::new(PipelineLogicImpl {
+        repository,
+        environment_logic,
+    })
 }
 
 #[derive(Clone)]
 struct PipelineLogicImpl {
     repository: Box<dyn PipelineRepository>,
-    environment_logic: Box<dyn EnvironmentLogic>
+    environment_logic: Box<dyn EnvironmentLogic>,
 }
 
 impl PipelineLogicImpl {
@@ -54,12 +62,19 @@ impl PipelineLogicImpl {
         update
     }
 
-    async fn get_environment_map(&self, pipelines: &Vec<crate::database::entity::Pipeline>, has_stage: bool) -> Result<HashMap<Uuid, Environment>, Error> {
+    async fn get_environment_map(
+        &self,
+        pipelines: &Vec<crate::database::entity::Pipeline>,
+        has_stage: bool,
+    ) -> Result<HashMap<Uuid, Environment>, Error> {
         let mut environment_map = HashMap::new();
         for pipeline in pipelines {
             for stage in &pipeline.stages {
                 if has_stage && !environment_map.contains_key(&stage.environment_id) {
-                    let environment = self.environment_logic.get_environment_by_id(stage.environment_id).await?;
+                    let environment = self
+                        .environment_logic
+                        .get_environment_by_id(stage.environment_id.into())
+                        .await?;
                     environment_map.insert(stage.environment_id, environment);
                 }
             }
@@ -67,36 +82,54 @@ impl PipelineLogicImpl {
         Ok(environment_map)
     }
 
-    fn map_stages(has_stage: bool, environment_map: &HashMap<Uuid, Environment>, pipeline: &crate::database::entity::Pipeline) -> Vec<PipelineStage> {
+    fn map_stages(
+        has_stage: bool,
+        environment_map: &HashMap<Uuid, Environment>,
+        pipeline: &crate::database::entity::Pipeline,
+    ) -> Vec<PipelineStage> {
         if has_stage {
-            pipeline.stages.iter().map(|stage| {
-                PipelineStage {
+            pipeline
+                .stages
+                .iter()
+                .map(|stage| PipelineStage {
                     id: stage.id.into(),
-                    environment: environment_map.get(&stage.environment_id).unwrap().to_owned(),
+                    environment: environment_map
+                        .get(&stage.environment_id)
+                        .unwrap()
+                        .to_owned(),
                     order_index: stage.order_index,
                     position: stage.position.clone(),
-                }
-            }).collect()
+                })
+                .collect()
         } else {
             vec![]
         }
     }
 
-    fn create_relationships(has_stage: bool, pipeline: &crate::database::entity::Pipeline) -> Vec<PipelineRelationship> {
+    fn create_relationships(
+        has_stage: bool,
+        pipeline: &crate::database::entity::Pipeline,
+    ) -> Vec<PipelineRelationship> {
         if !has_stage {
             return vec![];
         }
         let mut relationships = vec![];
-        pipeline.stages.iter().filter(|stage| stage.parent_stage_id.is_some()).for_each(|stage| {
-            pipeline.stages.iter().filter(|stage_inner| {
-                stage.parent_stage_id.unwrap() == stage_inner.id
-            }).for_each(|stage_inner| {
-                relationships.push(PipelineRelationship {
-                    source_id: stage_inner.order_index,
-                    target_id: stage.order_index,
-                });
+        pipeline
+            .stages
+            .iter()
+            .filter(|stage| stage.parent_stage_id.is_some())
+            .for_each(|stage| {
+                pipeline
+                    .stages
+                    .iter()
+                    .filter(|stage_inner| stage.parent_stage_id.unwrap() == stage_inner.id)
+                    .for_each(|stage_inner| {
+                        relationships.push(PipelineRelationship {
+                            source_id: stage_inner.order_index,
+                            target_id: stage.order_index,
+                        });
+                    });
             });
-        });
 
         relationships
     }
@@ -118,6 +151,7 @@ impl PipelineLogic for PipelineLogicImpl {
             active: pipeline.active,
             stages,
             relationships,
+            team_id: pipeline.team_id.into()
         })
     }
 
@@ -144,12 +178,12 @@ impl PipelineLogic for PipelineLogicImpl {
                     name: pipeline.name,
                     active: pipeline.active,
                     stages,
-                    relationships
+                    relationships,
+                    team_id: pipeline.team_id.into(),
                 }
             })
             .collect())
     }
-
 
     async fn create_pipeline(&self, team_id: ID, input: CreatePipelineInput) -> Result<ID, Error> {
         let team_id = Uuid::try_from(team_id).unwrap();
@@ -165,7 +199,8 @@ impl PipelineLogic for PipelineLogicImpl {
             id: pipeline.id.into(),
             name: pipeline.name,
             active: pipeline.active,
-            stages: vec![], //#FIXME: Stages are not included in this mapping
+            team_id: pipeline.team_id.into(),
+            stages: vec![],        //#FIXME: Stages are not included in this mapping
             relationships: vec![], //#FIXME: Relationships are not included in this mapping
         })
     }
@@ -201,18 +236,31 @@ fn get_stages_to_create(
     let mut stages = stages
         .into_iter()
         .map(|stage| {
-            CreateStage::new(Uuid::new_v4(), Uuid::try_from(stage.environment_id.clone()).unwrap(), stage.order_index, None, stage.position)
+            CreateStage::new(
+                Uuid::new_v4(),
+                Uuid::try_from(stage.environment_id.clone()).unwrap(),
+                stage.order_index,
+                None,
+                stage.position,
+            )
         })
         .collect::<Vec<CreateStage>>();
 
     //#FIXME: This code is duplicated and should be refactored
     let cloned_stages = stages.clone();
-    let relationships_map = relationships.iter().map(|relationship| {
-        let stage = cloned_stages.iter().find(|stage| {
-            stage.order_index == relationship.source_id
-        });
-        (relationship.source_id, relationship.target_id, stage.unwrap()) // Stage should always be present
-    }).collect::<Vec<(i32, i32, &CreateStage)>>();
+    let relationships_map = relationships
+        .iter()
+        .map(|relationship| {
+            let stage = cloned_stages
+                .iter()
+                .find(|stage| stage.order_index == relationship.source_id);
+            (
+                relationship.source_id,
+                relationship.target_id,
+                stage.unwrap(),
+            ) // Stage should always be present
+        })
+        .collect::<Vec<(i32, i32, &CreateStage)>>();
 
     for (_, target_id, stage) in relationships_map {
         if let Some(target_stage) = stages.iter_mut().find(|s| s.order_index == target_id) {
@@ -252,6 +300,7 @@ mod test {
             id: environment_id.into(),
             name: "Test Environment".to_string(),
             active: true,
+            team_id: environment_id.into(), // I'm lazy here, use the env id as the team id
         };
         let mut environment_map = HashMap::new();
         environment_map.insert(environment_id, environment);
@@ -261,16 +310,14 @@ mod test {
             name: "Test Pipeline".to_string(),
             active: true,
             team_id: Uuid::new_v4(),
-            stages: vec![
-                crate::database::entity::Stage {
-                    id: Uuid::new_v4(),
-                    pipeline_id: Uuid::new_v4(),
-                    environment_id,
-                    order_index: 0,
-                    parent_stage_id: None,
-                    position: "".to_string()
-                },
-            ],
+            stages: vec![crate::database::entity::Stage {
+                id: Uuid::new_v4(),
+                pipeline_id: Uuid::new_v4(),
+                environment_id,
+                order_index: 0,
+                parent_stage_id: None,
+                position: "".to_string(),
+            }],
         };
 
         let stages = PipelineLogicImpl::map_stages(true, &environment_map, &pipeline);
@@ -293,7 +340,7 @@ mod test {
                     environment_id: Uuid::new_v4(),
                     order_index: 0,
                     parent_stage_id: None,
-                    position: "".to_string()
+                    position: "".to_string(),
                 },
                 crate::database::entity::Stage {
                     id: Uuid::new_v4(),
@@ -301,7 +348,7 @@ mod test {
                     environment_id: Uuid::new_v4(),
                     order_index: 1,
                     parent_stage_id: Some(parent_id),
-                    position: "".to_string()
+                    position: "".to_string(),
                 },
             ],
         };
@@ -317,13 +364,11 @@ mod test {
         let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
         let input = CreatePipelineInput {
             name: "Test Pipeline".to_string(),
-            stages: vec![
-                CreateStageInput {
-                    environment_id: ID::from("3eef17bc-9e06-411d-b5f4-7a786e68bb96"),
-                    order_index: 0,
-                    position: "".to_string()
-                },
-            ],
+            stages: vec![CreateStageInput {
+                environment_id: ID::from("3eef17bc-9e06-411d-b5f4-7a786e68bb96"),
+                order_index: 0,
+                position: "".to_string(),
+            }],
             relationships: vec![],
         };
         let create_pipeline = map_to_create_pipeline(team_id, input);
@@ -352,7 +397,7 @@ mod test {
             CreateRelationshipInput {
                 source_id: 3,
                 target_id: 4,
-            }
+            },
         ];
         let input = CreatePipelineInput {
             name: "Test Pipeline".to_string(),
@@ -360,28 +405,28 @@ mod test {
                 CreateStageInput {
                     environment_id: ID::from("e74a6c91-33b7-467f-b2ec-b01434a0bc96"),
                     order_index: 0,
-                    position: "".to_string()
+                    position: "".to_string(),
                 },
                 CreateStageInput {
                     environment_id: ID::from("81cf8b7d-4945-4a30-96a2-e27559e97fac"),
                     order_index: 1,
-                    position: "".to_string()
+                    position: "".to_string(),
                 },
                 CreateStageInput {
                     environment_id: ID::from("13728519-a82b-4987-b82a-3fb57652388f"),
                     order_index: 2,
-                    position: "".to_string()
+                    position: "".to_string(),
                 },
                 CreateStageInput {
                     environment_id: ID::from("cb1d22be-bc57-4626-abf2-7534de556586"),
                     order_index: 3,
-                    position: "".to_string()
+                    position: "".to_string(),
                 },
                 CreateStageInput {
                     environment_id: ID::from("06f28625-df1d-499f-a4ee-5629a8b6a169"),
                     order_index: 4,
-                    position: "".to_string()
-                }
+                    position: "".to_string(),
+                },
             ],
             relationships,
         };
@@ -395,22 +440,34 @@ mod test {
         let parent_stage = &stages.get(1).unwrap().parent_stage;
         assert!(parent_stage.is_some());
         let parent_stage = parent_stage.as_ref().unwrap();
-        assert_eq!(parent_stage.environment_id, Uuid::parse_str("e74a6c91-33b7-467f-b2ec-b01434a0bc96").unwrap());
+        assert_eq!(
+            parent_stage.environment_id,
+            Uuid::parse_str("e74a6c91-33b7-467f-b2ec-b01434a0bc96").unwrap()
+        );
 
         let parent_stage = &stages.get(2).unwrap().parent_stage;
         assert!(parent_stage.is_some());
         let parent_stage = parent_stage.as_ref().unwrap();
-        assert_eq!(parent_stage.environment_id, Uuid::parse_str("81cf8b7d-4945-4a30-96a2-e27559e97fac").unwrap());
+        assert_eq!(
+            parent_stage.environment_id,
+            Uuid::parse_str("81cf8b7d-4945-4a30-96a2-e27559e97fac").unwrap()
+        );
 
         let parent_stage = &stages.get(3).unwrap().parent_stage;
         assert!(parent_stage.is_some());
         let parent_stage = parent_stage.as_ref().unwrap();
-        assert_eq!(parent_stage.environment_id, Uuid::parse_str("e74a6c91-33b7-467f-b2ec-b01434a0bc96").unwrap());
+        assert_eq!(
+            parent_stage.environment_id,
+            Uuid::parse_str("e74a6c91-33b7-467f-b2ec-b01434a0bc96").unwrap()
+        );
 
         let parent_stage = &stages.get(4).unwrap().parent_stage;
         assert!(parent_stage.is_some());
         let parent_stage = parent_stage.as_ref().unwrap();
-        assert_eq!(parent_stage.environment_id, Uuid::parse_str("cb1d22be-bc57-4626-abf2-7534de556586").unwrap());
+        assert_eq!(
+            parent_stage.environment_id,
+            Uuid::parse_str("cb1d22be-bc57-4626-abf2-7534de556586").unwrap()
+        );
     }
 
     #[tokio::test]
@@ -501,14 +558,14 @@ mod test {
         let stages = vec![CreateStageInput {
             environment_id: ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"),
             order_index: 0,
-            position: "".to_string()
+            position: "".to_string(),
         }];
 
         let input = UpdatePipelineInput {
             name: Some(NAME.to_string()),
             active: Some(true),
             stages,
-            relationships: vec![]
+            relationships: vec![],
         };
 
         repository
@@ -526,10 +583,11 @@ mod test {
                     stages: vec![crate::database::entity::Stage {
                         id: Uuid::parse_str(ID).unwrap(),
                         pipeline_id: Uuid::parse_str(ID).unwrap(),
-                        environment_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
+                        environment_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27")
+                            .unwrap(),
                         order_index: 0,
                         parent_stage_id: None,
-                        position: "".to_string()
+                        position: "".to_string(),
                     }],
                 })
             });
@@ -553,7 +611,7 @@ mod test {
             name: Some("Non-existing Pipeline".to_string()),
             active: Some(false),
             stages: vec![],
-            relationships: vec![]
+            relationships: vec![],
         };
 
         repository
@@ -638,7 +696,12 @@ mod test {
 
         let logic = pipeline_logic(Box::new(repository), Box::new(environment_repo));
         let result = logic
-            .get_pipelines(ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"), None, None, vec![])
+            .get_pipelines(
+                ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"),
+                None,
+                None,
+                vec![],
+            )
             .await;
         assert!(result.is_ok());
     }

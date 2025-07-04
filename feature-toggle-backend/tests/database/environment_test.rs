@@ -10,7 +10,7 @@ async fn test_get_existing_environment() {
     let id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
     let result = repository.get_environment_by_id(id).await;
 
-    assert_eq!(result.is_ok(), true);
+    assert!(result.is_ok());
     let environment = result.unwrap();
     assert_eq!(environment.id, id);
     assert_eq!(environment.name, "Test Environment");
@@ -24,12 +24,9 @@ async fn test_get_not_found_environment() {
     let id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98fca").unwrap();
     let result = repository.get_environment_by_id(id).await;
 
-    assert_eq!(result.is_err(), true);
+    assert!(result.is_err());
     let error = result.err().unwrap();
-    assert!(matches!(
-        error,
-        feature_toggle_backend::Error::NotFound(_)
-    ));
+    assert!(matches!(error, feature_toggle_backend::Error::NotFound(_)));
 }
 
 #[tokio::test]
@@ -44,7 +41,7 @@ async fn test_create_environment() {
     let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
     let result = repository.create_environment(team_id, input).await;
 
-    assert_eq!(result.is_ok(), true);
+    assert!(result.is_ok());
     let environment = result.unwrap();
     assert_eq!(environment.name, "New Environment");
     assert!(environment.active);
@@ -82,10 +79,10 @@ async fn test_update_environment() {
     };
     let result = repository.update_environment(id, input).await;
 
-    assert_eq!(result.is_ok(), true);
+    assert!(result.is_ok());
     let environment = result.unwrap();
     assert_eq!(environment.name, "Updated Environment");
-    assert_eq!(environment.active, false);
+    assert!(!environment.active);
 }
 
 #[tokio::test]
@@ -100,12 +97,9 @@ async fn test_not_found_update_environment() {
     };
     let result = repository.update_environment(id, input).await;
 
-    assert_eq!(result.is_err(), true);
+    assert!(result.is_err());
     let error = result.err().unwrap();
-    assert!(matches!(
-        error,
-        feature_toggle_backend::Error::NotFound(_)
-    ));
+    assert!(matches!(error, feature_toggle_backend::Error::NotFound(_)));
 }
 
 #[tokio::test]
@@ -116,7 +110,7 @@ async fn test_delete_environment() {
     let id = Uuid::parse_str("1ab6ca79-a4fc-44ba-87e2-12884edf17f7").unwrap();
     let result = repository.delete_environment(id).await;
 
-    assert_eq!(result.is_ok(), true);
+    assert!(result.is_ok());
 }
 
 #[tokio::test]
@@ -127,12 +121,9 @@ async fn test_not_found_delete_environment() {
     let id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98fca").unwrap();
     let result = repository.delete_environment(id).await;
 
-    assert_eq!(result.is_err(), true);
+    assert!(result.is_err());
     let error = result.err().unwrap();
-    assert!(matches!(
-        error,
-        feature_toggle_backend::Error::NotFound(_)
-    ));
+    assert!(matches!(error, feature_toggle_backend::Error::NotFound(_)));
 }
 
 #[tokio::test]
@@ -143,7 +134,7 @@ async fn test_non_param_get_environments() {
     let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
     let result = repository.get_environments(team_id, None, None).await;
 
-    assert_eq!(result.is_ok(), true);
+    assert!(result.is_ok());
     let environments = result.unwrap();
     assert!(!environments.is_empty());
     assert!(
@@ -161,7 +152,7 @@ async fn test_active_param_get_environments() {
     let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
     let result = repository.get_environments(team_id, None, Some(true)).await;
 
-    assert_eq!(result.is_ok(), true);
+    assert!(result.is_ok());
     let environments = result.unwrap();
     assert!(!environments.is_empty());
     assert!(environments.iter().all(|env| env.active));
@@ -177,7 +168,7 @@ async fn test_name_param_get_environments() {
         .get_environments(team_id, Some("Test".to_string()), None)
         .await;
 
-    assert_eq!(result.is_ok(), true);
+    assert!(result.is_ok());
     let environments = result.unwrap();
     assert!(!environments.is_empty());
     assert!(environments.iter().all(|env| env.name.contains("Test")));
@@ -193,7 +184,7 @@ async fn test_name_and_active_param_get_environments() {
         .get_environments(team_id, Some("Test".to_string()), Some(true))
         .await;
 
-    assert_eq!(result.is_ok(), true);
+    assert!(result.is_ok());
     let environments = result.unwrap();
     assert!(!environments.is_empty());
     assert!(

@@ -47,11 +47,15 @@ ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO public.pipeline_stages(id, pipeline_id, environment_id, parent_stage_id, order_index, position)
 VALUES ('51ecc366-f1cd-4d3d-ab73-fa60bad98f27', '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
-        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', NULL, 0, 0),
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', NULL, 0, '{ "x": 250, "y": 250 }'),
        ('1ab6ca79-a4fc-44ba-87e2-12884edf17f7', '1ab6ca79-a4fc-44ba-87e2-12884edf17f7',
-        '06f28625-df1d-499f-a4ee-5629a8b6a169', NULL, 0, 0),
+        '06f28625-df1d-499f-a4ee-5629a8b6a169', NULL, 0, '{ "x": 250, "y": 250 }'),
        ('3eef17bc-9e06-411d-b5f4-7a786e68bb96', '3eef17bc-9e06-411d-b5f4-7a786e68bb96',
-        '78ccc5d7-e1bb-4e41-b6ef-02adf5c0d017', NULL, 0, 0)
+        '78ccc5d7-e1bb-4e41-b6ef-02adf5c0d017', NULL, 0, '{ "x": 250, "y": 250 }'),
+       ('3eef17bc-9e06-411d-b5f4-7a786e68bb97', '4eef17bc-9e06-411d-b5f4-7a786e68bb96',
+        '78ccc5d7-e1bb-4e41-b6ef-02adf5c0d017', NULL, 0, '{ "x": 250, "y": 250 }'),
+       ('3eef17bc-9e06-411d-b5f4-7a786e68bb99', '3eef17bc-9e06-411d-b5f4-7a786e68bb97',
+        '78ccc5d7-e1bb-4e41-b6ef-02adf5c0d017', NULL, 0, '{ "x": 250, "y": 250 }')
 ON CONFLICT (id) DO NOTHING;
 
 DELETE

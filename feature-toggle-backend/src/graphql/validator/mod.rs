@@ -1,8 +1,22 @@
 use async_graphql::{Context, Error, ID};
 
 pub mod pipeline;
-mod team;
+pub mod team;
+pub mod environment;
 
-pub trait InputValidator {
-    async fn validate(&self, id: Option<ID>, team_id: Option<ID>, ctx: &Context<'_>) -> async_graphql::Result<(), Error>;
+pub trait CreateInputValidator {
+    async fn validate(
+        &self,
+        team_id: Option<ID>,
+        ctx: &Context<'_>,
+    ) -> async_graphql::Result<(), Error>;
 }
+
+pub trait UpdateInputValidator {
+    async fn validate(
+        &self,
+        id: Option<ID>,
+        ctx: &Context<'_>,
+    ) -> async_graphql::Result<(), Error>;
+}
+

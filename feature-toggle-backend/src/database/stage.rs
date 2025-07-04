@@ -69,7 +69,7 @@ impl StageRepository for StageRepositoryImpl {
 
         if let Some(pipeline_id) = pipeline_id {
             query_builder.push(" pipeline_id ILIKE ");
-            query_builder.push_bind(format!("%{}%", pipeline_id));
+            query_builder.push_bind(format!("%{pipeline_id}%"));
             has_where = true;
         }
         if let Some(parent_stage_id) = parent_stage_id {

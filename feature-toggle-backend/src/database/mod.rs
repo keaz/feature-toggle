@@ -7,8 +7,8 @@ pub mod team;
 
 use crate::Error;
 use log::error;
-use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use sqlx::postgres::PgPoolOptions;
 use std::env;
 use uuid::Uuid;
 
@@ -21,13 +21,12 @@ pub async fn init_pg_pool() -> PgPool {
         .expect("Failed to connect to Postgres")
 }
 
-
 pub fn handle_error<T>(id: Option<Uuid>, result: Result<T, sqlx::Error>) -> Result<T, Error> {
     if let Ok(record) = result {
         Ok(record)
     } else {
         let error = result.err().unwrap();
-        error!("Database error: {}", error);
+        error!("Database error: {error}");
         match error {
             sqlx::Error::RowNotFound => Err(Error::NotFound(id.unwrap())),
             _ => Err(Error::DatabaseError(error)),
