@@ -5,7 +5,7 @@ use async_graphql::{Context, Error, ID};
 impl CreateInputValidator for CreateTeamInput {
     async fn validate(
         &self,
-        team_id: Option<ID>,
+        _team_id: Option<ID>,
         ctx: &Context<'_>,
     ) -> async_graphql::Result<(), Error> {
         let logic = ctx.data::<Box<dyn crate::logic::team::TeamLogic>>()?;

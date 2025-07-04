@@ -1,7 +1,7 @@
 use crate::graphql::schema::{
     CreatePipelineInput, CreateRelationshipInput, CreateStageInput, UpdatePipelineInput,
 };
-use crate::graphql::validator::CreateInputValidator;
+use crate::graphql::validator::{CreateInputValidator, UpdateInputValidator};
 use crate::logic::pipeline::PipelineLogic;
 use async_graphql::{Context, Error, Result, ID};
 use std::collections::HashMap;
@@ -78,7 +78,7 @@ impl CreateInputValidator for CreatePipelineInput {
     }
 }
 
-impl CreateInputValidator for UpdatePipelineInput {
+impl UpdateInputValidator for UpdatePipelineInput {
     async fn validate(
         &self,
         id: Option<ID>,

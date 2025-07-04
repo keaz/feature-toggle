@@ -1,4 +1,3 @@
-use crate::Error;
 use crate::database::entity::FeatureType as EntityFeatureType;
 use crate::database::feature::{
     CreateFeature, CreateFeatureStage, FeatureRepository, UpdateFeature,
@@ -7,6 +6,7 @@ use crate::graphql::schema::{
     CreateFeatureInput, CreateFeatureStageInput, CreateRelationshipInput, Feature,
     FeatureType as GraphQLFeatureType, UpdateFeatureInput,
 };
+use crate::Error;
 use async_graphql::ID;
 use uuid::Uuid;
 
@@ -123,7 +123,7 @@ impl FeatureLogicImpl {
             name: Some(input.name),
             description: input.description,
             feature_type,
-            stages: vec![],
+            stages,
             dependencies: vec![],
         }
     }
