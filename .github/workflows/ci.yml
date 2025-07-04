@@ -31,7 +31,10 @@ jobs:
         run: echo "POSTGRES_CONTAINER_ID=$(docker ps --filter 'ancestor=postgres:latest' -q)" >> $GITHUB_ENV
 
       - name: Copy SQL to the container
-        run: docker cp ./init.sql ${{ env.POSTGRES_CONTAINER_ID }}:/docker-entrypoint-initdb.d/init.sql
+        run: docker cp ./init.sql ${{ env.POSTGRES_CONTAINER_ID }}:/init.sql
+
+      - name: Execute SQL script
+        run: docker exec ${{ env.POSTGRES_CONTAINER_ID }} psql -U postgres -d feature_toggle -f /init.sql
 
       - name: Set up Rust
         uses: actions-rs/toolchain@v1
