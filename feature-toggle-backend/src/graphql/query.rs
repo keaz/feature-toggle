@@ -72,9 +72,9 @@ impl Query {
     async fn feature(
         &self,
         ctx: &Context<'_>,
-        #[graphql(desc = "Id of the feature")] id: Uuid,
+        #[graphql(desc = "Id of the feature")] id: ID,
     ) -> GqlResult<Feature> {
-        debug!("Fetching feature with id: {id}");
+        debug!("Fetching feature with id: {id:?}");
         let logic = ctx.data::<Box<dyn FeatureLogic>>().unwrap();
         Ok(logic.get_feature_by_id(id).await?)
     }

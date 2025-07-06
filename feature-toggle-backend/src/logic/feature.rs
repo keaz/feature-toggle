@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 #[async_trait::async_trait]
 pub trait FeatureLogic: Send + Sync {
-    async fn get_feature_by_id(&self, id: Uuid) -> Result<Feature, Error>;
+    async fn get_feature_by_id(&self, id: ID) -> Result<Feature, Error>;
     async fn get_features(
         &self,
         team_id: ID,
@@ -135,7 +135,8 @@ impl FeatureLogicImpl {
             description: feature.description,
             feature_type: Self::map_entity_to_graphql_feature_type(feature.feature_type),
             enabled: None, // This would need to be determined based on the feature's stages
-            rules: None,   // This would need to be determined based on the feature's type
+            contextual_types: None,   // This would need to be determined based on the feature's type
+            team_id: feature.team_id.into(),
             dependencies: feature
                 .dependencies
                 .into_iter()
@@ -147,8 +148,8 @@ impl FeatureLogicImpl {
 
 #[async_trait::async_trait]
 impl FeatureLogic for FeatureLogicImpl {
-    async fn get_feature_by_id(&self, id: Uuid) -> Result<Feature, Error> {
-        let feature = self.repository.get_feature_by_id(id).await?;
+    async fn get_feature_by_id(&self, id: ID) -> Result<Feature, Error> {
+        let feature = self.repository.get_feature_by_id(Uuid::try_from(id).unwrap()).await?;
         Ok(Self::map_entity_to_graphql_feature(feature))
     }
 
@@ -272,7 +273,7 @@ mod test {
 
         let logic = feature_logic(Box::new(repository));
         let id = Uuid::parse_str(ID).unwrap();
-        let result = logic.get_feature_by_id(id).await;
+        let result = logic.get_feature_by_id(ID::from(ID)).await;
 
         assert!(result.is_ok());
         let feature = result.unwrap();
@@ -295,7 +296,7 @@ mod test {
 
         let logic = feature_logic(Box::new(repository));
         let id = Uuid::parse_str(ID).unwrap();
-        let result = logic.get_feature_by_id(id).await;
+        let result = logic.get_feature_by_id(ID::from(ID)).await;
 
         assert!(result.is_err());
         let error = result.err().unwrap();
@@ -311,7 +312,7 @@ mod test {
             description: Some("New feature description".to_string()),
             feature_type: GraphQLFeatureType::Simple,
             enabled: Some(true),
-            rules: None,
+            context: None,
             dependencies: vec![],
             relationships: vec![],
             stages: vec![],
@@ -348,7 +349,7 @@ mod test {
             description: Some("Updated description".to_string()),
             feature_type: GraphQLFeatureType::Contextual,
             enabled: Some(true),
-            rules: None,
+            context: None,
             dependencies: vec![],
             relationships: vec![],
             stages: vec![],

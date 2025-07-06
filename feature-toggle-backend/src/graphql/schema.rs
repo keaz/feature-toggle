@@ -23,15 +23,23 @@ pub struct Feature {
     pub description: Option<String>,
     pub feature_type: FeatureType,
     pub enabled: Option<bool>,
-    pub rules: Option<Vec<ContextRule>>,
     pub dependencies: Vec<ID>,
+    pub team_id: ID,
+    pub contextual_types: Option<Vec<ContextualType>>,
 }
 
 #[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
-pub struct ContextRule {
-    pub key: String,
+pub struct ContextualType {
+    pub id: ID,
+    pub name: String,
+    pub description: Option<String>,
+    pub entries: Vec<ContextualEntry>,
+}
+
+#[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
+pub struct ContextualEntry {
+    pub id: ID,
     pub value: String,
-    pub operator: RuleOperator,
 }
 
 #[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
@@ -74,7 +82,7 @@ pub struct CreateFeatureInput {
     pub description: Option<String>,
     pub feature_type: FeatureType,
     pub enabled: Option<bool>,
-    pub rules: Option<Vec<ContextRuleInput>>,
+    pub context: Option<Vec<CreateContextualTypeInput>>,
     #[graphql(validator(min_items = 0))]
     pub dependencies: Vec<ID>,
     #[graphql(validator(min_items = 0))]
@@ -84,6 +92,13 @@ pub struct CreateFeatureInput {
 }
 
 #[derive(InputObject, Debug)]
+pub struct CreateContextualTypeInput {
+    pub key: String,
+    pub entries: Vec<String>, // List of allowed values,
+}
+
+
+#[derive(InputObject, Debug)]
 pub struct UpdateFeatureInput {
     pub id: ID,
     #[graphql(validator(min_length = 3, max_length = 100))]
@@ -91,7 +106,7 @@ pub struct UpdateFeatureInput {
     pub description: Option<String>,
     pub feature_type: FeatureType,
     pub enabled: Option<bool>,
-    pub rules: Option<Vec<ContextRuleInput>>,
+    pub context: Option<Vec<CreateContextualTypeInput>>,
     #[graphql(validator(min_items = 0))]
     pub dependencies: Vec<ID>,
     #[graphql(validator(min_items = 0))]
@@ -110,13 +125,24 @@ pub struct CreateFeatureStageInput {
     pub position: String,
 }
 
-#[derive(InputObject, Debug)]
-pub struct ContextRuleInput {
-    #[graphql(validator(min_length = 1, max_length = 50))]
-    pub key: String,
-    #[graphql(validator(min_length = 1, max_length = 100))]
-    pub value: String,
-    pub operator: RuleOperator,
+pub trait StageInput {
+    fn environment_id(&self) -> &ID;
+    fn order_index(&self) -> i32;
+    fn position(&self) -> &String;
+}
+
+impl StageInput for CreateFeatureStageInput {
+    fn environment_id(&self) -> &ID {
+        &self.environment_id
+    }
+
+    fn order_index(&self) -> i32 {
+        self.order_index
+    }
+
+    fn position(&self) -> &String {
+        &self.position
+    }
 }
 
 #[derive(InputObject, Debug)]
@@ -135,6 +161,7 @@ pub struct CreatePipelineInput {
     pub relationships: Vec<CreateRelationshipInput>,
 }
 
+
 #[derive(InputObject, Debug)]
 pub struct CreateRelationshipInput {
     #[graphql(validator(minimum = 0))]
@@ -150,6 +177,20 @@ pub struct CreateStageInput {
     pub order_index: i32,
     #[graphql(validator(min_length = 1, max_length = 50))]
     pub position: String,
+}
+
+impl StageInput for CreateStageInput {
+    fn environment_id(&self) -> &ID {
+        &self.environment_id
+    }
+
+    fn order_index(&self) -> i32 {
+        self.order_index
+    }
+
+    fn position(&self) -> &String {
+        &self.position
+    }
 }
 
 #[derive(InputObject, Debug)]
