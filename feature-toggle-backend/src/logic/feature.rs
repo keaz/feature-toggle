@@ -268,6 +268,7 @@ mod test {
                     created_at: chrono::Utc::now(),
                     stages: vec![],
                     dependencies: vec![],
+                    contextual_types: None,
                 })
             });
 
@@ -371,6 +372,7 @@ mod test {
                     created_at: chrono::Utc::now(),
                     stages: vec![],
                     dependencies: vec![],
+                    contextual_types: None,
                 })
             });
 
@@ -423,6 +425,7 @@ mod test {
                         created_at: chrono::Utc::now(),
                         stages: vec![],
                         dependencies: vec![],
+                        contextual_types: None,
                     },
                     EntityFeature {
                         id: Uuid::new_v4(),
@@ -433,6 +436,7 @@ mod test {
                         created_at: chrono::Utc::now(),
                         stages: vec![],
                         dependencies: vec![],
+                        contextual_types: None,
                     },
                 ])
             });

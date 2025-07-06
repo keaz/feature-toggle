@@ -17,8 +17,8 @@ CREATE TABLE environments
 CREATE TABLE pipelines
 (
     id      UUID PRIMARY KEY,
-    name    VARCHAR(100) NOT NULL UNIQUE,
-    active  BOOLEAN NOT NULL,
+    name   VARCHAR(100) NOT NULL,
+    active BOOLEAN      NOT NULL,
     team_id UUID         NOT NULL REFERENCES teams (id) ON DELETE CASCADE,
     UNIQUE (name, team_id)
 );
@@ -31,7 +31,9 @@ CREATE TABLE pipeline_stages
     parent_stage_id UUID REFERENCES pipeline_stages (id) ON DELETE CASCADE, -- for DAG/forking
     order_index     INT          NOT NULL,
     position        VARCHAR(100) NOT NULL,                                  -- to display in the UI
-    UNIQUE (pipeline_id, environment_id)
+    UNIQUE (pipeline_id, environment_id),
+    UNIQUE (pipeline_id, order_index)
+
 );
 
 
@@ -56,7 +58,8 @@ CREATE TABLE features_pipeline_stages
     order_index     INT          NOT NULL,
     position        VARCHAR(100) NOT NULL,
     enabled         BOOLEAN      NOT NULL DEFAULT true,
-    UNIQUE (feature_id, environment_id)
+    UNIQUE (feature_id, environment_id),
+    UNIQUE (feature_id, order_index)
 );
 
 CREATE TABLE feature_dependencies

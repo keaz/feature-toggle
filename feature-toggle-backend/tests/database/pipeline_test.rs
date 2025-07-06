@@ -103,7 +103,7 @@ async fn test_create_pipeline_with_stages_parent() {
             CreateStage {
                 id: Uuid::new_v4(),
                 environment_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
-                order_index: 0,
+                order_index: 1,
                 parent_stage: Some(Box::new(parent_stage_id)),
                 position: String::from("{ x: 500, y: 500 }"),
             },

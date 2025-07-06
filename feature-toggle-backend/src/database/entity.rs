@@ -1,3 +1,4 @@
+use async_graphql::SimpleObject;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -41,6 +42,21 @@ pub struct Feature {
     pub created_at: DateTime<Utc>,
     pub stages: Vec<FeaturePipelineStage>,
     pub dependencies: Vec<FeatureDependency>,
+    pub contextual_types: Option<Vec<ContextualType>>,
+}
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
+pub struct ContextualType {
+    pub id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub entries: Vec<ContextualEntry>,
+}
+
+#[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
+pub struct ContextualEntry {
+    pub id: Uuid,
+    pub value: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
@@ -65,6 +81,7 @@ pub enum FeatureType {
     Simple,
     Contextual,
 }
+
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
 pub struct Team {

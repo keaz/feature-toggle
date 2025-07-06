@@ -1,5 +1,5 @@
-use crate::database::entity::{Feature, FeatureDependency, FeaturePipelineStage, FeatureType};
-use crate::database::{Error, handle_error};
+use crate::database::entity::{ContextualEntry, ContextualType, Feature, FeatureDependency, FeaturePipelineStage, FeatureType};
+use crate::database::{handle_error, Error};
 use chrono::{DateTime, Utc};
 use mockall::automock;
 use sqlx::postgres::PgQueryResult;
@@ -72,6 +72,13 @@ struct FeatureWithStageRow {
     parent_stage_id: Option<Uuid>,
     position: Option<String>,
     enabled: Option<bool>,
+
+    context_id: Option<Uuid>,
+    context_name: Option<String>,
+    context_description: Option<String>,
+    entry_id: Option<Uuid>,
+    entry_value: Option<String>,
+
 }
 
 #[derive(Debug, sqlx::FromRow, Clone)]
@@ -439,7 +446,7 @@ impl FeatureRepositoryImpl {
         }
     }
 
-    fn map_row_to_feature(features: Vec<FeatureWithStageRow>) -> Result<Feature, Error> {
+    fn map_row_to_feature(features: Vec<FeatureWithStageRow>) -> Feature {
         let feature = &features[0];
         let stages = &features
             .clone()
@@ -461,10 +468,35 @@ impl FeatureRepositoryImpl {
         let feature_type = match feature.feature_type.as_str() {
             "Simple" => FeatureType::Simple,
             "Contextual" => FeatureType::Contextual,
-            _ => return Err(Error::InvalidInput("Invalid feature type".to_string())),
+            _ => panic!("Unknown feature type, this should never happen"),
         };
 
-        Ok(Feature {
+        let context = features.clone().split_off(stages.len())
+            .into_iter()
+            .filter_map(|r| {
+                r.context_id.map(|id| {
+                    let entries = features
+                        .iter()
+                        .filter(|e| e.context_id == Some(id))
+                        .filter_map(|e| {
+                            e.entry_id.map(|entry_id| ContextualEntry {
+                                id: entry_id,
+                                value: e.entry_value.clone().unwrap_or_default(),
+                            })
+                        })
+                        .collect::<Vec<ContextualEntry>>();
+
+                    ContextualType {
+                        id,
+                        name: r.context_name.clone().unwrap_or_default(),
+                        description: r.context_description.clone(),
+                        entries,
+                    }
+                })
+            })
+            .collect::<Vec<ContextualType>>();
+
+        Feature {
             id: feature.feature_id,
             name: feature.feature_name.clone(),
             description: feature.description.clone(),
@@ -473,7 +505,8 @@ impl FeatureRepositoryImpl {
             created_at: feature.created_at,
             stages: stages.clone(),
             dependencies: vec![], // Dependencies will be loaded separately
-        })
+            contextual_types: Some(context)
+        }
     }
 }
 
@@ -483,7 +516,11 @@ impl FeatureRepository for FeatureRepositoryImpl {
         let result = sqlx::query_as::<_, FeatureWithStageRow>(
             r#"SELECT f.id as feature_id, f.name as feature_name, f.description, f.feature_type, f.team_id, f.created_at, 
             s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
-            s.parent_stage_id, s.position, s.enabled FROM features f LEFT JOIN features_pipeline_stages s ON s.feature_id = f.id WHERE f.id = $1"#,
+            s.parent_stage_id, s.position, s.enabled,  c.id as context_id, c.name as context_name, c.description as context_description,
+			e.id as entry_id, e.value as entry_value
+			FROM features f LEFT JOIN features_pipeline_stages s ON f.id = s.feature_id
+			LEFT JOIN contextual_type c ON f.id = c.feature_id
+			LEFT JOIN contextual_entries e ON c.id = e.contextual_id WHERE f.id = $1"#,
         )
             .bind(id)
             .fetch_all(&self.pool)
@@ -494,7 +531,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
             return Err(Error::NotFound(id));
         }
 
-        let mut feature = Self::map_row_to_feature(features)?;
+        let mut feature = Self::map_row_to_feature(features);
 
         // Load dependencies
         let dependencies = self.get_feature_dependencies(&id).await?;
@@ -512,7 +549,11 @@ impl FeatureRepository for FeatureRepositoryImpl {
         let mut query_builder = sqlx::QueryBuilder::new(
             r#"SELECT f.id as feature_id, f.name as feature_name, f.description, f.feature_type, f.team_id, f.created_at, 
             s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
-            s.parent_stage_id, s.position, s.enabled FROM features f LEFT JOIN features_pipeline_stages s ON s.feature_id = f.id"#,
+            s.parent_stage_id, s.position, s.enabled,  c.id as context_id, c.name as context_name, c.description as context_description,
+			e.id as entry_id, e.value as entry_value
+			FROM features f LEFT JOIN features_pipeline_stages s ON f.id = s.feature_id
+			LEFT JOIN contextual_type c ON f.id = c.feature_id
+			LEFT JOIN contextual_entries e ON c.id = e.contextual_id"#,
         );
         query_builder.push(" WHERE f.team_id = ").push_bind(team_id);
 
@@ -537,43 +578,49 @@ impl FeatureRepository for FeatureRepositoryImpl {
             .await;
 
         let features_rows = handle_error(None, result)?;
-        let mut map: HashMap<Uuid, Feature> = HashMap::new();
+        let mut map: HashMap<Uuid, Vec<FeatureWithStageRow>> = HashMap::new();
 
         for row in features_rows {
-            let feature_entry = map.entry(row.feature_id).or_insert_with(|| {
-                let feature_type = match row.feature_type.as_str() {
-                    "Simple" => FeatureType::Simple,
-                    "Contextual" => FeatureType::Contextual,
-                    _ => FeatureType::Simple, // Default to Simple if unknown
-                };
-
-                Feature {
-                    id: row.feature_id,
-                    name: row.feature_name.clone(),
-                    description: row.description.clone(),
-                    feature_type,
-                    team_id: row.team_id,
-                    created_at: row.created_at,
-                    stages: vec![],
-                    dependencies: vec![],
-                }
-            });
-
-            if let Some(stage_id) = row.stage_id {
-                feature_entry.stages.push(FeaturePipelineStage {
-                    id: stage_id,
-                    feature_id: row.feature_id_stage.unwrap(),
-                    environment_id: row.environment_id.unwrap(),
-                    order_index: row.order_index.unwrap(),
-                    parent_stage_id: row.parent_stage_id,
-                    position: row.position.unwrap(),
-                    enabled: row.enabled.unwrap(),
-                });
-            }
+            map.entry(row.feature_id).or_default().push(row);
+            // if !map.contains_key(&row.feature_id) {
+            //     let mut feature = Self::map_row_to_feature(row)?;
+            // }
+            //
+            // let feature_entry = map.entry(row.feature_id).or_insert_with(|| {
+            //     let feature_type = match row.feature_type.as_str() {
+            //         "Simple" => FeatureType::Simple,
+            //         "Contextual" => FeatureType::Contextual,
+            //         _ => FeatureType::Simple, // Default to Simple if unknown
+            //     };
+            //     let mut feature = Self::map_row_to_feature(features)?;
+            //     Feature {
+            //         id: row.feature_id,
+            //         name: row.feature_name.clone(),
+            //         description: row.description.clone(),
+            //         feature_type,
+            //         team_id: row.team_id,
+            //         created_at: row.created_at,
+            //         stages: vec![],
+            //         dependencies: vec![],
+            //         contextual_types: None,
+            //     }
+            // });
+            //
+            // if let Some(stage_id) = row.stage_id {
+            //     feature_entry.stages.push(FeaturePipelineStage {
+            //         id: stage_id,
+            //         feature_id: row.feature_id_stage.unwrap(),
+            //         environment_id: row.environment_id.unwrap(),
+            //         order_index: row.order_index.unwrap(),
+            //         parent_stage_id: row.parent_stage_id,
+            //         position: row.position.unwrap(),
+            //         enabled: row.enabled.unwrap(),
+            //     });
+            // }
         }
 
         // Load dependencies for each feature
-        let mut features: Vec<Feature> = map.into_values().collect();
+        let mut features: Vec<Feature> = map.into_values().map(Self::map_row_to_feature).collect();
         for feature in &mut features {
             let dependencies = self.get_feature_dependencies(&feature.id).await?;
             feature.dependencies = dependencies;
