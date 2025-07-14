@@ -1,5 +1,7 @@
-use async_graphql::{Enum, InputObject, SimpleObject, ID};
+use crate::database::entity::DBStage;
+use async_graphql::{Enum, InputObject, OutputType, SimpleObject, ID};
 use serde::{Deserialize, Serialize};
+use std::any::Any;
 
 #[derive(Enum, Copy, Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub enum FeatureType {
@@ -24,8 +26,24 @@ pub struct Feature {
     pub feature_type: FeatureType,
     pub enabled: Option<bool>,
     pub dependencies: Vec<ID>,
+    pub relationships: Vec<FeatureRelationship>,
+    pub stages: Vec<FeatureStage>,
     pub team_id: ID,
     pub contextual_types: Option<Vec<ContextualType>>,
+}
+
+#[derive(SimpleObject, Clone, Debug, Serialize, Deserialize, Copy)]
+pub struct FeatureRelationship {
+    pub source_id: i32,
+    pub target_id: i32,
+}
+
+#[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
+pub struct FeatureStage {
+    pub id: ID,
+    pub environment: Environment,
+    pub order_index: i32,
+    pub position: String,
 }
 
 #[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
@@ -241,4 +259,91 @@ pub struct UpdateTeamInput {
     pub name: Option<String>,
     #[graphql(validator(min_length = 0, max_length = 200))]
     pub description: Option<String>,
+}
+
+// Keep the trait for backward compatibility, but don't use it with trait objects
+pub trait Relationship: Any {
+    fn source_id(&self) -> i32;
+    fn target_id(&self) -> i32;
+    fn into_any(self: Box<Self>) -> Box<dyn Any>;
+}
+
+impl Relationship for PipelineRelationship {
+    fn source_id(&self) -> i32 {
+        self.source_id
+    }
+
+    fn target_id(&self) -> i32 {
+        self.target_id
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn Any> {
+        self
+    }
+}
+
+impl Relationship for FeatureRelationship {
+    fn source_id(&self) -> i32 {
+        self.source_id
+    }
+
+    fn target_id(&self) -> i32 {
+        self.target_id
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn Any> {
+        self
+    }
+}
+
+pub trait Stage: Any {
+    fn set_id(&mut self, id: ID);
+    fn set_environment(&mut self, environment: Environment);
+    fn set_order_index(&mut self, order_index: i32);
+    fn set_position(&mut self, position: String);
+    fn into_any(self: Box<Self>) -> Box<dyn Any>;
+}
+
+impl Stage for FeatureStage {
+    fn set_id(&mut self, id: ID) {
+        self.id = id;
+    }
+
+    fn set_environment(&mut self, environment: Environment) {
+        self.environment = environment;
+    }
+
+    fn set_order_index(&mut self, order_index: i32) {
+        self.order_index = order_index;
+    }
+
+    fn set_position(&mut self, position: String) {
+        self.position = position;
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn Any> {
+        self
+    }
+}
+
+impl Stage for PipelineStage {
+    fn set_id(&mut self, id: ID) {
+        self.id = id;
+    }
+
+    fn set_environment(&mut self, environment: Environment) {
+        self.environment = environment;
+    }
+
+    fn set_order_index(&mut self, order_index: i32) {
+        self.order_index = order_index;
+    }
+
+    fn set_position(&mut self, position: String) {
+        self.position = position;
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn Any> {
+        self
+    }
 }

@@ -19,11 +19,11 @@ pub struct Pipeline {
     pub name: String,
     pub active: bool,
     pub team_id: Uuid,
-    pub stages: Vec<Stage>,
+    pub stages: Vec<PipelineStage>,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
-pub struct Stage {
+pub struct PipelineStage {
     pub id: Uuid,
     pub pipeline_id: Uuid,
     pub environment_id: Uuid,
@@ -88,4 +88,57 @@ pub struct Team {
     pub id: Uuid,
     pub name: String,
     pub description: String,
+}
+
+
+pub trait DBStage: Send + Sync {
+    fn get_id(&self) -> Uuid;
+    fn order_index(&self) -> i32;
+    fn parent_stage_id(&self) -> Option<Uuid>;
+    fn environment_id(&self) -> Uuid;
+    fn position(&self) -> String;
+}
+
+impl DBStage for PipelineStage {
+    fn get_id(&self) -> Uuid {
+        self.id
+    }
+
+    fn order_index(&self) -> i32 {
+        self.order_index
+    }
+
+    fn parent_stage_id(&self) -> Option<Uuid> {
+        self.parent_stage_id
+    }
+
+    fn environment_id(&self) -> Uuid {
+        self.environment_id
+    }
+
+    fn position(&self) -> String {
+        self.position.clone()
+    }
+}
+
+impl DBStage for FeaturePipelineStage {
+    fn get_id(&self) -> Uuid {
+        self.id
+    }
+
+    fn order_index(&self) -> i32 {
+        self.order_index
+    }
+
+    fn parent_stage_id(&self) -> Option<Uuid> {
+        self.parent_stage_id
+    }
+
+    fn environment_id(&self) -> Uuid {
+        self.environment_id
+    }
+
+    fn position(&self) -> String {
+        self.position.clone()
+    }
 }

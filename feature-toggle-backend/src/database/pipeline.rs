@@ -1,4 +1,4 @@
-use crate::database::entity::{Pipeline, Stage};
+use crate::database::entity::{Pipeline, PipelineStage};
 use crate::database::{handle_error, Error};
 use mockall::automock;
 use sqlx::postgres::PgQueryResult;
@@ -196,7 +196,7 @@ impl PipelineRepositoryImpl {
             .split_off(0)
             .into_iter()
             .filter_map(|r| {
-                r.stage_id.map(|id| Stage {
+                r.stage_id.map(|id| PipelineStage {
                     id,
                     pipeline_id: r.pipeline_id_stage.unwrap(),
                     environment_id: r.environment_id.unwrap(),
@@ -205,7 +205,7 @@ impl PipelineRepositoryImpl {
                     position: r.position,
                 })
             })
-            .collect::<Vec<Stage>>();
+            .collect::<Vec<PipelineStage>>();
 
         Ok(Pipeline {
             id: pipeline.pipeline_id,
@@ -279,7 +279,7 @@ impl PipelineRepository for PipelineRepositoryImpl {
             });
 
             if let Some(stage_id) = row.stage_id {
-                pipeline_entry.stages.push(Stage {
+                pipeline_entry.stages.push(PipelineStage {
                     id: stage_id,
                     pipeline_id: row.pipeline_id_stage.unwrap(),
                     environment_id: row.environment_id.unwrap(),

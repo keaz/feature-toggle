@@ -1,11 +1,10 @@
-use crate::database::entity::FeatureType as EntityFeatureType;
+use crate::database::entity::{DBStage, FeatureType as EntityFeatureType};
 use crate::database::feature::{
     CreateFeature, CreateFeatureStage, FeatureRepository, UpdateFeature,
 };
-use crate::graphql::schema::{
-    CreateFeatureInput, CreateFeatureStageInput, CreateRelationshipInput, Feature,
-    FeatureType as GraphQLFeatureType, UpdateFeatureInput,
-};
+use crate::graphql::schema::{CreateFeatureInput, CreateFeatureStageInput, CreateRelationshipInput, Environment, Feature, FeatureRelationship, FeatureStage, FeatureType as GraphQLFeatureType, Relationship, Stage, UpdateFeatureInput};
+use crate::logic::environment::EnvironmentLogic;
+use crate::logic::{create_relationships, get_environment_map, map_stages};
 use crate::Error;
 use async_graphql::ID;
 use uuid::Uuid;
@@ -32,13 +31,14 @@ impl Clone for Box<dyn FeatureLogic> {
     }
 }
 
-pub fn feature_logic(repository: Box<dyn FeatureRepository>) -> Box<dyn FeatureLogic> {
-    Box::new(FeatureLogicImpl { repository })
+pub fn feature_logic(repository: Box<dyn FeatureRepository>, environment_logic: Box<dyn EnvironmentLogic>) -> Box<dyn FeatureLogic> {
+    Box::new(FeatureLogicImpl { repository, environment_logic })
 }
 
 #[derive(Clone)]
 struct FeatureLogicImpl {
     repository: Box<dyn FeatureRepository>,
+    environment_logic: Box<dyn EnvironmentLogic>, // Assuming you have an EnvironmentLogic trait
 }
 
 impl FeatureLogicImpl {
@@ -142,15 +142,33 @@ impl FeatureLogicImpl {
                 .into_iter()
                 .map(|d| d.depends_on_id.into())
                 .collect(),
+            stages: vec![],
+            relationships: vec![]
         }
     }
+
 }
 
 #[async_trait::async_trait]
 impl FeatureLogic for FeatureLogicImpl {
     async fn get_feature_by_id(&self, id: ID) -> Result<Feature, Error> {
         let feature = self.repository.get_feature_by_id(Uuid::try_from(id).unwrap()).await?;
-        Ok(Self::map_entity_to_graphql_feature(feature))
+        let features = vec![feature.clone()]; // Wrap in a vector to reuse the same logic
+        let stages = features.iter().flat_map(|feature| &feature.stages)
+            .map(|stage| Box::new(stage.clone()) as Box<dyn DBStage>).collect::<Vec<Box<dyn DBStage>>>();
+
+        let environment_map = get_environment_map(&*self.environment_logic, &stages, true).await?;
+        let db_stages = feature.stages.iter().map(|stage| {
+            Box::new(stage.clone()) as Box<dyn DBStage>
+        }).collect();
+
+        let stages = map_stages(true, &environment_map, &db_stages, stage_factory);
+        let relationships = create_relationships(true, db_stages, relationship_factory);
+
+        let mut feature = Self::map_entity_to_graphql_feature(feature);
+        feature.stages = stages;
+        feature.relationships = relationships;
+        Ok(feature)
     }
 
     async fn get_features(
@@ -197,11 +215,31 @@ impl FeatureLogic for FeatureLogicImpl {
     }
 }
 
+fn relationship_factory(
+    source_id: i32,
+    target_id: i32,
+) -> FeatureRelationship {
+    FeatureRelationship {
+        source_id,
+        target_id,
+    }
+}
+
+fn stage_factory(id: ID, environment: Environment, order_index: i32, position: String) -> FeatureStage {
+    FeatureStage {
+        id,
+        environment,
+        order_index,
+        position,
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
     use crate::database::entity::Feature as EntityFeature;
     use crate::database::feature::MockFeatureRepository;
+    use crate::logic::environment::MockEnvironmentLogic;
 
     #[test]
     fn test_get_create_stages_to_create() {
@@ -252,6 +290,7 @@ mod test {
     #[tokio::test]
     async fn test_get_feature_by_id() {
         let mut repository = MockFeatureRepository::new();
+        let environment_logic = MockEnvironmentLogic::new();
 
         const ID: &str = "3eef17bc-9e06-411d-b5f4-7a786e68bb96";
         repository
@@ -272,7 +311,7 @@ mod test {
                 })
             });
 
-        let logic = feature_logic(Box::new(repository));
+        let logic = feature_logic(Box::new(repository), Box::new(environment_logic));
         let id = Uuid::parse_str(ID).unwrap();
         let result = logic.get_feature_by_id(ID::from(ID)).await;
 
@@ -287,6 +326,7 @@ mod test {
     #[tokio::test]
     async fn test_get_non_existing_feature() {
         let mut repository = MockFeatureRepository::new();
+        let environment_logic = MockEnvironmentLogic::new();
 
         const ID: &str = "51ecc366-f1cd-4d3d-ab73-fa60bad98fca";
         repository
@@ -295,7 +335,7 @@ mod test {
             .times(1)
             .returning(move |_| Err(Error::NotFound(Uuid::parse_str(ID).unwrap())));
 
-        let logic = feature_logic(Box::new(repository));
+        let logic = feature_logic(Box::new(repository), Box::new(environment_logic));
         let id = Uuid::parse_str(ID).unwrap();
         let result = logic.get_feature_by_id(ID::from(ID)).await;
 
@@ -307,6 +347,7 @@ mod test {
     #[tokio::test]
     async fn test_create_feature() {
         let mut repository = MockFeatureRepository::new();
+        let environment_logic = MockEnvironmentLogic::new();
 
         let input = CreateFeatureInput {
             name: "New Feature".to_string(),
@@ -327,7 +368,7 @@ mod test {
             .times(1)
             .returning(move |_| Ok(id));
 
-        let logic = feature_logic(Box::new(repository));
+        let logic = feature_logic(Box::new(repository), Box::new(environment_logic));
         let result = logic
             .create_feature(ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"), input)
             .await;
@@ -340,6 +381,7 @@ mod test {
     #[tokio::test]
     async fn test_update_feature() {
         let mut repository = MockFeatureRepository::new();
+        let environment_logic = MockEnvironmentLogic::new();
 
         const ID: &str = "3eef17bc-9e06-411d-b5f4-7a786e68bb96";
         const NAME: &str = "Updated Feature";
@@ -376,7 +418,7 @@ mod test {
                 })
             });
 
-        let logic = feature_logic(Box::new(repository));
+        let logic = feature_logic(Box::new(repository), Box::new(environment_logic));
         let result = logic.update_feature(ID::from(ID), input).await;
 
         assert!(result.is_ok());
@@ -392,6 +434,7 @@ mod test {
     #[tokio::test]
     async fn test_delete_feature() {
         let mut repository = MockFeatureRepository::new();
+        let environment_logic = MockEnvironmentLogic::new();
 
         const ID: &str = "3eef17bc-9e06-411d-b5f4-7a786e68bb96";
         repository
@@ -400,7 +443,7 @@ mod test {
             .times(1)
             .returning(move |_| Ok(()));
 
-        let logic = feature_logic(Box::new(repository));
+        let logic = feature_logic(Box::new(repository), Box::new(environment_logic));
         let result = logic.delete_feature(ID::from(ID)).await;
 
         assert!(result.is_ok());
@@ -409,6 +452,7 @@ mod test {
     #[tokio::test]
     async fn test_get_features() {
         let mut repository = MockFeatureRepository::new();
+        let environment_logic = MockEnvironmentLogic::new();
 
         repository
             .expect_get_features()
@@ -441,7 +485,7 @@ mod test {
                 ])
             });
 
-        let logic = feature_logic(Box::new(repository));
+        let logic = feature_logic(Box::new(repository), Box::new(environment_logic));
         let result = logic
             .get_features(ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"), None, None)
             .await;
