@@ -22,7 +22,11 @@ impl CreateInputValidator for CreateTeamInput {
 }
 
 impl UpdateInputValidator for UpdateTeamInput {
-    async fn validate(&self, id: Option<ID>, ctx: &Context<'_>) -> async_graphql::Result<(), Error> {
+    async fn validate(
+        &self,
+        id: Option<ID>,
+        ctx: &Context<'_>,
+    ) -> async_graphql::Result<(), Error> {
         let logic = ctx.data::<Box<dyn crate::logic::team::TeamLogic>>()?;
         if let Some(name) = &self.name {
             let teams = logic.get_teams(Some(name.clone())).await?;

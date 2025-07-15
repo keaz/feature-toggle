@@ -82,14 +82,12 @@ pub enum FeatureType {
     Contextual,
 }
 
-
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
 pub struct Team {
     pub id: Uuid,
     pub name: String,
     pub description: String,
 }
-
 
 pub trait DBStage: Send + Sync {
     fn get_id(&self) -> Uuid;

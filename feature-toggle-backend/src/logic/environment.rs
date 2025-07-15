@@ -50,7 +50,10 @@ struct EnvironmentLogicImpl {
 #[async_trait::async_trait]
 impl EnvironmentLogic for EnvironmentLogicImpl {
     async fn get_environment_by_id(&self, env_id: ID) -> Result<Environment, Error> {
-        let environment = self.repository.get_environment_by_id(Uuid::try_from(env_id).unwrap()).await?;
+        let environment = self
+            .repository
+            .get_environment_by_id(Uuid::try_from(env_id).unwrap())
+            .await?;
         let id = ID::from(environment.id);
         Ok(Environment {
             id,
@@ -164,7 +167,9 @@ mod tests {
             });
 
         let logic = environment_logic(Box::new(mock_repository));
-        let result = logic.get_environment_by_id(ID::try_from(ENV_ID).unwrap()).await;
+        let result = logic
+            .get_environment_by_id(ID::try_from(ENV_ID).unwrap())
+            .await;
 
         assert!(result.is_ok());
         let environment = result.unwrap();
@@ -184,7 +189,9 @@ mod tests {
             .returning(move |_| Err(Error::NotFound(id)));
 
         let logic = environment_logic(Box::new(mock_repository));
-        let result = logic.get_environment_by_id(ID::try_from(ENV_ID).unwrap()).await;
+        let result = logic
+            .get_environment_by_id(ID::try_from(ENV_ID).unwrap())
+            .await;
 
         assert!(result.is_err());
         let error = result.err().unwrap();
@@ -217,9 +224,7 @@ mod tests {
             });
 
         let logic = environment_logic(Box::new(mock_repository));
-        let result = logic
-            .create_environment(ID::from(ID), input)
-            .await;
+        let result = logic.create_environment(ID::from(ID), input).await;
 
         assert!(result.is_ok());
         let environment = result.unwrap();
@@ -292,7 +297,6 @@ mod tests {
     async fn test_delete_environment() {
         let mut mock_repository = MockEnvironmentRepository::new();
         const ENV_ID: &str = "51ecc366-f1cd-4d3d-ab73-fa60bad98f27";
-        let id = Uuid::parse_str(ENV_ID).unwrap();
         mock_repository
             .expect_delete_environment()
             .withf(|mock_id| mock_id.eq(&Uuid::parse_str(ENV_ID).unwrap()))
@@ -300,9 +304,7 @@ mod tests {
             .returning(move |_| Ok(()));
 
         let logic = environment_logic(Box::new(mock_repository));
-        let result = logic
-            .delete_environment(ID::from(ENV_ID))
-            .await;
+        let result = logic.delete_environment(ID::from(ENV_ID)).await;
 
         assert!(result.is_ok());
     }
@@ -319,9 +321,7 @@ mod tests {
             .returning(move |_| Err(Error::NotFound(id)));
 
         let logic = environment_logic(Box::new(mock_repository));
-        let result = logic
-            .delete_environment(ID::from(ENV_ID))
-            .await;
+        let result = logic.delete_environment(ID::from(ENV_ID)).await;
 
         assert!(result.is_err());
         let error = result.err().unwrap();
@@ -338,7 +338,7 @@ mod tests {
         let team_id = ID::from(expected_id);
         mock_repository
             .expect_get_environments()
-            .withf(|team, name, active| name.is_none() && active.is_none())
+            .withf(|_, name, active| name.is_none() && active.is_none())
             .times(1)
             .returning(move |_, _, _| {
                 Ok(vec![

@@ -1,5 +1,5 @@
 use crate::database::entity::{Pipeline, PipelineStage};
-use crate::database::{handle_error, Error};
+use crate::database::{Error, handle_error};
 use mockall::automock;
 use sqlx::postgres::PgQueryResult;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
@@ -352,7 +352,7 @@ impl PipelineRepository for PipelineRepositoryImpl {
             input.active.unwrap_or(existing_env.active),
             input.id
         )
-            .execute(&mut *tx)
+        .execute(&mut *tx)
         .await;
 
         if result.is_err() {

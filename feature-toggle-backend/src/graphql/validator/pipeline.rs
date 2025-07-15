@@ -1,16 +1,13 @@
-use crate::graphql::schema::{
-    CreatePipelineInput, UpdatePipelineInput,
+use crate::graphql::schema::{CreatePipelineInput, UpdatePipelineInput};
+use crate::graphql::validator::{
+    CreateInputValidator, UpdateInputValidator, validate_duplicate_environment_and_index,
+    validate_relationships_and_stages,
 };
-use crate::graphql::validator::{validate_duplicate_environment_and_index, validate_relationships_and_stages, CreateInputValidator, UpdateInputValidator};
 use crate::logic::pipeline::PipelineLogic;
-use async_graphql::{Context, Error, Result, ID};
+use async_graphql::{Context, Error, ID, Result};
 
 impl CreateInputValidator for CreatePipelineInput {
-    async fn validate(
-        &self,
-        team_id: Option<ID>,
-        ctx: &Context<'_>,
-    ) -> Result<(), Error> {
+    async fn validate(&self, team_id: Option<ID>, ctx: &Context<'_>) -> Result<(), Error> {
         let logic = ctx.data::<Box<dyn PipelineLogic>>()?;
         let pipelines = logic
             .get_pipelines(
@@ -35,17 +32,13 @@ impl CreateInputValidator for CreatePipelineInput {
 }
 
 impl UpdateInputValidator for UpdatePipelineInput {
-    async fn validate(
-        &self,
-        id: Option<ID>,
-        ctx: &Context<'_>,
-    ) -> Result<(), Error> {
+    async fn validate(&self, id: Option<ID>, ctx: &Context<'_>) -> Result<(), Error> {
         let logic = ctx.data::<Box<dyn PipelineLogic>>()?;
         let pipeline = logic.get_pipeline_by_id(id.clone().unwrap()).await?;
         let pipelines = logic
             .get_pipelines(pipeline.team_id, self.name.clone(), self.active, vec![])
             .await?;
-        
+
         if !pipelines.is_empty() && pipelines.iter().any(|p| p.id != id.clone().unwrap()) {
             return Err(Error::new(format!(
                 "Pipeline with name '{:?}' already exists",

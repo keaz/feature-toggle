@@ -6,8 +6,8 @@ pub mod team;
 
 use crate::Error;
 use log::error;
-use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use sqlx::postgres::PgPoolOptions;
 use std::env;
 use uuid::Uuid;
 

@@ -2,7 +2,11 @@ use crate::database::entity::{DBStage, FeatureType as EntityFeatureType};
 use crate::database::feature::{
     CreateFeature, CreateFeatureStage, FeatureRepository, UpdateFeature,
 };
-use crate::graphql::schema::{CreateFeatureInput, CreateFeatureStageInput, CreateRelationshipInput, Environment, Feature, FeatureRelationship, FeatureStage, FeatureType as GraphQLFeatureType, Relationship, Stage, UpdateFeatureInput};
+use crate::graphql::schema::{
+    CreateFeatureInput, CreateFeatureStageInput, CreateRelationshipInput, Environment, Feature,
+    FeatureRelationship, FeatureStage, FeatureType as GraphQLFeatureType,
+    UpdateFeatureInput,
+};
 use crate::logic::environment::EnvironmentLogic;
 use crate::logic::{create_relationships, get_environment_map, map_stages};
 use crate::Error;
@@ -31,8 +35,14 @@ impl Clone for Box<dyn FeatureLogic> {
     }
 }
 
-pub fn feature_logic(repository: Box<dyn FeatureRepository>, environment_logic: Box<dyn EnvironmentLogic>) -> Box<dyn FeatureLogic> {
-    Box::new(FeatureLogicImpl { repository, environment_logic })
+pub fn feature_logic(
+    repository: Box<dyn FeatureRepository>,
+    environment_logic: Box<dyn EnvironmentLogic>,
+) -> Box<dyn FeatureLogic> {
+    Box::new(FeatureLogicImpl {
+        repository,
+        environment_logic,
+    })
 }
 
 #[derive(Clone)]
@@ -135,7 +145,7 @@ impl FeatureLogicImpl {
             description: feature.description,
             feature_type: Self::map_entity_to_graphql_feature_type(feature.feature_type),
             enabled: None, // This would need to be determined based on the feature's stages
-            contextual_types: None,   // This would need to be determined based on the feature's type
+            contextual_types: None, // This would need to be determined based on the feature's type
             team_id: feature.team_id.into(),
             dependencies: feature
                 .dependencies
@@ -143,24 +153,31 @@ impl FeatureLogicImpl {
                 .map(|d| d.depends_on_id.into())
                 .collect(),
             stages: vec![],
-            relationships: vec![]
+            relationships: vec![],
         }
     }
-
 }
 
 #[async_trait::async_trait]
 impl FeatureLogic for FeatureLogicImpl {
     async fn get_feature_by_id(&self, id: ID) -> Result<Feature, Error> {
-        let feature = self.repository.get_feature_by_id(Uuid::try_from(id).unwrap()).await?;
+        let feature = self
+            .repository
+            .get_feature_by_id(Uuid::try_from(id).unwrap())
+            .await?;
         let features = vec![feature.clone()]; // Wrap in a vector to reuse the same logic
-        let stages = features.iter().flat_map(|feature| &feature.stages)
-            .map(|stage| Box::new(stage.clone()) as Box<dyn DBStage>).collect::<Vec<Box<dyn DBStage>>>();
+        let stages = features
+            .iter()
+            .flat_map(|feature| &feature.stages)
+            .map(|stage| Box::new(stage.clone()) as Box<dyn DBStage>)
+            .collect::<Vec<Box<dyn DBStage>>>();
 
         let environment_map = get_environment_map(&*self.environment_logic, &stages, true).await?;
-        let db_stages = feature.stages.iter().map(|stage| {
-            Box::new(stage.clone()) as Box<dyn DBStage>
-        }).collect();
+        let db_stages = feature
+            .stages
+            .iter()
+            .map(|stage| Box::new(stage.clone()) as Box<dyn DBStage>)
+            .collect();
 
         let stages = map_stages(true, &environment_map, &db_stages, stage_factory);
         let relationships = create_relationships(true, db_stages, relationship_factory);
@@ -215,17 +232,19 @@ impl FeatureLogic for FeatureLogicImpl {
     }
 }
 
-fn relationship_factory(
-    source_id: i32,
-    target_id: i32,
-) -> FeatureRelationship {
+fn relationship_factory(source_id: i32, target_id: i32) -> FeatureRelationship {
     FeatureRelationship {
         source_id,
         target_id,
     }
 }
 
-fn stage_factory(id: ID, environment: Environment, order_index: i32, position: String) -> FeatureStage {
+fn stage_factory(
+    id: ID,
+    environment: Environment,
+    order_index: i32,
+    position: String,
+) -> FeatureStage {
     FeatureStage {
         id,
         environment,
@@ -312,7 +331,6 @@ mod test {
             });
 
         let logic = feature_logic(Box::new(repository), Box::new(environment_logic));
-        let id = Uuid::parse_str(ID).unwrap();
         let result = logic.get_feature_by_id(ID::from(ID)).await;
 
         assert!(result.is_ok());
@@ -336,7 +354,6 @@ mod test {
             .returning(move |_| Err(Error::NotFound(Uuid::parse_str(ID).unwrap())));
 
         let logic = feature_logic(Box::new(repository), Box::new(environment_logic));
-        let id = Uuid::parse_str(ID).unwrap();
         let result = logic.get_feature_by_id(ID::from(ID)).await;
 
         assert!(result.is_err());
@@ -456,7 +473,7 @@ mod test {
 
         repository
             .expect_get_features()
-            .withf(|team_id, name, feature_type| name.is_none() && feature_type.is_none())
+            .withf(|_, name, feature_type| name.is_none() && feature_type.is_none())
             .times(1)
             .returning(move |_, _, _| {
                 Ok(vec![

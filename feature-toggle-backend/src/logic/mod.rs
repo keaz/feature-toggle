@@ -11,7 +11,6 @@ pub mod feature;
 pub mod pipeline;
 pub mod team;
 
-
 fn create_relationships<R: Relationship + 'static>(
     has_stage: bool,
     stages: Vec<Box<dyn DBStage>>,
@@ -29,9 +28,10 @@ fn create_relationships<R: Relationship + 'static>(
                 .iter()
                 .filter(|stage_inner| stage.parent_stage_id().unwrap() == stage_inner.get_id())
                 .for_each(|stage_inner| {
-                    relationships.push(
-                        relationship_factory(stage_inner.order_index(), stage.order_index())
-                    );
+                    relationships.push(relationship_factory(
+                        stage_inner.order_index(),
+                        stage.order_index(),
+                    ));
                 });
         });
 
@@ -46,21 +46,19 @@ fn map_stages<R: Stage + 'static>(
 ) -> Vec<R> {
     let mut mapped_stages: Vec<R> = vec![];
     if has_stage {
-        stages
-            .iter()
-            .for_each(|stage| {
-                let feature_stage = stage_factory(
-                    stage.get_id().into(),
-                    environment_map
-                        .get(&stage.environment_id())
-                        .unwrap()
-                        .to_owned(),
-                    stage.order_index(),
-                    stage.position(),
-                );
+        stages.iter().for_each(|stage| {
+            let feature_stage = stage_factory(
+                stage.get_id().into(),
+                environment_map
+                    .get(&stage.environment_id())
+                    .unwrap()
+                    .to_owned(),
+                stage.order_index(),
+                stage.position(),
+            );
 
-                mapped_stages.push(feature_stage);
-            });
+            mapped_stages.push(feature_stage);
+        });
         mapped_stages
     } else {
         mapped_stages
@@ -82,4 +80,192 @@ pub async fn get_environment_map(
         }
     }
     Ok(environment_map)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, Clone)]
+    struct MockStage {
+        id: Uuid,
+        environment_id: Uuid,
+        order_index: i32,
+        position: String,
+        parent_stage_id: Option<Uuid>,
+    }
+
+    impl DBStage for MockStage {
+        fn get_id(&self) -> Uuid {
+            self.id
+        }
+
+        fn order_index(&self) -> i32 {
+            self.order_index
+        }
+
+        fn parent_stage_id(&self) -> Option<Uuid> {
+            self.parent_stage_id
+        }
+
+        fn environment_id(&self) -> Uuid {
+            self.environment_id
+        }
+
+        fn position(&self) -> String {
+            self.position.clone()
+        }
+    }
+
+    impl Stage for MockStage {}
+
+    #[derive(Debug, Clone)]
+    struct MockRelationship {
+        source_id: i32,
+        target_id: i32,
+    }
+
+    impl Relationship for MockRelationship {}
+
+    #[test]
+    fn test_create_relationships_no_relationships() {
+        let stages: Vec<Box<dyn DBStage>> = vec![
+            Box::new(MockStage {
+                id: Uuid::new_v4(),
+                environment_id: Uuid::new_v4(),
+                order_index: 1,
+                position: "first".to_string(),
+                parent_stage_id: None,
+            }),
+            Box::new(MockStage {
+                id: Uuid::new_v4(),
+                environment_id: Uuid::new_v4(),
+                order_index: 2,
+                position: "second".to_string(),
+                parent_stage_id: Some(Uuid::new_v4()),
+            }),
+        ];
+
+        let relationships =
+            create_relationships(true, stages, |target_id, source_id| MockRelationship {
+                target_id,
+                source_id,
+            });
+
+        assert_eq!(relationships.len(), 0);
+    }
+
+    #[test]
+    fn test_create_relationships_with_relationships() {
+        let parent_stage_id = Uuid::new_v4();
+        let stages: Vec<Box<dyn DBStage>> = vec![
+            Box::new(MockStage {
+                id: parent_stage_id,
+                environment_id: Uuid::new_v4(),
+                order_index: 1,
+                position: "first".to_string(),
+                parent_stage_id: None,
+            }),
+            Box::new(MockStage {
+                id: Uuid::new_v4(),
+                environment_id: Uuid::new_v4(),
+                order_index: 2,
+                position: "second".to_string(),
+                parent_stage_id: Some(parent_stage_id),
+            }),
+        ];
+
+        let relationships =
+            create_relationships(true, stages, |target_id, source_id| MockRelationship {
+                target_id,
+                source_id,
+            });
+
+        assert_eq!(relationships.len(), 1);
+        assert_eq!(relationships[0].source_id, 2);
+        assert_eq!(relationships[0].target_id, 1);
+    }
+
+    #[test]
+    fn test_map_stages_no_stages() {
+        let environment_map: HashMap<Uuid, Environment> = HashMap::new();
+        let stages: Vec<Box<dyn DBStage>> = vec![];
+
+        let mapped_stages: Vec<MockStage> = map_stages(
+            false,
+            &environment_map,
+            &stages,
+            |id, environment, order_index, position| MockStage {
+                id: id.parse().unwrap(),
+                environment_id: environment.id.parse().unwrap(),
+                order_index,
+                position,
+                parent_stage_id: None,
+            },
+        );
+
+        assert!(mapped_stages.is_empty());
+    }
+
+    #[test]
+    fn test_map_stages_with_stages() {
+        let mut environment_map: HashMap<Uuid, Environment> = HashMap::new();
+        let env_first_id = "52e4cfe1-b20b-4ad1-9ede-24c771cdef9d";
+        let env_second_id = "56f618e6-0303-47c4-bb53-d13e0e24e4cb";
+        environment_map.insert(
+            Uuid::parse_str(env_first_id).unwrap(),
+            Environment {
+                id: ID::from(env_first_id),
+                name: "Test Environment".to_string(),
+                team_id: Default::default(),
+                active: true,
+            },
+        );
+
+        environment_map.insert(
+            Uuid::parse_str(env_second_id).unwrap(),
+            Environment {
+                id: ID::from(env_second_id),
+                name: "Another Environment".to_string(),
+                team_id: Default::default(),
+                active: true,
+            },
+        );
+
+        let stages: Vec<Box<dyn DBStage>> = vec![
+            Box::new(MockStage {
+                id: Uuid::new_v4(),
+                environment_id: Uuid::parse_str(env_first_id).unwrap(),
+                order_index: 1,
+                position: "first".to_string(),
+                parent_stage_id: None,
+            }),
+            Box::new(MockStage {
+                id: Uuid::new_v4(),
+                environment_id: Uuid::parse_str(env_second_id).unwrap(),
+                order_index: 2,
+                position: "second".to_string(),
+                parent_stage_id: Some(Uuid::new_v4()),
+            }),
+        ];
+
+        let mapped_stages: Vec<MockStage> = map_stages(
+            true,
+            &environment_map,
+            &stages,
+            |id, environment, order_index, position| MockStage {
+                id: id.parse().unwrap(),
+                environment_id: environment.id.parse().unwrap(),
+                order_index,
+                position,
+                parent_stage_id: None,
+            },
+        );
+
+        assert_eq!(mapped_stages.len(), 2);
+        assert_eq!(mapped_stages[0].order_index, 1);
+        assert_eq!(mapped_stages[1].order_index, 2);
+        assert_eq!(mapped_stages[0].position, "first");
+        assert_eq!(mapped_stages[1].position, "second");
+    }
 }

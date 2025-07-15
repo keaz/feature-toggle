@@ -1,6 +1,9 @@
 use crate::database::entity::DBStage;
 use crate::database::pipeline::{CreatePipeline, CreateStage, PipelineRepository, UpdatePipeline};
-use crate::graphql::schema::{CreatePipelineInput, CreateRelationshipInput, CreateStageInput, Environment, Pipeline, PipelineRelationship, PipelineStage, UpdatePipelineInput};
+use crate::graphql::schema::{
+    CreatePipelineInput, CreateRelationshipInput, CreateStageInput, Environment, Pipeline,
+    PipelineRelationship, PipelineStage, UpdatePipelineInput,
+};
 use crate::logic::environment::EnvironmentLogic;
 use crate::logic::{create_relationships, get_environment_map, map_stages};
 use crate::Error;
@@ -59,7 +62,6 @@ impl PipelineLogicImpl {
         update.stages = get_stages_to_create(input.stages, input.relationships);
         update
     }
-
 }
 
 #[async_trait::async_trait]
@@ -69,13 +71,18 @@ impl PipelineLogic for PipelineLogicImpl {
         let pipeline = self.repository.get_pipeline_by_id(pipeline_id).await?;
         let pipelines = vec![pipeline.clone()]; // Wrap in a vector to reuse the same logic
 
-        let stages = pipelines.iter().flat_map(|feature| &feature.stages)
-            .map(|stage| Box::new(stage.clone()) as Box<dyn DBStage>).collect::<Vec<Box<dyn DBStage>>>();
+        let stages = pipelines
+            .iter()
+            .flat_map(|feature| &feature.stages)
+            .map(|stage| Box::new(stage.clone()) as Box<dyn DBStage>)
+            .collect::<Vec<Box<dyn DBStage>>>();
 
         let environment_map = get_environment_map(&*self.environment_logic, &stages, true).await?;
-        let db_stages = pipeline.stages.iter().map(|stage| {
-            Box::new(stage.clone()) as Box<dyn DBStage>
-        }).collect();
+        let db_stages = pipeline
+            .stages
+            .iter()
+            .map(|stage| Box::new(stage.clone()) as Box<dyn DBStage>)
+            .collect();
 
         let stages = map_stages(true, &environment_map, &db_stages, stage_factory);
         let relationships = create_relationships(true, db_stages, relationship_factory);
@@ -86,7 +93,7 @@ impl PipelineLogic for PipelineLogicImpl {
             active: pipeline.active,
             stages,
             relationships,
-            team_id: pipeline.team_id.into()
+            team_id: pipeline.team_id.into(),
         })
     }
 
@@ -101,19 +108,25 @@ impl PipelineLogic for PipelineLogicImpl {
         let pipelines = self.repository.get_pipelines(team_id, name, active).await?;
         let has_stage = fields.contains(&"stages".to_string());
 
-        let stages = pipelines.iter().flat_map(|feature| &feature.stages)
-            .map(|stage| Box::new(stage.clone()) as Box<dyn DBStage>).collect::<Vec<Box<dyn DBStage>>>();
+        let stages = pipelines
+            .iter()
+            .flat_map(|feature| &feature.stages)
+            .map(|stage| Box::new(stage.clone()) as Box<dyn DBStage>)
+            .collect::<Vec<Box<dyn DBStage>>>();
 
         let environment_map = get_environment_map(&*self.environment_logic, &stages, true).await?;
 
         Ok(pipelines
             .into_iter()
             .map(|pipeline| {
-                let db_stages = pipeline.stages.iter().map(|stage| {
-                    Box::new(stage.clone()) as Box<dyn DBStage>
-                }).collect();
+                let db_stages = pipeline
+                    .stages
+                    .iter()
+                    .map(|stage| Box::new(stage.clone()) as Box<dyn DBStage>)
+                    .collect();
                 let stages = map_stages(has_stage, &environment_map, &db_stages, stage_factory);
-                let relationships = create_relationships(has_stage, db_stages, relationship_factory);
+                let relationships =
+                    create_relationships(has_stage, db_stages, relationship_factory);
                 Pipeline {
                     id: pipeline.id.into(),
                     name: pipeline.name,
@@ -158,17 +171,19 @@ impl PipelineLogic for PipelineLogicImpl {
     }
 }
 
-fn relationship_factory(
-    source_id: i32,
-    target_id: i32,
-) -> PipelineRelationship {
+fn relationship_factory(source_id: i32, target_id: i32) -> PipelineRelationship {
     PipelineRelationship {
         source_id,
         target_id,
     }
 }
 
-fn stage_factory(id: ID, environment: Environment, order_index: i32, position: String) -> PipelineStage {
+fn stage_factory(
+    id: ID,
+    environment: Environment,
+    order_index: i32,
+    position: String,
+) -> PipelineStage {
     PipelineStage {
         id,
         environment,
@@ -371,7 +386,6 @@ mod test {
             });
 
         let logic = pipeline_logic(Box::new(repository), Box::new(environment_repo));
-        let id = Uuid::parse_str(ID).unwrap();
         let result = logic.get_pipeline_by_id(ID::from(ID)).await;
         assert!(result.is_ok());
         let pipeline = result.unwrap();
@@ -553,7 +567,7 @@ mod test {
 
         repository
             .expect_get_pipelines()
-            .withf(|team_id, name, active| name.is_none() && active.is_none())
+            .withf(|_, name, active| name.is_none() && active.is_none())
             .times(1)
             .returning(move |_, _, _| {
                 Ok(vec![

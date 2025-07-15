@@ -1,5 +1,5 @@
 use crate::database::entity::Environment;
-use crate::database::{handle_error, Error};
+use crate::database::{Error, handle_error};
 use mockall::automock;
 use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
@@ -156,7 +156,7 @@ impl EnvironmentRepository for EnvironmentRepositoryImpl {
             id: environment.id,
             name: environment.name,
             active: environment.active,
-            team_id: environment.team_id
+            team_id: environment.team_id,
         })
     }
 

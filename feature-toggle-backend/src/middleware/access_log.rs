@@ -63,9 +63,7 @@ where
             let duration = start_time.elapsed().as_millis();
             let status = res.status().as_u16();
 
-            info!(
-                "{method} {path} -> {status} ({duration} ms) [{peer_addr}]"
-            );
+            info!("{method} {path} -> {status} ({duration} ms) [{peer_addr}]");
 
             Ok(res)
         })

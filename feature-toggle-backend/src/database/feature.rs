@@ -1,5 +1,7 @@
-use crate::database::entity::{ContextualEntry, ContextualType, Feature, FeatureDependency, FeaturePipelineStage, FeatureType};
-use crate::database::{handle_error, Error};
+use crate::database::entity::{
+    ContextualEntry, ContextualType, Feature, FeatureDependency, FeaturePipelineStage, FeatureType,
+};
+use crate::database::{Error, handle_error};
 use chrono::{DateTime, Utc};
 use mockall::automock;
 use sqlx::postgres::PgQueryResult;
@@ -78,7 +80,6 @@ struct FeatureWithStageRow {
     context_description: Option<String>,
     entry_id: Option<Uuid>,
     entry_value: Option<String>,
-
 }
 
 #[derive(Debug, sqlx::FromRow, Clone)]
@@ -471,7 +472,9 @@ impl FeatureRepositoryImpl {
             _ => panic!("Unknown feature type, this should never happen"),
         };
 
-        let context = features.clone().split_off(stages.len())
+        let context = features
+            .clone()
+            .split_off(stages.len())
             .into_iter()
             .filter_map(|r| {
                 r.context_id.map(|id| {
@@ -505,7 +508,7 @@ impl FeatureRepositoryImpl {
             created_at: feature.created_at,
             stages: stages.clone(),
             dependencies: vec![], // Dependencies will be loaded separately
-            contextual_types: Some(context)
+            contextual_types: Some(context),
         }
     }
 }

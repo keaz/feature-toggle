@@ -5,7 +5,6 @@ use crate::logic::pipeline::PipelineLogic;
 use crate::logic::team::TeamLogic;
 use async_graphql::{Context, Object, Result as GqlResult, ID};
 use log::debug;
-use uuid::Uuid;
 
 pub struct Query;
 
@@ -28,9 +27,7 @@ impl Query {
         #[graphql(desc = "Name of the environment")] name: Option<String>,
         #[graphql(desc = "Active status of the environment")] active: Option<bool>,
     ) -> GqlResult<Vec<Environment>> {
-        debug!(
-            "Fetching environments with name: {name:?} and active: {active:?}"
-        );
+        debug!("Fetching environments with name: {name:?} and active: {active:?}");
         let repository = ctx.data::<Box<dyn EnvironmentLogic>>().unwrap();
         Ok(repository.get_environments(team_id, name, active).await?)
     }

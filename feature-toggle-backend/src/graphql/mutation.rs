@@ -6,7 +6,7 @@ use crate::graphql::validator::{CreateInputValidator, UpdateInputValidator};
 use crate::logic::environment::EnvironmentLogic;
 use crate::logic::feature::FeatureLogic;
 use crate::logic::pipeline::PipelineLogic;
-use async_graphql::{Context, Object, Result as GqlResult, ID};
+use async_graphql::{Context, ID, Object, Result as GqlResult};
 use log::info;
 use uuid::Uuid;
 

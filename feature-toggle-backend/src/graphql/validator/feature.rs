@@ -1,16 +1,15 @@
 use crate::graphql::schema::{CreateFeatureInput, FeatureType, UpdateFeatureInput};
-use crate::graphql::validator::{validate_duplicate_environment_and_index, validate_relationships_and_stages, CreateInputValidator, UpdateInputValidator};
+use crate::graphql::validator::{
+    CreateInputValidator, UpdateInputValidator, validate_duplicate_environment_and_index,
+    validate_relationships_and_stages,
+};
 use crate::logic::feature::FeatureLogic;
 use crate::logic::pipeline::PipelineLogic;
-use async_graphql::{Context, Error, Result, ID};
+use async_graphql::{Context, Error, ID, Result};
 use std::collections::HashSet;
 
 impl CreateInputValidator for CreateFeatureInput {
-    async fn validate(
-        &self,
-        team_id: Option<ID>,
-        ctx: &Context<'_>,
-    ) -> Result<(), Error> {
+    async fn validate(&self, team_id: Option<ID>, ctx: &Context<'_>) -> Result<(), Error> {
         let logic = ctx.data::<Box<dyn PipelineLogic>>()?;
         let pipelines = logic
             .get_pipelines(
@@ -32,7 +31,9 @@ impl CreateInputValidator for CreateFeatureInput {
 
         if self.feature_type == FeatureType::Contextual {
             if self.context.is_none() || self.context.as_ref().unwrap().is_empty() {
-                return Err(Error::new("Contextual features must have at least one context defined"));
+                return Err(Error::new(
+                    "Contextual features must have at least one context defined",
+                ));
             }
 
             for context in self.context.as_ref().unwrap() {
@@ -51,11 +52,7 @@ impl CreateInputValidator for CreateFeatureInput {
 }
 
 impl UpdateInputValidator for UpdateFeatureInput {
-    async fn validate(
-        &self,
-        id: Option<ID>,
-        ctx: &Context<'_>,
-    ) -> Result<(), Error> {
+    async fn validate(&self, id: Option<ID>, ctx: &Context<'_>) -> Result<(), Error> {
         let logic = ctx.data::<Box<dyn FeatureLogic>>()?;
         let feature = logic.get_feature_by_id(id.clone().unwrap()).await?;
         let pipelines = logic

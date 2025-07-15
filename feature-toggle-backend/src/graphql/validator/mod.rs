@@ -2,10 +2,10 @@ use crate::graphql::schema::{CreateRelationshipInput, StageInput};
 use async_graphql::{Context, Error, ID};
 use std::collections::HashMap;
 
-pub mod pipeline;
-pub mod team;
 pub mod environment;
 pub mod feature;
+pub mod pipeline;
+pub mod team;
 
 pub trait CreateInputValidator {
     async fn validate(
@@ -16,13 +16,9 @@ pub trait CreateInputValidator {
 }
 
 pub trait UpdateInputValidator {
-    async fn validate(
-        &self,
-        id: Option<ID>,
-        ctx: &Context<'_>,
-    ) -> async_graphql::Result<(), Error>;
+    async fn validate(&self, id: Option<ID>, ctx: &Context<'_>)
+    -> async_graphql::Result<(), Error>;
 }
-
 
 pub fn validate_relationships_and_stages<T: StageInput + 'static>(
     stages: &[T],
@@ -42,7 +38,9 @@ pub fn validate_relationships_and_stages<T: StageInput + 'static>(
     Ok(())
 }
 
-pub fn validate_duplicate_environment_and_index<T: StageInput + 'static>(stages: &[T]) -> async_graphql::Result<(), Error> {
+pub fn validate_duplicate_environment_and_index<T: StageInput + 'static>(
+    stages: &[T],
+) -> async_graphql::Result<(), Error> {
     let mut env_map: HashMap<&ID, usize> = HashMap::new();
     let mut order_map: HashMap<i32, usize> = HashMap::new();
 
