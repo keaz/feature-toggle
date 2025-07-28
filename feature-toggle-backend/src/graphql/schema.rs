@@ -93,8 +93,9 @@ pub struct PipelineStage {
 // Input types for mutations
 #[derive(InputObject, Debug)]
 pub struct CreateFeatureInput {
-    #[graphql(validator(min_length = 3, max_length = 100))]
+    #[graphql(validator(min_length = 3, max_length = 40))]
     pub name: String,
+    #[graphql(validator(min_length = 3, max_length = 255))]
     pub description: Option<String>,
     pub feature_type: FeatureType,
     pub enabled: Option<bool>,
@@ -110,6 +111,7 @@ pub struct CreateFeatureInput {
 #[derive(InputObject, Debug)]
 pub struct CreateContextualTypeInput {
     pub key: String,
+    pub description: String,
     pub entries: Vec<String>, // List of allowed values,
 }
 

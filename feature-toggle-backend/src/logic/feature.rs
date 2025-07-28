@@ -1,12 +1,6 @@
 use crate::database::entity::{DBStage, FeatureType as EntityFeatureType};
-use crate::database::feature::{
-    CreateFeature, CreateFeatureStage, FeatureRepository, UpdateFeature,
-};
-use crate::graphql::schema::{
-    CreateFeatureInput, CreateFeatureStageInput, CreateRelationshipInput, Environment, Feature,
-    FeatureRelationship, FeatureStage, FeatureType as GraphQLFeatureType,
-    UpdateFeatureInput,
-};
+use crate::database::feature::{CreateContextualType, CreateFeature, CreateFeatureStage, FeatureRepository, UpdateFeature};
+use crate::graphql::schema::{ContextualType, CreateContextualTypeInput, CreateFeatureInput, CreateFeatureStageInput, CreateRelationshipInput, Environment, Feature, FeatureRelationship, FeatureStage, FeatureType as GraphQLFeatureType, UpdateFeatureInput};
 use crate::logic::environment::EnvironmentLogic;
 use crate::logic::{create_relationships, get_environment_map, map_stages};
 use crate::Error;
@@ -68,16 +62,31 @@ impl FeatureLogicImpl {
 
     fn map_to_create_feature(team_id: Uuid, input: CreateFeatureInput) -> CreateFeature {
         let feature_type = Self::map_graphql_to_entity_feature_type(input.feature_type);
-
+        let contextual_types = Self::map_contextual_types_to_db(&input.context.unwrap_or_default());
         let stages = Self::get_create_stages_to_create(input.stages, input.relationships);
+
         CreateFeature {
             team_id,
             name: input.name,
             description: input.description,
             feature_type,
             stages,
-            dependencies: vec![], //#FIXME: For now, we're not handling dependencies from the GraphQL input
+            dependencies: input.dependencies.into_iter().map(|id| Uuid::try_from(id).unwrap()).collect(),
+            contextual_types
         }
+    }
+
+    fn map_contextual_types_to_db(context: &[CreateContextualTypeInput]) -> Vec<CreateContextualType> {
+        context
+            .iter()
+            .map(|ct| {
+                crate::database::feature::CreateContextualType {
+                    name: ct.key.clone(),
+                    description: ct.description.clone(),
+                    entries: ct.entries.clone(),
+                }
+            })
+            .collect::<Vec<_>>()
     }
 
     fn get_create_stages_to_create(
@@ -171,6 +180,21 @@ impl FeatureLogic for FeatureLogicImpl {
             .flat_map(|feature| &feature.stages)
             .map(|stage| Box::new(stage.clone()) as Box<dyn DBStage>)
             .collect::<Vec<Box<dyn DBStage>>>();
+        let contextual_types = feature
+            .contextual_types.clone()
+            .map(|ct| ct.into_iter().map(|context_type| {
+                ContextualType {
+                    id: context_type.id.into(),
+                    name: context_type.name,
+                    description: context_type.description,
+                    entries: context_type.entries.iter().map(|entry| {
+                        crate::graphql::schema::ContextualEntry {
+                            id: entry.id.into(),
+                            value: entry.value.clone(),
+                        }
+                    }).collect(),
+                }
+            }).collect::<Vec<ContextualType>>());
 
         let environment_map = get_environment_map(&*self.environment_logic, &stages, true).await?;
         let db_stages = feature
@@ -185,6 +209,7 @@ impl FeatureLogic for FeatureLogicImpl {
         let mut feature = Self::map_entity_to_graphql_feature(feature);
         feature.stages = stages;
         feature.relationships = relationships;
+        feature.contextual_types = contextual_types;
         Ok(feature)
     }
 

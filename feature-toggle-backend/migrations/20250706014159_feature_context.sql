@@ -11,6 +11,6 @@ CREATE TABLE contextual_entries
 (
     id            UUID PRIMARY KEY,
     contextual_id UUID NOT NULL REFERENCES contextual_type (id) ON DELETE CASCADE,
-    value         TEXT NOT NULL CHECK (value <> ''),
+    value         TEXT NOT NULL UNIQUE CHECK (value <> ''),
     UNIQUE (contextual_id, value)
 );

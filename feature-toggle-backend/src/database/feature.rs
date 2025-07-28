@@ -1,12 +1,13 @@
 use crate::database::entity::{
     ContextualEntry, ContextualType, Feature, FeatureDependency, FeaturePipelineStage, FeatureType,
 };
-use crate::database::{Error, handle_error};
+use crate::database::{handle_error, Error};
 use chrono::{DateTime, Utc};
 use mockall::automock;
+use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgQueryResult;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -17,6 +18,14 @@ pub struct CreateFeature {
     pub feature_type: FeatureType,
     pub stages: Vec<CreateFeatureStage>,
     pub dependencies: Vec<Uuid>,
+    pub contextual_types: Vec<CreateContextualType>
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateContextualType {
+    pub name: String,
+    pub description: String,
+    pub entries: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -116,7 +125,7 @@ pub fn feature_repository(pool: PgPool) -> Box<dyn FeatureRepository> {
 }
 
 #[derive(Clone)]
-struct FeatureRepositoryImpl {
+pub struct FeatureRepositoryImpl {
     pool: PgPool,
 }
 
@@ -288,6 +297,48 @@ impl FeatureRepositoryImpl {
         handle_error(None, result)
     }
 
+    /// This function should only be called when there is a contextual type with entries.
+    pub async fn create_contextual_type(
+        &self,
+        feature_id: &Uuid,
+        input: CreateContextualType,
+        tx: &mut PgConnection,
+    ) -> Result<(Uuid, Vec<Uuid>), Error> {
+        let id = Uuid::new_v4();
+        let result = sqlx::query!(
+            r#"INSERT INTO contextual_type (id, feature_id, name, description)
+               VALUES ($1, $2, $3, $4)"#,
+            id,
+            feature_id,
+            input.name,
+            input.description
+        )
+            .execute(&mut *tx)
+            .await;
+
+        handle_error(None, result)?;
+
+        let mut entry_ids: Vec<Uuid> = vec![];
+        if !input.entries.is_empty() {
+            entry_ids = input.entries.iter().map(|e| Uuid::new_v4()).collect();
+            let contextual_ids: Vec<Uuid> = input.entries.iter().map(|_| id).collect();
+
+            let entry_result = sqlx::query!(
+                r#"INSERT INTO contextual_entries (id, contextual_id, value)
+                   SELECT unnest($1::uuid[]), unnest($2::uuid[]), unnest($3::text[])"#,
+                &entry_ids[..],
+                &contextual_ids[..],
+                &input.entries[..]
+            )
+                .execute(&mut *tx)
+                .await;
+
+            handle_error(None, entry_result)?;
+        }
+
+        Ok((id, entry_ids))
+    }
+
     async fn update_feature_stage(
         &self,
         feature_id: &Uuid,
@@ -449,19 +500,30 @@ impl FeatureRepositoryImpl {
 
     fn map_row_to_feature(features: Vec<FeatureWithStageRow>) -> Feature {
         let feature = &features[0];
+
+        let mut seen = HashSet::new();
         let stages = &features
             .clone()
             .split_off(0)
             .into_iter()
+            .filter(|r| {
+                if let Some(stage_id) = r.stage_id {
+                    seen.insert(stage_id)
+                } else {
+                    true // Keep rows without a stage_id
+                }
+            })
             .filter_map(|r| {
-                r.stage_id.map(|id| FeaturePipelineStage {
-                    id,
-                    feature_id: r.feature_id_stage.unwrap(),
-                    environment_id: r.environment_id.unwrap(),
-                    order_index: r.order_index.unwrap(),
-                    parent_stage_id: r.parent_stage_id,
-                    position: r.position.unwrap(),
-                    enabled: r.enabled.unwrap(),
+                r.stage_id.map(|id| {
+                    FeaturePipelineStage {
+                        id,
+                        feature_id: r.feature_id_stage.unwrap(),
+                        environment_id: r.environment_id.unwrap(),
+                        order_index: r.order_index.unwrap(),
+                        parent_stage_id: r.parent_stage_id,
+                        position: r.position.unwrap(),
+                        enabled: r.enabled.unwrap(),
+                    }
                 })
             })
             .collect::<Vec<FeaturePipelineStage>>();
@@ -472,10 +534,17 @@ impl FeatureRepositoryImpl {
             _ => panic!("Unknown feature type, this should never happen"),
         };
 
+        let mut seen_contexts = HashSet::new();
         let context = features
             .clone()
-            .split_off(stages.len())
             .into_iter()
+            .filter(|r| {
+                if let Some(stage_id) = r.stage_id {
+                    seen_contexts.insert(stage_id)
+                } else {
+                    true // Keep rows without a stage_id
+                }
+            })
             .filter_map(|r| {
                 r.context_id.map(|id| {
                     let entries = features
@@ -510,6 +579,74 @@ impl FeatureRepositoryImpl {
             dependencies: vec![], // Dependencies will be loaded separately
             contextual_types: Some(context),
         }
+    }
+
+    async fn save_feature(input: &CreateFeature, tx: &mut PgConnection) -> Result<Uuid, Error> {
+        let id = Uuid::new_v4();
+        let feature_type_str = match input.feature_type {
+            FeatureType::Simple => "Simple",
+            FeatureType::Contextual => "Contextual",
+        };
+
+        let result = sqlx::query!(
+            r#"INSERT INTO features (id, name, description, feature_type, team_id)
+               VALUES ($1, $2, $3, $4, $5) RETURNING id"#,
+            id,
+            input.name,
+            input.description,
+            feature_type_str,
+            input.team_id
+        )
+            .fetch_one(&mut *tx)
+            .await;
+
+        let handled_error = handle_error(None, result);
+        if handled_error.is_err() {
+            return Err(handled_error.err().unwrap());
+        }
+
+        Ok(id)
+    }
+
+    async fn check_feature_exists(&self, input: &CreateFeature) -> Result<(), Error> {
+        let existing_feature = self
+            .get_features(input.team_id, Some(input.name.clone()), None)
+            .await;
+
+        if let Ok(existing_feature) = existing_feature {
+            if !existing_feature.is_empty() {
+                return Err(Error::RecordAlreadyExists(format!(
+                    "Feature with name '{}' already exists",
+                    input.name
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    async fn update_feature(&self, input: &UpdateFeature, tx: &mut PgConnection) -> Result<PgQueryResult, Error> {
+        let existing_feature = self.get_feature_by_id(input.id).await?;
+
+        let feature_type_str = match input.feature_type.clone().unwrap_or(existing_feature.feature_type) {
+            FeatureType::Simple => "Simple",
+            FeatureType::Contextual => "Contextual",
+        };
+
+        let result = sqlx::query!(
+            r#"UPDATE features SET name = $1, description = $2, feature_type = $3 WHERE id = $4"#,
+            input.name.clone().unwrap_or(existing_feature.name),
+            input.description.clone().or(existing_feature.description),
+            feature_type_str,
+            input.id
+        )
+            .execute(&mut *tx)
+            .await;
+
+        if result.is_err() {
+            return Err(Error::DatabaseError(result.err().unwrap()));
+        }
+
+        Ok(result.unwrap())
     }
 }
 
@@ -633,18 +770,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
     }
 
     async fn create_feature(&self, input: CreateFeature) -> Result<Uuid, Error> {
-        let existing_feature = self
-            .get_features(input.team_id, Some(input.name.clone()), None)
-            .await;
-
-        if let Ok(existing_feature) = existing_feature {
-            if !existing_feature.is_empty() {
-                return Err(Error::RecordAlreadyExists(format!(
-                    "Feature with name '{}' already exists",
-                    input.name
-                )));
-            }
-        }
+        self.check_feature_exists(&input).await?;
 
         let tx: Result<Transaction<'static, Postgres>, sqlx::Error> = self.pool.begin().await;
         if tx.is_err() {
@@ -652,27 +778,9 @@ impl FeatureRepository for FeatureRepositoryImpl {
         }
         let mut tx: Transaction<'_, Postgres> = tx.unwrap();
 
-        let id = Uuid::new_v4();
-        let feature_type_str = match input.feature_type {
-            FeatureType::Simple => "Simple",
-            FeatureType::Contextual => "Contextual",
-        };
-
-        let result = sqlx::query!(
-            r#"INSERT INTO features (id, name, description, feature_type, team_id) 
-               VALUES ($1, $2, $3, $4, $5) RETURNING id"#,
-            id,
-            input.name,
-            input.description,
-            feature_type_str,
-            input.team_id
-        )
-        .fetch_one(&mut *tx)
-        .await;
-
-        let handled_error = handle_error(None, result);
-        match handled_error {
-            Ok(saved_feature) => {
+        let saved_feature = Self::save_feature(&input, &mut tx).await;
+        match saved_feature {
+            Ok(id) => {
                 // Create stages
                 let stages = self.create_feature_stage(&id, input.stages, &mut tx).await;
                 if stages.is_err() {
@@ -689,8 +797,17 @@ impl FeatureRepository for FeatureRepositoryImpl {
                     return Err(dependencies.err().unwrap());
                 }
 
+                // Create contextual types
+                for contextual_type in input.contextual_types {
+                    let result = self.create_contextual_type(&id, contextual_type, &mut tx).await;
+                    if result.is_err() {
+                        let _ = tx.rollback().await;
+                        return Err(result.err().unwrap());
+                    }
+                }
+
                 let _ = tx.commit().await;
-                Ok(saved_feature.id)
+                Ok(id)
             }
             Err(e) => {
                 let _ = tx.rollback().await;
@@ -706,26 +823,11 @@ impl FeatureRepository for FeatureRepositoryImpl {
         }
         let mut tx = tx.unwrap();
 
-        let existing_feature = self.get_feature_by_id(input.id).await?;
-
-        let feature_type_str = match input.feature_type.unwrap_or(existing_feature.feature_type) {
-            FeatureType::Simple => "Simple",
-            FeatureType::Contextual => "Contextual",
-        };
-
-        let result = sqlx::query!(
-            r#"UPDATE features SET name = $1, description = $2, feature_type = $3 WHERE id = $4"#,
-            input.name.unwrap_or(existing_feature.name),
-            input.description.or(existing_feature.description),
-            feature_type_str,
-            input.id
-        )
-        .execute(&mut *tx)
-        .await;
-
+        // Update feature
+        let result = self.update_feature(&input, &mut tx).await;
         if result.is_err() {
             let _ = tx.rollback().await;
-            return Err(Error::DatabaseError(result.err().unwrap()));
+            return Err(result.err().unwrap());
         }
 
         // Update stages
@@ -746,17 +848,8 @@ impl FeatureRepository for FeatureRepositoryImpl {
             return Err(dependencies_result.err().unwrap());
         }
 
-        let result = handle_error(Some(input.id), result);
-        match result {
-            Ok(_) => {
-                let _ = tx.commit().await;
-                self.get_feature_by_id(input.id).await
-            }
-            Err(e) => {
-                let _ = tx.rollback().await;
-                Err(e)
-            }
-        }
+        let _ = tx.commit().await;
+        self.get_feature_by_id(input.id).await
     }
 
     async fn delete_feature(&self, id: Uuid) -> Result<(), Error> {

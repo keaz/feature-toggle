@@ -85,6 +85,7 @@ pub async fn get_environment_map(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::logic::environment::MockEnvironmentLogic;
 
     #[derive(Debug, Clone)]
     struct MockStage {
@@ -267,5 +268,167 @@ mod tests {
         assert_eq!(mapped_stages[1].order_index, 2);
         assert_eq!(mapped_stages[0].position, "first");
         assert_eq!(mapped_stages[1].position, "second");
+    }
+
+    #[tokio::test]
+    async fn test_get_environment_map_has_stage_false() {
+        let mock_env_logic = MockEnvironmentLogic::new();
+        // No expectations set because the function shouldn't call get_environment_by_id
+        
+        let stages: Vec<Box<dyn DBStage>> = vec![
+            Box::new(MockStage {
+                id: Uuid::new_v4(),
+                environment_id: Uuid::new_v4(),
+                order_index: 1,
+                position: "first".to_string(),
+                parent_stage_id: None,
+            }),
+        ];
+
+        let result = get_environment_map(&mock_env_logic, &stages, false).await;
+        
+        assert!(result.is_ok());
+        let env_map = result.unwrap();
+        assert_eq!(env_map.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_environment_map_same_environment_id() {
+        let mut mock_env_logic = MockEnvironmentLogic::new();
+        let env_id = Uuid::new_v4();
+        let env_id_str = env_id.to_string();
+        
+        // Set expectation for get_environment_by_id to be called once
+        mock_env_logic
+            .expect_get_environment_by_id()
+            .withf(move |id| id.to_string() == env_id_str)
+            .times(1)
+            .returning(move |id| {
+                Ok(Environment {
+                    id,
+                    name: "Test Environment".to_string(),
+                    team_id: Default::default(),
+                    active: true,
+                })
+            });
+        
+        let stages: Vec<Box<dyn DBStage>> = vec![
+            Box::new(MockStage {
+                id: Uuid::new_v4(),
+                environment_id: env_id,
+                order_index: 1,
+                position: "first".to_string(),
+                parent_stage_id: None,
+            }),
+            Box::new(MockStage {
+                id: Uuid::new_v4(),
+                environment_id: env_id, // Same environment ID
+                order_index: 2,
+                position: "second".to_string(),
+                parent_stage_id: None,
+            }),
+        ];
+
+        let result = get_environment_map(&mock_env_logic, &stages, true).await;
+        
+        assert!(result.is_ok());
+        let env_map = result.unwrap();
+        assert_eq!(env_map.len(), 1);
+        assert!(env_map.contains_key(&env_id));
+    }
+
+    #[tokio::test]
+    async fn test_get_environment_map_different_environment_ids() {
+        let mut mock_env_logic = MockEnvironmentLogic::new();
+        let env_id1 = Uuid::new_v4();
+        let env_id1_str = env_id1.to_string();
+        let env_id2 = Uuid::new_v4();
+        let env_id2_str = env_id2.to_string();
+        
+        // Set expectations for get_environment_by_id to be called for each environment ID
+        mock_env_logic
+            .expect_get_environment_by_id()
+            .withf(move |id| id.to_string() == env_id1_str)
+            .times(1)
+            .returning(move |id| {
+                Ok(Environment {
+                    id,
+                    name: "Environment 1".to_string(),
+                    team_id: Default::default(),
+                    active: true,
+                })
+            });
+            
+        mock_env_logic
+            .expect_get_environment_by_id()
+            .withf(move |id| id.to_string() == env_id2_str)
+            .times(1)
+            .returning(move |id| {
+                Ok(Environment {
+                    id,
+                    name: "Environment 2".to_string(),
+                    team_id: Default::default(),
+                    active: true,
+                })
+            });
+        
+        let stages: Vec<Box<dyn DBStage>> = vec![
+            Box::new(MockStage {
+                id: Uuid::new_v4(),
+                environment_id: env_id1,
+                order_index: 1,
+                position: "first".to_string(),
+                parent_stage_id: None,
+            }),
+            Box::new(MockStage {
+                id: Uuid::new_v4(),
+                environment_id: env_id2, // Different environment ID
+                order_index: 2,
+                position: "second".to_string(),
+                parent_stage_id: None,
+            }),
+        ];
+
+        let result = get_environment_map(&mock_env_logic, &stages, true).await;
+        
+        assert!(result.is_ok());
+        let env_map = result.unwrap();
+        assert_eq!(env_map.len(), 2);
+        assert!(env_map.contains_key(&env_id1));
+        assert!(env_map.contains_key(&env_id2));
+        assert_eq!(env_map.get(&env_id1).unwrap().name, "Environment 1");
+        assert_eq!(env_map.get(&env_id2).unwrap().name, "Environment 2");
+    }
+
+    #[tokio::test]
+    async fn test_get_environment_map_error_handling() {
+        let mut mock_env_logic = MockEnvironmentLogic::new();
+        let env_id = Uuid::new_v4();
+        let env_id_str = env_id.to_string();
+        
+        // Set expectation for get_environment_by_id to return an error
+        mock_env_logic
+            .expect_get_environment_by_id()
+            .withf(move |id| id.to_string() == env_id_str)
+            .times(1)
+            .returning(move |_| Err(Error::NotFound(env_id)));
+        
+        let stages: Vec<Box<dyn DBStage>> = vec![
+            Box::new(MockStage {
+                id: Uuid::new_v4(),
+                environment_id: env_id,
+                order_index: 1,
+                position: "first".to_string(),
+                parent_stage_id: None,
+            }),
+        ];
+
+        let result = get_environment_map(&mock_env_logic, &stages, true).await;
+        
+        assert!(result.is_err());
+        match result {
+            Err(Error::NotFound(uuid)) => assert_eq!(uuid, env_id),
+            _ => panic!("Expected NotFound error"),
+        }
     }
 }
