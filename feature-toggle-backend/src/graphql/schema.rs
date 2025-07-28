@@ -48,7 +48,6 @@ pub struct FeatureStage {
 pub struct ContextualType {
     pub id: ID,
     pub name: String,
-    pub description: Option<String>,
     pub entries: Vec<ContextualEntry>,
 }
 
@@ -111,7 +110,6 @@ pub struct CreateFeatureInput {
 #[derive(InputObject, Debug)]
 pub struct CreateContextualTypeInput {
     pub key: String,
-    pub description: String,
     pub entries: Vec<String>, // List of allowed values,
 }
 

@@ -80,9 +80,8 @@ impl FeatureLogicImpl {
         context
             .iter()
             .map(|ct| {
-                crate::database::feature::CreateContextualType {
+                CreateContextualType {
                     name: ct.key.clone(),
-                    description: ct.description.clone(),
                     entries: ct.entries.clone(),
                 }
             })
@@ -186,7 +185,6 @@ impl FeatureLogic for FeatureLogicImpl {
                 ContextualType {
                     id: context_type.id.into(),
                     name: context_type.name,
-                    description: context_type.description,
                     entries: context_type.entries.iter().map(|entry| {
                         crate::graphql::schema::ContextualEntry {
                             id: entry.id.into(),

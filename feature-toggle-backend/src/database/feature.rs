@@ -24,7 +24,6 @@ pub struct CreateFeature {
 #[derive(Debug, Clone)]
 pub struct CreateContextualType {
     pub name: String,
-    pub description: String,
     pub entries: Vec<String>,
 }
 
@@ -86,7 +85,6 @@ struct FeatureWithStageRow {
 
     context_id: Option<Uuid>,
     context_name: Option<String>,
-    context_description: Option<String>,
     entry_id: Option<Uuid>,
     entry_value: Option<String>,
 }
@@ -306,12 +304,11 @@ impl FeatureRepositoryImpl {
     ) -> Result<(Uuid, Vec<Uuid>), Error> {
         let id = Uuid::new_v4();
         let result = sqlx::query!(
-            r#"INSERT INTO contextual_type (id, feature_id, name, description)
-               VALUES ($1, $2, $3, $4)"#,
+            r#"INSERT INTO contextual_type (id, feature_id, name)
+               VALUES ($1, $2, $3)"#,
             id,
             feature_id,
-            input.name,
-            input.description
+            input.name
         )
             .execute(&mut *tx)
             .await;
@@ -561,7 +558,6 @@ impl FeatureRepositoryImpl {
                     ContextualType {
                         id,
                         name: r.context_name.clone().unwrap_or_default(),
-                        description: r.context_description.clone(),
                         entries,
                     }
                 })
@@ -656,7 +652,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
         let result = sqlx::query_as::<_, FeatureWithStageRow>(
             r#"SELECT f.id as feature_id, f.name as feature_name, f.description, f.feature_type, f.team_id, f.created_at, 
             s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
-            s.parent_stage_id, s.position, s.enabled,  c.id as context_id, c.name as context_name, c.description as context_description,
+            s.parent_stage_id, s.position, s.enabled,  c.id as context_id, c.name as context_name,
 			e.id as entry_id, e.value as entry_value
 			FROM features f LEFT JOIN features_pipeline_stages s ON f.id = s.feature_id
 			LEFT JOIN contextual_type c ON f.id = c.feature_id
@@ -689,7 +685,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
         let mut query_builder = sqlx::QueryBuilder::new(
             r#"SELECT f.id as feature_id, f.name as feature_name, f.description, f.feature_type, f.team_id, f.created_at, 
             s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
-            s.parent_stage_id, s.position, s.enabled,  c.id as context_id, c.name as context_name, c.description as context_description,
+            s.parent_stage_id, s.position, s.enabled,  c.id as context_id, c.name as context_name,
 			e.id as entry_id, e.value as entry_value
 			FROM features f LEFT JOIN features_pipeline_stages s ON f.id = s.feature_id
 			LEFT JOIN contextual_type c ON f.id = c.feature_id

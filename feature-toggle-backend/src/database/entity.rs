@@ -49,7 +49,6 @@ pub struct Feature {
 pub struct ContextualType {
     pub id: Uuid,
     pub name: String,
-    pub description: Option<String>,
     pub entries: Vec<ContextualEntry>,
 }
 

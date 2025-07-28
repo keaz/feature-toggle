@@ -574,7 +574,6 @@ async fn test_create_contextual_type() {
 
     let contextual_type = feature::CreateContextualType {
         name: "Test Contextual Type".to_string(),
-        description: "A test contextual type".to_string(),
         entries,
     };
     let feature_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
