@@ -183,6 +183,7 @@ fn stage_factory(
     environment: Environment,
     order_index: i32,
     position: String,
+    enabled: bool,
 ) -> PipelineStage {
     PipelineStage {
         id,

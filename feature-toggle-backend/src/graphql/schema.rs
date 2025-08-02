@@ -42,6 +42,7 @@ pub struct FeatureStage {
     pub environment: Environment,
     pub order_index: i32,
     pub position: String,
+    pub enabled: bool,
 }
 
 #[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
@@ -138,6 +139,7 @@ pub struct CreateFeatureStageInput {
     pub order_index: i32,
     #[graphql(validator(min_length = 1, max_length = 50))]
     pub position: String,
+    pub enabled: bool,
 }
 
 pub trait StageInput {

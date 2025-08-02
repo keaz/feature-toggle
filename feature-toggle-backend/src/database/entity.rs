@@ -94,6 +94,7 @@ pub trait DBStage: Send + Sync {
     fn parent_stage_id(&self) -> Option<Uuid>;
     fn environment_id(&self) -> Uuid;
     fn position(&self) -> String;
+    fn enabled(&self) -> bool;
 }
 
 impl DBStage for PipelineStage {
@@ -116,6 +117,10 @@ impl DBStage for PipelineStage {
     fn position(&self) -> String {
         self.position.clone()
     }
+
+    fn enabled(&self) -> bool {
+        true // Pipeline stages are always enabled
+    }
 }
 
 impl DBStage for FeaturePipelineStage {
@@ -137,5 +142,9 @@ impl DBStage for FeaturePipelineStage {
 
     fn position(&self) -> String {
         self.position.clone()
+    }
+
+    fn enabled(&self) -> bool {
+        self.enabled
     }
 }

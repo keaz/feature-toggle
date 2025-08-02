@@ -101,7 +101,7 @@ impl FeatureLogicImpl {
                 environment_id: Uuid::try_from(stage.environment_id.clone()).unwrap(),
                 order_index: stage.order_index,
                 position: stage.position,
-                enabled: true,
+                enabled: stage.enabled,
                 parent_stage: None,
             })
             .collect::<Vec<CreateFeatureStage>>();
@@ -267,12 +267,14 @@ fn stage_factory(
     environment: Environment,
     order_index: i32,
     position: String,
+    enabled: bool,
 ) -> FeatureStage {
     FeatureStage {
         id,
         environment,
         order_index,
         position,
+        enabled
     }
 }
 
@@ -318,12 +320,14 @@ mod test {
                 environment_id: ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"),
                 order_index: 0,
                 position: "top".to_string(),
+                enabled: true,
             },
             CreateFeatureStageInput {
                 id: Some(ID::from("3eef17bc-9e06-411d-b5f4-7a786e68bb96")),
                 environment_id: ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"),
                 order_index: 1,
                 position: "bottom".to_string(),
+                enabled: true,
             },
         ];
         stages
