@@ -1,8 +1,9 @@
-use crate::graphql::schema::{Environment, Feature, FeatureType, Pipeline, Team};
+use crate::graphql::schema::{Client, ClientType, Environment, Feature, FeatureType, Pipeline, Team};
 use crate::logic::environment::EnvironmentLogic;
 use crate::logic::feature::FeatureLogic;
 use crate::logic::pipeline::PipelineLogic;
 use crate::logic::team::TeamLogic;
+use crate::logic::client::ClientLogic;
 use async_graphql::{Context, Object, Result as GqlResult, ID};
 use log::debug;
 
@@ -86,5 +87,28 @@ impl Query {
         debug!("Fetching features for team with id: {team_id:?}");
         let logic = ctx.data::<Box<dyn FeatureLogic>>().unwrap();
         Ok(logic.get_features(team_id, name, feature_type).await?)
+    }
+
+    async fn client(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Id of the client")] id: ID,
+    ) -> GqlResult<Client> {
+        debug!("Fetching client with id: {id:?}");
+        let logic = ctx.data::<Box<dyn ClientLogic>>().unwrap();
+        Ok(logic.get_client_by_id(id).await?)
+    }
+
+    async fn clients(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Id of the team")] team_id: ID,
+        #[graphql(desc = "Name of the client")] name: Option<String>,
+        #[graphql(desc = "Enabled status of the client")] enabled: Option<bool>,
+        #[graphql(desc = "Type of the client")] client_type: Option<ClientType>,
+    ) -> GqlResult<Vec<Client>> {
+        debug!("Fetching clients for team with id: {team_id:?}");
+        let logic = ctx.data::<Box<dyn ClientLogic>>().unwrap();
+        Ok(logic.get_clients(team_id, name, enabled, client_type).await?)
     }
 }

@@ -3,6 +3,7 @@ pub mod environment;
 pub mod feature;
 pub mod pipeline;
 pub mod team;
+pub mod client;
 
 use crate::Error;
 use log::error;

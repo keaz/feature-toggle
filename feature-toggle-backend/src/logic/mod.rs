@@ -1,3 +1,5 @@
+pub mod client;
+
 use crate::database::entity::DBStage;
 use crate::graphql::schema::{Environment, Relationship, Stage};
 use crate::logic::environment::EnvironmentLogic;

@@ -88,6 +88,24 @@ pub struct Team {
     pub description: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub enum ClientType {
+    Web,
+    Backend,
+}
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
+pub struct Client {
+    pub id: Uuid,
+    pub team_id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub enabled: bool,
+    pub client_type: ClientType,
+    pub api_key: String,
+    pub web_origins: Option<Vec<String>>, // Populated when loading with joins
+}
+
 pub trait DBStage: Send + Sync {
     fn get_id(&self) -> Uuid;
     fn order_index(&self) -> i32;

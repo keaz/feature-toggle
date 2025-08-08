@@ -13,6 +13,11 @@ DELETE
 FROM public.features_pipeline_stages;
 DELETE
 FROM public.features;
+-- clients and origins
+DELETE
+FROM public.client_web_origins;
+DELETE
+FROM public.clients;
 DELETE
 FROM public.pipeline_stages;
 DELETE
@@ -88,3 +93,16 @@ INSERT INTO public.feature_dependencies(feature_id, depends_on_id)
 VALUES ('51ecc366-f1cd-4d3d-ab73-fa60bad98f27', '6eef17bc-9e06-411d-b5f4-7a786e68bb91'),
        ('3eef17bc-9e06-411d-b5f4-7a786e68bb96', '6eef17bc-9e06-411d-b5f4-7a786e68bb91')
 ON CONFLICT (feature_id, depends_on_id) DO NOTHING;
+
+-- Seed clients
+INSERT INTO public.clients(id, team_id, name, description, enabled, client_type, api_key)
+VALUES ('a1b2c3d4-0000-4000-8000-000000000001', '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', 'Web Client 1',
+        'Seed web client', true, 'Web', 'TEST_WEB_KEY_1'),
+       ('a1b2c3d4-0000-4000-8000-000000000002', '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', 'Backend Client 1',
+        'Seed backend client', true, 'Backend', 'TEST_BACKEND_KEY_1')
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO public.client_web_origins(id, client_id, origin)
+VALUES ('b1b2c3d4-0000-4000-8000-000000000001', 'a1b2c3d4-0000-4000-8000-000000000001', 'http://localhost:5173'),
+       ('b1b2c3d4-0000-4000-8000-000000000002', 'a1b2c3d4-0000-4000-8000-000000000001', 'https://example.com')
+ON CONFLICT (id) DO NOTHING;

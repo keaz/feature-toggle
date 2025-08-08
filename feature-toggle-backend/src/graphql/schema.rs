@@ -261,3 +261,43 @@ pub trait Stage {}
 impl Stage for FeatureStage {}
 
 impl Stage for PipelineStage {}
+
+#[derive(Enum, Copy, Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
+pub enum ClientType {
+    Web,
+    Backend,
+}
+
+#[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
+pub struct Client {
+    pub id: ID,
+    pub team_id: ID,
+    pub name: String,
+    pub description: Option<String>,
+    pub enabled: bool,
+    pub client_type: ClientType,
+    pub api_key: String,
+    pub web_origins: Vec<String>,
+}
+
+#[derive(InputObject, Debug)]
+pub struct CreateClientInput {
+    #[graphql(validator(min_length = 3, max_length = 100))]
+    pub name: String,
+    #[graphql(validator(min_length = 0, max_length = 500))]
+    pub description: Option<String>,
+    pub enabled: Option<bool>,
+    pub client_type: ClientType,
+    pub web_origins: Option<Vec<String>>,
+}
+
+#[derive(InputObject, Debug)]
+pub struct UpdateClientInput {
+    #[graphql(validator(min_length = 3, max_length = 100))]
+    pub name: Option<String>,
+    #[graphql(validator(min_length = 0, max_length = 500))]
+    pub description: Option<String>,
+    pub enabled: Option<bool>,
+    pub client_type: Option<ClientType>,
+    pub web_origins: Option<Vec<String>>,
+}

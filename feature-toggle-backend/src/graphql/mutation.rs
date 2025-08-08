@@ -1,11 +1,12 @@
 use crate::graphql::schema::{
-    CreateEnvironmentInput, CreateFeatureInput, CreatePipelineInput, CreateTeamInput, Environment,
-    Feature, Pipeline, Team, UpdateEnvironmentInput, UpdateFeatureInput, UpdatePipelineInput,
+    CreateClientInput, CreateEnvironmentInput, CreateFeatureInput, CreatePipelineInput, CreateTeamInput, Environment,
+    Feature, Pipeline, Team, UpdateClientInput, UpdateEnvironmentInput, UpdateFeatureInput, UpdatePipelineInput,
 };
 use crate::graphql::validator::{CreateInputValidator, UpdateInputValidator};
 use crate::logic::environment::EnvironmentLogic;
 use crate::logic::feature::FeatureLogic;
 use crate::logic::pipeline::PipelineLogic;
+use crate::logic::client::ClientLogic;
 use async_graphql::{Context, ID, Object, Result as GqlResult};
 use log::info;
 use uuid::Uuid;
@@ -113,6 +114,35 @@ impl MutationRoot {
         info!("Deleting feature with id: {id:?}");
         let logic = ctx.data::<Box<dyn FeatureLogic>>().unwrap();
         logic.delete_feature(id).await?;
+        Ok(true)
+    }
+
+    async fn create_client(
+        &self,
+        ctx: &Context<'_>,
+        team_id: ID,
+        input: CreateClientInput,
+    ) -> GqlResult<crate::graphql::schema::Client> {
+        info!("Creating client with input: {input:?}");
+        let logic = ctx.data::<Box<dyn ClientLogic>>().unwrap();
+        Ok(logic.create_client(team_id, input).await?)
+    }
+
+    async fn update_client(
+        &self,
+        ctx: &Context<'_>,
+        id: ID,
+        input: UpdateClientInput,
+    ) -> GqlResult<crate::graphql::schema::Client> {
+        info!("Updating client with id: {id:?} and input: {input:?}");
+        let logic = ctx.data::<Box<dyn ClientLogic>>().unwrap();
+        Ok(logic.update_client(id, input).await?)
+    }
+
+    async fn delete_client(&self, ctx: &Context<'_>, id: ID) -> GqlResult<bool> {
+        info!("Deleting client with id: {id:?}");
+        let logic = ctx.data::<Box<dyn ClientLogic>>().unwrap();
+        logic.delete_client(id).await?;
         Ok(true)
     }
 }

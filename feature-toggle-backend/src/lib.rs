@@ -41,6 +41,9 @@ pub async fn run() -> std::io::Result<()> {
         database::feature::feature_repository(db_pool.clone()),
         environment_logic.clone(),
     );
+    let client_logic = logic::client::client_logic(
+        database::client::client_repository(db_pool.clone()),
+    );
 
     HttpServer::new(move || {
         let schema = Schema::build(Query, MutationRoot, EmptySubscription)
@@ -49,6 +52,7 @@ pub async fn run() -> std::io::Result<()> {
             .data(team_logic.clone())
             .data(pipeline_logic.clone())
             .data(feature_logic.clone())
+            .data(client_logic.clone())
             // .extension(ApolloTracing)
             .finish();
 
