@@ -184,7 +184,7 @@ impl FeatureLogic for FeatureLogicImpl {
             .map(|ct| ct.into_iter().map(|context_type| {
                 ContextualType {
                     id: context_type.id.into(),
-                    name: context_type.name,
+                    key: context_type.name,
                     entries: context_type.entries.iter().map(|entry| {
                         crate::graphql::schema::ContextualEntry {
                             id: entry.id.into(),
@@ -431,7 +431,6 @@ mod test {
         const NAME: &str = "Updated Feature";
 
         let input = UpdateFeatureInput {
-            id: ID::from(ID),
             name: NAME.to_string(),
             description: Some("Updated description".to_string()),
             feature_type: GraphQLFeatureType::Contextual,

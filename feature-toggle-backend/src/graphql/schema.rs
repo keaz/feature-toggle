@@ -48,7 +48,7 @@ pub struct FeatureStage {
 #[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
 pub struct ContextualType {
     pub id: ID,
-    pub name: String,
+    pub key: String,
     pub entries: Vec<ContextualEntry>,
 }
 
@@ -116,7 +116,6 @@ pub struct CreateContextualTypeInput {
 
 #[derive(InputObject, Debug)]
 pub struct UpdateFeatureInput {
-    pub id: ID,
     #[graphql(validator(min_length = 3, max_length = 100))]
     pub name: String,
     pub description: Option<String>,
