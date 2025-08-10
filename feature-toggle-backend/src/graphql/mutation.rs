@@ -7,6 +7,7 @@ use crate::logic::environment::EnvironmentLogic;
 use crate::logic::feature::FeatureLogic;
 use crate::logic::pipeline::PipelineLogic;
 use crate::logic::client::ClientLogic;
+use crate::logic::context::ContextLogic;
 use async_graphql::{Context, ID, Object, Result as GqlResult};
 use log::info;
 use uuid::Uuid;
@@ -144,5 +145,86 @@ impl MutationRoot {
         let logic = ctx.data::<Box<dyn ClientLogic>>().unwrap();
         logic.delete_client(id).await?;
         Ok(true)
+    }
+
+    // Context mutations
+    async fn create_context(
+        &self,
+        ctx: &Context<'_>,
+        team_id: ID,
+        input: crate::graphql::schema::CreateContextInput,
+    ) -> GqlResult<crate::graphql::schema::Context> {
+        info!("Creating context with key: {}", input.key);
+        let logic = ctx.data::<Box<dyn ContextLogic>>().unwrap();
+        Ok(logic.create_context(team_id, input).await?)
+    }
+
+    async fn update_context(
+        &self,
+        ctx: &Context<'_>,
+        id: ID,
+        input: crate::graphql::schema::UpdateContextInput,
+    ) -> GqlResult<crate::graphql::schema::Context> {
+        info!("Updating context with id: {id:?}");
+        let logic = ctx.data::<Box<dyn ContextLogic>>().unwrap();
+        Ok(logic.update_context(id, input).await?)
+    }
+
+    async fn delete_context(&self, ctx: &Context<'_>, id: ID) -> GqlResult<bool> {
+        info!("Deleting context with id: {id:?}");
+        let logic = ctx.data::<Box<dyn ContextLogic>>().unwrap();
+        logic.delete_context(id).await?;
+        Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_graphql::{Schema, EmptySubscription, Request};
+    use crate::logic::context::MockContextLogic;
+    use crate::graphql::query::Query as GqlQuery;
+
+    #[tokio::test]
+    async fn test_create_context_mutation() {
+        let mut mock = MockContextLogic::new();
+        let team_id = ID::from(Uuid::new_v4());
+        let input = crate::graphql::schema::CreateContextInput { key: "country".into(), entries: vec!["US".into()] };
+        let expected = crate::graphql::schema::Context {
+            id: ID::from(Uuid::new_v4()),
+            team_id: team_id.clone(),
+            key: "country".into(),
+            entries: vec![crate::graphql::schema::ContextEntry { id: ID::from(Uuid::new_v4()), value: "US".into() }],
+        };
+
+        let team_id_clone = team_id.clone();
+        mock.expect_create_context()
+            .times(1)
+            .withf(move |tid, i| tid == &team_id_clone && i.key == "country" && i.entries.len() == 1)
+            .return_once(move |_, _| Ok(expected.clone()));
+
+        let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
+            .data::<Box<dyn crate::logic::context::ContextLogic>>(Box::new(mock))
+            .finish();
+
+        let gql = r#"
+            mutation($team: ID!, $key: String!, $entries: [String!]!) {
+                createContext(teamId: $team, input: { key: $key, entries: $entries }) {
+                    key
+                    entries { value }
+                }
+            }
+        "#;
+        let mut req = Request::new(gql);
+        req = req.variables(async_graphql::Variables::from_json(serde_json::json!({
+            "team": team_id.to_string(),
+            "key": "country",
+            "entries": ["US"]
+        })));
+        let resp = schema.execute(req).await;
+        assert!(resp.errors.is_empty(), "{}", serde_json::to_string(&resp.errors).unwrap());
+        let data = resp.data.into_json().unwrap();
+        assert_eq!(data["createContext"]["key"], "country");
+        assert_eq!(data["createContext"]["entries"].as_array().unwrap().len(), 1);
     }
 }

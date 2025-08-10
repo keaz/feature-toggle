@@ -106,3 +106,23 @@ INSERT INTO public.client_web_origins(id, client_id, origin)
 VALUES ('b1b2c3d4-0000-4000-8000-000000000001', 'a1b2c3d4-0000-4000-8000-000000000001', 'http://localhost:5173'),
        ('b1b2c3d4-0000-4000-8000-000000000002', 'a1b2c3d4-0000-4000-8000-000000000001', 'https://example.com')
 ON CONFLICT (id) DO NOTHING;
+
+-- Seed contexts for tests (appended by automation)
+-- Ensure contexts tables are clean and then insert deterministic data
+DELETE
+FROM public.context_entries;
+DELETE
+FROM public.contexts;
+
+-- Insert two contexts for the known test team with predictable keys
+INSERT INTO public.contexts(id, team_id, key)
+VALUES ('cb461425-373b-49d9-9634-9a248612d7b7', '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', 'filter-alpha'),
+       ('fcc0dfca-07b0-44ad-8d9a-21f2cd450d10', '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', 'filter-beta')
+ON CONFLICT (id) DO NOTHING;
+
+-- Entries for each context
+INSERT INTO public.context_entries(id, context_id, value)
+VALUES ('bbdb4e6e-0ac9-4a1e-b83b-78ba663f3d6f', 'cb461425-373b-49d9-9634-9a248612d7b7', 'X'),
+       ('093dadfa-8452-4631-a9dd-fa7eb090cdad', 'fcc0dfca-07b0-44ad-8d9a-21f2cd450d10', 'Y'),
+       ('535575bc-3dbe-4fde-a974-5673ab727149', 'fcc0dfca-07b0-44ad-8d9a-21f2cd450d10', 'Z')
+ON CONFLICT (id) DO NOTHING;

@@ -4,11 +4,12 @@ pub mod feature;
 pub mod pipeline;
 pub mod team;
 pub mod client;
+pub mod context;
 
 use crate::Error;
 use log::error;
-use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 use std::env;
 use uuid::Uuid;
 

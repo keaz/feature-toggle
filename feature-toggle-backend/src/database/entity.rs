@@ -88,6 +88,20 @@ pub struct Team {
     pub description: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
+pub struct Context {
+    pub id: Uuid,
+    pub team_id: Uuid,
+    pub key: String,
+    pub entries: Vec<ContextEntry>,
+}
+
+#[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
+pub struct ContextEntry {
+    pub id: Uuid,
+    pub value: String,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum ClientType {
     Web,

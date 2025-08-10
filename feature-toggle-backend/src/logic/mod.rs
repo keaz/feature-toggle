@@ -1,5 +1,3 @@
-pub mod client;
-
 use crate::database::entity::DBStage;
 use crate::graphql::schema::{Environment, Relationship, Stage};
 use crate::logic::environment::EnvironmentLogic;
@@ -9,9 +7,11 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 pub mod environment;
+pub mod context;
 pub mod feature;
 pub mod pipeline;
 pub mod team;
+pub mod client;
 
 fn create_relationships<R: Relationship + 'static>(
     has_stage: bool,

@@ -27,3 +27,4 @@ rand = { version = "0.9.1" }
 [dev-dependencies]
 async-trait = "0.1.88"
 mockall = "0.13.1"
+serde_json = "1.0"

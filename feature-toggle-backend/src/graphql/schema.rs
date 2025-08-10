@@ -280,6 +280,33 @@ pub struct Client {
     pub web_origins: Vec<String>,
 }
 
+// Team-scoped Contexts
+#[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
+pub struct ContextEntry {
+    pub id: ID,
+    pub value: String,
+}
+
+#[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
+pub struct Context {
+    pub id: ID,
+    pub team_id: ID,
+    pub key: String,
+    pub entries: Vec<ContextEntry>,
+}
+
+#[derive(InputObject, Debug)]
+pub struct CreateContextInput {
+    pub key: String,
+    pub entries: Vec<String>,
+}
+
+#[derive(InputObject, Debug)]
+pub struct UpdateContextInput {
+    pub key: Option<String>,
+    pub entries: Option<Vec<String>>,
+}
+
 #[derive(InputObject, Debug)]
 pub struct CreateClientInput {
     #[graphql(validator(min_length = 3, max_length = 100))]
