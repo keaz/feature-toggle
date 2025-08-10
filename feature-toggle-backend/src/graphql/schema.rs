@@ -27,7 +27,6 @@ pub struct Feature {
     pub relationships: Vec<FeatureRelationship>,
     pub stages: Vec<FeatureStage>,
     pub team_id: ID,
-    pub contextual_types: Option<Vec<ContextualType>>,
 }
 
 #[derive(SimpleObject, Clone, Debug, Serialize, Deserialize, Copy)]
@@ -99,7 +98,6 @@ pub struct CreateFeatureInput {
     pub description: Option<String>,
     pub feature_type: FeatureType,
     pub enabled: Option<bool>,
-    pub context: Option<Vec<CreateContextualTypeInput>>,
     #[graphql(validator(min_items = 0))]
     pub dependencies: Vec<ID>,
     #[graphql(validator(min_items = 0))]
@@ -108,11 +106,6 @@ pub struct CreateFeatureInput {
     pub stages: Vec<CreateFeatureStageInput>,
 }
 
-#[derive(InputObject, Debug)]
-pub struct CreateContextualTypeInput {
-    pub key: String,
-    pub entries: Vec<String>, // List of allowed values,
-}
 
 #[derive(InputObject, Debug)]
 pub struct UpdateFeatureInput {
@@ -121,7 +114,6 @@ pub struct UpdateFeatureInput {
     pub description: Option<String>,
     pub feature_type: FeatureType,
     pub enabled: Option<bool>,
-    pub context: Option<Vec<CreateContextualTypeInput>>,
     #[graphql(validator(min_items = 0))]
     pub dependencies: Vec<ID>,
     #[graphql(validator(min_items = 0))]

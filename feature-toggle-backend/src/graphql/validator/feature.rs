@@ -1,12 +1,11 @@
 use crate::graphql::schema::{CreateFeatureInput, FeatureType, UpdateFeatureInput};
 use crate::graphql::validator::{
-    CreateInputValidator, UpdateInputValidator, validate_duplicate_environment_and_index,
-    validate_relationships_and_stages,
+    validate_duplicate_environment_and_index, validate_relationships_and_stages, CreateInputValidator,
+    UpdateInputValidator,
 };
 use crate::logic::feature::FeatureLogic;
 use crate::logic::pipeline::PipelineLogic;
-use async_graphql::{Context, Error, ID, Result};
-use std::collections::HashSet;
+use async_graphql::{Context, Error, Result, ID};
 
 impl CreateInputValidator for CreateFeatureInput {
     async fn validate(&self, team_id: Option<ID>, ctx: &Context<'_>) -> Result<(), Error> {
@@ -30,21 +29,7 @@ impl CreateInputValidator for CreateFeatureInput {
         validate_duplicate_environment_and_index(&self.stages)?;
 
         if self.feature_type == FeatureType::Contextual {
-            if self.context.is_none() || self.context.as_ref().unwrap().is_empty() {
-                return Err(Error::new(
-                    "Contextual features must have at least one context defined",
-                ));
-            }
-
-            for context in self.context.as_ref().unwrap() {
-                let set: HashSet<&String> = context.entries.iter().collect();
-                if set.len() != context.entries.len() {
-                    return Err(Error::new(format!(
-                        "Contextual feature '{}' has duplicate entries in context '{}'",
-                        self.name, context.key
-                    )));
-                }
-            }
+            //# TODO: validate stage context
         }
 
         Ok(())

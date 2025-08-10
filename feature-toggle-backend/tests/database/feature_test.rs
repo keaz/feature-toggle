@@ -1,7 +1,7 @@
 use std::vec;
 
 use feature_toggle_backend::database::entity::FeatureType;
-use feature_toggle_backend::database::feature::{CreateFeature, CreateFeatureStage, FeatureRepositoryImpl, UpdateFeature};
+use feature_toggle_backend::database::feature::{CreateFeature, CreateFeatureStage, UpdateFeature};
 use feature_toggle_backend::database::{feature, init_pg_pool};
 use uuid::Uuid;
 
@@ -59,7 +59,6 @@ async fn test_create_feature_without_stages() {
         feature_type: FeatureType::Simple,
         stages: vec![],
         dependencies: vec![],
-        contextual_types: vec![],
     };
     let result = repository.create_feature(input).await;
 
@@ -98,7 +97,6 @@ async fn test_create_feature_with_stages() {
             },
         ],
         dependencies: vec![],
-        contextual_types: vec![],
     };
     let result = repository.create_feature(input).await;
 
@@ -120,7 +118,6 @@ async fn test_create_feature_with_dependencies() {
         feature_type: FeatureType::Simple,
         stages: vec![],
         dependencies: vec![],
-        contextual_types: vec![],
     };
     let dependency_result = repository.create_feature(dependency_input).await;
     assert!(dependency_result.is_ok());
@@ -135,7 +132,6 @@ async fn test_create_feature_with_dependencies() {
         feature_type: FeatureType::Simple,
         stages: vec![],
         dependencies: vec![dependency_id],
-        contextual_types: vec![],
     };
     let result = repository.create_feature(input).await;
 
@@ -160,7 +156,6 @@ async fn test_create_existing_feature() {
         feature_type: FeatureType::Simple,
         stages: vec![],
         dependencies: vec![],
-        contextual_types: vec![],
     };
     let result = repository.create_feature(input).await;
 
@@ -386,7 +381,6 @@ async fn test_create_feature_with_stages_verification() {
         feature_type: FeatureType::Simple,
         stages: vec![parent.clone(), child],
         dependencies: vec![],
-        contextual_types: vec![],
     };
 
     // Create the feature
@@ -469,7 +463,6 @@ async fn test_update_feature_with_stages() {
         feature_type: FeatureType::Simple,
         stages: vec![stage1.clone(), stage2.clone()],
         dependencies: vec![],
-        contextual_types: vec![],
     };
 
     // Create the feature
@@ -559,27 +552,4 @@ async fn test_update_feature_with_stages() {
     assert_eq!(new_stage3.order_index, 2);
     assert_eq!(new_stage3.position, "{ x: 300, y: 300 }");
     assert!(new_stage3.enabled);
-}
-
-#[tokio::test]
-async fn test_create_contextual_type() {
-    let pool = init_pg_pool().await;
-    let mut tx = pool.begin().await.unwrap();
-    let repository = FeatureRepositoryImpl::new(pool);
-
-    let mut entries = vec![];
-    for i in 0..5 {
-        entries.push(format!("Entry {i}"));
-    }
-
-    let contextual_type = feature::CreateContextualType {
-        name: "Test Contextual Type".to_string(),
-        entries,
-    };
-    let feature_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
-    let result = repository.create_contextual_type(&feature_id, contextual_type, &mut tx).await;
-    tx.commit().await.unwrap();
-    assert!(result.is_ok());
-    let created_type = result.unwrap();
-    assert_eq!(created_type.1.len(), 5);
 }

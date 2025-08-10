@@ -1,5 +1,5 @@
 use crate::database::entity::{
-    ContextualEntry, ContextualType, Feature, FeatureDependency, FeaturePipelineStage, FeatureType,
+    Feature, FeatureDependency, FeaturePipelineStage, FeatureType,
 };
 use crate::database::{handle_error, Error};
 use chrono::{DateTime, Utc};
@@ -18,14 +18,8 @@ pub struct CreateFeature {
     pub feature_type: FeatureType,
     pub stages: Vec<CreateFeatureStage>,
     pub dependencies: Vec<Uuid>,
-    pub contextual_types: Vec<CreateContextualType>
 }
 
-#[derive(Debug, Clone)]
-pub struct CreateContextualType {
-    pub name: String,
-    pub entries: Vec<String>,
-}
 
 #[derive(Debug, Clone)]
 pub struct CreateFeatureStage {
@@ -83,10 +77,6 @@ struct FeatureWithStageRow {
     position: Option<String>,
     enabled: Option<bool>,
 
-    context_id: Option<Uuid>,
-    context_name: Option<String>,
-    entry_id: Option<Uuid>,
-    entry_value: Option<String>,
 }
 
 #[derive(Debug, sqlx::FromRow, Clone)]
@@ -295,46 +285,6 @@ impl FeatureRepositoryImpl {
         handle_error(None, result)
     }
 
-    /// This function should only be called when there is a contextual type with entries.
-    pub async fn create_contextual_type(
-        &self,
-        feature_id: &Uuid,
-        input: CreateContextualType,
-        tx: &mut PgConnection,
-    ) -> Result<(Uuid, Vec<Uuid>), Error> {
-        let id = Uuid::new_v4();
-        let result = sqlx::query!(
-            r#"INSERT INTO contextual_type (id, feature_id, name)
-               VALUES ($1, $2, $3)"#,
-            id,
-            feature_id,
-            input.name
-        )
-            .execute(&mut *tx)
-            .await;
-
-        handle_error(None, result)?;
-
-        let mut entry_ids: Vec<Uuid> = vec![];
-        if !input.entries.is_empty() {
-            entry_ids = input.entries.iter().map(|e| Uuid::new_v4()).collect();
-            let contextual_ids: Vec<Uuid> = input.entries.iter().map(|_| id).collect();
-
-            let entry_result = sqlx::query!(
-                r#"INSERT INTO contextual_entries (id, contextual_id, value)
-                   SELECT unnest($1::uuid[]), unnest($2::uuid[]), unnest($3::text[])"#,
-                &entry_ids[..],
-                &contextual_ids[..],
-                &input.entries[..]
-            )
-                .execute(&mut *tx)
-                .await;
-
-            handle_error(None, entry_result)?;
-        }
-
-        Ok((id, entry_ids))
-    }
 
     async fn update_feature_stage(
         &self,
@@ -511,16 +461,14 @@ impl FeatureRepositoryImpl {
                 }
             })
             .filter_map(|r| {
-                r.stage_id.map(|id| {
-                    FeaturePipelineStage {
-                        id,
-                        feature_id: r.feature_id_stage.unwrap(),
-                        environment_id: r.environment_id.unwrap(),
-                        order_index: r.order_index.unwrap(),
-                        parent_stage_id: r.parent_stage_id,
-                        position: r.position.unwrap(),
-                        enabled: r.enabled.unwrap(),
-                    }
+                r.stage_id.map(|id| FeaturePipelineStage {
+                    id,
+                    feature_id: r.feature_id_stage.unwrap(),
+                    environment_id: r.environment_id.unwrap(),
+                    order_index: r.order_index.unwrap(),
+                    parent_stage_id: r.parent_stage_id,
+                    position: r.position.unwrap(),
+                    enabled: r.enabled.unwrap(),
                 })
             })
             .collect::<Vec<FeaturePipelineStage>>();
@@ -531,39 +479,6 @@ impl FeatureRepositoryImpl {
             _ => panic!("Unknown feature type, this should never happen"),
         };
 
-        let mut seen_contexts = HashSet::new();
-        let context = features
-            .clone()
-            .into_iter()
-            .filter(|r| {
-                if let Some(stage_id) = r.stage_id {
-                    seen_contexts.insert(stage_id)
-                } else {
-                    true // Keep rows without a stage_id
-                }
-            })
-            .filter_map(|r| {
-                r.context_id.map(|id| {
-                    let entries = features
-                        .iter()
-                        .filter(|e| e.context_id == Some(id))
-                        .filter_map(|e| {
-                            e.entry_id.map(|entry_id| ContextualEntry {
-                                id: entry_id,
-                                value: e.entry_value.clone().unwrap_or_default(),
-                            })
-                        })
-                        .collect::<Vec<ContextualEntry>>();
-
-                    ContextualType {
-                        id,
-                        name: r.context_name.clone().unwrap_or_default(),
-                        entries,
-                    }
-                })
-            })
-            .collect::<Vec<ContextualType>>();
-
         Feature {
             id: feature.feature_id,
             name: feature.feature_name.clone(),
@@ -573,7 +488,6 @@ impl FeatureRepositoryImpl {
             created_at: feature.created_at,
             stages: stages.clone(),
             dependencies: vec![], // Dependencies will be loaded separately
-            contextual_types: Some(context),
         }
     }
 
@@ -652,11 +566,9 @@ impl FeatureRepository for FeatureRepositoryImpl {
         let result = sqlx::query_as::<_, FeatureWithStageRow>(
             r#"SELECT f.id as feature_id, f.name as feature_name, f.description, f.feature_type, f.team_id, f.created_at, 
             s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
-            s.parent_stage_id, s.position, s.enabled,  c.id as context_id, c.name as context_name,
-			e.id as entry_id, e.value as entry_value
+            s.parent_stage_id, s.position, s.enabled
 			FROM features f LEFT JOIN features_pipeline_stages s ON f.id = s.feature_id
-			LEFT JOIN contextual_type c ON f.id = c.feature_id
-			LEFT JOIN contextual_entries e ON c.id = e.contextual_id WHERE f.id = $1"#,
+			WHERE f.id = $1"#,
         )
             .bind(id)
             .fetch_all(&self.pool)
@@ -685,11 +597,8 @@ impl FeatureRepository for FeatureRepositoryImpl {
         let mut query_builder = sqlx::QueryBuilder::new(
             r#"SELECT f.id as feature_id, f.name as feature_name, f.description, f.feature_type, f.team_id, f.created_at, 
             s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
-            s.parent_stage_id, s.position, s.enabled,  c.id as context_id, c.name as context_name,
-			e.id as entry_id, e.value as entry_value
-			FROM features f LEFT JOIN features_pipeline_stages s ON f.id = s.feature_id
-			LEFT JOIN contextual_type c ON f.id = c.feature_id
-			LEFT JOIN contextual_entries e ON c.id = e.contextual_id"#,
+            s.parent_stage_id, s.position, s.enabled
+			FROM features f LEFT JOIN features_pipeline_stages s ON f.id = s.feature_id"#,
         );
         query_builder.push(" WHERE f.team_id = ").push_bind(team_id);
 
@@ -793,14 +702,6 @@ impl FeatureRepository for FeatureRepositoryImpl {
                     return Err(dependencies.err().unwrap());
                 }
 
-                // Create contextual types
-                for contextual_type in input.contextual_types {
-                    let result = self.create_contextual_type(&id, contextual_type, &mut tx).await;
-                    if result.is_err() {
-                        let _ = tx.rollback().await;
-                        return Err(result.err().unwrap());
-                    }
-                }
 
                 let _ = tx.commit().await;
                 Ok(id)

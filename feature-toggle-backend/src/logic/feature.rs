@@ -1,6 +1,6 @@
 use crate::database::entity::{DBStage, FeatureType as EntityFeatureType};
-use crate::database::feature::{CreateContextualType, CreateFeature, CreateFeatureStage, FeatureRepository, UpdateFeature};
-use crate::graphql::schema::{ContextualType, CreateContextualTypeInput, CreateFeatureInput, CreateFeatureStageInput, CreateRelationshipInput, Environment, Feature, FeatureRelationship, FeatureStage, FeatureType as GraphQLFeatureType, UpdateFeatureInput};
+use crate::database::feature::{CreateFeature, CreateFeatureStage, FeatureRepository, UpdateFeature};
+use crate::graphql::schema::{CreateFeatureInput, CreateFeatureStageInput, CreateRelationshipInput, Environment, Feature, FeatureRelationship, FeatureStage, FeatureType as GraphQLFeatureType, UpdateFeatureInput};
 use crate::logic::environment::EnvironmentLogic;
 use crate::logic::{create_relationships, get_environment_map, map_stages};
 use crate::Error;
@@ -62,7 +62,6 @@ impl FeatureLogicImpl {
 
     fn map_to_create_feature(team_id: Uuid, input: CreateFeatureInput) -> CreateFeature {
         let feature_type = Self::map_graphql_to_entity_feature_type(input.feature_type);
-        let contextual_types = Self::map_contextual_types_to_db(&input.context.unwrap_or_default());
         let stages = Self::get_create_stages_to_create(input.stages, input.relationships);
 
         CreateFeature {
@@ -72,21 +71,9 @@ impl FeatureLogicImpl {
             feature_type,
             stages,
             dependencies: input.dependencies.into_iter().map(|id| Uuid::try_from(id).unwrap()).collect(),
-            contextual_types
         }
     }
 
-    fn map_contextual_types_to_db(context: &[CreateContextualTypeInput]) -> Vec<CreateContextualType> {
-        context
-            .iter()
-            .map(|ct| {
-                CreateContextualType {
-                    name: ct.key.clone(),
-                    entries: ct.entries.clone(),
-                }
-            })
-            .collect::<Vec<_>>()
-    }
 
     fn get_create_stages_to_create(
         stages: Vec<CreateFeatureStageInput>,
@@ -153,7 +140,6 @@ impl FeatureLogicImpl {
             description: feature.description,
             feature_type: Self::map_entity_to_graphql_feature_type(feature.feature_type),
             enabled: None, // This would need to be determined based on the feature's stages
-            contextual_types: None, // This would need to be determined based on the feature's type
             team_id: feature.team_id.into(),
             dependencies: feature
                 .dependencies
@@ -179,20 +165,7 @@ impl FeatureLogic for FeatureLogicImpl {
             .flat_map(|feature| &feature.stages)
             .map(|stage| Box::new(stage.clone()) as Box<dyn DBStage>)
             .collect::<Vec<Box<dyn DBStage>>>();
-        let contextual_types = feature
-            .contextual_types.clone()
-            .map(|ct| ct.into_iter().map(|context_type| {
-                ContextualType {
-                    id: context_type.id.into(),
-                    key: context_type.name,
-                    entries: context_type.entries.iter().map(|entry| {
-                        crate::graphql::schema::ContextualEntry {
-                            id: entry.id.into(),
-                            value: entry.value.clone(),
-                        }
-                    }).collect(),
-                }
-            }).collect::<Vec<ContextualType>>());
+
 
         let environment_map = get_environment_map(&*self.environment_logic, &stages, true).await?;
         let db_stages = feature
@@ -207,7 +180,6 @@ impl FeatureLogic for FeatureLogicImpl {
         let mut feature = Self::map_entity_to_graphql_feature(feature);
         feature.stages = stages;
         feature.relationships = relationships;
-        feature.contextual_types = contextual_types;
         Ok(feature)
     }
 
@@ -353,7 +325,6 @@ mod test {
                     created_at: chrono::Utc::now(),
                     stages: vec![],
                     dependencies: vec![],
-                    contextual_types: None,
                 })
             });
 
@@ -398,7 +369,6 @@ mod test {
             description: Some("New feature description".to_string()),
             feature_type: GraphQLFeatureType::Simple,
             enabled: Some(true),
-            context: None,
             dependencies: vec![],
             relationships: vec![],
             stages: vec![],
@@ -435,7 +405,6 @@ mod test {
             description: Some("Updated description".to_string()),
             feature_type: GraphQLFeatureType::Contextual,
             enabled: Some(true),
-            context: None,
             dependencies: vec![],
             relationships: vec![],
             stages: vec![],
@@ -457,7 +426,6 @@ mod test {
                     created_at: chrono::Utc::now(),
                     stages: vec![],
                     dependencies: vec![],
-                    contextual_types: None,
                 })
             });
 
@@ -512,7 +480,6 @@ mod test {
                         created_at: chrono::Utc::now(),
                         stages: vec![],
                         dependencies: vec![],
-                        contextual_types: None,
                     },
                     EntityFeature {
                         id: Uuid::new_v4(),
@@ -523,7 +490,6 @@ mod test {
                         created_at: chrono::Utc::now(),
                         stages: vec![],
                         dependencies: vec![],
-                        contextual_types: None,
                     },
                 ])
             });
