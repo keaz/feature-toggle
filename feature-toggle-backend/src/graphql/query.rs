@@ -1,10 +1,10 @@
 use crate::graphql::schema::{Client, ClientType, Environment, Feature, FeatureType, Pipeline, Team};
+use crate::logic::client::ClientLogic;
+use crate::logic::context::ContextLogic;
 use crate::logic::environment::EnvironmentLogic;
 use crate::logic::feature::FeatureLogic;
 use crate::logic::pipeline::PipelineLogic;
 use crate::logic::team::TeamLogic;
-use crate::logic::client::ClientLogic;
-use crate::logic::context::ContextLogic;
 use async_graphql::{Context, Object, Result as GqlResult, ID};
 use log::debug;
 
@@ -133,13 +133,23 @@ impl Query {
         let logic = ctx.data::<Box<dyn ContextLogic>>().unwrap();
         Ok(logic.get_contexts(team_id, key).await?)
     }
+
+    async fn stage_contexts(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Id of the feature stage")] stage_id: ID,
+    ) -> GqlResult<Vec<crate::graphql::schema::Context>> {
+        debug!("Fetching contexts for stage id: {stage_id:?}");
+        let logic = ctx.data::<Box<dyn FeatureLogic>>().unwrap();
+        Ok(logic.get_stage_contexts(stage_id).await?)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_graphql::{Schema, EmptySubscription, Request};
     use crate::logic::context::MockContextLogic;
+    use async_graphql::{EmptySubscription, Request, Schema};
 
     #[tokio::test]
     async fn test_contexts_query() {
@@ -177,5 +187,44 @@ mod tests {
         let data = resp.data.into_json().unwrap();
         assert_eq!(data["contexts"].as_array().unwrap().len(), 1);
         assert_eq!(data["contexts"][0]["key"], "country");
+    }
+
+    #[tokio::test]
+    async fn test_stage_contexts_query() {
+        use crate::logic::feature::MockFeatureLogic;
+        let mut mock = MockFeatureLogic::new();
+        let stage_id = ID::from("11111111-1111-1111-1111-111111111111");
+        let expected = vec![
+            crate::graphql::schema::Context {
+                id: ID::from("22222222-2222-2222-2222-222222222222"),
+                team_id: ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"),
+                key: "alpha".into(),
+                entries: vec![crate::graphql::schema::ContextEntry { id: ID::from("33333333-3333-3333-3333-333333333333"), value: "X".into() }],
+            }
+        ];
+        let stage_id_clone = stage_id.clone();
+        mock.expect_get_stage_contexts()
+            .times(1)
+            .withf(move |sid| sid == &stage_id_clone)
+            .return_once(move |_| Ok(expected.clone()));
+
+        let schema = Schema::build(super::Query, crate::graphql::mutation::MutationRoot, EmptySubscription)
+            .data::<Box<dyn crate::logic::feature::FeatureLogic>>(Box::new(mock))
+            .finish();
+
+        let gql = r#"
+            query($sid: ID!) {
+                stageContexts(stageId: $sid) { key entries { value } }
+            }
+        "#;
+        let mut req = Request::new(gql);
+        req = req.variables(async_graphql::Variables::from_json(serde_json::json!({
+            "sid": stage_id.to_string()
+        })));
+        let resp = schema.execute(req).await;
+        assert!(resp.errors.is_empty(), "{}", serde_json::to_string(&resp.errors).unwrap());
+        let data = resp.data.into_json().unwrap();
+        assert_eq!(data["stageContexts"].as_array().unwrap().len(), 1);
+        assert_eq!(data["stageContexts"][0]["key"], "alpha");
     }
 }

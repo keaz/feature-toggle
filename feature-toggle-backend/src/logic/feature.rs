@@ -7,6 +7,9 @@ use crate::Error;
 use async_graphql::ID;
 use uuid::Uuid;
 
+use mockall::automock;
+
+#[automock]
 #[async_trait::async_trait]
 pub trait FeatureLogic: Send + Sync {
     async fn get_feature_by_id(&self, id: ID) -> Result<Feature, Error>;
@@ -20,6 +23,11 @@ pub trait FeatureLogic: Send + Sync {
     async fn create_feature(&self, team_id: ID, input: CreateFeatureInput) -> Result<ID, Error>;
     async fn update_feature(&self, id: ID, input: UpdateFeatureInput) -> Result<Feature, Error>;
     async fn delete_feature(&self, id: ID) -> Result<(), Error>;
+
+    // Stage-contexts
+    async fn get_stage_contexts(&self, stage_id: ID) -> Result<Vec<crate::graphql::schema::Context>, Error>;
+    async fn set_stage_contexts(&self, stage_id: ID, context_ids: Vec<ID>) -> Result<Vec<crate::graphql::schema::Context>, Error>;
+
     fn clone_box(&self) -> Box<dyn FeatureLogic>;
 }
 
@@ -222,8 +230,30 @@ impl FeatureLogic for FeatureLogicImpl {
         Ok(())
     }
 
+    async fn get_stage_contexts(&self, stage_id: ID) -> Result<Vec<crate::graphql::schema::Context>, Error> {
+        let stage_id = Uuid::try_from(stage_id).unwrap();
+        let list = self.repository.get_stage_contexts(stage_id).await?;
+        Ok(list.into_iter().map(map_db_ctx_to_gql).collect())
+    }
+
+    async fn set_stage_contexts(&self, stage_id: ID, context_ids: Vec<ID>) -> Result<Vec<crate::graphql::schema::Context>, Error> {
+        let stage_id = Uuid::try_from(stage_id).unwrap();
+        let context_ids: Vec<Uuid> = context_ids.into_iter().map(|id| Uuid::try_from(id).unwrap()).collect();
+        let list = self.repository.set_stage_contexts(stage_id, context_ids).await?;
+        Ok(list.into_iter().map(map_db_ctx_to_gql).collect())
+    }
+
     fn clone_box(&self) -> Box<dyn FeatureLogic> {
         Box::new(self.clone())
+    }
+}
+
+fn map_db_ctx_to_gql(c: crate::database::entity::Context) -> crate::graphql::schema::Context {
+    crate::graphql::schema::Context {
+        id: ID::from(c.id),
+        team_id: ID::from(c.team_id),
+        key: c.key,
+        entries: c.entries.into_iter().map(|e| crate::graphql::schema::ContextEntry { id: ID::from(e.id), value: e.value }).collect(),
     }
 }
 

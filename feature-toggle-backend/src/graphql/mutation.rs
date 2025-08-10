@@ -3,12 +3,12 @@ use crate::graphql::schema::{
     Feature, Pipeline, Team, UpdateClientInput, UpdateEnvironmentInput, UpdateFeatureInput, UpdatePipelineInput,
 };
 use crate::graphql::validator::{CreateInputValidator, UpdateInputValidator};
+use crate::logic::client::ClientLogic;
+use crate::logic::context::ContextLogic;
 use crate::logic::environment::EnvironmentLogic;
 use crate::logic::feature::FeatureLogic;
 use crate::logic::pipeline::PipelineLogic;
-use crate::logic::client::ClientLogic;
-use crate::logic::context::ContextLogic;
-use async_graphql::{Context, ID, Object, Result as GqlResult};
+use async_graphql::{Context, Object, Result as GqlResult, ID};
 use log::info;
 use uuid::Uuid;
 
@@ -176,14 +176,26 @@ impl MutationRoot {
         logic.delete_context(id).await?;
         Ok(true)
     }
+
+    // Feature stage context bindings
+    async fn set_stage_contexts(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Id of the feature stage")] stage_id: ID,
+        #[graphql(desc = "List of context IDs to assign")] context_ids: Vec<ID>,
+    ) -> GqlResult<Vec<crate::graphql::schema::Context>> {
+        info!("Setting contexts for stage {stage_id:?}");
+        let logic = ctx.data::<Box<dyn FeatureLogic>>().unwrap();
+        Ok(logic.set_stage_contexts(stage_id, context_ids).await?)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_graphql::{Schema, EmptySubscription, Request};
-    use crate::logic::context::MockContextLogic;
     use crate::graphql::query::Query as GqlQuery;
+    use crate::logic::context::MockContextLogic;
+    use async_graphql::{EmptySubscription, Request, Schema};
 
     #[tokio::test]
     async fn test_create_context_mutation() {
@@ -226,5 +238,44 @@ mod tests {
         let data = resp.data.into_json().unwrap();
         assert_eq!(data["createContext"]["key"], "country");
         assert_eq!(data["createContext"]["entries"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_set_stage_contexts_mutation() {
+        use crate::logic::feature::MockFeatureLogic;
+        use crate::graphql::query::Query as GqlQuery;
+        let mut mock = MockFeatureLogic::new();
+        let stage_id = ID::from(Uuid::new_v4());
+        let ctx1 = ID::from(Uuid::new_v4());
+        let ctx2 = ID::from(Uuid::new_v4());
+        let expected = vec![
+            crate::graphql::schema::Context { id: ctx1.clone(), team_id: ID::from(Uuid::new_v4()), key: "k1".into(), entries: vec![] },
+            crate::graphql::schema::Context { id: ctx2.clone(), team_id: ID::from(Uuid::new_v4()), key: "k2".into(), entries: vec![] },
+        ];
+        let stage_id_clone = stage_id.clone();
+        let ids_for_match = vec![ctx1.clone(), ctx2.clone()];
+        mock.expect_set_stage_contexts()
+            .times(1)
+            .withf(move |sid, ids| sid == &stage_id_clone && ids == &ids_for_match)
+            .return_once(move |_, _| Ok(expected.clone()));
+
+        let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
+            .data::<Box<dyn crate::logic::feature::FeatureLogic>>(Box::new(mock))
+            .finish();
+
+        let gql = r#"
+            mutation($sid: ID!, $ids: [ID!]!) {
+                setStageContexts(stageId: $sid, contextIds: $ids) { key }
+            }
+        "#;
+        let mut req = Request::new(gql);
+        req = req.variables(async_graphql::Variables::from_json(serde_json::json!({
+            "sid": stage_id.to_string(),
+            "ids": [ctx1.to_string(), ctx2.to_string()]
+        })));
+        let resp = schema.execute(req).await;
+        assert!(resp.errors.is_empty(), "{}", serde_json::to_string(&resp.errors).unwrap());
+        let data = resp.data.into_json().unwrap();
+        assert_eq!(data["setStageContexts"].as_array().unwrap().len(), 2);
     }
 }
