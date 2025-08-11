@@ -54,6 +54,7 @@ pub struct FeaturePipelineStage {
     pub parent_stage_id: Option<Uuid>,
     pub position: String,
     pub enabled: bool,
+    pub bucketing_key: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
@@ -87,6 +88,15 @@ pub struct Context {
 pub struct ContextEntry {
     pub id: Uuid,
     pub value: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct StageCriterion {
+    pub id: Uuid,
+    pub stage_id: Uuid,
+    pub context_key: String,
+    pub context: Context,
+    pub rollout_percentage: i32,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

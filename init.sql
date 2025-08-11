@@ -10,6 +10,8 @@ ALTER TABLE IF EXISTS public.features_pipeline_stages ADD CONSTRAINT features_pi
 DELETE
 FROM public.feature_dependencies;
 DELETE
+FROM public.feature_stage_criteria;
+DELETE
 FROM public.features_pipeline_stages;
 DELETE
 FROM public.features;
@@ -107,6 +109,11 @@ VALUES ('b1b2c3d4-0000-4000-8000-000000000001', 'a1b2c3d4-0000-4000-8000-0000000
        ('b1b2c3d4-0000-4000-8000-000000000002', 'a1b2c3d4-0000-4000-8000-000000000001', 'https://example.com')
 ON CONFLICT (id) DO NOTHING;
 
+-- Optionally set bucketing_key for a known stage
+UPDATE public.features_pipeline_stages
+SET bucketing_key = 'userId'
+WHERE id = '3eef17bc-9e06-411d-b5f4-7a786e68bb96';
+
 -- Seed contexts for tests (appended by automation)
 -- Ensure contexts tables are clean and then insert deterministic data
 DELETE
@@ -125,4 +132,22 @@ INSERT INTO public.context_entries(id, context_id, value)
 VALUES ('bbdb4e6e-0ac9-4a1e-b83b-78ba663f3d6f', 'cb461425-373b-49d9-9634-9a248612d7b7', 'X'),
        ('093dadfa-8452-4631-a9dd-fa7eb090cdad', 'fcc0dfca-07b0-44ad-8d9a-21f2cd450d10', 'Y'),
        ('535575bc-3dbe-4fde-a974-5673ab727149', 'fcc0dfca-07b0-44ad-8d9a-21f2cd450d10', 'Z')
+ON CONFLICT (id) DO NOTHING;
+
+-- Seed feature stage criteria for tests
+-- Link to an existing features_pipeline_stages row and existing contexts
+INSERT INTO public.feature_stage_criteria(id, stage_id, context_key, context_id, rollout_percentage)
+VALUES (
+    '11111111-1111-4111-8111-111111111111',
+    '3eef17bc-9e06-411d-b5f4-7a786e68bb96',
+    'filter',
+    'cb461425-373b-49d9-9634-9a248612d7b7',
+    50
+), (
+    '22222222-2222-4222-8222-222222222222',
+    '3eef17bc-9e06-411d-b5f4-7a786e68bb96',
+    'filter',
+    'fcc0dfca-07b0-44ad-8d9a-21f2cd450d10',
+    30
+)
 ON CONFLICT (id) DO NOTHING;

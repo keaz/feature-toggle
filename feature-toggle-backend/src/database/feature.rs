@@ -10,6 +10,13 @@ use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateStageCriterion {
+    pub context_key: String,
+    pub context_id: Uuid,
+    pub rollout_percentage: i32,
+}
+
 #[derive(Debug, Clone)]
 pub struct CreateFeature {
     pub team_id: Uuid,
@@ -29,6 +36,7 @@ pub struct CreateFeatureStage {
     pub parent_stage: Option<Box<CreateFeatureStage>>,
     pub position: String,
     pub enabled: bool,
+    pub bucketing_key: Option<String>,
 }
 
 impl CreateFeatureStage {
@@ -47,6 +55,7 @@ impl CreateFeatureStage {
             parent_stage,
             position,
             enabled,
+            bucketing_key: None,
         }
     }
 }
@@ -76,6 +85,7 @@ struct FeatureWithStageRow {
     parent_stage_id: Option<Uuid>,
     position: Option<String>,
     enabled: Option<bool>,
+    bucketing_key: Option<String>,
 
 }
 
@@ -98,9 +108,12 @@ pub trait FeatureRepository: Send + Sync {
     async fn create_feature(&self, input: CreateFeature) -> Result<Uuid, Error>;
     async fn update_feature(&self, input: UpdateFeature) -> Result<Feature, Error>;
     async fn delete_feature(&self, id: Uuid) -> Result<(), Error>;
-    // Stage-contexts
+    // Stage-contexts (legacy)
     async fn get_stage_contexts(&self, stage_id: Uuid) -> Result<Vec<crate::database::entity::Context>, Error>;
     async fn set_stage_contexts(&self, stage_id: Uuid, context_ids: Vec<Uuid>) -> Result<Vec<crate::database::entity::Context>, Error>;
+    // Stage-criteria (new)
+    async fn get_stage_criteria(&self, stage_id: Uuid) -> Result<Vec<crate::database::entity::StageCriterion>, Error>;
+    async fn set_stage_criteria(&self, stage_id: Uuid, criteria: Vec<CreateStageCriterion>) -> Result<Vec<crate::database::entity::StageCriterion>, Error>;
 
     fn clone_box(&self) -> Box<dyn FeatureRepository>;
 }
@@ -139,7 +152,7 @@ impl FeatureRepositoryImpl {
         parent_stage_id: Option<&Uuid>,
     ) -> Result<Vec<FeaturePipelineStage>, Error> {
         let mut query_builder = sqlx::QueryBuilder::new(
-            r#"SELECT id, feature_id, environment_id, order_index, parent_stage_id, position, enabled FROM features_pipeline_stages"#,
+            r#"SELECT id, feature_id, environment_id, order_index, parent_stage_id, position, enabled, bucketing_key FROM features_pipeline_stages"#,
         );
 
         let mut has_where = false;
@@ -233,24 +246,31 @@ impl FeatureRepositoryImpl {
             .map(|stage| stage.enabled)
             .collect::<Vec<bool>>();
 
-        let result = sqlx::query!(
-            r#"INSERT INTO features_pipeline_stages (id, feature_id, environment_id, order_index, parent_stage_id, position, enabled)
+        let bucketing_keys: Vec<Option<String>> = stages
+            .iter()
+            .map(|stage| stage.bucketing_key.clone())
+            .collect();
+
+        let result = sqlx::query(
+            r#"INSERT INTO features_pipeline_stages (id, feature_id, environment_id, order_index, parent_stage_id, position, enabled, bucketing_key)
                SELECT unnest($1::uuid[]) AS id,
                unnest($2::uuid[]) AS feature_id,
                unnest($3::uuid[]) AS environment_id,
                unnest($4::int[]) AS order_index,
                unnest($5::uuid[]) AS parent_stage_id,
                unnest($6::varchar[]) AS position,
-               unnest($7::boolean[]) AS enabled
+               unnest($7::boolean[]) AS enabled,
+               unnest($8::varchar[]) AS bucketing_key
                "#,
-            ids,
-            feature_ids,
-            environment_ids,
-            order_indices,
-            parent_stage_ids as &[Option<Uuid>],
-            positions,
-            enabled_values,
         )
+            .bind(ids)
+            .bind(feature_ids)
+            .bind(environment_ids)
+            .bind(order_indices)
+            .bind(parent_stage_ids as &[Option<Uuid>])
+            .bind(positions)
+            .bind(enabled_values)
+            .bind(&bucketing_keys[..])
             .execute(&mut *tx)
             .await;
 
@@ -341,21 +361,23 @@ impl FeatureRepositoryImpl {
         for stage in updates {
             let parent_stage_id = stage.parent_stage.as_ref().map(|p| p.id);
 
-            let result = sqlx::query!(
+            let result = sqlx::query(
                 r#"UPDATE features_pipeline_stages
                    SET environment_id = $1,
                        order_index = $2,
                        parent_stage_id = $3,
                        position = $4,
-                       enabled = $5
-                   WHERE id = $6"#,
-                stage.environment_id,
-                stage.order_index,
-                parent_stage_id,
-                &stage.position,
-                stage.enabled,
-                stage.id
+                       enabled = $5,
+                       bucketing_key = $6
+                   WHERE id = $7"#
             )
+            .bind(stage.environment_id)
+            .bind(stage.order_index)
+            .bind(parent_stage_id)
+            .bind(&stage.position)
+            .bind(stage.enabled)
+            .bind(stage.bucketing_key.clone())
+            .bind(stage.id)
             .execute(&mut *tx)
             .await;
 
@@ -472,6 +494,7 @@ impl FeatureRepositoryImpl {
                     parent_stage_id: r.parent_stage_id,
                     position: r.position.unwrap(),
                     enabled: r.enabled.unwrap(),
+                    bucketing_key: r.bucketing_key,
                 })
             })
             .collect::<Vec<FeaturePipelineStage>>();
@@ -565,11 +588,89 @@ impl FeatureRepositoryImpl {
 
 #[async_trait::async_trait]
 impl FeatureRepository for FeatureRepositoryImpl {
+    async fn get_stage_criteria(&self, stage_id: Uuid) -> Result<Vec<crate::database::entity::StageCriterion>, Error> {
+        // load criteria join contexts and entries
+        let rows = sqlx::query!(
+            r#"SELECT sc.id, sc.stage_id, sc.context_key, sc.context_id, sc.rollout_percentage,
+                      c.team_id, c.key
+               FROM feature_stage_criteria sc
+               JOIN contexts c ON c.id = sc.context_id
+               WHERE sc.stage_id = $1
+               ORDER BY sc.context_key, c.key"#,
+            stage_id
+        ).fetch_all(&self.pool).await;
+        let rows = handle_error(Some(stage_id), rows)?;
+        let mut out = Vec::new();
+        for r in rows {
+            // entries for context
+            let entries = handle_error(Some(r.context_id), sqlx::query!(
+                r#"SELECT id, value FROM context_entries WHERE context_id = $1 ORDER BY value"#,
+                r.context_id
+            ).fetch_all(&self.pool).await)?
+                .into_iter()
+                .map(|e| crate::database::entity::ContextEntry{ id: e.id, value: e.value})
+                .collect();
+            let context = crate::database::entity::Context { id: r.context_id, team_id: r.team_id, key: r.key, entries };
+            out.push(crate::database::entity::StageCriterion { id: r.id, stage_id: r.stage_id, context_key: r.context_key, context, rollout_percentage: r.rollout_percentage });
+        }
+        Ok(out)
+    }
+
+    async fn set_stage_criteria(&self, stage_id: Uuid, criteria: Vec<CreateStageCriterion>) -> Result<Vec<crate::database::entity::StageCriterion>, Error> {
+        // ensure stage exists
+        let exists = handle_error(Some(stage_id), sqlx::query_scalar!("SELECT id FROM features_pipeline_stages WHERE id = $1", stage_id).fetch_optional(&self.pool).await)?;
+        if exists.is_none() { return Err(Error::NotFound(stage_id)); }
+
+        // validate rollout range and contexts/key match
+        for c in &criteria {
+            if c.rollout_percentage < 0 || c.rollout_percentage > 100 {
+                return Err(Error::InvalidInput(format!(
+                    "rollout_percentage for context {} must be between 0 and 100",
+                    c.context_id
+                )));
+            }
+            // fetch context key
+            let ctx_key = handle_error(Some(c.context_id), sqlx::query_scalar!(
+                "SELECT key FROM contexts WHERE id = $1",
+                c.context_id
+            ).fetch_optional(&self.pool).await)?;
+            if ctx_key.is_none() {
+                return Err(Error::NotFound(c.context_id));
+            }
+            let actual_key: String = ctx_key.unwrap();
+            // The stored context_key is a logical group (e.g., 'filter'), while the actual context key can be 'filter-alpha'.
+            // Accept either exact match or a hyphenated prefix match.
+            if actual_key != c.context_key && !actual_key.starts_with(&(c.context_key.clone() + "-")) {
+                return Err(Error::InvalidInput(format!(
+                    "context_key '{}' is not compatible with context '{}' actual key '{}'",
+                    c.context_key, c.context_id, actual_key
+                )));
+            }
+        }
+
+        let mut tx = self.pool.begin().await.map_err(Error::DatabaseError)?;
+        // clear
+        handle_error(Some(stage_id), sqlx::query!("DELETE FROM feature_stage_criteria WHERE stage_id = $1", stage_id).execute(&mut *tx).await)?;
+        if !criteria.is_empty() {
+            let ids: Vec<Uuid> = criteria.iter().map(|_| Uuid::new_v4()).collect();
+            let stage_ids: Vec<Uuid> = vec![stage_id; criteria.len()];
+            let context_keys: Vec<String> = criteria.iter().map(|c| c.context_key.clone()).collect();
+            let context_ids: Vec<Uuid> = criteria.iter().map(|c| c.context_id).collect();
+            let rollouts: Vec<i32> = criteria.iter().map(|c| c.rollout_percentage).collect();
+            handle_error(None, sqlx::query!(
+                r#"INSERT INTO feature_stage_criteria(id, stage_id, context_key, context_id, rollout_percentage)
+                   SELECT unnest($1::uuid[]), unnest($2::uuid[]), unnest($3::varchar[]), unnest($4::uuid[]), unnest($5::int[])"#,
+                &ids[..], &stage_ids[..], &context_keys[..], &context_ids[..], &rollouts[..]
+            ).execute(&mut *tx).await)?;
+        }
+        tx.commit().await.map_err(Error::DatabaseError)?;
+        self.get_stage_criteria(stage_id).await
+    }
     async fn get_feature_by_id(&self, id: Uuid) -> Result<Feature, Error> {
         let result = sqlx::query_as::<_, FeatureWithStageRow>(
             r#"SELECT f.id as feature_id, f.name as feature_name, f.description, f.feature_type, f.team_id, f.created_at, 
             s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
-            s.parent_stage_id, s.position, s.enabled
+            s.parent_stage_id, s.position, s.enabled, s.bucketing_key
 			FROM features f LEFT JOIN features_pipeline_stages s ON f.id = s.feature_id
 			WHERE f.id = $1"#,
         )
@@ -600,7 +701,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
         let mut query_builder = sqlx::QueryBuilder::new(
             r#"SELECT f.id as feature_id, f.name as feature_name, f.description, f.feature_type, f.team_id, f.created_at, 
             s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
-            s.parent_stage_id, s.position, s.enabled
+            s.parent_stage_id, s.position, s.enabled, s.bucketing_key
 			FROM features f LEFT JOIN features_pipeline_stages s ON f.id = s.feature_id"#,
         );
         query_builder.push(" WHERE f.team_id = ").push_bind(team_id);
@@ -630,41 +731,6 @@ impl FeatureRepository for FeatureRepositoryImpl {
 
         for row in features_rows {
             map.entry(row.feature_id).or_default().push(row);
-            // if !map.contains_key(&row.feature_id) {
-            //     let mut feature = Self::map_row_to_feature(row)?;
-            // }
-            //
-            // let feature_entry = map.entry(row.feature_id).or_insert_with(|| {
-            //     let feature_type = match row.feature_type.as_str() {
-            //         "Simple" => FeatureType::Simple,
-            //         "Contextual" => FeatureType::Contextual,
-            //         _ => FeatureType::Simple, // Default to Simple if unknown
-            //     };
-            //     let mut feature = Self::map_row_to_feature(features)?;
-            //     Feature {
-            //         id: row.feature_id,
-            //         name: row.feature_name.clone(),
-            //         description: row.description.clone(),
-            //         feature_type,
-            //         team_id: row.team_id,
-            //         created_at: row.created_at,
-            //         stages: vec![],
-            //         dependencies: vec![],
-            //         contextual_types: None,
-            //     }
-            // });
-            //
-            // if let Some(stage_id) = row.stage_id {
-            //     feature_entry.stages.push(FeaturePipelineStage {
-            //         id: stage_id,
-            //         feature_id: row.feature_id_stage.unwrap(),
-            //         environment_id: row.environment_id.unwrap(),
-            //         order_index: row.order_index.unwrap(),
-            //         parent_stage_id: row.parent_stage_id,
-            //         position: row.position.unwrap(),
-            //         enabled: row.enabled.unwrap(),
-            //     });
-            // }
         }
 
         // Load dependencies for each feature

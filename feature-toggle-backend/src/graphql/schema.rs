@@ -42,6 +42,7 @@ pub struct FeatureStage {
     pub order_index: i32,
     pub position: String,
     pub enabled: bool,
+    pub bucketing_key: Option<String>,
 }
 
 #[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
@@ -131,6 +132,7 @@ pub struct CreateFeatureStageInput {
     #[graphql(validator(min_length = 1, max_length = 50))]
     pub position: String,
     pub enabled: bool,
+    pub bucketing_key: Option<String>,
 }
 
 pub trait StageInput {
@@ -319,4 +321,23 @@ pub struct UpdateClientInput {
     pub enabled: Option<bool>,
     pub client_type: Option<ClientType>,
     pub web_origins: Option<Vec<String>>,
+}
+
+// Stage criteria GraphQL types
+#[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
+pub struct StageCriterion {
+    pub id: ID,
+    pub stage_id: ID,
+    pub context_key: String,
+    pub context: super::schema::Context,
+    pub rollout_percentage: i32,
+}
+
+#[derive(InputObject, Debug, Clone)]
+pub struct CreateStageCriterionInput {
+    #[graphql(validator(min_length = 1, max_length = 100))]
+    pub context_key: String,
+    pub context_id: ID,
+    #[graphql(validator(minimum = 0, maximum = 100))]
+    pub rollout_percentage: i32,
 }

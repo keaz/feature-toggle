@@ -28,6 +28,10 @@ pub trait FeatureLogic: Send + Sync {
     async fn get_stage_contexts(&self, stage_id: ID) -> Result<Vec<crate::graphql::schema::Context>, Error>;
     async fn set_stage_contexts(&self, stage_id: ID, context_ids: Vec<ID>) -> Result<Vec<crate::graphql::schema::Context>, Error>;
 
+    // Stage-criteria
+    async fn get_stage_criteria(&self, stage_id: ID) -> Result<Vec<crate::graphql::schema::StageCriterion>, Error>;
+    async fn set_stage_criteria(&self, stage_id: ID, criteria: Vec<crate::graphql::schema::CreateStageCriterionInput>) -> Result<Vec<crate::graphql::schema::StageCriterion>, Error>;
+
     fn clone_box(&self) -> Box<dyn FeatureLogic>;
 }
 
@@ -97,6 +101,7 @@ impl FeatureLogicImpl {
                 order_index: stage.order_index,
                 position: stage.position,
                 enabled: stage.enabled,
+                bucketing_key: stage.bucketing_key.clone(),
                 parent_stage: None,
             })
             .collect::<Vec<CreateFeatureStage>>();
@@ -243,6 +248,23 @@ impl FeatureLogic for FeatureLogicImpl {
         Ok(list.into_iter().map(map_db_ctx_to_gql).collect())
     }
 
+    async fn get_stage_criteria(&self, stage_id: ID) -> Result<Vec<crate::graphql::schema::StageCriterion>, Error> {
+        let stage_id = Uuid::try_from(stage_id).unwrap();
+        let list = self.repository.get_stage_criteria(stage_id).await?;
+        Ok(list.into_iter().map(map_db_criterion_to_gql).collect())
+    }
+
+    async fn set_stage_criteria(&self, stage_id: ID, criteria: Vec<crate::graphql::schema::CreateStageCriterionInput>) -> Result<Vec<crate::graphql::schema::StageCriterion>, Error> {
+        let stage_id = Uuid::try_from(stage_id).unwrap();
+        let create: Vec<crate::database::feature::CreateStageCriterion> = criteria.into_iter().map(|c| crate::database::feature::CreateStageCriterion {
+            context_key: c.context_key,
+            context_id: Uuid::try_from(c.context_id).unwrap(),
+            rollout_percentage: c.rollout_percentage,
+        }).collect();
+        let list = self.repository.set_stage_criteria(stage_id, create).await?;
+        Ok(list.into_iter().map(map_db_criterion_to_gql).collect())
+    }
+
     fn clone_box(&self) -> Box<dyn FeatureLogic> {
         Box::new(self.clone())
     }
@@ -254,6 +276,16 @@ fn map_db_ctx_to_gql(c: crate::database::entity::Context) -> crate::graphql::sch
         team_id: ID::from(c.team_id),
         key: c.key,
         entries: c.entries.into_iter().map(|e| crate::graphql::schema::ContextEntry { id: ID::from(e.id), value: e.value }).collect(),
+    }
+}
+
+fn map_db_criterion_to_gql(sc: crate::database::entity::StageCriterion) -> crate::graphql::schema::StageCriterion {
+    crate::graphql::schema::StageCriterion {
+        id: ID::from(sc.id),
+        stage_id: ID::from(sc.stage_id),
+        context_key: sc.context_key,
+        context: map_db_ctx_to_gql(sc.context),
+        rollout_percentage: sc.rollout_percentage,
     }
 }
 
@@ -276,7 +308,8 @@ fn stage_factory(
         environment,
         order_index,
         position,
-        enabled
+        enabled,
+        bucketing_key: None,
     }
 }
 
@@ -323,6 +356,7 @@ mod test {
                 order_index: 0,
                 position: "top".to_string(),
                 enabled: true,
+                bucketing_key: None,
             },
             CreateFeatureStageInput {
                 id: Some(ID::from("3eef17bc-9e06-411d-b5f4-7a786e68bb96")),
@@ -330,6 +364,7 @@ mod test {
                 order_index: 1,
                 position: "bottom".to_string(),
                 enabled: true,
+                bucketing_key: None,
             },
         ];
         stages
