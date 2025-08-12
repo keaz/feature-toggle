@@ -143,6 +143,15 @@ impl Query {
         let logic = ctx.data::<Box<dyn FeatureLogic>>().unwrap();
         Ok(logic.get_stage_contexts(stage_id).await?)
     }
+
+    async fn get_stage_criteria(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Id of the feature stage")] stage_id: ID,
+    ) -> GqlResult<Vec<crate::graphql::schema::StageCriterion>> {
+        let logic = ctx.data::<Box<dyn FeatureLogic>>().unwrap();
+        Ok(logic.get_stage_criteria(stage_id).await?)
+    }
 }
 
 #[cfg(test)]

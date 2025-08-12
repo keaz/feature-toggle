@@ -188,16 +188,7 @@ impl MutationRoot {
         let logic = ctx.data::<Box<dyn FeatureLogic>>().unwrap();
         Ok(logic.set_stage_contexts(stage_id, context_ids).await?)
     }
-
-    // Feature stage criteria bindings
-    async fn get_stage_criteria(
-        &self,
-        ctx: &Context<'_>,
-        #[graphql(desc = "Id of the feature stage")] stage_id: ID,
-    ) -> GqlResult<Vec<crate::graphql::schema::StageCriterion>> {
-        let logic = ctx.data::<Box<dyn FeatureLogic>>().unwrap();
-        Ok(logic.get_stage_criteria(stage_id).await?)
-    }
+    
 
     async fn set_stage_criteria(
         &self,
