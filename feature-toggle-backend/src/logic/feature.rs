@@ -187,8 +187,21 @@ impl FeatureLogic for FeatureLogicImpl {
             .map(|stage| Box::new(stage.clone()) as Box<dyn DBStage>)
             .collect();
 
-        let stages = map_stages(true, &environment_map, &db_stages, stage_factory);
+        let mut stages = map_stages(true, &environment_map, &db_stages, stage_factory);
         let relationships = create_relationships(true, db_stages, relationship_factory);
+
+        // Populate bucketing_key on stages from the database entity
+        use std::collections::HashMap;
+        let bucketing_map: HashMap<String, Option<String>> = feature
+            .stages
+            .iter()
+            .map(|s| (s.id.to_string(), s.bucketing_key.clone()))
+            .collect();
+        for stage in stages.iter_mut() {
+            if let Some(b) = bucketing_map.get(&stage.id.to_string()) {
+                stage.bucketing_key = b.clone();
+            }
+        }
 
         let mut feature = Self::map_entity_to_graphql_feature(feature);
         feature.stages = stages;

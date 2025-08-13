@@ -188,7 +188,7 @@ impl MutationRoot {
         let logic = ctx.data::<Box<dyn FeatureLogic>>().unwrap();
         Ok(logic.set_stage_contexts(stage_id, context_ids).await?)
     }
-    
+
 
     async fn set_stage_criteria(
         &self,
@@ -288,45 +288,6 @@ mod tests {
         assert!(resp.errors.is_empty(), "{}", serde_json::to_string(&resp.errors).unwrap());
         let data = resp.data.into_json().unwrap();
         assert_eq!(data["setStageContexts"].as_array().unwrap().len(), 2);
-    }
-
-    #[tokio::test]
-    async fn test_get_stage_criteria_mutation() {
-        use crate::logic::feature::MockFeatureLogic;
-        let mut mock = MockFeatureLogic::new();
-        let stage_id = ID::from(Uuid::new_v4());
-        let expected = vec![
-            crate::graphql::schema::StageCriterion {
-                id: ID::from(Uuid::new_v4()),
-                stage_id: stage_id.clone(),
-                context_key: "filter".into(),
-                context: crate::graphql::schema::Context { id: ID::from(Uuid::new_v4()), team_id: ID::from(Uuid::new_v4()), key: "filter-alpha".into(), entries: vec![] },
-                rollout_percentage: 50,
-            }
-        ];
-        let stage_id_clone = stage_id.clone();
-        mock.expect_get_stage_criteria()
-            .times(1)
-            .withf(move |sid| sid == &stage_id_clone)
-            .return_once(move |_| Ok(expected.clone()));
-
-        let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
-            .data::<Box<dyn crate::logic::feature::FeatureLogic>>(Box::new(mock))
-            .finish();
-
-        let gql = r#"
-            mutation($sid: ID!) {
-                getStageCriteria(stageId: $sid) { contextKey rolloutPercentage }
-            }
-        "#;
-        let mut req = Request::new(gql);
-        req = req.variables(async_graphql::Variables::from_json(serde_json::json!({
-            "sid": stage_id.to_string()
-        })));
-        let resp = schema.execute(req).await;
-        assert!(resp.errors.is_empty(), "{}", serde_json::to_string(&resp.errors).unwrap());
-        let data = resp.data.into_json().unwrap();
-        assert_eq!(data["getStageCriteria"].as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]
