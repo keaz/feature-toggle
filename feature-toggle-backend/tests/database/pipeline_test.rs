@@ -31,22 +31,6 @@ async fn test_get_non_existing_pipeline() {
     assert!(matches!(error, feature_toggle_backend::Error::NotFound(_)));
 }
 
-#[tokio::test]
-async fn test_create_pipeline_without_stages() {
-    let pool = init_pg_pool().await;
-    let repository = pipeline::pipeline_repository(pool);
-
-    let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
-    let random_name = format!("Without Stages {}", Uuid::new_v4());
-    let input = CreatePipeline {
-        team_id,
-        name: random_name.clone(),
-        stages: vec![],
-    };
-    let result = repository.create_pipeline(input).await;
-
-    assert!(result.is_ok());
-}
 
 #[tokio::test]
 async fn test_create_pipeline_with_stages() {

@@ -2,6 +2,7 @@ pub mod database;
 mod graphql;
 mod logic;
 mod middleware;
+pub mod grpc;
 
 use crate::database::init_pg_pool;
 use crate::graphql::mutation::MutationRoot;
@@ -12,6 +13,7 @@ use actix_web::{guard, web, App, HttpRequest, HttpResponse, HttpServer, Result};
 use async_graphql::http::GraphiQLSource;
 use async_graphql::{EmptyMutation, EmptySubscription, Schema};
 use async_graphql_actix_web::{GraphQL, GraphQLSubscription};
+use log::error;
 use uuid::Uuid;
 
 #[derive(Debug, thiserror::Error)]
@@ -47,6 +49,15 @@ pub async fn run() -> std::io::Result<()> {
     let context_logic = logic::context::context_logic(
         database::context::context_repository(db_pool.clone()),
     );
+
+    let grpc_pool = db_pool.clone();
+    // Spawn gRPC server on separate task
+    let grpc_addr: std::net::SocketAddr = "0.0.0.0:50051".parse().unwrap();
+    tokio::spawn(async move {
+        if let Err(e) = crate::grpc::serve(grpc_pool, grpc_addr).await {
+            error!("gRPC server error: {e}");
+        }
+    });
 
     HttpServer::new(move || {
         let schema = Schema::build(Query, MutationRoot, EmptySubscription)

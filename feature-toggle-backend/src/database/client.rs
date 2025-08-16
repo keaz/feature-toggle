@@ -162,6 +162,7 @@ impl ClientRepository for ClientRepositoryImpl {
         if let Some(ct) = client_type {
             qb.push(" AND client_type = ").push_bind(Self::to_type_str(&ct));
         }
+        qb.push(" ORDER BY name");
 
         let rows = qb
             .build()

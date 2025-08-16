@@ -92,6 +92,7 @@ impl EnvironmentRepository for EnvironmentRepositoryImpl {
         if let Some(active_value) = active {
             qb.push(" AND active = ").push_bind(active_value);
         }
+        qb.push(" ORDER BY name");
 
         let query = qb.build_query_as::<Environment>();
         let result = query.fetch_all(&self.pool).await;

@@ -67,6 +67,7 @@ impl TeamRepository for TeamRepositoryImpl {
             let pattern = format!("%{filter_name}%");
             qb.push("name ILIKE ").push_bind(pattern);
         }
+        qb.push(" ORDER BY name");
 
         let query = qb.build_query_as::<Team>();
         let result = query.fetch_all(&self.pool).await;

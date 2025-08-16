@@ -1,5 +1,5 @@
 use crate::database::entity::{Pipeline, PipelineStage};
-use crate::database::{Error, handle_error};
+use crate::database::{handle_error, Error};
 use mockall::automock;
 use sqlx::postgres::PgQueryResult;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};

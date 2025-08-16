@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package featuretoggle;
+
+message Context {
+  string key = 1;
+  string value = 2;
+}
+
+message EvaluateRequest {
+  // Name of the feature, matching FeatureEvaluationContext.feature
+  string feature = 1;
+  // environment identifier (UUID as string), matching FeatureEvaluationContext.environment_id
+  string environment_id = 2;
+  // evaluation context key/values, matching FeatureEvaluationContext.context
+  repeated Context context = 3;
+  // Optional: legacy identifier to allow server-side lookup until migration completes
+  string feature_id = 4;
+}
+
+message EvaluateResponse {
+  bool enabled = 1;
+}
+
+service FeatureEvaluation {
+  rpc Evaluate(EvaluateRequest) returns (EvaluateResponse);
+}

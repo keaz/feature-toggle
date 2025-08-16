@@ -629,23 +629,6 @@ impl FeatureRepository for FeatureRepositoryImpl {
                     c.context_id
                 )));
             }
-            // fetch context key
-            let ctx_key = handle_error(Some(c.context_id), sqlx::query_scalar!(
-                "SELECT key FROM contexts WHERE id = $1",
-                c.context_id
-            ).fetch_optional(&self.pool).await)?;
-            if ctx_key.is_none() {
-                return Err(Error::NotFound(c.context_id));
-            }
-            let actual_key: String = ctx_key.unwrap();
-            // The stored context_key is a logical group (e.g., 'filter'), while the actual context key can be 'filter-alpha'.
-            // Accept either exact match or a hyphenated prefix match.
-            if actual_key != c.context_key && !actual_key.starts_with(&(c.context_key.clone() + "-")) {
-                return Err(Error::InvalidInput(format!(
-                    "context_key '{}' is not compatible with context '{}' actual key '{}'",
-                    c.context_key, c.context_id, actual_key
-                )));
-            }
         }
 
         let mut tx = self.pool.begin().await.map_err(Error::DatabaseError)?;
@@ -728,13 +711,23 @@ impl FeatureRepository for FeatureRepositoryImpl {
 
         let features_rows = handle_error(None, result)?;
         let mut map: HashMap<Uuid, Vec<FeatureWithStageRow>> = HashMap::new();
+        // Preserve ordering by feature name as returned from SQL by tracking first-seen order
+        let mut order: Vec<Uuid> = Vec::new();
 
         for row in features_rows {
+            if !map.contains_key(&row.feature_id) {
+                order.push(row.feature_id);
+            }
             map.entry(row.feature_id).or_default().push(row);
         }
 
-        // Load dependencies for each feature
-        let mut features: Vec<Feature> = map.into_values().map(Self::map_row_to_feature).collect();
+        // Load dependencies for each feature while preserving order by name
+        let mut features: Vec<Feature> = Vec::with_capacity(order.len());
+        for id in order {
+            if let Some(rows) = map.remove(&id) {
+                features.push(Self::map_row_to_feature(rows));
+            }
+        }
         for feature in &mut features {
             let dependencies = self.get_feature_dependencies(&feature.id).await?;
             feature.dependencies = dependencies;
