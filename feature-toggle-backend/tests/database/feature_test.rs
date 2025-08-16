@@ -16,7 +16,7 @@ async fn test_get_existing_feature() {
     assert!(result.is_ok());
     let feature = result.unwrap();
     assert_eq!(feature.id, id);
-    assert_eq!(feature.name, "Test Feature");
+    assert_eq!(feature.key, "Test Feature");
     assert_eq!(feature.stages.len(), 1);
     let stage = feature.stages.first().unwrap();
     assert_eq!(
@@ -51,10 +51,10 @@ async fn test_create_feature_without_stages() {
     let repository = feature::feature_repository(pool);
 
     let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
-    let random_name = format!("Without Stages {}", Uuid::new_v4());
+    let random_key = format!("Without Stages {}", Uuid::new_v4());
     let input = CreateFeature {
         team_id,
-        name: random_name.clone(),
+        key: random_key.clone(),
         description: Some("Test feature without stages".to_string()),
         feature_type: FeatureType::Simple,
         stages: vec![],
@@ -71,7 +71,7 @@ async fn test_create_feature_with_stages() {
     let repository = feature::feature_repository(pool);
 
     let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
-    let random_name = format!("With Stages {}", Uuid::new_v4());
+    let random_key = format!("With Stages {}", Uuid::new_v4());
     let parent = CreateFeatureStage {
         id: Uuid::new_v4(),
         environment_id: Uuid::parse_str("3eef17bc-9e06-411d-b5f4-7a786e68bb96").unwrap(),
@@ -83,7 +83,7 @@ async fn test_create_feature_with_stages() {
     };
     let input = CreateFeature {
         team_id,
-        name: random_name.clone(),
+        key: random_key.clone(),
         description: Some("Test feature with stages".to_string()),
         feature_type: FeatureType::Simple,
         stages: vec![
@@ -112,10 +112,10 @@ async fn test_create_feature_with_dependencies() {
 
     // First create a feature to depend on
     let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
-    let dependency_name = format!("Dependency {}", Uuid::new_v4());
+    let dependency_key = format!("Dependency {}", Uuid::new_v4());
     let dependency_input = CreateFeature {
         team_id,
-        name: dependency_name.clone(),
+        key: dependency_key.clone(),
         description: Some("Dependency feature".to_string()),
         feature_type: FeatureType::Simple,
         stages: vec![],
@@ -126,10 +126,10 @@ async fn test_create_feature_with_dependencies() {
     let dependency_id = dependency_result.unwrap();
 
     // Now create a feature that depends on the first one
-    let feature_name = format!("With Dependencies {}", Uuid::new_v4());
+    let feature_key = format!("With Dependencies {}", Uuid::new_v4());
     let input = CreateFeature {
         team_id,
-        name: feature_name.clone(),
+        key: feature_key.clone(),
         description: Some("Test feature with dependencies".to_string()),
         feature_type: FeatureType::Simple,
         stages: vec![],
@@ -153,7 +153,7 @@ async fn test_create_existing_feature() {
     let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
     let input = CreateFeature {
         team_id,
-        name: "Existing Feature".to_string(),
+        key: "Existing Feature".to_string(),
         description: Some("Test feature".to_string()),
         feature_type: FeatureType::Simple,
         stages: vec![],
@@ -176,7 +176,7 @@ async fn test_update_feature() {
 
     let input = UpdateFeature {
         id: Uuid::parse_str("3eef17bc-9e06-411d-b5f4-7a786e68bb96").unwrap(),
-        name: Some("Updated Feature".to_string()),
+        key: Some("Updated Feature".to_string()),
         description: Some("Updated description".to_string()),
         feature_type: Some(FeatureType::Contextual),
         stages: vec![],
@@ -186,7 +186,7 @@ async fn test_update_feature() {
 
     assert!(result.is_ok());
     let feature = result.unwrap();
-    assert_eq!(feature.name, "Updated Feature");
+    assert_eq!(feature.key, "Updated Feature");
     assert_eq!(feature.description, Some("Updated description".to_string()));
     assert!(matches!(feature.feature_type, FeatureType::Contextual));
     assert!(feature.stages.is_empty());
@@ -199,7 +199,7 @@ async fn test_update_feature_with_existing_stages() {
 
     let input = UpdateFeature {
         id: Uuid::parse_str("6eef17bc-9e06-411d-b5f4-7a786e68bb81").unwrap(),
-        name: Some("Another feature Updated Feature".to_string()),
+        key: Some("Another feature Updated Feature".to_string()),
         description: Some("Updated description".to_string()),
         feature_type: Some(FeatureType::Contextual),
         stages: vec![CreateFeatureStage {
@@ -217,7 +217,7 @@ async fn test_update_feature_with_existing_stages() {
 
     assert!(result.is_ok());
     let feature = result.unwrap();
-    assert_eq!(feature.name, "Another feature Updated Feature");
+    assert_eq!(feature.key, "Another feature Updated Feature");
     assert_eq!(feature.description, Some("Updated description".to_string()));
     assert!(matches!(feature.feature_type, FeatureType::Contextual));
     assert_eq!(feature.stages.len(), 1);
@@ -242,7 +242,7 @@ async fn test_update_non_existing_feature() {
 
     let input = UpdateFeature {
         id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98fca").unwrap(),
-        name: Some("Non-existing Feature".to_string()),
+        key: Some("Non-existing Feature".to_string()),
         description: Some("This feature doesn't exist".to_string()),
         feature_type: Some(FeatureType::Simple),
         stages: vec![],
@@ -292,7 +292,7 @@ async fn test_get_all_features() {
 }
 
 #[tokio::test]
-async fn test_name_get_features() {
+async fn test_key_get_features() {
     let pool = init_pg_pool().await;
     let repository = feature::feature_repository(pool);
 
@@ -303,7 +303,7 @@ async fn test_name_get_features() {
 
     assert!(result.is_ok());
     let features = result.unwrap();
-    assert!(features.iter().all(|p| p.name.contains("Test")));
+    assert!(features.iter().all(|p| p.key.contains("Test")));
 }
 
 #[tokio::test]
@@ -326,7 +326,7 @@ async fn test_feature_type_get_features() {
 }
 
 #[tokio::test]
-async fn test_name_and_feature_type_get_features() {
+async fn test_key_and_feature_type_get_features() {
     let pool = init_pg_pool().await;
     let repository = feature::feature_repository(pool);
 
@@ -340,7 +340,7 @@ async fn test_name_and_feature_type_get_features() {
     assert!(
         features
             .iter()
-            .all(|p| p.name.contains("Test") && matches!(p.feature_type, FeatureType::Simple))
+            .all(|p| p.key.contains("Test") && matches!(p.feature_type, FeatureType::Simple))
     );
 }
 
@@ -350,7 +350,7 @@ async fn test_create_feature_with_stages_verification() {
     let repository = feature::feature_repository(pool);
 
     let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
-    let random_name = format!("Stage Verification {}", Uuid::new_v4());
+    let random_key = format!("Stage Verification {}", Uuid::new_v4());
 
     // Create stage IDs
     let parent_stage_id = Uuid::new_v4();
@@ -381,7 +381,7 @@ async fn test_create_feature_with_stages_verification() {
     // Create feature with stages
     let input = CreateFeature {
         team_id,
-        name: random_name.clone(),
+        key: random_key.clone(),
         description: Some("Test feature with stages verification".to_string()),
         feature_type: FeatureType::Simple,
         stages: vec![parent.clone(), child],
@@ -399,7 +399,7 @@ async fn test_create_feature_with_stages_verification() {
 
     // Verify the feature and its stages
     let feature = feature.unwrap();
-    assert_eq!(feature.name, random_name);
+    assert_eq!(feature.key, random_key);
     assert_eq!(feature.stages.len(), 2);
 
     // Find parent stage
@@ -435,7 +435,7 @@ async fn test_update_feature_with_stages() {
     let repository = feature::feature_repository(pool);
 
     let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
-    let random_name = format!("Update Stages Test {}", Uuid::new_v4());
+    let random_key = format!("Update Stages Test {}", Uuid::new_v4());
 
     // Create stage IDs for initial feature
     let stage1_id = Uuid::new_v4();
@@ -465,7 +465,7 @@ async fn test_update_feature_with_stages() {
     // Create initial feature with stages
     let create_input = CreateFeature {
         team_id,
-        name: random_name.clone(),
+        key: random_key.clone(),
         description: Some("Test feature for update stages".to_string()),
         feature_type: FeatureType::Simple,
         stages: vec![stage1.clone(), stage2.clone()],
@@ -512,7 +512,7 @@ async fn test_update_feature_with_stages() {
     // - stage3 will be inserted (new stage)
     let update_input = UpdateFeature {
         id: feature_id,
-        name: Some(format!("{random_name} - Updated")),
+        key: Some(format!("{random_key} - Updated")),
         description: Some("Updated description".to_string()),
         feature_type: Some(FeatureType::Contextual),
         stages: vec![updated_stage1, new_stage3],
@@ -526,7 +526,7 @@ async fn test_update_feature_with_stages() {
     let updated_feature = update_result.unwrap();
 
     // Verify feature was updated
-    assert_eq!(updated_feature.name, format!("{random_name} - Updated"));
+    assert_eq!(updated_feature.key, format!("{random_key} - Updated"));
     assert_eq!(
         updated_feature.description,
         Some("Updated description".to_string())

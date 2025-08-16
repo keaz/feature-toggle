@@ -35,7 +35,7 @@ pub struct PipelineStage {
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
 pub struct Feature {
     pub id: Uuid,
-    pub name: String,
+    pub key: String,
     pub description: Option<String>,
     pub feature_type: FeatureType,
     pub team_id: Uuid,

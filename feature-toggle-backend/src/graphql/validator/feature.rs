@@ -13,7 +13,7 @@ impl CreateInputValidator for CreateFeatureInput {
         let pipelines = logic
             .get_pipelines(
                 team_id.unwrap(),
-                Some(self.name.clone()),
+                Some(self.key.clone()),
                 Some(true),
                 vec![],
             )
@@ -21,7 +21,7 @@ impl CreateInputValidator for CreateFeatureInput {
         if !pipelines.is_empty() {
             return Err(Error::new(format!(
                 "Feature with name '{}' already exists",
-                self.name
+                self.key
             )));
         }
 

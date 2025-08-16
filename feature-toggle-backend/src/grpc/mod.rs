@@ -2,16 +2,17 @@ pub mod pb {
     tonic::include_proto!("featuretoggle");
 }
 
-use crate::database;
-use crate::database::feature::feature_repository;
+use crate::database::client::client_repository;
 use crate::database::entity as db;
+use crate::database::feature::feature_repository;
 use evaluation_engine as engine;
 use pb::feature_evaluation_server::{FeatureEvaluation, FeatureEvaluationServer};
 use pb::{EvaluateRequest, EvaluateResponse};
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
-pub use pb::feature_evaluation_server; // re-export for server creation
+pub use pb::feature_evaluation_server;
+// re-export for server creation
 
 #[derive(Clone)]
 pub struct FeatureEvaluationSvc {
@@ -70,19 +71,52 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
     ) -> Result<Response<EvaluateResponse>, Status> {
         let req = request.into_inner();
 
-        let feature_id = Uuid::parse_str(&req.feature_id)
-            .map_err(|_| Status::invalid_argument("feature_id must be a UUID"))?;
+        // Validate inputs
+        if req.client_id.is_empty() {
+            return Err(Status::invalid_argument("client_id is required"));
+        }
+        if req.client_secret.is_empty() {
+            return Err(Status::invalid_argument("client_secret is required"));
+        }
+        if req.feature.is_empty() {
+            return Err(Status::invalid_argument("feature (key) is required"));
+        }
 
-        let repo = feature_repository(self.pool.clone());
-        let db_feature = repo
-            .get_feature_by_id(feature_id)
+        let client_id = Uuid::parse_str(&req.client_id)
+            .map_err(|_| Status::invalid_argument("client_id must be a UUID"))?;
+
+        // Fetch client -> team
+        let client_repo = client_repository(self.pool.clone());
+        let client = client_repo
+            .get_client_by_id(client_id)
+            .await
+            .map_err(|e| Status::not_found(format!("client not found: {}", e)))?;
+
+        // Validate client secret and status
+        if !client.enabled {
+            return Err(Status::permission_denied("client is disabled"));
+        }
+        if client.api_key != req.client_secret {
+            return Err(Status::unauthenticated("invalid client_secret"));
+        }
+
+        let team_id = client.team_id;
+
+        // Fetch feature by key within team
+        let feature_repo = feature_repository(self.pool.clone());
+        let mut features = feature_repo
+            .get_features(team_id, Some(req.feature.clone()), None)
             .await
             .map_err(|e| Status::internal(format!("db error: {}", e)))?;
+
+        let db_feature = features
+            .pop()
+            .ok_or_else(|| Status::not_found("feature with given key not found for client's team"))?;
 
         let eng_feature = self.map_db_feature_to_engine(db_feature.clone()).await?;
 
         let ec = engine::FeatureEvaluationContext {
-            feature: db_feature.name,
+            feature: db_feature.key,
             environment_id: req.environment_id,
             context: req
                 .context

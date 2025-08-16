@@ -68,7 +68,7 @@ ON CONFLICT (id) DO NOTHING;
 DELETE
 FROM public.features;
 
-INSERT INTO public.features(id, name, description, feature_type, team_id, created_at)
+INSERT INTO public.features(id, key, description, feature_type, team_id, created_at)
 VALUES ('51ecc366-f1cd-4d3d-ab73-fa60bad98f27', 'Test Feature', 'This is a test feature', 'Simple', '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', now()),
        ('3eef17bc-9e06-411d-b5f4-7a786e68bb96', 'Update Feature', 'This is a feature to update', 'Simple', '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', now()),
        ('3eef17bc-9e06-411d-b5f4-7a786e68bb97', 'Delete Feature', 'This is a feature to delete', 'Simple', '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', now()),

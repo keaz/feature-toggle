@@ -8,7 +8,7 @@ message Context {
 }
 
 message EvaluateRequest {
-  // Name of the feature, matching FeatureEvaluationContext.feature
+  // Key of the feature, matching FeatureEvaluationContext.feature
   string feature = 1;
   // environment identifier (UUID as string), matching FeatureEvaluationContext.environment_id
   string environment_id = 2;
@@ -16,6 +16,9 @@ message EvaluateRequest {
   repeated Context context = 3;
   // Optional: legacy identifier to allow server-side lookup until migration completes
   string feature_id = 4;
+  // Client making the request; used to derive team for feature lookup
+  string client_id = 5;
+  string client_secret = 6;
 }
 
 message EvaluateResponse {

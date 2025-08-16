@@ -78,7 +78,7 @@ impl FeatureLogicImpl {
 
         CreateFeature {
             team_id,
-            name: input.name,
+            key: input.key,
             description: input.description,
             feature_type,
             stages,
@@ -138,7 +138,7 @@ impl FeatureLogicImpl {
         let stages = Self::get_create_stages_to_create(input.stages, input.relationships);
         UpdateFeature {
             id,
-            name: Some(input.name),
+            key: Some(input.name),
             description: input.description,
             feature_type,
             stages,
@@ -149,7 +149,7 @@ impl FeatureLogicImpl {
     fn map_entity_to_graphql_feature(feature: crate::database::entity::Feature) -> Feature {
         Feature {
             id: feature.id.into(),
-            name: feature.name,
+            key: feature.key,
             description: feature.description,
             feature_type: Self::map_entity_to_graphql_feature_type(feature.feature_type),
             enabled: None, // This would need to be determined based on the feature's stages
@@ -396,7 +396,7 @@ mod test {
             .returning(move |_| {
                 Ok(EntityFeature {
                     id: Uuid::parse_str(ID).unwrap(),
-                    name: "Test Feature".to_string(),
+                    key: "Test Feature".to_string(),
                     description: Some("Test description".to_string()),
                     feature_type: EntityFeatureType::Simple,
                     team_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
@@ -412,7 +412,7 @@ mod test {
         assert!(result.is_ok());
         let feature = result.unwrap();
         assert_eq!(feature.id.to_string(), ID);
-        assert_eq!(feature.name, "Test Feature");
+        assert_eq!(feature.key, "Test Feature");
         assert_eq!(feature.description, Some("Test description".to_string()));
         assert!(matches!(feature.feature_type, GraphQLFeatureType::Simple));
     }
@@ -443,7 +443,7 @@ mod test {
         let environment_logic = MockEnvironmentLogic::new();
 
         let input = CreateFeatureInput {
-            name: "New Feature".to_string(),
+            key: "New Feature".to_string(),
             description: Some("New feature description".to_string()),
             feature_type: GraphQLFeatureType::Simple,
             enabled: Some(true),
@@ -456,7 +456,7 @@ mod test {
         let id = Uuid::parse_str(ID).unwrap();
         repository
             .expect_create_feature()
-            .withf(|input| input.name == "New Feature")
+            .withf(|input| input.key == "New Feature")
             .times(1)
             .returning(move |_| Ok(id));
 
@@ -491,13 +491,13 @@ mod test {
         repository
             .expect_update_feature()
             .withf(|input| {
-                input.id == Uuid::parse_str(ID).unwrap() && input.name == Some(NAME.to_string())
+                input.id == Uuid::parse_str(ID).unwrap() && input.key == Some(NAME.to_string())
             })
             .times(1)
             .returning(move |_| {
                 Ok(EntityFeature {
                     id: Uuid::parse_str(ID).unwrap(),
-                    name: NAME.to_string(),
+                    key: NAME.to_string(),
                     description: Some("Updated description".to_string()),
                     feature_type: EntityFeatureType::Contextual,
                     team_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
@@ -512,7 +512,7 @@ mod test {
 
         assert!(result.is_ok());
         let feature = result.unwrap();
-        assert_eq!(feature.name, NAME);
+        assert_eq!(feature.key, NAME);
         assert_eq!(feature.description, Some("Updated description".to_string()));
         assert!(matches!(
             feature.feature_type,
@@ -551,7 +551,7 @@ mod test {
                 Ok(vec![
                     EntityFeature {
                         id: Uuid::new_v4(),
-                        name: "Test Feature".to_string(),
+                        key: "Test Feature".to_string(),
                         description: Some("Test description".to_string()),
                         feature_type: EntityFeatureType::Simple,
                         team_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
@@ -561,7 +561,7 @@ mod test {
                     },
                     EntityFeature {
                         id: Uuid::new_v4(),
-                        name: "Another Feature".to_string(),
+                        key: "Another Feature".to_string(),
                         description: Some("Another description".to_string()),
                         feature_type: EntityFeatureType::Contextual,
                         team_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),

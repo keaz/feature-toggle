@@ -19,7 +19,7 @@ pub enum RuleOperator {
 #[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
 pub struct Feature {
     pub id: ID,
-    pub name: String,
+    pub key: String,
     pub description: Option<String>,
     pub feature_type: FeatureType,
     pub enabled: Option<bool>,
@@ -94,7 +94,7 @@ pub struct PipelineStage {
 #[derive(InputObject, Debug)]
 pub struct CreateFeatureInput {
     #[graphql(validator(min_length = 3, max_length = 40))]
-    pub name: String,
+    pub key: String,
     #[graphql(validator(min_length = 3, max_length = 255))]
     pub description: Option<String>,
     pub feature_type: FeatureType,

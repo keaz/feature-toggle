@@ -20,7 +20,7 @@ pub struct CreateStageCriterion {
 #[derive(Debug, Clone)]
 pub struct CreateFeature {
     pub team_id: Uuid,
-    pub name: String,
+    pub key: String,
     pub description: Option<String>,
     pub feature_type: FeatureType,
     pub stages: Vec<CreateFeatureStage>,
@@ -62,7 +62,7 @@ impl CreateFeatureStage {
 
 pub struct UpdateFeature {
     pub id: Uuid,
-    pub name: Option<String>,
+    pub key: Option<String>,
     pub description: Option<String>,
     pub feature_type: Option<FeatureType>,
     pub stages: Vec<CreateFeatureStage>,
@@ -72,7 +72,7 @@ pub struct UpdateFeature {
 #[derive(Debug, sqlx::FromRow, Clone)]
 struct FeatureWithStageRow {
     feature_id: Uuid,
-    feature_name: String,
+    feature_key: String,
     description: Option<String>,
     feature_type: String,
     team_id: Uuid,
@@ -102,7 +102,7 @@ pub trait FeatureRepository: Send + Sync {
     async fn get_features(
         &self,
         team_id: Uuid,
-        name: Option<String>,
+        key: Option<String>,
         feature_type: Option<FeatureType>,
     ) -> Result<Vec<Feature>, Error>;
     async fn create_feature(&self, input: CreateFeature) -> Result<Uuid, Error>;
@@ -507,7 +507,7 @@ impl FeatureRepositoryImpl {
 
         Feature {
             id: feature.feature_id,
-            name: feature.feature_name.clone(),
+            key: feature.feature_key.clone(),
             description: feature.description.clone(),
             feature_type,
             team_id: feature.team_id,
@@ -525,10 +525,10 @@ impl FeatureRepositoryImpl {
         };
 
         let result = sqlx::query!(
-            r#"INSERT INTO features (id, name, description, feature_type, team_id)
+            r#"INSERT INTO features (id, key, description, feature_type, team_id)
                VALUES ($1, $2, $3, $4, $5) RETURNING id"#,
             id,
-            input.name,
+            input.key,
             input.description,
             feature_type_str,
             input.team_id
@@ -546,14 +546,14 @@ impl FeatureRepositoryImpl {
 
     async fn check_feature_exists(&self, input: &CreateFeature) -> Result<(), Error> {
         let existing_feature = self
-            .get_features(input.team_id, Some(input.name.clone()), None)
+            .get_features(input.team_id, Some(input.key.clone()), None)
             .await;
 
         if let Ok(existing_feature) = existing_feature {
             if !existing_feature.is_empty() {
                 return Err(Error::RecordAlreadyExists(format!(
-                    "Feature with name '{}' already exists",
-                    input.name
+                    "Feature with key '{}' already exists",
+                    input.key
                 )));
             }
         }
@@ -569,8 +569,8 @@ impl FeatureRepositoryImpl {
         };
 
         let result = sqlx::query!(
-            r#"UPDATE features SET name = $1, description = $2, feature_type = $3 WHERE id = $4"#,
-            input.name.clone().unwrap_or(existing_feature.name),
+            r#"UPDATE features SET key = $1, description = $2, feature_type = $3 WHERE id = $4"#,
+            input.key.clone().unwrap_or(existing_feature.key),
             input.description.clone().or(existing_feature.description),
             feature_type_str,
             input.id
@@ -651,7 +651,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
     }
     async fn get_feature_by_id(&self, id: Uuid) -> Result<Feature, Error> {
         let result = sqlx::query_as::<_, FeatureWithStageRow>(
-            r#"SELECT f.id as feature_id, f.name as feature_name, f.description, f.feature_type, f.team_id, f.created_at, 
+            r#"SELECT f.id as feature_id, f.key as feature_key, f.description, f.feature_type, f.team_id, f.created_at, 
             s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
             s.parent_stage_id, s.position, s.enabled, s.bucketing_key
 			FROM features f LEFT JOIN features_pipeline_stages s ON f.id = s.feature_id
@@ -678,20 +678,20 @@ impl FeatureRepository for FeatureRepositoryImpl {
     async fn get_features(
         &self,
         team_id: Uuid,
-        name: Option<String>,
+        key: Option<String>,
         feature_type: Option<FeatureType>,
     ) -> Result<Vec<Feature>, Error> {
         let mut query_builder = sqlx::QueryBuilder::new(
-            r#"SELECT f.id as feature_id, f.name as feature_name, f.description, f.feature_type, f.team_id, f.created_at, 
+            r#"SELECT f.id as feature_id, f.key as feature_key, f.description, f.feature_type, f.team_id, f.created_at, 
             s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
             s.parent_stage_id, s.position, s.enabled, s.bucketing_key
-			FROM features f LEFT JOIN features_pipeline_stages s ON f.id = s.feature_id"#,
+			FROM features f LEFT JOIN features_pipeline_stages s ON f.id = s.feature_id"#, 
         );
         query_builder.push(" WHERE f.team_id = ").push_bind(team_id);
 
-        if let Some(name) = name {
-            query_builder.push(" AND f.name ILIKE ");
-            query_builder.push_bind(format!("%{name}%"));
+        if let Some(key) = key {
+            query_builder.push(" AND f.key ILIKE ");
+            query_builder.push_bind(format!("%{key}%"));
         }
         if let Some(feature_type_value) = feature_type {
             let feature_type_str = match feature_type_value {
@@ -702,7 +702,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
                 .push(" AND f.feature_type = ")
                 .push_bind(feature_type_str);
         }
-        query_builder.push(" ORDER BY f.name");
+        query_builder.push(" ORDER BY f.key");
 
         let result = query_builder
             .build_query_as::<FeatureWithStageRow>()

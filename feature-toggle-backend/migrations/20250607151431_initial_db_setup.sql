@@ -40,12 +40,12 @@ CREATE TABLE pipeline_stages
 CREATE TABLE features
 (
     id           UUID PRIMARY KEY,
-    name VARCHAR(100) NOT NULL,
+    key VARCHAR(100) NOT NULL,
     description  TEXT,
     feature_type TEXT         NOT NULL CHECK (feature_type IN ('Simple', 'Contextual')),
     team_id      UUID         NOT NULL REFERENCES teams (id) ON DELETE CASCADE,
     created_at   TIMESTAMPTZ DEFAULT now(),
-    UNIQUE (name, team_id)
+    UNIQUE (key, team_id)
 );
 
 

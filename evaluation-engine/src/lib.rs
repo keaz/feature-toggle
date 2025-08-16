@@ -46,21 +46,6 @@ fn get_context_value<'a>(ctx: &'a FeatureEvaluationContext, key: &str) -> Option
     ctx.context.iter().find(|c| c.key == key).map(|c| c.value.as_str())
 }
 
-fn in_list(value: &str, allowed: &[String]) -> bool {
-    allowed.iter().any(|v| v == value)
-}
-
-// Deterministic FNV-1a 64-bit hash for sticky rollouts
-fn fnv1a64(input: &str) -> u64 {
-    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
-    const FNV_PRIME: u64 = 0x00000100000001B3;
-    let mut hash = FNV_OFFSET;
-    for b in input.as_bytes() {
-        hash ^= *b as u64;
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    hash
-}
 
 fn hash_to_percentage(hash: &[u8]) -> f32 {
     // Use first 8 bytes to create a u64 number, then map to [0.0, 100.0)
@@ -97,7 +82,7 @@ fn passes_stage_criteria(ec: &FeatureEvaluationContext, stage: &FeatureStage) ->
 
     for crit in &stage.criterias {
         // Find provided value for the actual context key stored in the context
-        let ctx_key = &crit.context.key;
+        let ctx_key = &crit.context_key;
         if let Some(provided) = get_context_value(ec, ctx_key) {
             // Check allowed values
             if crit.context.entries.iter().any(|v| v == provided) {
