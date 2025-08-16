@@ -8,14 +8,14 @@ message Context {
 }
 
 message EvaluateRequest {
-  // Key of the feature, matching FeatureEvaluationContext.feature
-  string feature = 1;
+  // Key of the feature (unique feature key), matching FeatureEvaluationContext.feature
+  string feature_key = 1;
   // environment identifier (UUID as string), matching FeatureEvaluationContext.environment_id
   string environment_id = 2;
   // evaluation context key/values, matching FeatureEvaluationContext.context
   repeated Context context = 3;
-  // Optional: legacy identifier to allow server-side lookup until migration completes
-  string feature_id = 4;
+  // Deprecated: legacy identifier retained temporarily for migration; do not use
+  string feature_id = 4 [deprecated = true];
   // Client making the request; used to derive team for feature lookup
   string client_id = 5;
   string client_secret = 6;
@@ -25,6 +25,57 @@ message EvaluateResponse {
   bool enabled = 1;
 }
 
+// New request to retrieve a full feature by its key
+message GetFeatureByKeyRequest {
+  string feature_key = 1;
+  string client_id = 2;
+  string client_secret = 3;
+}
+
+// Context used within criteria for full feature representation
+message CriterionContext {
+  string key = 1;
+  repeated string entries = 2;
+}
+
+message StageCriterionFull {
+  string id = 1;
+  string context_key = 2;
+  CriterionContext context = 3;
+  int32 rollout_percentage = 4;
+}
+
+message FeatureStageFull {
+  string id = 1;
+  string environment_id = 2;
+  int32 order_index = 3;
+  string position = 4;
+  bool enabled = 5;
+  string bucketing_key = 6;
+  repeated StageCriterionFull criterias = 7;
+}
+
+message FeatureDependencyFull {
+  string feature_id = 1;
+  string depends_on_id = 2;
+}
+
+message FeatureFull {
+  string id = 1;
+  string key = 2;
+  string description = 3;
+  string feature_type = 4;
+  string team_id = 5;
+  string created_at = 6;
+  repeated FeatureStageFull stages = 7;
+  repeated FeatureDependencyFull dependencies = 8;
+}
+
+message GetFeatureByKeyResponse {
+  FeatureFull feature = 1;
+}
+
 service FeatureEvaluation {
   rpc Evaluate(EvaluateRequest) returns (EvaluateResponse);
+  rpc GetFeatureByKey(GetFeatureByKeyRequest) returns (GetFeatureByKeyResponse);
 }
