@@ -6,6 +6,8 @@
       <sourceFolder url="file://$MODULE_DIR$/feature-toggle-shared/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/feature-toggle-ui/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/feature-toggle-backend/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/evaluation-engine/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/evaluation-engine/tests" isTestSource="true" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />
