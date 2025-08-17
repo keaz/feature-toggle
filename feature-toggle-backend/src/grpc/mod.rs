@@ -6,8 +6,11 @@ use crate::database::client::client_repository;
 use crate::database::entity as db;
 use crate::database::feature::feature_repository;
 use evaluation_engine as engine;
+use futures_util::StreamExt;
 use pb::feature_evaluation_server::{FeatureEvaluation, FeatureEvaluationServer};
 use pb::{EvaluateRequest, EvaluateResponse};
+use tokio::sync::{broadcast, mpsc};
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
@@ -17,11 +20,12 @@ pub use pb::feature_evaluation_server;
 #[derive(Clone)]
 pub struct FeatureEvaluationSvc {
     pool: sqlx::PgPool,
+    updates_tx: tokio::sync::broadcast::Sender<pb::FeatureUpdate>,
 }
 
 impl FeatureEvaluationSvc {
-    pub fn new(pool: sqlx::PgPool) -> Self {
-        Self { pool }
+    pub fn new(pool: sqlx::PgPool, updates_tx: tokio::sync::broadcast::Sender<pb::FeatureUpdate>) -> Self {
+        Self { pool, updates_tx }
     }
 
     async fn map_db_feature_to_engine(&self, f: db::Feature) -> Result<engine::Feature, Status> {
@@ -239,10 +243,105 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
 
         Ok(Response::new(pb::GetFeatureByKeyResponse { feature: Some(feature_msg) }))
     }
+    type StreamUpdatesStream = ReceiverStream<Result<pb::FeatureUpdate, Status>>;
+
+    async fn stream_updates(
+        &self,
+        request: Request<tonic::Streaming<pb::StreamRequest>>,
+    ) -> Result<Response<Self::StreamUpdatesStream>, Status> {
+        let mut in_stream = request.into_inner();
+
+        // Expect first message to be SubscribeRequest
+        let first = in_stream.next().await.ok_or_else(|| Status::invalid_argument("missing subscribe message"))??;
+        let subscribe = match first.payload {
+            Some(pb::stream_request::Payload::Subscribe(s)) => s,
+            _ => return Err(Status::invalid_argument("first message must be subscribe")),
+        };
+
+        // Authenticate similar to other methods
+        if subscribe.client_id.is_empty() || subscribe.client_secret.is_empty() {
+            return Err(Status::invalid_argument("client_id and client_secret are required"));
+        }
+        let client_id = Uuid::parse_str(&subscribe.client_id)
+            .map_err(|_| Status::invalid_argument("client_id must be a UUID"))?;
+        let client_repo = client_repository(self.pool.clone());
+        let client = client_repo
+            .get_client_by_id(client_id)
+            .await
+            .map_err(|e| Status::not_found(format!("client not found: {}", e)))?;
+        if !client.enabled { return Err(Status::permission_denied("client is disabled")); }
+        if client.api_key != subscribe.client_secret { return Err(Status::unauthenticated("invalid client_secret")); }
+        let team_id = client.team_id;
+
+        // Prepare outgoing channel
+        let (out_tx, out_rx) = mpsc::channel::<Result<pb::FeatureUpdate, Status>>(64);
+
+        // Send initial snapshot (filtered by keys if provided)
+        {
+            let feature_repo = feature_repository(self.pool.clone());
+            let keys = if subscribe.feature_keys.is_empty() { None } else { Some(subscribe.feature_keys.join(",")) };
+            // If keys provided, we'll fetch one-by-one to reuse existing repository API
+            if let Some(list) = keys {
+                for k in list.split(',') {
+                    let mut features = feature_repo
+                        .get_features(team_id, Some(k.to_string()), None)
+                        .await
+                        .map_err(|e| Status::internal(format!("db error: {}", e)))?;
+                    if let Some(f) = features.pop() {
+                        let full = self.map_db_feature_to_full(f).await?;
+                        let _ = out_tx.send(Ok(pb::FeatureUpdate { message_id: uuid::Uuid::new_v4().to_string(), action: pb::feature_update::Action::Snapshot as i32, feature: Some(full), feature_key: String::new(), error: String::new() })).await;
+                    }
+                }
+            } else {
+                // Fetch all features for team (no key filter)
+                let features = feature_repo
+                    .get_features(team_id, None, None)
+                    .await
+                    .map_err(|e| Status::internal(format!("db error: {}", e)))?;
+                for f in features {
+                    let full = self.map_db_feature_to_full(f).await?;
+                    let _ = out_tx.send(Ok(pb::FeatureUpdate { message_id: uuid::Uuid::new_v4().to_string(), action: pb::feature_update::Action::Snapshot as i32, feature: Some(full), feature_key: String::new(), error: String::new() })).await;
+                }
+            }
+        }
+
+        // Subscribe to shared broadcaster for live updates
+        let mut rx = self.updates_tx.subscribe();
+        let out_tx_clone = out_tx.clone();
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(update) => {
+                        if out_tx_clone.send(Ok(update)).await.is_err() { break; }
+                    },
+                    Err(broadcast::error::RecvError::Closed) => break,
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        let _ = out_tx_clone.send(Ok(pb::FeatureUpdate { message_id: uuid::Uuid::new_v4().to_string(), action: pb::feature_update::Action::Error as i32, feature: None, feature_key: String::new(), error: "lagged".into() })).await;
+                    }
+                }
+            }
+        });
+
+        // Handle incoming heartbeats/acks (optional). We keep the stream alive by draining inputs.
+        let drain_tx = out_tx.clone();
+        tokio::spawn(async move {
+            while let Some(msg) = in_stream.next().await {
+                match msg {
+                    Ok(pb::StreamRequest { payload: Some(pb::stream_request::Payload::Heartbeat(hb)) }) => {
+                        let _ = drain_tx.send(Ok(pb::FeatureUpdate { message_id: uuid::Uuid::new_v4().to_string(), action: pb::feature_update::Action::Heartbeat as i32, feature: None, feature_key: String::new(), error: String::new() })).await;
+                    }
+                    Ok(_) => { /* ignore other kinds for now */ }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(out_rx)))
+    }
 }
 
-pub async fn serve(pool: sqlx::PgPool, addr: std::net::SocketAddr) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let svc = FeatureEvaluationSvc::new(pool);
+pub async fn serve(pool: sqlx::PgPool, addr: std::net::SocketAddr, updates_tx: broadcast::Sender<pb::FeatureUpdate>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let svc = FeatureEvaluationSvc::new(pool, updates_tx.clone());
     tonic::transport::Server::builder()
         .add_service(FeatureEvaluationServer::new(svc))
         .serve(addr)

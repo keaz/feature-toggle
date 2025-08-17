@@ -75,7 +75,38 @@ message GetFeatureByKeyResponse {
   FeatureFull feature = 1;
 }
 
+// Streaming definitions for sidecar cache sync
+message SubscribeRequest {
+  string client_id = 1;
+  string client_secret = 2;
+  // optional: filter features by keys; if empty -> all team features
+  repeated string feature_keys = 3;
+  // optional environment scoping for snapshot
+  string environment_id = 4;
+}
+
+message Ack { string message_id = 1; }
+message Heartbeat { int64 ts_unix_ms = 1; }
+
+message StreamRequest {
+  oneof payload {
+    SubscribeRequest subscribe = 1;
+    Ack ack = 2;
+    Heartbeat heartbeat = 3;
+  }
+}
+
+message FeatureUpdate {
+  string message_id = 1;
+  enum Action { UPSERT = 0; DELETE = 1; SNAPSHOT = 2; HEARTBEAT = 3; ERROR = 4; }
+  Action action = 2;
+  FeatureFull feature = 3; // used for UPSERT/SNAPSHOT
+  string feature_key = 4;  // used for DELETE
+  string error = 5;        // used for ERROR
+}
+
 service FeatureEvaluation {
   rpc Evaluate(EvaluateRequest) returns (EvaluateResponse);
   rpc GetFeatureByKey(GetFeatureByKeyRequest) returns (GetFeatureByKeyResponse);
+  rpc StreamUpdates(stream StreamRequest) returns (stream FeatureUpdate);
 }

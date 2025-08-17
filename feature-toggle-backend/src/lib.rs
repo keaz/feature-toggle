@@ -50,11 +50,15 @@ pub async fn run() -> std::io::Result<()> {
         database::context::context_repository(db_pool.clone()),
     );
 
+    // Create a broadcast channel for feature updates shared between GraphQL mutations and gRPC streaming
+    let (updates_tx, _updates_rx) = tokio::sync::broadcast::channel::<crate::grpc::pb::FeatureUpdate>(128);
+
     let grpc_pool = db_pool.clone();
+    let grpc_updates_tx = updates_tx.clone();
     // Spawn gRPC server on separate task
     let grpc_addr: std::net::SocketAddr = "0.0.0.0:50051".parse().unwrap();
     tokio::spawn(async move {
-        if let Err(e) = crate::grpc::serve(grpc_pool, grpc_addr).await {
+        if let Err(e) = crate::grpc::serve(grpc_pool, grpc_addr, grpc_updates_tx).await {
             error!("gRPC server error: {e}");
         }
     });
@@ -62,6 +66,7 @@ pub async fn run() -> std::io::Result<()> {
     HttpServer::new(move || {
         let schema = Schema::build(Query, MutationRoot, EmptySubscription)
             .data(db_pool.clone())
+            .data(updates_tx.clone())
             .data(environment_logic.clone())
             .data(team_logic.clone())
             .data(pipeline_logic.clone())

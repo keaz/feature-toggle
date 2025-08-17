@@ -27,6 +27,8 @@ rand = { version = "0.9.1" }
 # gRPC
 tonic = { version = "0.12" }
 prost = { version = "0.13" }
+# stream wrappers
+ tokio-stream = "0.1"
 
 [build-dependencies]
 tonic-build = { version = "0.12" }

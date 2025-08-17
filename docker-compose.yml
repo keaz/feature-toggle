@@ -5,19 +5,17 @@ services:
     environment:
       - POSTGRES_PASSWORD="local123"
       - POSTGRES_DB="feature_toggle"
-    networks:
-      - backend
     ports:
       - "5433:5432"
   feature_toggle_backend:
     build:
       context: .
-      dockerfile: feature-toggle-backend/Dockerfile
+      dockerfile: Dockerfile
     environment:
       - DATABASE_URL=postgres://postgres:local123@postgres_server:5432/feature_toggle
-    networks:
-      - backend
+    volumes:
+      - ./init.sql:/app/init.sql
     depends_on:
       - postgres_server
     ports:
-      - "8000:8000"
+      - "8080:8080"
