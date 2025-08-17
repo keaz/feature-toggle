@@ -21,11 +21,17 @@ pub use pb::feature_evaluation_server;
 pub struct FeatureEvaluationSvc {
     pool: sqlx::PgPool,
     updates_tx: tokio::sync::broadcast::Sender<pb::FeatureUpdate>,
+    // Tracks, per client_id, the set of feature keys that the client explicitly requested via GetFeatureByKeyRequest
+    requested_keys: std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<uuid::Uuid, std::collections::HashSet<String>>>>,
 }
 
 impl FeatureEvaluationSvc {
     pub fn new(pool: sqlx::PgPool, updates_tx: tokio::sync::broadcast::Sender<pb::FeatureUpdate>) -> Self {
-        Self { pool, updates_tx }
+        Self {
+            pool,
+            updates_tx,
+            requested_keys: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        }
     }
 
     async fn map_db_feature_to_engine(&self, f: db::Feature) -> Result<engine::Feature, Status> {
@@ -241,6 +247,13 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
 
         let feature_msg = self.map_db_feature_to_full(db_feature).await?;
 
+        // Track that this client requested this feature key for future update filtering
+        {
+            let mut map = self.requested_keys.write().await;
+            let entry = map.entry(client_id).or_default();
+            entry.insert(req.feature_key.clone());
+        }
+
         Ok(Response::new(pb::GetFeatureByKeyResponse { feature: Some(feature_msg) }))
     }
     type StreamUpdatesStream = ReceiverStream<Result<pb::FeatureUpdate, Status>>;
@@ -276,43 +289,53 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
         // Prepare outgoing channel
         let (out_tx, out_rx) = mpsc::channel::<Result<pb::FeatureUpdate, Status>>(64);
 
-        // Send initial snapshot (filtered by keys if provided)
+        // Send initial snapshot: only for features that were previously requested via GetFeatureByKeyRequest for this client.
         {
             let feature_repo = feature_repository(self.pool.clone());
-            let keys = if subscribe.feature_keys.is_empty() { None } else { Some(subscribe.feature_keys.join(",")) };
-            // If keys provided, we'll fetch one-by-one to reuse existing repository API
-            if let Some(list) = keys {
-                for k in list.split(',') {
-                    let mut features = feature_repo
-                        .get_features(team_id, Some(k.to_string()), None)
-                        .await
-                        .map_err(|e| Status::internal(format!("db error: {}", e)))?;
-                    if let Some(f) = features.pop() {
-                        let full = self.map_db_feature_to_full(f).await?;
-                        let _ = out_tx.send(Ok(pb::FeatureUpdate { message_id: uuid::Uuid::new_v4().to_string(), action: pb::feature_update::Action::Snapshot as i32, feature: Some(full), feature_key: String::new(), error: String::new() })).await;
-                    }
-                }
-            } else {
-                // Fetch all features for team (no key filter)
-                let features = feature_repo
-                    .get_features(team_id, None, None)
+            let keys_snapshot: Vec<String> = {
+                let map = self.requested_keys.read().await;
+                map.get(&client_id)
+                    .map(|set| set.iter().cloned().collect())
+                    .unwrap_or_else(Vec::new)
+            };
+
+            for k in keys_snapshot {
+                let mut features = feature_repo
+                    .get_features(team_id, Some(k.clone()), None)
                     .await
                     .map_err(|e| Status::internal(format!("db error: {}", e)))?;
-                for f in features {
+                if let Some(f) = features.pop() {
                     let full = self.map_db_feature_to_full(f).await?;
                     let _ = out_tx.send(Ok(pb::FeatureUpdate { message_id: uuid::Uuid::new_v4().to_string(), action: pb::feature_update::Action::Snapshot as i32, feature: Some(full), feature_key: String::new(), error: String::new() })).await;
                 }
             }
         }
 
-        // Subscribe to shared broadcaster for live updates
+        // Subscribe to shared broadcaster for live updates, filtering per client's requested keys
         let mut rx = self.updates_tx.subscribe();
         let out_tx_clone = out_tx.clone();
+        let requested_keys = self.requested_keys.clone();
+        let client_id_for_filter = client_id;
         tokio::spawn(async move {
             loop {
                 match rx.recv().await {
                     Ok(update) => {
-                        if out_tx_clone.send(Ok(update)).await.is_err() { break; }
+                        // Determine feature key for the update
+                        let key_for_update = if let Some(ref feature) = update.feature {
+                            feature.key.clone()
+                        } else {
+                            update.feature_key.clone()
+                        };
+                        // Check if the client has requested this key (dynamic check)
+                        let should_send = {
+                            let map = requested_keys.read().await;
+                            map.get(&client_id_for_filter)
+                                .map(|set| set.contains(&key_for_update))
+                                .unwrap_or(false)
+                        };
+                        if should_send && out_tx_clone.send(Ok(update)).await.is_err() {
+                            break;
+                        }
                     },
                     Err(broadcast::error::RecvError::Closed) => break,
                     Err(broadcast::error::RecvError::Lagged(_)) => {
