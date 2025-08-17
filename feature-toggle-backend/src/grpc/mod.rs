@@ -20,6 +20,8 @@ pub use pb::feature_evaluation_server;
 #[derive(Clone)]
 pub struct FeatureEvaluationSvc {
     pool: sqlx::PgPool,
+    feature_repo: Box<dyn crate::database::feature::FeatureRepository>,
+    client_repo: Box<dyn crate::database::client::ClientRepository>,
     updates_tx: tokio::sync::broadcast::Sender<pb::FeatureUpdate>,
     // Tracks, per client_id, the set of feature keys that the client explicitly requested via GetFeatureByKeyRequest
     requested_keys: std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<uuid::Uuid, std::collections::HashSet<String>>>>,
@@ -27,15 +29,36 @@ pub struct FeatureEvaluationSvc {
 
 impl FeatureEvaluationSvc {
     pub fn new(pool: sqlx::PgPool, updates_tx: tokio::sync::broadcast::Sender<pb::FeatureUpdate>) -> Self {
+        let feature_repo = crate::database::feature::feature_repository(pool.clone());
+        let client_repo = crate::database::client::client_repository(pool.clone());
         Self {
             pool,
+            feature_repo,
+            client_repo,
+            updates_tx,
+            requested_keys: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        }
+    }
+
+    // test-friendly constructor to inject mocks
+    pub fn new_with_repos(
+        feature_repo: Box<dyn crate::database::feature::FeatureRepository>,
+        client_repo: Box<dyn crate::database::client::ClientRepository>,
+        updates_tx: tokio::sync::broadcast::Sender<pb::FeatureUpdate>,
+    ) -> Self {
+        // Use a dummy pool; not used when repos are injected
+        let pool = sqlx::PgPool::connect_lazy("postgres://unused").expect("lazy pool");
+        Self {
+            pool,
+            feature_repo,
+            client_repo,
             updates_tx,
             requested_keys: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         }
     }
 
     async fn map_db_feature_to_engine(&self, f: db::Feature) -> Result<engine::Feature, Status> {
-        let repo = feature_repository(self.pool.clone());
+        let repo = &self.feature_repo;
         let mut stages = Vec::with_capacity(f.stages.len());
         for s in f.stages.into_iter() {
             // Load stage criterias
@@ -73,7 +96,7 @@ impl FeatureEvaluationSvc {
     }
 
     async fn map_db_feature_to_full(&self, f: db::Feature) -> Result<pb::FeatureFull, Status> {
-        let repo = feature_repository(self.pool.clone());
+        let repo = &self.feature_repo;
 
         // Map stages and load criterias for each
         let mut stage_msgs: Vec<pb::FeatureStageFull> = Vec::with_capacity(f.stages.len());
@@ -154,7 +177,7 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
             .map_err(|_| Status::invalid_argument("client_id must be a UUID"))?;
 
         // Fetch client -> team
-        let client_repo = client_repository(self.pool.clone());
+        let client_repo = &self.client_repo;
         let client = client_repo
             .get_client_by_id(client_id)
             .await
@@ -171,7 +194,7 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
         let team_id = client.team_id;
 
         // Fetch feature by key within team
-        let feature_repo = feature_repository(self.pool.clone());
+        let feature_repo = &self.feature_repo;
         let mut features = feature_repo
             .get_features(team_id, Some(req.feature_key.clone()), None)
             .await
@@ -218,7 +241,7 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
             .map_err(|_| Status::invalid_argument("client_id must be a UUID"))?;
 
         // Fetch client -> team
-        let client_repo = client_repository(self.pool.clone());
+        let client_repo = &self.client_repo;
         let client = client_repo
             .get_client_by_id(client_id)
             .await
@@ -235,7 +258,7 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
         let team_id = client.team_id;
 
         // Fetch feature by key within team
-        let feature_repo = feature_repository(self.pool.clone());
+        let feature_repo = &self.feature_repo;
         let mut features = feature_repo
             .get_features(team_id, Some(req.feature_key.clone()), None)
             .await
@@ -277,7 +300,7 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
         }
         let client_id = Uuid::parse_str(&subscribe.client_id)
             .map_err(|_| Status::invalid_argument("client_id must be a UUID"))?;
-        let client_repo = client_repository(self.pool.clone());
+        let client_repo = &self.client_repo;
         let client = client_repo
             .get_client_by_id(client_id)
             .await
@@ -291,7 +314,7 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
 
         // Send initial snapshot: only for features that were previously requested via GetFeatureByKeyRequest for this client.
         {
-            let feature_repo = feature_repository(self.pool.clone());
+            let feature_repo = &self.feature_repo;
             let keys_snapshot: Vec<String> = {
                 let map = self.requested_keys.read().await;
                 map.get(&client_id)
