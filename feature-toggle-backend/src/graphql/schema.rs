@@ -1,4 +1,4 @@
-use async_graphql::{Enum, InputObject, SimpleObject, ID};
+use async_graphql::{Enum, ID, InputObject, SimpleObject};
 use serde::{Deserialize, Serialize};
 
 #[derive(Enum, Copy, Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
@@ -106,7 +106,6 @@ pub struct CreateFeatureInput {
     #[graphql(validator(min_items = 1))]
     pub stages: Vec<CreateFeatureStageInput>,
 }
-
 
 #[derive(InputObject, Debug)]
 pub struct UpdateFeatureInput {

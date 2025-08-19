@@ -1,11 +1,13 @@
-use crate::graphql::schema::{Client, ClientType, Environment, Feature, FeatureType, Pipeline, Team};
+use crate::graphql::schema::{
+    Client, ClientType, Environment, Feature, FeatureType, Pipeline, Team,
+};
 use crate::logic::client::ClientLogic;
 use crate::logic::context::ContextLogic;
 use crate::logic::environment::EnvironmentLogic;
 use crate::logic::feature::FeatureLogic;
 use crate::logic::pipeline::PipelineLogic;
 use crate::logic::team::TeamLogic;
-use async_graphql::{Context, Object, Result as GqlResult, ID};
+use async_graphql::{Context, ID, Object, Result as GqlResult};
 use log::debug;
 
 pub struct Query;
@@ -110,7 +112,9 @@ impl Query {
     ) -> GqlResult<Vec<Client>> {
         debug!("Fetching clients for team with id: {team_id:?}");
         let logic = ctx.data::<Box<dyn ClientLogic>>().unwrap();
-        Ok(logic.get_clients(team_id, name, enabled, client_type).await?)
+        Ok(logic
+            .get_clients(team_id, name, enabled, client_type)
+            .await?)
     }
 
     async fn context(
@@ -164,23 +168,28 @@ mod tests {
     async fn test_contexts_query() {
         let mut mock = MockContextLogic::new();
         let team_id = ID::from("11111111-1111-1111-1111-111111111111");
-        let expected = vec![
-            crate::graphql::schema::Context {
-                id: ID::from("22222222-2222-2222-2222-222222222222"),
-                team_id: team_id.clone(),
-                key: "country".into(),
-                entries: vec![crate::graphql::schema::ContextEntry { id: ID::from("33333333-3333-3333-3333-333333333333"), value: "US".into() }],
-            }
-        ];
+        let expected = vec![crate::graphql::schema::Context {
+            id: ID::from("22222222-2222-2222-2222-222222222222"),
+            team_id: team_id.clone(),
+            key: "country".into(),
+            entries: vec![crate::graphql::schema::ContextEntry {
+                id: ID::from("33333333-3333-3333-3333-333333333333"),
+                value: "US".into(),
+            }],
+        }];
         let team_id_clone = team_id.clone();
         mock.expect_get_contexts()
             .times(1)
             .withf(move |tid, key| tid == &team_id_clone && key.is_none())
             .return_once(move |_, _| Ok(expected.clone()));
 
-        let schema = Schema::build(super::Query, crate::graphql::mutation::MutationRoot, EmptySubscription)
-            .data::<Box<dyn crate::logic::context::ContextLogic>>(Box::new(mock))
-            .finish();
+        let schema = Schema::build(
+            super::Query,
+            crate::graphql::mutation::MutationRoot,
+            EmptySubscription,
+        )
+        .data::<Box<dyn crate::logic::context::ContextLogic>>(Box::new(mock))
+        .finish();
 
         let gql = r#"
             query($team: ID!) {
@@ -203,23 +212,28 @@ mod tests {
         use crate::logic::feature::MockFeatureLogic;
         let mut mock = MockFeatureLogic::new();
         let stage_id = ID::from("11111111-1111-1111-1111-111111111111");
-        let expected = vec![
-            crate::graphql::schema::Context {
-                id: ID::from("22222222-2222-2222-2222-222222222222"),
-                team_id: ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"),
-                key: "alpha".into(),
-                entries: vec![crate::graphql::schema::ContextEntry { id: ID::from("33333333-3333-3333-3333-333333333333"), value: "X".into() }],
-            }
-        ];
+        let expected = vec![crate::graphql::schema::Context {
+            id: ID::from("22222222-2222-2222-2222-222222222222"),
+            team_id: ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"),
+            key: "alpha".into(),
+            entries: vec![crate::graphql::schema::ContextEntry {
+                id: ID::from("33333333-3333-3333-3333-333333333333"),
+                value: "X".into(),
+            }],
+        }];
         let stage_id_clone = stage_id.clone();
         mock.expect_get_stage_contexts()
             .times(1)
             .withf(move |sid| sid == &stage_id_clone)
             .return_once(move |_| Ok(expected.clone()));
 
-        let schema = Schema::build(super::Query, crate::graphql::mutation::MutationRoot, EmptySubscription)
-            .data::<Box<dyn crate::logic::feature::FeatureLogic>>(Box::new(mock))
-            .finish();
+        let schema = Schema::build(
+            super::Query,
+            crate::graphql::mutation::MutationRoot,
+            EmptySubscription,
+        )
+        .data::<Box<dyn crate::logic::feature::FeatureLogic>>(Box::new(mock))
+        .finish();
 
         let gql = r#"
             query($sid: ID!) {
@@ -231,7 +245,11 @@ mod tests {
             "sid": stage_id.to_string()
         })));
         let resp = schema.execute(req).await;
-        assert!(resp.errors.is_empty(), "{}", serde_json::to_string(&resp.errors).unwrap());
+        assert!(
+            resp.errors.is_empty(),
+            "{}",
+            serde_json::to_string(&resp.errors).unwrap()
+        );
         let data = resp.data.into_json().unwrap();
         assert_eq!(data["stageContexts"].as_array().unwrap().len(), 1);
         assert_eq!(data["stageContexts"][0]["key"], "alpha");

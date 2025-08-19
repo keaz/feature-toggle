@@ -1,6 +1,7 @@
 use crate::graphql::schema::{
-    CreateClientInput, CreateEnvironmentInput, CreateFeatureInput, CreatePipelineInput, CreateTeamInput, Environment,
-    Feature, Pipeline, Team, UpdateClientInput, UpdateEnvironmentInput, UpdateFeatureInput, UpdatePipelineInput,
+    CreateClientInput, CreateEnvironmentInput, CreateFeatureInput, CreatePipelineInput,
+    CreateTeamInput, Environment, Feature, Pipeline, Team, UpdateClientInput,
+    UpdateEnvironmentInput, UpdateFeatureInput, UpdatePipelineInput,
 };
 use crate::graphql::validator::{CreateInputValidator, UpdateInputValidator};
 use crate::logic::client::ClientLogic;
@@ -8,7 +9,7 @@ use crate::logic::context::ContextLogic;
 use crate::logic::environment::EnvironmentLogic;
 use crate::logic::feature::FeatureLogic;
 use crate::logic::pipeline::PipelineLogic;
-use async_graphql::{Context, Object, Result as GqlResult, ID};
+use async_graphql::{Context, ID, Object, Result as GqlResult};
 use log::info;
 use uuid::Uuid;
 
@@ -112,13 +113,18 @@ impl MutationRoot {
         // After successful update, publish to gRPC streaming subscribers
         if let (Ok(pool), Ok(updates_tx)) = (
             ctx.data::<sqlx::PgPool>(),
-            ctx.data::<tokio::sync::broadcast::Sender<crate::grpc::pb::FeatureUpdate>>()
+            ctx.data::<tokio::sync::broadcast::Sender<crate::grpc::pb::FeatureUpdate>>(),
         ) {
             // Try to load the updated feature from DB and broadcast an UPSERT
             let repo = crate::database::feature::feature_repository(pool.clone());
-            if let Ok(db_feature) = repo.get_feature_by_id(uuid::Uuid::try_from(id.clone()).unwrap()).await {
+            if let Ok(db_feature) = repo
+                .get_feature_by_id(uuid::Uuid::try_from(id.clone()).unwrap())
+                .await
+            {
                 // Map db_feature -> pb::FeatureFull
-                if let Ok(full) = map_db_feature_to_full_for_broadcast(pool.clone(), db_feature).await {
+                if let Ok(full) =
+                    map_db_feature_to_full_for_broadcast(pool.clone(), db_feature).await
+                {
                     let _ = updates_tx.send(crate::grpc::pb::FeatureUpdate {
                         message_id: uuid::Uuid::new_v4().to_string(),
                         action: crate::grpc::pb::feature_update::Action::Upsert as i32,
@@ -211,19 +217,23 @@ impl MutationRoot {
         Ok(logic.set_stage_contexts(stage_id, context_ids).await?)
     }
 
-
     async fn set_stage_criteria(
         &self,
         ctx: &Context<'_>,
         #[graphql(desc = "Id of the feature stage")] stage_id: ID,
-        #[graphql(desc = "Criteria to assign")] criteria: Vec<crate::graphql::schema::CreateStageCriterionInput>,
+        #[graphql(desc = "Criteria to assign")] criteria: Vec<
+            crate::graphql::schema::CreateStageCriterionInput,
+        >,
     ) -> GqlResult<Vec<crate::graphql::schema::StageCriterion>> {
         let logic = ctx.data::<Box<dyn FeatureLogic>>().unwrap();
         Ok(logic.set_stage_criteria(stage_id, criteria).await?)
     }
 }
 
-async fn map_db_feature_to_full_for_broadcast(pool: sqlx::PgPool, f: crate::database::entity::Feature) -> Result<crate::grpc::pb::FeatureFull, crate::Error> {
+async fn map_db_feature_to_full_for_broadcast(
+    pool: sqlx::PgPool,
+    f: crate::database::entity::Feature,
+) -> Result<crate::grpc::pb::FeatureFull, crate::Error> {
     use crate::grpc::pb;
     let repo = crate::database::feature::feature_repository(pool.clone());
 
@@ -236,7 +246,10 @@ async fn map_db_feature_to_full_for_broadcast(pool: sqlx::PgPool, f: crate::data
             .map(|c| pb::StageCriterionFull {
                 id: c.id.to_string(),
                 context_key: c.context_key,
-                context: Some(pb::CriterionContext { key: c.context.key, entries: c.context.entries.into_iter().map(|e| e.value).collect() }),
+                context: Some(pb::CriterionContext {
+                    key: c.context.key,
+                    entries: c.context.entries.into_iter().map(|e| e.value).collect(),
+                }),
                 rollout_percentage: c.rollout_percentage,
             })
             .collect::<Vec<_>>();
@@ -252,7 +265,14 @@ async fn map_db_feature_to_full_for_broadcast(pool: sqlx::PgPool, f: crate::data
         });
     }
 
-    let deps = f.dependencies.iter().map(|d| pb::FeatureDependencyFull { feature_id: d.feature_id.to_string(), depends_on_id: d.depends_on_id.to_string() }).collect::<Vec<_>>();
+    let deps = f
+        .dependencies
+        .iter()
+        .map(|d| pb::FeatureDependencyFull {
+            feature_id: d.feature_id.to_string(),
+            depends_on_id: d.depends_on_id.to_string(),
+        })
+        .collect::<Vec<_>>();
 
     let feature = pb::FeatureFull {
         id: f.id.to_string(),
@@ -278,18 +298,26 @@ mod tests {
     async fn test_create_context_mutation() {
         let mut mock = MockContextLogic::new();
         let team_id = ID::from(Uuid::new_v4());
-        let input = crate::graphql::schema::CreateContextInput { key: "country".into(), entries: vec!["US".into()] };
+        let input = crate::graphql::schema::CreateContextInput {
+            key: "country".into(),
+            entries: vec!["US".into()],
+        };
         let expected = crate::graphql::schema::Context {
             id: ID::from(Uuid::new_v4()),
             team_id: team_id.clone(),
             key: "country".into(),
-            entries: vec![crate::graphql::schema::ContextEntry { id: ID::from(Uuid::new_v4()), value: "US".into() }],
+            entries: vec![crate::graphql::schema::ContextEntry {
+                id: ID::from(Uuid::new_v4()),
+                value: "US".into(),
+            }],
         };
 
         let team_id_clone = team_id.clone();
         mock.expect_create_context()
             .times(1)
-            .withf(move |tid, i| tid == &team_id_clone && i.key == "country" && i.entries.len() == 1)
+            .withf(move |tid, i| {
+                tid == &team_id_clone && i.key == "country" && i.entries.len() == 1
+            })
             .return_once(move |_, _| Ok(expected.clone()));
 
         let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
@@ -311,23 +339,40 @@ mod tests {
             "entries": ["US"]
         })));
         let resp = schema.execute(req).await;
-        assert!(resp.errors.is_empty(), "{}", serde_json::to_string(&resp.errors).unwrap());
+        assert!(
+            resp.errors.is_empty(),
+            "{}",
+            serde_json::to_string(&resp.errors).unwrap()
+        );
         let data = resp.data.into_json().unwrap();
         assert_eq!(data["createContext"]["key"], "country");
-        assert_eq!(data["createContext"]["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            data["createContext"]["entries"].as_array().unwrap().len(),
+            1
+        );
     }
 
     #[tokio::test]
     async fn test_set_stage_contexts_mutation() {
-        use crate::logic::feature::MockFeatureLogic;
         use crate::graphql::query::Query as GqlQuery;
+        use crate::logic::feature::MockFeatureLogic;
         let mut mock = MockFeatureLogic::new();
         let stage_id = ID::from(Uuid::new_v4());
         let ctx1 = ID::from(Uuid::new_v4());
         let ctx2 = ID::from(Uuid::new_v4());
         let expected = vec![
-            crate::graphql::schema::Context { id: ctx1.clone(), team_id: ID::from(Uuid::new_v4()), key: "k1".into(), entries: vec![] },
-            crate::graphql::schema::Context { id: ctx2.clone(), team_id: ID::from(Uuid::new_v4()), key: "k2".into(), entries: vec![] },
+            crate::graphql::schema::Context {
+                id: ctx1.clone(),
+                team_id: ID::from(Uuid::new_v4()),
+                key: "k1".into(),
+                entries: vec![],
+            },
+            crate::graphql::schema::Context {
+                id: ctx2.clone(),
+                team_id: ID::from(Uuid::new_v4()),
+                key: "k2".into(),
+                entries: vec![],
+            },
         ];
         let stage_id_clone = stage_id.clone();
         let ids_for_match = vec![ctx1.clone(), ctx2.clone()];
@@ -351,7 +396,11 @@ mod tests {
             "ids": [ctx1.to_string(), ctx2.to_string()]
         })));
         let resp = schema.execute(req).await;
-        assert!(resp.errors.is_empty(), "{}", serde_json::to_string(&resp.errors).unwrap());
+        assert!(
+            resp.errors.is_empty(),
+            "{}",
+            serde_json::to_string(&resp.errors).unwrap()
+        );
         let data = resp.data.into_json().unwrap();
         assert_eq!(data["setStageContexts"].as_array().unwrap().len(), 2);
     }
@@ -362,19 +411,27 @@ mod tests {
         let mut mock = MockFeatureLogic::new();
         let stage_id = ID::from(Uuid::new_v4());
         // success path
-        let expected = vec![
-            crate::graphql::schema::StageCriterion {
+        let expected = vec![crate::graphql::schema::StageCriterion {
+            id: ID::from(Uuid::new_v4()),
+            stage_id: stage_id.clone(),
+            context_key: "filter".into(),
+            context: crate::graphql::schema::Context {
                 id: ID::from(Uuid::new_v4()),
-                stage_id: stage_id.clone(),
-                context_key: "filter".into(),
-                context: crate::graphql::schema::Context { id: ID::from(Uuid::new_v4()), team_id: ID::from(Uuid::new_v4()), key: "filter-alpha".into(), entries: vec![] },
-                rollout_percentage: 75,
-            }
-        ];
+                team_id: ID::from(Uuid::new_v4()),
+                key: "filter-alpha".into(),
+                entries: vec![],
+            },
+            rollout_percentage: 75,
+        }];
         let stage_id_clone = stage_id.clone();
         mock.expect_set_stage_criteria()
             .times(1)
-            .withf(move |sid, crit| sid == &stage_id_clone && crit.len() == 1 && crit[0].context_key == "filter" && crit[0].rollout_percentage == 75)
+            .withf(move |sid, crit| {
+                sid == &stage_id_clone
+                    && crit.len() == 1
+                    && crit[0].context_key == "filter"
+                    && crit[0].rollout_percentage == 75
+            })
             .return_once(move |_, _| Ok(expected.clone()));
 
         let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
@@ -394,7 +451,11 @@ mod tests {
             "cid": cid.to_string()
         })));
         let resp = schema.execute(req).await;
-        assert!(resp.errors.is_empty(), "{}", serde_json::to_string(&resp.errors).unwrap());
+        assert!(
+            resp.errors.is_empty(),
+            "{}",
+            serde_json::to_string(&resp.errors).unwrap()
+        );
 
         // validation failure for rollout_percentage
         let gql_bad = r#"

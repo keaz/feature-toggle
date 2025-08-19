@@ -24,11 +24,18 @@ pub struct FeatureEvaluationSvc {
     client_repo: Box<dyn crate::database::client::ClientRepository>,
     updates_tx: tokio::sync::broadcast::Sender<pb::FeatureUpdate>,
     // Tracks, per client_id, the set of feature keys that the client explicitly requested via GetFeatureByKeyRequest
-    requested_keys: std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<uuid::Uuid, std::collections::HashSet<String>>>>,
+    requested_keys: std::sync::Arc<
+        tokio::sync::RwLock<
+            std::collections::HashMap<uuid::Uuid, std::collections::HashSet<String>>,
+        >,
+    >,
 }
 
 impl FeatureEvaluationSvc {
-    pub fn new(pool: sqlx::PgPool, updates_tx: tokio::sync::broadcast::Sender<pb::FeatureUpdate>) -> Self {
+    pub fn new(
+        pool: sqlx::PgPool,
+        updates_tx: tokio::sync::broadcast::Sender<pb::FeatureUpdate>,
+    ) -> Self {
         let feature_repo = crate::database::feature::feature_repository(pool.clone());
         let client_repo = crate::database::client::client_repository(pool.clone());
         Self {
@@ -36,7 +43,9 @@ impl FeatureEvaluationSvc {
             feature_repo,
             client_repo,
             updates_tx,
-            requested_keys: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            requested_keys: std::sync::Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
         }
     }
 
@@ -53,7 +62,9 @@ impl FeatureEvaluationSvc {
             feature_repo,
             client_repo,
             updates_tx,
-            requested_keys: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            requested_keys: std::sync::Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
         }
     }
 
@@ -200,9 +211,9 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
             .await
             .map_err(|e| Status::internal(format!("db error: {}", e)))?;
 
-        let db_feature = features
-            .pop()
-            .ok_or_else(|| Status::not_found("feature with given key not found for client's team"))?;
+        let db_feature = features.pop().ok_or_else(|| {
+            Status::not_found("feature with given key not found for client's team")
+        })?;
 
         let eng_feature = self.map_db_feature_to_engine(db_feature.clone()).await?;
 
@@ -212,7 +223,10 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
             context: req
                 .context
                 .into_iter()
-                .map(|c| engine::Context { key: c.key, value: c.value })
+                .map(|c| engine::Context {
+                    key: c.key,
+                    value: c.value,
+                })
                 .collect(),
         };
 
@@ -264,9 +278,9 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
             .await
             .map_err(|e| Status::internal(format!("db error: {}", e)))?;
 
-        let db_feature = features
-            .pop()
-            .ok_or_else(|| Status::not_found("feature with given key not found for client's team"))?;
+        let db_feature = features.pop().ok_or_else(|| {
+            Status::not_found("feature with given key not found for client's team")
+        })?;
 
         let feature_msg = self.map_db_feature_to_full(db_feature).await?;
 
@@ -277,7 +291,9 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
             entry.insert(req.feature_key.clone());
         }
 
-        Ok(Response::new(pb::GetFeatureByKeyResponse { feature: Some(feature_msg) }))
+        Ok(Response::new(pb::GetFeatureByKeyResponse {
+            feature: Some(feature_msg),
+        }))
     }
     type StreamUpdatesStream = ReceiverStream<Result<pb::FeatureUpdate, Status>>;
 
@@ -288,7 +304,10 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
         let mut in_stream = request.into_inner();
 
         // Expect first message to be SubscribeRequest
-        let first = in_stream.next().await.ok_or_else(|| Status::invalid_argument("missing subscribe message"))??;
+        let first = in_stream
+            .next()
+            .await
+            .ok_or_else(|| Status::invalid_argument("missing subscribe message"))??;
         let subscribe = match first.payload {
             Some(pb::stream_request::Payload::Subscribe(s)) => s,
             _ => return Err(Status::invalid_argument("first message must be subscribe")),
@@ -296,7 +315,9 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
 
         // Authenticate similar to other methods
         if subscribe.client_id.is_empty() || subscribe.client_secret.is_empty() {
-            return Err(Status::invalid_argument("client_id and client_secret are required"));
+            return Err(Status::invalid_argument(
+                "client_id and client_secret are required",
+            ));
         }
         let client_id = Uuid::parse_str(&subscribe.client_id)
             .map_err(|_| Status::invalid_argument("client_id must be a UUID"))?;
@@ -305,8 +326,12 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
             .get_client_by_id(client_id)
             .await
             .map_err(|e| Status::not_found(format!("client not found: {}", e)))?;
-        if !client.enabled { return Err(Status::permission_denied("client is disabled")); }
-        if client.api_key != subscribe.client_secret { return Err(Status::unauthenticated("invalid client_secret")); }
+        if !client.enabled {
+            return Err(Status::permission_denied("client is disabled"));
+        }
+        if client.api_key != subscribe.client_secret {
+            return Err(Status::unauthenticated("invalid client_secret"));
+        }
         let team_id = client.team_id;
 
         // Prepare outgoing channel
@@ -329,7 +354,15 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
                     .map_err(|e| Status::internal(format!("db error: {}", e)))?;
                 if let Some(f) = features.pop() {
                     let full = self.map_db_feature_to_full(f).await?;
-                    let _ = out_tx.send(Ok(pb::FeatureUpdate { message_id: uuid::Uuid::new_v4().to_string(), action: pb::feature_update::Action::Snapshot as i32, feature: Some(full), feature_key: String::new(), error: String::new() })).await;
+                    let _ = out_tx
+                        .send(Ok(pb::FeatureUpdate {
+                            message_id: uuid::Uuid::new_v4().to_string(),
+                            action: pb::feature_update::Action::Snapshot as i32,
+                            feature: Some(full),
+                            feature_key: String::new(),
+                            error: String::new(),
+                        }))
+                        .await;
                 }
             }
         }
@@ -359,10 +392,18 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
                         if should_send && out_tx_clone.send(Ok(update)).await.is_err() {
                             break;
                         }
-                    },
+                    }
                     Err(broadcast::error::RecvError::Closed) => break,
                     Err(broadcast::error::RecvError::Lagged(_)) => {
-                        let _ = out_tx_clone.send(Ok(pb::FeatureUpdate { message_id: uuid::Uuid::new_v4().to_string(), action: pb::feature_update::Action::Error as i32, feature: None, feature_key: String::new(), error: "lagged".into() })).await;
+                        let _ = out_tx_clone
+                            .send(Ok(pb::FeatureUpdate {
+                                message_id: uuid::Uuid::new_v4().to_string(),
+                                action: pb::feature_update::Action::Error as i32,
+                                feature: None,
+                                feature_key: String::new(),
+                                error: "lagged".into(),
+                            }))
+                            .await;
                     }
                 }
             }
@@ -373,8 +414,18 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
         tokio::spawn(async move {
             while let Some(msg) = in_stream.next().await {
                 match msg {
-                    Ok(pb::StreamRequest { payload: Some(pb::stream_request::Payload::Heartbeat(hb)) }) => {
-                        let _ = drain_tx.send(Ok(pb::FeatureUpdate { message_id: uuid::Uuid::new_v4().to_string(), action: pb::feature_update::Action::Heartbeat as i32, feature: None, feature_key: String::new(), error: String::new() })).await;
+                    Ok(pb::StreamRequest {
+                        payload: Some(pb::stream_request::Payload::Heartbeat(hb)),
+                    }) => {
+                        let _ = drain_tx
+                            .send(Ok(pb::FeatureUpdate {
+                                message_id: uuid::Uuid::new_v4().to_string(),
+                                action: pb::feature_update::Action::Heartbeat as i32,
+                                feature: None,
+                                feature_key: String::new(),
+                                error: String::new(),
+                            }))
+                            .await;
                     }
                     Ok(_) => { /* ignore other kinds for now */ }
                     Err(_) => break,
@@ -386,7 +437,11 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
     }
 }
 
-pub async fn serve(pool: sqlx::PgPool, addr: std::net::SocketAddr, updates_tx: broadcast::Sender<pb::FeatureUpdate>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub async fn serve(
+    pool: sqlx::PgPool,
+    addr: std::net::SocketAddr,
+    updates_tx: broadcast::Sender<pb::FeatureUpdate>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let svc = FeatureEvaluationSvc::new(pool, updates_tx.clone());
     tonic::transport::Server::builder()
         .add_service(FeatureEvaluationServer::new(svc))

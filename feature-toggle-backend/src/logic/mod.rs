@@ -1,17 +1,17 @@
+use crate::Error;
 use crate::database::entity::DBStage;
 use crate::graphql::schema::{Environment, Relationship, Stage};
 use crate::logic::environment::EnvironmentLogic;
-use crate::Error;
 use async_graphql::ID;
 use std::collections::HashMap;
 use uuid::Uuid;
 
-pub mod environment;
+pub mod client;
 pub mod context;
+pub mod environment;
 pub mod feature;
 pub mod pipeline;
 pub mod team;
-pub mod client;
 
 fn create_relationships<R: Relationship + 'static>(
     has_stage: bool,
@@ -57,7 +57,7 @@ fn map_stages<R: Stage + 'static>(
                     .to_owned(),
                 stage.order_index(),
                 stage.position(),
-                stage.enabled()
+                stage.enabled(),
             );
 
             mapped_stages.push(feature_stage);
@@ -281,19 +281,17 @@ mod tests {
     async fn test_get_environment_map_has_stage_false() {
         let mock_env_logic = MockEnvironmentLogic::new();
         // No expectations set because the function shouldn't call get_environment_by_id
-        
-        let stages: Vec<Box<dyn DBStage>> = vec![
-            Box::new(MockStage {
-                id: Uuid::new_v4(),
-                environment_id: Uuid::new_v4(),
-                order_index: 1,
-                position: "first".to_string(),
-                parent_stage_id: None,
-            }),
-        ];
+
+        let stages: Vec<Box<dyn DBStage>> = vec![Box::new(MockStage {
+            id: Uuid::new_v4(),
+            environment_id: Uuid::new_v4(),
+            order_index: 1,
+            position: "first".to_string(),
+            parent_stage_id: None,
+        })];
 
         let result = get_environment_map(&mock_env_logic, &stages, false).await;
-        
+
         assert!(result.is_ok());
         let env_map = result.unwrap();
         assert_eq!(env_map.len(), 0);
@@ -304,7 +302,7 @@ mod tests {
         let mut mock_env_logic = MockEnvironmentLogic::new();
         let env_id = Uuid::new_v4();
         let env_id_str = env_id.to_string();
-        
+
         // Set expectation for get_environment_by_id to be called once
         mock_env_logic
             .expect_get_environment_by_id()
@@ -318,7 +316,7 @@ mod tests {
                     active: true,
                 })
             });
-        
+
         let stages: Vec<Box<dyn DBStage>> = vec![
             Box::new(MockStage {
                 id: Uuid::new_v4(),
@@ -337,7 +335,7 @@ mod tests {
         ];
 
         let result = get_environment_map(&mock_env_logic, &stages, true).await;
-        
+
         assert!(result.is_ok());
         let env_map = result.unwrap();
         assert_eq!(env_map.len(), 1);
@@ -351,7 +349,7 @@ mod tests {
         let env_id1_str = env_id1.to_string();
         let env_id2 = Uuid::new_v4();
         let env_id2_str = env_id2.to_string();
-        
+
         // Set expectations for get_environment_by_id to be called for each environment ID
         mock_env_logic
             .expect_get_environment_by_id()
@@ -365,7 +363,7 @@ mod tests {
                     active: true,
                 })
             });
-            
+
         mock_env_logic
             .expect_get_environment_by_id()
             .withf(move |id| id.to_string() == env_id2_str)
@@ -378,7 +376,7 @@ mod tests {
                     active: true,
                 })
             });
-        
+
         let stages: Vec<Box<dyn DBStage>> = vec![
             Box::new(MockStage {
                 id: Uuid::new_v4(),
@@ -397,7 +395,7 @@ mod tests {
         ];
 
         let result = get_environment_map(&mock_env_logic, &stages, true).await;
-        
+
         assert!(result.is_ok());
         let env_map = result.unwrap();
         assert_eq!(env_map.len(), 2);
@@ -412,26 +410,24 @@ mod tests {
         let mut mock_env_logic = MockEnvironmentLogic::new();
         let env_id = Uuid::new_v4();
         let env_id_str = env_id.to_string();
-        
+
         // Set expectation for get_environment_by_id to return an error
         mock_env_logic
             .expect_get_environment_by_id()
             .withf(move |id| id.to_string() == env_id_str)
             .times(1)
             .returning(move |_| Err(Error::NotFound(env_id)));
-        
-        let stages: Vec<Box<dyn DBStage>> = vec![
-            Box::new(MockStage {
-                id: Uuid::new_v4(),
-                environment_id: env_id,
-                order_index: 1,
-                position: "first".to_string(),
-                parent_stage_id: None,
-            }),
-        ];
+
+        let stages: Vec<Box<dyn DBStage>> = vec![Box::new(MockStage {
+            id: Uuid::new_v4(),
+            environment_id: env_id,
+            order_index: 1,
+            position: "first".to_string(),
+            parent_stage_id: None,
+        })];
 
         let result = get_environment_map(&mock_env_logic, &stages, true).await;
-        
+
         assert!(result.is_err());
         match result {
             Err(Error::NotFound(uuid)) => assert_eq!(uuid, env_id),

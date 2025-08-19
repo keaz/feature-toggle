@@ -1,3 +1,4 @@
+use crate::Error;
 use crate::database::entity::DBStage;
 use crate::database::pipeline::{CreatePipeline, CreateStage, PipelineRepository, UpdatePipeline};
 use crate::graphql::schema::{
@@ -6,7 +7,6 @@ use crate::graphql::schema::{
 };
 use crate::logic::environment::EnvironmentLogic;
 use crate::logic::{create_relationships, get_environment_map, map_stages};
-use crate::Error;
 use async_graphql::ID;
 use uuid::Uuid;
 

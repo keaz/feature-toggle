@@ -1,5 +1,5 @@
 use crate::database::entity::{Context, ContextEntry};
-use crate::database::{handle_error, Error};
+use crate::database::{Error, handle_error};
 use log::{debug, info};
 use mockall::automock;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row};
@@ -21,8 +21,13 @@ pub struct UpdateContextInput {
 #[async_trait::async_trait]
 pub trait ContextRepository: Send + Sync {
     async fn get_context_by_id(&self, id: Uuid) -> Result<Context, Error>;
-    async fn get_contexts(&self, team_id: Uuid, key: Option<String>) -> Result<Vec<Context>, Error>;
-    async fn create_context(&self, team_id: Uuid, input: CreateContextInput) -> Result<Context, Error>;
+    async fn get_contexts(&self, team_id: Uuid, key: Option<String>)
+    -> Result<Vec<Context>, Error>;
+    async fn create_context(
+        &self,
+        team_id: Uuid,
+        input: CreateContextInput,
+    ) -> Result<Context, Error>;
     async fn update_context(&self, id: Uuid, input: UpdateContextInput) -> Result<Context, Error>;
     async fn delete_context(&self, id: Uuid) -> Result<(), Error>;
 
@@ -30,7 +35,9 @@ pub trait ContextRepository: Send + Sync {
 }
 
 impl Clone for Box<dyn ContextRepository> {
-    fn clone(&self) -> Box<dyn ContextRepository> { self.clone_box() }
+    fn clone(&self) -> Box<dyn ContextRepository> {
+        self.clone_box()
+    }
 }
 
 pub fn context_repository(pool: PgPool) -> Box<dyn ContextRepository> {
@@ -38,20 +45,23 @@ pub fn context_repository(pool: PgPool) -> Box<dyn ContextRepository> {
 }
 
 #[derive(Clone)]
-struct ContextRepositoryImpl { pool: PgPool }
+struct ContextRepositoryImpl {
+    pool: PgPool,
+}
 
-impl ContextRepositoryImpl { pub fn new(pool: PgPool) -> Self { Self { pool } } }
+impl ContextRepositoryImpl {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
 
 #[async_trait::async_trait]
 impl ContextRepository for ContextRepositoryImpl {
     async fn get_context_by_id(&self, id: Uuid) -> Result<Context, Error> {
         debug!("DB: get_context_by_id {id}");
-        let ctx_row = sqlx::query!(
-            r#"SELECT id, team_id, key FROM contexts WHERE id = $1"#,
-            id
-        )
-        .fetch_one(&self.pool)
-        .await;
+        let ctx_row = sqlx::query!(r#"SELECT id, team_id, key FROM contexts WHERE id = $1"#, id)
+            .fetch_one(&self.pool)
+            .await;
         let ctx_row = handle_error(Some(id), ctx_row)?;
 
         let entries = sqlx::query!(
@@ -68,12 +78,19 @@ impl ContextRepository for ContextRepositoryImpl {
             key: ctx_row.key,
             entries: entries
                 .into_iter()
-                .map(|e| ContextEntry { id: e.id, value: e.value })
+                .map(|e| ContextEntry {
+                    id: e.id,
+                    value: e.value,
+                })
                 .collect(),
         })
     }
 
-    async fn get_contexts(&self, team_id: Uuid, key: Option<String>) -> Result<Vec<Context>, Error> {
+    async fn get_contexts(
+        &self,
+        team_id: Uuid,
+        key: Option<String>,
+    ) -> Result<Vec<Context>, Error> {
         debug!("DB: get_contexts team={team_id} key={key:?}");
         let mut qb = QueryBuilder::<Postgres>::new(
             "SELECT c.id, c.team_id, c.key FROM contexts c WHERE c.team_id = ",
@@ -107,14 +124,21 @@ impl ContextRepository for ContextRepositoryImpl {
                 key,
                 entries: entries
                     .into_iter()
-                    .map(|e| ContextEntry { id: e.id, value: e.value })
+                    .map(|e| ContextEntry {
+                        id: e.id,
+                        value: e.value,
+                    })
                     .collect(),
             });
         }
         Ok(result)
     }
 
-    async fn create_context(&self, team_id: Uuid, input: CreateContextInput) -> Result<Context, Error> {
+    async fn create_context(
+        &self,
+        team_id: Uuid,
+        input: CreateContextInput,
+    ) -> Result<Context, Error> {
         info!("DB: create_context team={team_id} key={}", input.key);
         // Check duplicate key for team
         let exists = sqlx::query_scalar!(
@@ -125,7 +149,11 @@ impl ContextRepository for ContextRepositoryImpl {
         .fetch_optional(&self.pool)
         .await;
         let exists = handle_error(None, exists)?;
-        if exists.is_some() { return Err(Error::RecordAlreadyExists("Context key already exists for team".to_string())); }
+        if exists.is_some() {
+            return Err(Error::RecordAlreadyExists(
+                "Context key already exists for team".to_string(),
+            ));
+        }
 
         let id = Uuid::new_v4();
         let ctx_row = sqlx::query!(
@@ -141,14 +169,17 @@ impl ContextRepository for ContextRepositoryImpl {
         // insert entries unique per context
         for value in input.entries {
             let eid = Uuid::new_v4();
-            let _ = handle_error(None, sqlx::query!(
-                r#"INSERT INTO context_entries (id, context_id, value) VALUES ($1, $2, $3)"#,
-                eid,
-                ctx_row.id,
-                value
-            )
-            .execute(&self.pool)
-            .await)?;
+            let _ = handle_error(
+                None,
+                sqlx::query!(
+                    r#"INSERT INTO context_entries (id, context_id, value) VALUES ($1, $2, $3)"#,
+                    eid,
+                    ctx_row.id,
+                    value
+                )
+                .execute(&self.pool)
+                .await,
+            )?;
         }
 
         self.get_context_by_id(ctx_row.id).await
@@ -170,24 +201,27 @@ impl ContextRepository for ContextRepositoryImpl {
             .fetch_optional(&self.pool)
             .await;
             let exists = handle_error(None, exists)?;
-            if exists.is_some() { return Err(Error::RecordAlreadyExists("Context key already exists for team".to_string())); }
+            if exists.is_some() {
+                return Err(Error::RecordAlreadyExists(
+                    "Context key already exists for team".to_string(),
+                ));
+            }
         }
-        let _ = handle_error(Some(id), sqlx::query!(
-            r#"UPDATE contexts SET key = $1 WHERE id = $2"#,
-            new_key,
-            id
-        )
-        .execute(&self.pool)
-        .await)?;
+        let _ = handle_error(
+            Some(id),
+            sqlx::query!(r#"UPDATE contexts SET key = $1 WHERE id = $2"#, new_key, id)
+                .execute(&self.pool)
+                .await,
+        )?;
 
         if let Some(entries) = input.entries {
             // Replace entries
-            let _ = handle_error(Some(id), sqlx::query!(
-                r#"DELETE FROM context_entries WHERE context_id = $1"#,
-                id
-            )
-            .execute(&self.pool)
-            .await)?;
+            let _ = handle_error(
+                Some(id),
+                sqlx::query!(r#"DELETE FROM context_entries WHERE context_id = $1"#, id)
+                    .execute(&self.pool)
+                    .await,
+            )?;
             for v in entries {
                 let eid = Uuid::new_v4();
                 let _ = handle_error(None, sqlx::query!(
@@ -208,9 +242,12 @@ impl ContextRepository for ContextRepositoryImpl {
         info!("DB: delete_context id={id}");
         // ensure exists
         let _ = self.get_context_by_id(id).await?;
-        let _ = handle_error(Some(id), sqlx::query!("DELETE FROM context_entries WHERE context_id = $1", id)
-            .execute(&self.pool)
-            .await)?;
+        let _ = handle_error(
+            Some(id),
+            sqlx::query!("DELETE FROM context_entries WHERE context_id = $1", id)
+                .execute(&self.pool)
+                .await,
+        )?;
         let result = sqlx::query!("DELETE FROM contexts WHERE id = $1", id)
             .execute(&self.pool)
             .await;
@@ -218,5 +255,7 @@ impl ContextRepository for ContextRepositoryImpl {
         Ok(())
     }
 
-    fn clone_box(&self) -> Box<dyn ContextRepository> { Box::new(self.clone()) }
+    fn clone_box(&self) -> Box<dyn ContextRepository> {
+        Box::new(self.clone())
+    }
 }

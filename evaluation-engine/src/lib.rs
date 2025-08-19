@@ -43,9 +43,11 @@ pub struct StageCriterion {
 }
 
 fn get_context_value<'a>(ctx: &'a FeatureEvaluationContext, key: &str) -> Option<&'a str> {
-    ctx.context.iter().find(|c| c.key == key).map(|c| c.value.as_str())
+    ctx.context
+        .iter()
+        .find(|c| c.key == key)
+        .map(|c| c.value.as_str())
 }
-
 
 fn hash_to_percentage(hash: &[u8]) -> f32 {
     // Use first 8 bytes to create a u64 number, then map to [0.0, 100.0)
@@ -97,7 +99,7 @@ fn passes_stage_criteria(ec: &FeatureEvaluationContext, stage: &FeatureStage) ->
     false
 }
 
-pub fn evaluate(evaluation_context: FeatureEvaluationContext, feature: Feature) -> bool  {
+pub fn evaluate(evaluation_context: FeatureEvaluationContext, feature: Feature) -> bool {
     // Feature must be enabled
     if !feature.enabled {
         return false;
@@ -131,4 +133,3 @@ pub fn evaluate(evaluation_context: FeatureEvaluationContext, feature: Feature) 
 
     true
 }
-

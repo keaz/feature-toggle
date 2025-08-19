@@ -1,6 +1,6 @@
+use crate::Error;
 use crate::database::environment::EnvironmentRepository;
 use crate::graphql::schema::{CreateEnvironmentInput, Environment, UpdateEnvironmentInput};
-use crate::Error;
 use async_graphql::ID;
 use mockall::automock;
 use uuid::Uuid;

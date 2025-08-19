@@ -1,5 +1,5 @@
-use feature_toggle_backend::database::{feature, init_pg_pool};
 use feature_toggle_backend::database::feature::CreateStageCriterion;
+use feature_toggle_backend::database::{feature, init_pg_pool};
 use uuid::Uuid;
 
 #[tokio::test]
@@ -22,7 +22,10 @@ async fn test_get_stage_criteria_returns_seeded_values() {
         assert_eq!(c.stage_id, stage_id);
         assert_eq!(c.context_key, "filter");
         // Context should be fully loaded with entries
-        assert_eq!(c.context.team_id, Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap());
+        assert_eq!(
+            c.context.team_id,
+            Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap()
+        );
         assert!(!c.context.entries.is_empty());
         // Rollout percentage should be within [0,100]
         assert!(c.rollout_percentage >= 0 && c.rollout_percentage <= 100);
@@ -31,7 +34,10 @@ async fn test_get_stage_criteria_returns_seeded_values() {
     // Check that contexts correspond to the seeded keys
     let mut keys: Vec<String> = criteria.iter().map(|c| c.context.key.clone()).collect();
     keys.sort();
-    assert_eq!(keys, vec!["filter-alpha".to_string(), "filter-beta".to_string()]);
+    assert_eq!(
+        keys,
+        vec!["filter-alpha".to_string(), "filter-beta".to_string()]
+    );
 }
 
 #[tokio::test]
@@ -56,13 +62,11 @@ async fn test_set_stage_criteria_replaces_existing() {
     let stage_id = Uuid::parse_str("3eef17bc-9e06-411d-b5f4-7a786e68bb96").unwrap();
 
     // Prepare a new set of criteria (will replace seeded ones)
-    let crit = vec![
-        CreateStageCriterion {
-            context_key: "filter".to_string(),
-            context_id: Uuid::parse_str("cb461425-373b-49d9-9634-9a248612d7b7").unwrap(),
-            rollout_percentage: 75,
-        },
-    ];
+    let crit = vec![CreateStageCriterion {
+        context_key: "filter".to_string(),
+        context_id: Uuid::parse_str("cb461425-373b-49d9-9634-9a248612d7b7").unwrap(),
+        rollout_percentage: 75,
+    }];
 
     let set_result = repo.set_stage_criteria(stage_id, crit).await;
     assert!(set_result.is_ok());

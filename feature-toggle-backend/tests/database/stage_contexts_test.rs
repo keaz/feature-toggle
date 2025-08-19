@@ -12,20 +12,29 @@ async fn test_set_and_get_stage_contexts() {
     let ctx2 = Uuid::parse_str("fcc0dfca-07b0-44ad-8d9a-21f2cd450d10").unwrap(); // filter-beta
 
     // Set two contexts for stage
-    let set_out = repo.set_stage_contexts(stage_id, vec![ctx1, ctx2]).await.expect("set contexts should succeed");
+    let set_out = repo
+        .set_stage_contexts(stage_id, vec![ctx1, ctx2])
+        .await
+        .expect("set contexts should succeed");
     assert_eq!(set_out.len(), 2);
     let keys: Vec<String> = set_out.iter().map(|c| c.key.clone()).collect();
     assert!(keys.contains(&"filter-alpha".to_string()));
     assert!(keys.contains(&"filter-beta".to_string()));
 
     // Get and verify order by key
-    let got = repo.get_stage_contexts(stage_id).await.expect("get contexts should succeed");
+    let got = repo
+        .get_stage_contexts(stage_id)
+        .await
+        .expect("get contexts should succeed");
     assert_eq!(got.len(), 2);
     assert!(got.iter().any(|c| c.key == "filter-alpha"));
     assert!(got.iter().any(|c| c.key == "filter-beta"));
 
     // Clear contexts (empty list) and verify cleared
-    let cleared = repo.set_stage_contexts(stage_id, vec![]).await.expect("clear contexts should succeed");
+    let cleared = repo
+        .set_stage_contexts(stage_id, vec![])
+        .await
+        .expect("clear contexts should succeed");
     assert_eq!(cleared.len(), 0);
     let got2 = repo.get_stage_contexts(stage_id).await.unwrap();
     assert_eq!(got2.len(), 0);

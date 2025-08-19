@@ -1,7 +1,5 @@
-use crate::database::entity::{
-    Feature, FeatureDependency, FeaturePipelineStage, FeatureType,
-};
-use crate::database::{handle_error, Error};
+use crate::database::entity::{Feature, FeatureDependency, FeaturePipelineStage, FeatureType};
+use crate::database::{Error, handle_error};
 use chrono::{DateTime, Utc};
 use mockall::automock;
 use serde::{Deserialize, Serialize};
@@ -26,7 +24,6 @@ pub struct CreateFeature {
     pub stages: Vec<CreateFeatureStage>,
     pub dependencies: Vec<Uuid>,
 }
-
 
 #[derive(Debug, Clone)]
 pub struct CreateFeatureStage {
@@ -86,7 +83,6 @@ struct FeatureWithStageRow {
     position: Option<String>,
     enabled: Option<bool>,
     bucketing_key: Option<String>,
-
 }
 
 #[derive(Debug, sqlx::FromRow, Clone)]
@@ -109,11 +105,25 @@ pub trait FeatureRepository: Send + Sync {
     async fn update_feature(&self, input: UpdateFeature) -> Result<Feature, Error>;
     async fn delete_feature(&self, id: Uuid) -> Result<(), Error>;
     // Stage-contexts (legacy)
-    async fn get_stage_contexts(&self, stage_id: Uuid) -> Result<Vec<crate::database::entity::Context>, Error>;
-    async fn set_stage_contexts(&self, stage_id: Uuid, context_ids: Vec<Uuid>) -> Result<Vec<crate::database::entity::Context>, Error>;
+    async fn get_stage_contexts(
+        &self,
+        stage_id: Uuid,
+    ) -> Result<Vec<crate::database::entity::Context>, Error>;
+    async fn set_stage_contexts(
+        &self,
+        stage_id: Uuid,
+        context_ids: Vec<Uuid>,
+    ) -> Result<Vec<crate::database::entity::Context>, Error>;
     // Stage-criteria (new)
-    async fn get_stage_criteria(&self, stage_id: Uuid) -> Result<Vec<crate::database::entity::StageCriterion>, Error>;
-    async fn set_stage_criteria(&self, stage_id: Uuid, criteria: Vec<CreateStageCriterion>) -> Result<Vec<crate::database::entity::StageCriterion>, Error>;
+    async fn get_stage_criteria(
+        &self,
+        stage_id: Uuid,
+    ) -> Result<Vec<crate::database::entity::StageCriterion>, Error>;
+    async fn set_stage_criteria(
+        &self,
+        stage_id: Uuid,
+        criteria: Vec<CreateStageCriterion>,
+    ) -> Result<Vec<crate::database::entity::StageCriterion>, Error>;
 
     fn clone_box(&self) -> Box<dyn FeatureRepository>;
 }
@@ -308,7 +318,6 @@ impl FeatureRepositoryImpl {
         handle_error(None, result)
     }
 
-
     async fn update_feature_stage(
         &self,
         feature_id: &Uuid,
@@ -369,7 +378,7 @@ impl FeatureRepositoryImpl {
                        position = $4,
                        enabled = $5,
                        bucketing_key = $6
-                   WHERE id = $7"#
+                   WHERE id = $7"#,
             )
             .bind(stage.environment_id)
             .bind(stage.order_index)
@@ -533,8 +542,8 @@ impl FeatureRepositoryImpl {
             feature_type_str,
             input.team_id
         )
-            .fetch_one(&mut *tx)
-            .await;
+        .fetch_one(&mut *tx)
+        .await;
 
         let handled_error = handle_error(None, result);
         if handled_error.is_err() {
@@ -560,10 +569,18 @@ impl FeatureRepositoryImpl {
         Ok(())
     }
 
-    async fn update_feature(&self, input: &UpdateFeature, tx: &mut PgConnection) -> Result<PgQueryResult, Error> {
+    async fn update_feature(
+        &self,
+        input: &UpdateFeature,
+        tx: &mut PgConnection,
+    ) -> Result<PgQueryResult, Error> {
         let existing_feature = self.get_feature_by_id(input.id).await?;
 
-        let feature_type_str = match input.feature_type.clone().unwrap_or(existing_feature.feature_type) {
+        let feature_type_str = match input
+            .feature_type
+            .clone()
+            .unwrap_or(existing_feature.feature_type)
+        {
             FeatureType::Simple => "Simple",
             FeatureType::Contextual => "Contextual",
         };
@@ -575,8 +592,8 @@ impl FeatureRepositoryImpl {
             feature_type_str,
             input.id
         )
-            .execute(&mut *tx)
-            .await;
+        .execute(&mut *tx)
+        .await;
 
         if result.is_err() {
             return Err(Error::DatabaseError(result.err().unwrap()));
@@ -588,7 +605,10 @@ impl FeatureRepositoryImpl {
 
 #[async_trait::async_trait]
 impl FeatureRepository for FeatureRepositoryImpl {
-    async fn get_stage_criteria(&self, stage_id: Uuid) -> Result<Vec<crate::database::entity::StageCriterion>, Error> {
+    async fn get_stage_criteria(
+        &self,
+        stage_id: Uuid,
+    ) -> Result<Vec<crate::database::entity::StageCriterion>, Error> {
         // load criteria join contexts and entries
         let rows = sqlx::query!(
             r#"SELECT sc.id, sc.stage_id, sc.context_key, sc.context_id, sc.rollout_percentage,
@@ -598,28 +618,63 @@ impl FeatureRepository for FeatureRepositoryImpl {
                WHERE sc.stage_id = $1
                ORDER BY sc.context_key, c.key"#,
             stage_id
-        ).fetch_all(&self.pool).await;
+        )
+        .fetch_all(&self.pool)
+        .await;
         let rows = handle_error(Some(stage_id), rows)?;
         let mut out = Vec::new();
         for r in rows {
             // entries for context
-            let entries = handle_error(Some(r.context_id), sqlx::query!(
-                r#"SELECT id, value FROM context_entries WHERE context_id = $1 ORDER BY value"#,
-                r.context_id
-            ).fetch_all(&self.pool).await)?
-                .into_iter()
-                .map(|e| crate::database::entity::ContextEntry{ id: e.id, value: e.value})
-                .collect();
-            let context = crate::database::entity::Context { id: r.context_id, team_id: r.team_id, key: r.key, entries };
-            out.push(crate::database::entity::StageCriterion { id: r.id, stage_id: r.stage_id, context_key: r.context_key, context, rollout_percentage: r.rollout_percentage });
+            let entries = handle_error(
+                Some(r.context_id),
+                sqlx::query!(
+                    r#"SELECT id, value FROM context_entries WHERE context_id = $1 ORDER BY value"#,
+                    r.context_id
+                )
+                .fetch_all(&self.pool)
+                .await,
+            )?
+            .into_iter()
+            .map(|e| crate::database::entity::ContextEntry {
+                id: e.id,
+                value: e.value,
+            })
+            .collect();
+            let context = crate::database::entity::Context {
+                id: r.context_id,
+                team_id: r.team_id,
+                key: r.key,
+                entries,
+            };
+            out.push(crate::database::entity::StageCriterion {
+                id: r.id,
+                stage_id: r.stage_id,
+                context_key: r.context_key,
+                context,
+                rollout_percentage: r.rollout_percentage,
+            });
         }
         Ok(out)
     }
 
-    async fn set_stage_criteria(&self, stage_id: Uuid, criteria: Vec<CreateStageCriterion>) -> Result<Vec<crate::database::entity::StageCriterion>, Error> {
+    async fn set_stage_criteria(
+        &self,
+        stage_id: Uuid,
+        criteria: Vec<CreateStageCriterion>,
+    ) -> Result<Vec<crate::database::entity::StageCriterion>, Error> {
         // ensure stage exists
-        let exists = handle_error(Some(stage_id), sqlx::query_scalar!("SELECT id FROM features_pipeline_stages WHERE id = $1", stage_id).fetch_optional(&self.pool).await)?;
-        if exists.is_none() { return Err(Error::NotFound(stage_id)); }
+        let exists = handle_error(
+            Some(stage_id),
+            sqlx::query_scalar!(
+                "SELECT id FROM features_pipeline_stages WHERE id = $1",
+                stage_id
+            )
+            .fetch_optional(&self.pool)
+            .await,
+        )?;
+        if exists.is_none() {
+            return Err(Error::NotFound(stage_id));
+        }
 
         // validate rollout range and contexts/key match
         for c in &criteria {
@@ -633,11 +688,20 @@ impl FeatureRepository for FeatureRepositoryImpl {
 
         let mut tx = self.pool.begin().await.map_err(Error::DatabaseError)?;
         // clear
-        handle_error(Some(stage_id), sqlx::query!("DELETE FROM feature_stage_criteria WHERE stage_id = $1", stage_id).execute(&mut *tx).await)?;
+        handle_error(
+            Some(stage_id),
+            sqlx::query!(
+                "DELETE FROM feature_stage_criteria WHERE stage_id = $1",
+                stage_id
+            )
+            .execute(&mut *tx)
+            .await,
+        )?;
         if !criteria.is_empty() {
             let ids: Vec<Uuid> = criteria.iter().map(|_| Uuid::new_v4()).collect();
             let stage_ids: Vec<Uuid> = vec![stage_id; criteria.len()];
-            let context_keys: Vec<String> = criteria.iter().map(|c| c.context_key.clone()).collect();
+            let context_keys: Vec<String> =
+                criteria.iter().map(|c| c.context_key.clone()).collect();
             let context_ids: Vec<Uuid> = criteria.iter().map(|c| c.context_id).collect();
             let rollouts: Vec<i32> = criteria.iter().map(|c| c.rollout_percentage).collect();
             handle_error(None, sqlx::query!(
@@ -685,7 +749,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
             r#"SELECT f.id as feature_id, f.key as feature_key, f.description, f.feature_type, f.team_id, f.created_at, 
             s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
             s.parent_stage_id, s.position, s.enabled, s.bucketing_key
-			FROM features f LEFT JOIN features_pipeline_stages s ON f.id = s.feature_id"#, 
+			FROM features f LEFT JOIN features_pipeline_stages s ON f.id = s.feature_id"#,
         );
         query_builder.push(" WHERE f.team_id = ").push_bind(team_id);
 
@@ -764,7 +828,6 @@ impl FeatureRepository for FeatureRepositoryImpl {
                     return Err(dependencies.err().unwrap());
                 }
 
-
                 let _ = tx.commit().await;
                 Ok(id)
             }
@@ -823,7 +886,10 @@ impl FeatureRepository for FeatureRepositoryImpl {
         Ok(())
     }
 
-    async fn get_stage_contexts(&self, stage_id: Uuid) -> Result<Vec<crate::database::entity::Context>, Error> {
+    async fn get_stage_contexts(
+        &self,
+        stage_id: Uuid,
+    ) -> Result<Vec<crate::database::entity::Context>, Error> {
         // Load contexts linked to this stage along with their entries
         let ctx_rows = sqlx::query!(
             r#"SELECT c.id, c.team_id, c.key FROM feature_stage_contexts fsc
@@ -831,41 +897,78 @@ impl FeatureRepository for FeatureRepositoryImpl {
                WHERE fsc.stage_id = $1
                ORDER BY c.key"#,
             stage_id
-        ).fetch_all(&self.pool).await;
+        )
+        .fetch_all(&self.pool)
+        .await;
         let ctx_rows = handle_error(Some(stage_id), ctx_rows)?;
         let mut out: Vec<crate::database::entity::Context> = Vec::new();
         for row in ctx_rows {
-            let entries = handle_error(Some(row.id), sqlx::query!(
-                r#"SELECT id, value FROM context_entries WHERE context_id = $1 ORDER BY value"#,
-                row.id
-            ).fetch_all(&self.pool).await)?
-                .into_iter()
-                .map(|r| crate::database::entity::ContextEntry { id: r.id, value: r.value })
-                .collect();
-            out.push(crate::database::entity::Context { id: row.id, team_id: row.team_id, key: row.key, entries });
+            let entries = handle_error(
+                Some(row.id),
+                sqlx::query!(
+                    r#"SELECT id, value FROM context_entries WHERE context_id = $1 ORDER BY value"#,
+                    row.id
+                )
+                .fetch_all(&self.pool)
+                .await,
+            )?
+            .into_iter()
+            .map(|r| crate::database::entity::ContextEntry {
+                id: r.id,
+                value: r.value,
+            })
+            .collect();
+            out.push(crate::database::entity::Context {
+                id: row.id,
+                team_id: row.team_id,
+                key: row.key,
+                entries,
+            });
         }
         Ok(out)
     }
 
-    async fn set_stage_contexts(&self, stage_id: Uuid, context_ids: Vec<Uuid>) -> Result<Vec<crate::database::entity::Context>, Error> {
+    async fn set_stage_contexts(
+        &self,
+        stage_id: Uuid,
+        context_ids: Vec<Uuid>,
+    ) -> Result<Vec<crate::database::entity::Context>, Error> {
         // Ensure stage exists
-        let exists = sqlx::query_scalar!("SELECT id FROM features_pipeline_stages WHERE id=$1", stage_id)
-            .fetch_optional(&self.pool).await;
+        let exists = sqlx::query_scalar!(
+            "SELECT id FROM features_pipeline_stages WHERE id=$1",
+            stage_id
+        )
+        .fetch_optional(&self.pool)
+        .await;
         let exists = handle_error(Some(stage_id), exists)?;
-        if exists.is_none() { return Err(Error::NotFound(stage_id)); }
+        if exists.is_none() {
+            return Err(Error::NotFound(stage_id));
+        }
 
         let mut tx = self.pool.begin().await.map_err(Error::DatabaseError)?;
         // Clear existing
-        handle_error(Some(stage_id), sqlx::query!("DELETE FROM feature_stage_contexts WHERE stage_id=$1", stage_id)
-            .execute(&mut *tx).await)?;
+        handle_error(
+            Some(stage_id),
+            sqlx::query!(
+                "DELETE FROM feature_stage_contexts WHERE stage_id=$1",
+                stage_id
+            )
+            .execute(&mut *tx)
+            .await,
+        )?;
 
         if !context_ids.is_empty() {
-            let _ = handle_error(None, sqlx::query!(
-                r#"INSERT INTO feature_stage_contexts(stage_id, context_id)
+            let _ = handle_error(
+                None,
+                sqlx::query!(
+                    r#"INSERT INTO feature_stage_contexts(stage_id, context_id)
                    SELECT unnest($1::uuid[]), unnest($2::uuid[])"#,
-                &vec![stage_id; context_ids.len()][..],
-                &context_ids[..]
-            ).execute(&mut *tx).await)?;
+                    &vec![stage_id; context_ids.len()][..],
+                    &context_ids[..]
+                )
+                .execute(&mut *tx)
+                .await,
+            )?;
         }
         tx.commit().await.map_err(Error::DatabaseError)?;
         self.get_stage_contexts(stage_id).await

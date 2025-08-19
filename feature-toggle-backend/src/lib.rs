@@ -1,15 +1,15 @@
 pub mod database;
 mod graphql;
+pub mod grpc;
 mod logic;
 mod middleware;
-pub mod grpc;
 
 use crate::database::init_pg_pool;
 use crate::graphql::mutation::MutationRoot;
 use crate::graphql::query::Query;
 use crate::middleware::access_log::AccessLogger;
 use actix_cors::Cors;
-use actix_web::{guard, web, App, HttpRequest, HttpResponse, HttpServer, Result};
+use actix_web::{App, HttpRequest, HttpResponse, HttpServer, Result, guard, web};
 use async_graphql::http::GraphiQLSource;
 use async_graphql::{EmptyMutation, EmptySubscription, Schema};
 use async_graphql_actix_web::{GraphQL, GraphQLSubscription};
@@ -43,15 +43,14 @@ pub async fn run() -> std::io::Result<()> {
         database::feature::feature_repository(db_pool.clone()),
         environment_logic.clone(),
     );
-    let client_logic = logic::client::client_logic(
-        database::client::client_repository(db_pool.clone()),
-    );
-    let context_logic = logic::context::context_logic(
-        database::context::context_repository(db_pool.clone()),
-    );
+    let client_logic =
+        logic::client::client_logic(database::client::client_repository(db_pool.clone()));
+    let context_logic =
+        logic::context::context_logic(database::context::context_repository(db_pool.clone()));
 
     // Create a broadcast channel for feature updates shared between GraphQL mutations and gRPC streaming
-    let (updates_tx, _updates_rx) = tokio::sync::broadcast::channel::<crate::grpc::pb::FeatureUpdate>(128);
+    let (updates_tx, _updates_rx) =
+        tokio::sync::broadcast::channel::<crate::grpc::pb::FeatureUpdate>(128);
 
     let grpc_pool = db_pool.clone();
     let grpc_updates_tx = updates_tx.clone();

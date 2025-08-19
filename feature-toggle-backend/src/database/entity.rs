@@ -44,7 +44,6 @@ pub struct Feature {
     pub dependencies: Vec<FeatureDependency>,
 }
 
-
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
 pub struct FeaturePipelineStage {
     pub id: Uuid,

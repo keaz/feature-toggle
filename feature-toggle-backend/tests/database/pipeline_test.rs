@@ -31,7 +31,6 @@ async fn test_get_non_existing_pipeline() {
     assert!(matches!(error, feature_toggle_backend::Error::NotFound(_)));
 }
 
-
 #[tokio::test]
 async fn test_create_pipeline_with_stages() {
     let pool = init_pg_pool().await;

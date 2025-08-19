@@ -17,15 +17,20 @@ mod pb {
 #[derive(Clone)]
 pub struct AppState {
     cache: Arc<FeatureCache>,
-    grpc: Arc<tokio::sync::Mutex<pb::feature_evaluation_client::FeatureEvaluationClient<tonic::transport::Channel>>>, 
+    grpc: Arc<
+        tokio::sync::Mutex<
+            pb::feature_evaluation_client::FeatureEvaluationClient<tonic::transport::Channel>,
+        >,
+    >,
     client_id: String,
     client_secret: String,
+    connected: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Default)]
 pub struct FeatureCache {
     by_key: RwLock<HashMap<String, pb::FeatureFull>>, // key -> feature
-    by_id: RwLock<HashMap<String, String>>,            // id -> key
+    by_id: RwLock<HashMap<String, String>>,           // id -> key
 }
 
 impl FeatureCache {
@@ -74,10 +79,15 @@ struct EvaluateHttpRequest {
 }
 
 #[derive(Deserialize)]
-struct HttpContext { key: String, value: String }
+struct HttpContext {
+    key: String,
+    value: String,
+}
 
 #[derive(Serialize)]
-struct EvaluateHttpResponse { enabled: bool }
+struct EvaluateHttpResponse {
+    enabled: bool,
+}
 
 fn map_proto_to_engine(f: &pb::FeatureFull) -> engine::Feature {
     let stages = f
@@ -86,15 +96,27 @@ fn map_proto_to_engine(f: &pb::FeatureFull) -> engine::Feature {
         .map(|s| engine::FeatureStage {
             environment_id: s.environment_id.clone(),
             enabled: s.enabled,
-            bucketing_key: if s.bucketing_key.is_empty() { None } else { Some(s.bucketing_key.clone()) },
+            bucketing_key: if s.bucketing_key.is_empty() {
+                None
+            } else {
+                Some(s.bucketing_key.clone())
+            },
             criterias: s
                 .criterias
                 .iter()
                 .map(|c| engine::StageCriterion {
                     context_key: c.context_key.clone(),
                     context: engine::StageContext {
-                        key: c.context.as_ref().map(|x| x.key.clone()).unwrap_or_default(),
-                        entries: c.context.as_ref().map(|x| x.entries.clone()).unwrap_or_default(),
+                        key: c
+                            .context
+                            .as_ref()
+                            .map(|x| x.key.clone())
+                            .unwrap_or_default(),
+                        entries: c
+                            .context
+                            .as_ref()
+                            .map(|x| x.entries.clone())
+                            .unwrap_or_default(),
                     },
                     rollout_percentage: c.rollout_percentage,
                 })
@@ -103,49 +125,97 @@ fn map_proto_to_engine(f: &pb::FeatureFull) -> engine::Feature {
         .collect();
 
     engine::Feature {
-        enabled: true,             // Top-level flag not present in proto; default to true
-        dependencies: vec![],      // For minimal implementation, ignore dependency recursion
+        enabled: true,        // Top-level flag not present in proto; default to true
+        dependencies: vec![], // For minimal implementation, ignore dependency recursion
         stages,
     }
 }
 
-fn map_http_context_to_engine(feature_key: String, environment_id: String, ctx: Vec<HttpContext>) -> engine::FeatureEvaluationContext {
+fn map_http_context_to_engine(
+    feature_key: String,
+    environment_id: String,
+    ctx: Vec<HttpContext>,
+) -> engine::FeatureEvaluationContext {
     engine::FeatureEvaluationContext {
         feature: feature_key,
         environment_id,
         context: ctx
             .into_iter()
-            .map(|c| engine::Context { key: c.key, value: c.value })
+            .map(|c| engine::Context {
+                key: c.key,
+                value: c.value,
+            })
             .collect(),
     }
 }
 
-pub async fn evaluate_handler(app: web::Data<AppState>, req: web::Json<EvaluateHttpRequest>) -> actix_web::Result<web::Json<EvaluateHttpResponse>> {
+fn resolve_credentials(app: &AppState, req: &EvaluateHttpRequest) -> (String, String) {
+    let client_id = req
+        .client_id
+        .clone()
+        .unwrap_or_else(|| app.client_id.clone());
+    let client_secret = req
+        .client_secret
+        .clone()
+        .unwrap_or_else(|| app.client_secret.clone());
+    (client_id, client_secret)
+}
+
+async fn fetch_feature_via_grpc(
+    app: &AppState,
+    feature_key: &str,
+    client_id: &str,
+    client_secret: &str,
+) -> actix_web::Result<pb::FeatureFull> {
+    let mut client = app.grpc.lock().await;
+    let request = pb::GetFeatureByKeyRequest {
+        feature_key: feature_key.to_string(),
+        client_id: client_id.to_string(),
+        client_secret: client_secret.to_string(),
+    };
+    match client
+        .get_feature_by_key(tonic::Request::new(request))
+        .await
+    {
+        Ok(resp) => {
+            let feature = resp
+                .into_inner()
+                .feature
+                .expect("server returned no feature");
+            Ok(feature)
+        }
+        Err(e) => {
+            error!("gRPC GetFeatureByKey error: {}", e);
+            Err(actix_web::error::ErrorBadGateway("backend unavailable"))
+        }
+    }
+}
+
+async fn get_or_fetch_feature(
+    app: &AppState,
+    feature_key: &str,
+    client_id: &str,
+    client_secret: &str,
+) -> actix_web::Result<pb::FeatureFull> {
+    if let Some(f) = app.cache.get_by_key(feature_key).await {
+        return Ok(f);
+    }
+    let feature = fetch_feature_via_grpc(app, feature_key, client_id, client_secret).await?;
+    app.cache.upsert(feature.clone()).await;
+    Ok(feature)
+}
+
+async fn evaluate_handler(
+    app: web::Data<AppState>,
+    req: web::Json<EvaluateHttpRequest>,
+) -> actix_web::Result<web::Json<EvaluateHttpResponse>> {
     let req = req.into_inner();
     let feature_key = req.feature_key.clone();
 
-    // Resolve credentials (prefer request overrides)
-    let client_id = req.client_id.clone().unwrap_or_else(|| app.client_id.clone());
-    let client_secret = req.client_secret.clone().unwrap_or_else(|| app.client_secret.clone());
+    let (client_id, client_secret) = resolve_credentials(&app, &req);
 
-    // Try cache
-    let feature_opt = app.cache.get_by_key(&feature_key).await;
-    let feature = if let Some(f) = feature_opt { f } else {
-        // Fetch via gRPC GetFeatureByKey
-        let mut client = app.grpc.lock().await;
-        let request = pb::GetFeatureByKeyRequest { feature_key: feature_key.clone(), client_id: client_id.clone(), client_secret: client_secret.clone() };
-        match client.get_feature_by_key(tonic::Request::new(request)).await {
-            Ok(resp) => {
-                let feature = resp.into_inner().feature.expect("server returned no feature");
-                app.cache.upsert(feature.clone()).await;
-                feature
-            }
-            Err(e) => {
-                error!("gRPC GetFeatureByKey error: {}", e);
-                return Err(actix_web::error::ErrorBadGateway("backend unavailable"));
-            }
-        }
-    };
+    // Get feature from cache or backend
+    let feature = get_or_fetch_feature(&app, &feature_key, &client_id, &client_secret).await?;
 
     let engine_feature = map_proto_to_engine(&feature);
     let ec = map_http_context_to_engine(feature_key, req.environment_id, req.context);
@@ -153,69 +223,126 @@ pub async fn evaluate_handler(app: web::Data<AppState>, req: web::Json<EvaluateH
     Ok(web::Json(EvaluateHttpResponse { enabled }))
 }
 
-pub async fn health_handler() -> impl Responder { HttpResponse::Ok().body("OK") }
+pub async fn health_handler(app: web::Data<AppState>) -> impl Responder {
+    use std::sync::atomic::Ordering;
+    if app.connected.load(Ordering::Relaxed) {
+        HttpResponse::Ok().body("OK")
+    } else {
+        HttpResponse::ServiceUnavailable().body("UNAVAILABLE")
+    }
+}
+
+fn build_endpoint(grpc_addr: &str) -> Endpoint {
+    Endpoint::from_shared(grpc_addr.to_string())
+        .expect("invalid gRPC address")
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(10))
+        .tcp_keepalive(Some(Duration::from_secs(30)))
+        .http2_keep_alive_interval(Duration::from_secs(20))
+        .keep_alive_while_idle(true)
+        .concurrency_limit(256)
+        .tcp_nodelay(true)
+}
+
+async fn send_initial_subscribe(
+    tx: &tokio::sync::mpsc::Sender<pb::StreamRequest>,
+    app: &AppState,
+) {
+    let subscribe = pb::SubscribeRequest {
+        client_id: app.client_id.clone(),
+        client_secret: app.client_secret.clone(),
+        feature_keys: vec![],
+        environment_id: "".into(),
+    };
+    let initial = pb::StreamRequest {
+        payload: Some(pb::stream_request::Payload::Subscribe(subscribe)),
+    };
+    let _ = tx.send(initial).await;
+}
+
+fn spawn_heartbeat(tx: tokio::sync::mpsc::Sender<pb::StreamRequest>) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            let _ = tx
+                .send(pb::StreamRequest {
+                    payload: Some(pb::stream_request::Payload::Heartbeat(pb::Heartbeat {
+                        ts_unix_ms: ts,
+                    })),
+                })
+                .await;
+        }
+    });
+}
+
+async fn open_streaming_call(
+    mut client: pb::feature_evaluation_client::FeatureEvaluationClient<tonic::transport::Channel>,
+    rx: tokio::sync::mpsc::Receiver<pb::StreamRequest>,
+) -> Result<tonic::Response<tonic::Streaming<pb::FeatureUpdate>>, tonic::Status> {
+    use tokio_stream::wrappers::ReceiverStream;
+    let req_stream = ReceiverStream::new(rx);
+    client.stream_updates(req_stream).await
+}
+
+async fn handle_feature_update(app: &AppState, update: pb::FeatureUpdate) {
+    use pb::feature_update::Action;
+    match update.action {
+        x if x == Action::Upsert as i32 || x == Action::Snapshot as i32 => {
+            if let Some(f) = update.feature {
+                app.cache.upsert(f).await;
+            }
+        }
+        x if x == Action::Delete as i32 => {
+            if !update.feature_key.is_empty() {
+                app.cache.delete_by_key(&update.feature_key).await;
+            }
+        }
+        _ => {}
+    }
+}
 
 async fn run_stream_task(app: AppState, grpc_addr: String) {
-    use tokio_stream::wrappers::ReceiverStream;
+    use std::sync::atomic::Ordering;
     loop {
+        // reset status while attempting to connect
+        app.connected.store(false, Ordering::Relaxed);
         // reconnect loop
-        let endpoint = Endpoint::from_shared(grpc_addr.clone())
-            .expect("invalid gRPC address")
-            .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(10))
-            .tcp_keepalive(Some(Duration::from_secs(30)))
-            .http2_keep_alive_interval(Duration::from_secs(20))
-            .keep_alive_while_idle(true)
-            .concurrency_limit(256)
-            .tcp_nodelay(true);
+        let endpoint = build_endpoint(&grpc_addr);
         match endpoint.connect().await {
             Ok(channel) => {
-                let mut client = pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
-                info!("Connected to backend gRPC {}",&grpc_addr);
+                let client = pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
+                info!("Connected to backend gRPC {}", &grpc_addr);
 
                 let (tx, rx) = tokio::sync::mpsc::channel::<pb::StreamRequest>(16);
 
-                // Send initial Subscribe BEFORE opening the streaming call so the server receives it immediately
-                let subscribe = pb::SubscribeRequest {
-                    client_id: app.client_id.clone(),
-                    client_secret: app.client_secret.clone(),
-                    feature_keys: vec![],
-                    environment_id: "".into(),
-                };
-                let initial = pb::StreamRequest { payload: Some(pb::stream_request::Payload::Subscribe(subscribe)) };
-                let _ = tx.send(initial).await;
+                // Send initial Subscribe BEFORE opening the streaming call
+                send_initial_subscribe(&tx, &app).await;
 
                 // Heartbeats
-                let hb_tx = tx.clone();
-                tokio::spawn(async move {
-                    loop {
-                        tokio::time::sleep(Duration::from_secs(30)).await;
-                        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
-                        let _ = hb_tx.send(pb::StreamRequest{ payload: Some(pb::stream_request::Payload::Heartbeat(pb::Heartbeat{ ts_unix_ms: ts }))}).await;
-                    }
-                });
+                spawn_heartbeat(tx.clone());
 
-                let req_stream = ReceiverStream::new(rx);
-                let response = match client.stream_updates(req_stream).await {
+                let response = match open_streaming_call(client, rx).await {
                     Ok(r) => r,
-                    Err(e) => { error!("failed to open stream: {}", e); tokio::time::sleep(Duration::from_secs(3)).await; continue; }
+                    Err(e) => {
+                        error!("failed to open stream: {}", e);
+                        app.connected.store(false, Ordering::Relaxed);
+                        tokio::time::sleep(Duration::from_secs(3)).await;
+                        continue;
+                    }
                 };
+                // streaming successfully opened -> mark healthy
+                app.connected.store(true, Ordering::Relaxed);
                 let mut inbound = response.into_inner();
 
                 // Process updates
                 while let Some(msg) = inbound.next().await {
                     match msg {
                         Ok(update) => {
-                            use pb::feature_update::Action;
-                            match update.action {
-                                x if x == Action::Upsert as i32 || x == Action::Snapshot as i32 => {
-                                    if let Some(f) = update.feature { app.cache.upsert(f).await; }
-                                }
-                                x if x == Action::Delete as i32 => {
-                                    if !update.feature_key.is_empty() { app.cache.delete_by_key(&update.feature_key).await; }
-                                }
-                                _ => {}
-                            }
+                            handle_feature_update(&app, update).await;
                         }
                         Err(e) => {
                             error!("stream recv error: {}", e);
@@ -223,25 +350,38 @@ async fn run_stream_task(app: AppState, grpc_addr: String) {
                         }
                     }
                 }
+                // stream closed -> mark unhealthy
+                app.connected.store(false, Ordering::Relaxed);
             }
             Err(e) => {
                 error!("Failed to connect gRPC: {}", e);
+                app.connected.store(false, Ordering::Relaxed);
             }
         }
         tokio::time::sleep(Duration::from_secs(3)).await;
     }
 }
 
+fn setup_logger() -> actix_web::Result<(), Box<dyn std::error::Error>> {
+    log4rs::init_file("log4rs.yaml", Default::default())?;
+    Ok(())
+}
+
+
 #[actix_web::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // init tracing
-    tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).init();
-
+    setup_logger().unwrap();
     // Config
-    let grpc_addr = std::env::var("EDGE_BACKEND_GRPC").unwrap_or_else(|_| "http://127.0.0.1:50051".into());
-    let http_addr: SocketAddr = std::env::var("EDGE_HTTP_ADDR").unwrap_or_else(|_| "0.0.0.0:8081".into()).parse().expect("invalid EDGE_HTTP_ADDR");
-    let client_id = std::env::var("EDGE_CLIENT_ID").unwrap_or_else(|_| "a1b2c3d4-0000-4000-8000-000000000001".into());
-    let client_secret = std::env::var("EDGE_CLIENT_SECRET").unwrap_or_else(|_| "TEST_WEB_KEY_1".into());
+    let grpc_addr =
+        std::env::var("EDGE_BACKEND_GRPC").unwrap_or_else(|_| "http://127.0.0.1:50051".into());
+    let http_addr: SocketAddr = std::env::var("EDGE_HTTP_ADDR")
+        .unwrap_or_else(|_| "0.0.0.0:8081".into())
+        .parse()
+        .expect("invalid EDGE_HTTP_ADDR");
+    let client_id = std::env::var("EDGE_CLIENT_ID")
+        .unwrap_or_else(|_| "a1b2c3d4-0000-4000-8000-000000000001".into());
+    let client_secret =
+        std::env::var("EDGE_CLIENT_SECRET").unwrap_or_else(|_| "TEST_WEB_KEY_1".into());
 
     // Prepare gRPC client for direct calls (configured endpoint)
     let endpoint = Endpoint::from_shared(grpc_addr.clone())
@@ -261,6 +401,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         grpc: Arc::new(tokio::sync::Mutex::new(grpc_client)),
         client_id: client_id.clone(),
         client_secret: client_secret.clone(),
+        connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
 
     // Start stream sync task
@@ -268,7 +409,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let grpc_addr_clone = grpc_addr.clone();
     tokio::spawn(async move { run_stream_task(stream_state, grpc_addr_clone).await });
 
-    info!("feature-edge-server listening on {} (HTTP), streaming from {}", http_addr, grpc_addr);
+    info!(
+        "feature-edge-server listening on {} (HTTP), streaming from {}",
+        http_addr, grpc_addr
+    );
 
     HttpServer::new(move || {
         App::new()
@@ -288,7 +432,14 @@ mod tests {
     use super::*;
     use actix_web::test;
 
-    fn make_feature(key: &str, env: &str, enabled: bool, context_key: &str, allowed: &[&str], rollout: i32) -> pb::FeatureFull {
+    fn make_feature(
+        key: &str,
+        env: &str,
+        enabled: bool,
+        context_key: &str,
+        allowed: &[&str],
+        rollout: i32,
+    ) -> pb::FeatureFull {
         pb::FeatureFull {
             id: format!("{}_id", key),
             key: key.to_string(),
@@ -306,7 +457,10 @@ mod tests {
                 criterias: vec![pb::StageCriterionFull {
                     id: "crit1".into(),
                     context_key: context_key.into(),
-                    context: Some(pb::CriterionContext { key: context_key.into(), entries: allowed.iter().map(|s| s.to_string()).collect() }),
+                    context: Some(pb::CriterionContext {
+                        key: context_key.into(),
+                        entries: allowed.iter().map(|s| s.to_string()).collect(),
+                    }),
                     rollout_percentage: rollout,
                 }],
             }],
@@ -318,27 +472,49 @@ mod tests {
         let cache = Arc::new(FeatureCache::default());
         let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
         let grpc = pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
-        let state = AppState { cache: cache.clone(), grpc: Arc::new(tokio::sync::Mutex::new(grpc)), client_id: "c".into(), client_secret: "s".into() };
+        let state = AppState {
+            cache: cache.clone(),
+            grpc: Arc::new(tokio::sync::Mutex::new(grpc)),
+            client_id: "c".into(),
+            client_secret: "s".into(),
+            connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
         // seed cache
         cache.upsert(feature).await;
         state
     }
 
-    fn _make_lazy_channel_client() -> pb::feature_evaluation_client::FeatureEvaluationClient<tonic::transport::Channel> {
-            let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
-            pb::feature_evaluation_client::FeatureEvaluationClient::new(channel)
-        }
+    fn _make_lazy_channel_client()
+        -> pb::feature_evaluation_client::FeatureEvaluationClient<tonic::transport::Channel> {
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
+        pb::feature_evaluation_client::FeatureEvaluationClient::new(channel)
+    }
 
-        fn test_state_empty_cache() -> AppState {
+    fn test_state_empty_cache() -> AppState {
         let cache = Arc::new(FeatureCache::default());
         let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
         let grpc = pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
-        AppState { cache, grpc: Arc::new(tokio::sync::Mutex::new(grpc)), client_id: "c".into(), client_secret: "s".into() }
+        AppState {
+            cache,
+            grpc: Arc::new(tokio::sync::Mutex::new(grpc)),
+            client_id: "c".into(),
+            client_secret: "s".into(),
+            connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
     }
 
     #[actix_web::test]
     async fn test_map_http_context() {
-        let ctx = vec![HttpContext{ key: "user.id".into(), value: "u1".into() }, HttpContext{ key: "country".into(), value: "US".into() }];
+        let ctx = vec![
+            HttpContext {
+                key: "user.id".into(),
+                value: "u1".into(),
+            },
+            HttpContext {
+                key: "country".into(),
+                value: "US".into(),
+            },
+        ];
         let ec = map_http_context_to_engine("feat".into(), "env1".into(), ctx);
         assert_eq!(ec.feature, "feat");
         assert_eq!(ec.environment_id, "env1");
@@ -376,10 +552,19 @@ mod tests {
         let feature = make_feature("featA", "env1", true, "country", &["US"], 100);
         let state = test_state_with_cache(feature).await;
         let app_data = web::Data::new(state);
-        let req = EvaluateHttpRequest{
+        let req = EvaluateHttpRequest {
             feature_key: "featA".into(),
             environment_id: "env1".into(),
-            context: vec![HttpContext{ key: "user.id".into(), value: "u1".into() }, HttpContext{ key: "country".into(), value: "US".into() }],
+            context: vec![
+                HttpContext {
+                    key: "user.id".into(),
+                    value: "u1".into(),
+                },
+                HttpContext {
+                    key: "country".into(),
+                    value: "US".into(),
+                },
+            ],
             client_id: None,
             client_secret: None,
         };
@@ -392,10 +577,19 @@ mod tests {
         let feature = make_feature("featC", "env1", true, "country", &["US"], 100);
         let state = test_state_with_cache(feature).await;
         let app_data = web::Data::new(state);
-        let req = EvaluateHttpRequest{
+        let req = EvaluateHttpRequest {
             feature_key: "featC".into(),
             environment_id: "env1".into(),
-            context: vec![HttpContext{ key: "user.id".into(), value: "u2".into() }, HttpContext{ key: "country".into(), value: "US".into() }],
+            context: vec![
+                HttpContext {
+                    key: "user.id".into(),
+                    value: "u2".into(),
+                },
+                HttpContext {
+                    key: "country".into(),
+                    value: "US".into(),
+                },
+            ],
             client_id: Some("override_id".into()),
             client_secret: Some("override_secret".into()),
         };
@@ -408,10 +602,19 @@ mod tests {
         let feature = make_feature("featB", "env2", true, "country", &["US"], 100);
         let state = test_state_with_cache(feature).await;
         let app_data = web::Data::new(state);
-        let req = EvaluateHttpRequest{
+        let req = EvaluateHttpRequest {
             feature_key: "featB".into(),
             environment_id: "env1".into(),
-            context: vec![HttpContext{ key: "user.id".into(), value: "u1".into() }, HttpContext{ key: "country".into(), value: "US".into() }],
+            context: vec![
+                HttpContext {
+                    key: "user.id".into(),
+                    value: "u1".into(),
+                },
+                HttpContext {
+                    key: "country".into(),
+                    value: "US".into(),
+                },
+            ],
             client_id: None,
             client_secret: None,
         };
@@ -423,23 +626,43 @@ mod tests {
     async fn test_evaluate_handler_cache_miss_backend_error() {
         let state = test_state_empty_cache();
         let app_data = web::Data::new(state);
-        let req = EvaluateHttpRequest{
+        let req = EvaluateHttpRequest {
             feature_key: "unknown".into(),
             environment_id: "env1".into(),
-            context: vec![HttpContext{ key: "user.id".into(), value: "u1".into() }],
+            context: vec![HttpContext {
+                key: "user.id".into(),
+                value: "u1".into(),
+            }],
             client_id: Some("cid".into()),
             client_secret: Some("sec".into()),
         };
-        let err = evaluate_handler(app_data, web::Json(req)).await.err().expect("expected error");
+        let err = evaluate_handler(app_data, web::Json(req))
+            .await
+            .err()
+            .expect("expected error");
         use actix_web::ResponseError;
         assert_eq!(err.as_response_error().status_code().as_u16(), 502);
     }
 
     #[actix_web::test]
     async fn test_health_endpoint() {
-        let app = test::init_service(App::new().route("/health", web::get().to(health_handler))).await;
+        let state = test_state_empty_cache();
+        // mark as connected to simulate healthy state
+        state.connected.store(true, std::sync::atomic::Ordering::Relaxed);
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state.clone()))
+                .route("/health", web::get().to(health_handler)),
+        )
+            .await;
         let req = test::TestRequest::get().uri("/health").to_request();
         let resp = test::call_service(&app, req).await;
         assert!(resp.status().is_success());
+
+        // now mark disconnected and expect 503
+        state.connected.store(false, std::sync::atomic::Ordering::Relaxed);
+        let req2 = test::TestRequest::get().uri("/health").to_request();
+        let resp2 = test::call_service(&app, req2).await;
+        assert_eq!(resp2.status().as_u16(), 503);
     }
 }

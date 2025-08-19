@@ -1,9 +1,14 @@
+use crate::Error;
 use crate::database::entity::{DBStage, FeatureType as EntityFeatureType};
-use crate::database::feature::{CreateFeature, CreateFeatureStage, FeatureRepository, UpdateFeature};
-use crate::graphql::schema::{CreateFeatureInput, CreateFeatureStageInput, CreateRelationshipInput, Environment, Feature, FeatureRelationship, FeatureStage, FeatureType as GraphQLFeatureType, UpdateFeatureInput};
+use crate::database::feature::{
+    CreateFeature, CreateFeatureStage, FeatureRepository, UpdateFeature,
+};
+use crate::graphql::schema::{
+    CreateFeatureInput, CreateFeatureStageInput, CreateRelationshipInput, Environment, Feature,
+    FeatureRelationship, FeatureStage, FeatureType as GraphQLFeatureType, UpdateFeatureInput,
+};
 use crate::logic::environment::EnvironmentLogic;
 use crate::logic::{create_relationships, get_environment_map, map_stages};
-use crate::Error;
 use async_graphql::ID;
 use uuid::Uuid;
 
@@ -25,12 +30,26 @@ pub trait FeatureLogic: Send + Sync {
     async fn delete_feature(&self, id: ID) -> Result<(), Error>;
 
     // Stage-contexts
-    async fn get_stage_contexts(&self, stage_id: ID) -> Result<Vec<crate::graphql::schema::Context>, Error>;
-    async fn set_stage_contexts(&self, stage_id: ID, context_ids: Vec<ID>) -> Result<Vec<crate::graphql::schema::Context>, Error>;
+    async fn get_stage_contexts(
+        &self,
+        stage_id: ID,
+    ) -> Result<Vec<crate::graphql::schema::Context>, Error>;
+    async fn set_stage_contexts(
+        &self,
+        stage_id: ID,
+        context_ids: Vec<ID>,
+    ) -> Result<Vec<crate::graphql::schema::Context>, Error>;
 
     // Stage-criteria
-    async fn get_stage_criteria(&self, stage_id: ID) -> Result<Vec<crate::graphql::schema::StageCriterion>, Error>;
-    async fn set_stage_criteria(&self, stage_id: ID, criteria: Vec<crate::graphql::schema::CreateStageCriterionInput>) -> Result<Vec<crate::graphql::schema::StageCriterion>, Error>;
+    async fn get_stage_criteria(
+        &self,
+        stage_id: ID,
+    ) -> Result<Vec<crate::graphql::schema::StageCriterion>, Error>;
+    async fn set_stage_criteria(
+        &self,
+        stage_id: ID,
+        criteria: Vec<crate::graphql::schema::CreateStageCriterionInput>,
+    ) -> Result<Vec<crate::graphql::schema::StageCriterion>, Error>;
 
     fn clone_box(&self) -> Box<dyn FeatureLogic>;
 }
@@ -82,10 +101,13 @@ impl FeatureLogicImpl {
             description: input.description,
             feature_type,
             stages,
-            dependencies: input.dependencies.into_iter().map(|id| Uuid::try_from(id).unwrap()).collect(),
+            dependencies: input
+                .dependencies
+                .into_iter()
+                .map(|id| Uuid::try_from(id).unwrap())
+                .collect(),
         }
     }
-
 
     fn get_create_stages_to_create(
         stages: Vec<CreateFeatureStageInput>,
@@ -179,7 +201,6 @@ impl FeatureLogic for FeatureLogicImpl {
             .map(|stage| Box::new(stage.clone()) as Box<dyn DBStage>)
             .collect::<Vec<Box<dyn DBStage>>>();
 
-
         let environment_map = get_environment_map(&*self.environment_logic, &stages, true).await?;
         let db_stages = feature
             .stages
@@ -248,32 +269,55 @@ impl FeatureLogic for FeatureLogicImpl {
         Ok(())
     }
 
-    async fn get_stage_contexts(&self, stage_id: ID) -> Result<Vec<crate::graphql::schema::Context>, Error> {
+    async fn get_stage_contexts(
+        &self,
+        stage_id: ID,
+    ) -> Result<Vec<crate::graphql::schema::Context>, Error> {
         let stage_id = Uuid::try_from(stage_id).unwrap();
         let list = self.repository.get_stage_contexts(stage_id).await?;
         Ok(list.into_iter().map(map_db_ctx_to_gql).collect())
     }
 
-    async fn set_stage_contexts(&self, stage_id: ID, context_ids: Vec<ID>) -> Result<Vec<crate::graphql::schema::Context>, Error> {
+    async fn set_stage_contexts(
+        &self,
+        stage_id: ID,
+        context_ids: Vec<ID>,
+    ) -> Result<Vec<crate::graphql::schema::Context>, Error> {
         let stage_id = Uuid::try_from(stage_id).unwrap();
-        let context_ids: Vec<Uuid> = context_ids.into_iter().map(|id| Uuid::try_from(id).unwrap()).collect();
-        let list = self.repository.set_stage_contexts(stage_id, context_ids).await?;
+        let context_ids: Vec<Uuid> = context_ids
+            .into_iter()
+            .map(|id| Uuid::try_from(id).unwrap())
+            .collect();
+        let list = self
+            .repository
+            .set_stage_contexts(stage_id, context_ids)
+            .await?;
         Ok(list.into_iter().map(map_db_ctx_to_gql).collect())
     }
 
-    async fn get_stage_criteria(&self, stage_id: ID) -> Result<Vec<crate::graphql::schema::StageCriterion>, Error> {
+    async fn get_stage_criteria(
+        &self,
+        stage_id: ID,
+    ) -> Result<Vec<crate::graphql::schema::StageCriterion>, Error> {
         let stage_id = Uuid::try_from(stage_id).unwrap();
         let list = self.repository.get_stage_criteria(stage_id).await?;
         Ok(list.into_iter().map(map_db_criterion_to_gql).collect())
     }
 
-    async fn set_stage_criteria(&self, stage_id: ID, criteria: Vec<crate::graphql::schema::CreateStageCriterionInput>) -> Result<Vec<crate::graphql::schema::StageCriterion>, Error> {
+    async fn set_stage_criteria(
+        &self,
+        stage_id: ID,
+        criteria: Vec<crate::graphql::schema::CreateStageCriterionInput>,
+    ) -> Result<Vec<crate::graphql::schema::StageCriterion>, Error> {
         let stage_id = Uuid::try_from(stage_id).unwrap();
-        let create: Vec<crate::database::feature::CreateStageCriterion> = criteria.into_iter().map(|c| crate::database::feature::CreateStageCriterion {
-            context_key: c.context_key,
-            context_id: Uuid::try_from(c.context_id).unwrap(),
-            rollout_percentage: c.rollout_percentage,
-        }).collect();
+        let create: Vec<crate::database::feature::CreateStageCriterion> = criteria
+            .into_iter()
+            .map(|c| crate::database::feature::CreateStageCriterion {
+                context_key: c.context_key,
+                context_id: Uuid::try_from(c.context_id).unwrap(),
+                rollout_percentage: c.rollout_percentage,
+            })
+            .collect();
         let list = self.repository.set_stage_criteria(stage_id, create).await?;
         Ok(list.into_iter().map(map_db_criterion_to_gql).collect())
     }
@@ -288,11 +332,20 @@ fn map_db_ctx_to_gql(c: crate::database::entity::Context) -> crate::graphql::sch
         id: ID::from(c.id),
         team_id: ID::from(c.team_id),
         key: c.key,
-        entries: c.entries.into_iter().map(|e| crate::graphql::schema::ContextEntry { id: ID::from(e.id), value: e.value }).collect(),
+        entries: c
+            .entries
+            .into_iter()
+            .map(|e| crate::graphql::schema::ContextEntry {
+                id: ID::from(e.id),
+                value: e.value,
+            })
+            .collect(),
     }
 }
 
-fn map_db_criterion_to_gql(sc: crate::database::entity::StageCriterion) -> crate::graphql::schema::StageCriterion {
+fn map_db_criterion_to_gql(
+    sc: crate::database::entity::StageCriterion,
+) -> crate::graphql::schema::StageCriterion {
     crate::graphql::schema::StageCriterion {
         id: ID::from(sc.id),
         stage_id: ID::from(sc.stage_id),
