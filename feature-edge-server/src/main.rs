@@ -15,7 +15,7 @@ mod pb {
 }
 
 #[derive(Clone)]
-struct AppState {
+pub struct AppState {
     cache: Arc<FeatureCache>,
     grpc: Arc<tokio::sync::Mutex<pb::feature_evaluation_client::FeatureEvaluationClient<tonic::transport::Channel>>>, 
     client_id: String,
@@ -23,7 +23,7 @@ struct AppState {
 }
 
 #[derive(Default)]
-struct FeatureCache {
+pub struct FeatureCache {
     by_key: RwLock<HashMap<String, pb::FeatureFull>>, // key -> feature
     by_id: RwLock<HashMap<String, String>>,            // id -> key
 }
@@ -120,7 +120,7 @@ fn map_http_context_to_engine(feature_key: String, environment_id: String, ctx: 
     }
 }
 
-async fn evaluate_handler(app: web::Data<AppState>, req: web::Json<EvaluateHttpRequest>) -> actix_web::Result<web::Json<EvaluateHttpResponse>> {
+pub async fn evaluate_handler(app: web::Data<AppState>, req: web::Json<EvaluateHttpRequest>) -> actix_web::Result<web::Json<EvaluateHttpResponse>> {
     let req = req.into_inner();
     let feature_key = req.feature_key.clone();
 
@@ -153,7 +153,7 @@ async fn evaluate_handler(app: web::Data<AppState>, req: web::Json<EvaluateHttpR
     Ok(web::Json(EvaluateHttpResponse { enabled }))
 }
 
-async fn health_handler() -> impl Responder { HttpResponse::Ok().body("OK") }
+pub async fn health_handler() -> impl Responder { HttpResponse::Ok().body("OK") }
 
 async fn run_stream_task(app: AppState, grpc_addr: String) {
     use tokio_stream::wrappers::ReceiverStream;
@@ -281,4 +281,165 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use actix_web::test;
+
+    fn make_feature(key: &str, env: &str, enabled: bool, context_key: &str, allowed: &[&str], rollout: i32) -> pb::FeatureFull {
+        pb::FeatureFull {
+            id: format!("{}_id", key),
+            key: key.to_string(),
+            description: String::new(),
+            feature_type: String::new(),
+            team_id: String::new(),
+            created_at: String::new(),
+            stages: vec![pb::FeatureStageFull {
+                id: "stage1".into(),
+                environment_id: env.into(),
+                order_index: 0,
+                position: "start".into(),
+                enabled,
+                bucketing_key: String::new(),
+                criterias: vec![pb::StageCriterionFull {
+                    id: "crit1".into(),
+                    context_key: context_key.into(),
+                    context: Some(pb::CriterionContext { key: context_key.into(), entries: allowed.iter().map(|s| s.to_string()).collect() }),
+                    rollout_percentage: rollout,
+                }],
+            }],
+            dependencies: vec![],
+        }
+    }
+
+    async fn test_state_with_cache(feature: pb::FeatureFull) -> AppState {
+        let cache = Arc::new(FeatureCache::default());
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
+        let grpc = pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
+        let state = AppState { cache: cache.clone(), grpc: Arc::new(tokio::sync::Mutex::new(grpc)), client_id: "c".into(), client_secret: "s".into() };
+        // seed cache
+        cache.upsert(feature).await;
+        state
+    }
+
+    fn _make_lazy_channel_client() -> pb::feature_evaluation_client::FeatureEvaluationClient<tonic::transport::Channel> {
+            let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
+            pb::feature_evaluation_client::FeatureEvaluationClient::new(channel)
+        }
+
+        fn test_state_empty_cache() -> AppState {
+        let cache = Arc::new(FeatureCache::default());
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
+        let grpc = pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
+        AppState { cache, grpc: Arc::new(tokio::sync::Mutex::new(grpc)), client_id: "c".into(), client_secret: "s".into() }
+    }
+
+    #[actix_web::test]
+    async fn test_map_http_context() {
+        let ctx = vec![HttpContext{ key: "user.id".into(), value: "u1".into() }, HttpContext{ key: "country".into(), value: "US".into() }];
+        let ec = map_http_context_to_engine("feat".into(), "env1".into(), ctx);
+        assert_eq!(ec.feature, "feat");
+        assert_eq!(ec.environment_id, "env1");
+        assert_eq!(ec.context.len(), 2);
+    }
+
+    #[actix_web::test]
+    async fn test_map_proto_to_engine() {
+        let f = make_feature("f1", "env1", true, "country", &["US"], 100);
+        let eng = map_proto_to_engine(&f);
+        assert!(eng.enabled);
+        assert_eq!(eng.stages.len(), 1);
+        assert_eq!(eng.stages[0].environment_id, "env1");
+        assert!(eng.stages[0].criterias.len() > 0);
+    }
+
+    #[actix_web::test]
+    async fn test_feature_cache_ops() {
+        let cache = FeatureCache::default();
+        let f1 = make_feature("k1", "env", true, "country", &["US"], 100);
+        cache.upsert(f1.clone()).await;
+        assert!(cache.get_by_key("k1").await.is_some());
+        cache.delete_by_key("k1").await;
+        assert!(cache.get_by_key("k1").await.is_none());
+        // snapshot
+        let f2 = make_feature("k2", "env", true, "country", &["US"], 50);
+        let f3 = make_feature("k3", "env", true, "country", &["US"], 0);
+        cache.snapshot(vec![f2.clone(), f3.clone()]).await;
+        assert!(cache.get_by_key("k2").await.is_some());
+        assert!(cache.get_by_key("k3").await.is_some());
+    }
+
+    #[actix_web::test]
+    async fn test_evaluate_handler_cache_hit_true() {
+        let feature = make_feature("featA", "env1", true, "country", &["US"], 100);
+        let state = test_state_with_cache(feature).await;
+        let app_data = web::Data::new(state);
+        let req = EvaluateHttpRequest{
+            feature_key: "featA".into(),
+            environment_id: "env1".into(),
+            context: vec![HttpContext{ key: "user.id".into(), value: "u1".into() }, HttpContext{ key: "country".into(), value: "US".into() }],
+            client_id: None,
+            client_secret: None,
+        };
+        let resp = evaluate_handler(app_data, web::Json(req)).await.unwrap();
+        assert!(resp.into_inner().enabled);
+    }
+
+    #[actix_web::test]
+    async fn test_evaluate_handler_overrides_credentials_cache_hit() {
+        let feature = make_feature("featC", "env1", true, "country", &["US"], 100);
+        let state = test_state_with_cache(feature).await;
+        let app_data = web::Data::new(state);
+        let req = EvaluateHttpRequest{
+            feature_key: "featC".into(),
+            environment_id: "env1".into(),
+            context: vec![HttpContext{ key: "user.id".into(), value: "u2".into() }, HttpContext{ key: "country".into(), value: "US".into() }],
+            client_id: Some("override_id".into()),
+            client_secret: Some("override_secret".into()),
+        };
+        let resp = evaluate_handler(app_data, web::Json(req)).await.unwrap();
+        assert!(resp.into_inner().enabled);
+    }
+
+    #[actix_web::test]
+    async fn test_evaluate_handler_cache_hit_false_wrong_env() {
+        let feature = make_feature("featB", "env2", true, "country", &["US"], 100);
+        let state = test_state_with_cache(feature).await;
+        let app_data = web::Data::new(state);
+        let req = EvaluateHttpRequest{
+            feature_key: "featB".into(),
+            environment_id: "env1".into(),
+            context: vec![HttpContext{ key: "user.id".into(), value: "u1".into() }, HttpContext{ key: "country".into(), value: "US".into() }],
+            client_id: None,
+            client_secret: None,
+        };
+        let resp = evaluate_handler(app_data, web::Json(req)).await.unwrap();
+        assert!(!resp.into_inner().enabled);
+    }
+
+    #[actix_web::test]
+    async fn test_evaluate_handler_cache_miss_backend_error() {
+        let state = test_state_empty_cache();
+        let app_data = web::Data::new(state);
+        let req = EvaluateHttpRequest{
+            feature_key: "unknown".into(),
+            environment_id: "env1".into(),
+            context: vec![HttpContext{ key: "user.id".into(), value: "u1".into() }],
+            client_id: Some("cid".into()),
+            client_secret: Some("sec".into()),
+        };
+        let err = evaluate_handler(app_data, web::Json(req)).await.err().expect("expected error");
+        use actix_web::ResponseError;
+        assert_eq!(err.as_response_error().status_code().as_u16(), 502);
+    }
+
+    #[actix_web::test]
+    async fn test_health_endpoint() {
+        let app = test::init_service(App::new().route("/health", web::get().to(health_handler))).await;
+        let req = test::TestRequest::get().uri("/health").to_request();
+        let resp = test::call_service(&app, req).await;
+        assert!(resp.status().is_success());
+    }
 }
