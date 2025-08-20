@@ -1,4 +1,3 @@
-use crate::Error;
 use crate::database::entity::{DBStage, FeatureType as EntityFeatureType};
 use crate::database::feature::{
     CreateFeature, CreateFeatureStage, FeatureRepository, UpdateFeature,
@@ -9,6 +8,7 @@ use crate::graphql::schema::{
 };
 use crate::logic::environment::EnvironmentLogic;
 use crate::logic::{create_relationships, get_environment_map, map_stages};
+use crate::Error;
 use async_graphql::ID;
 use uuid::Uuid;
 
@@ -160,7 +160,7 @@ impl FeatureLogicImpl {
         let stages = Self::get_create_stages_to_create(input.stages, input.relationships);
         UpdateFeature {
             id,
-            key: Some(input.name),
+            key: Some(input.key),
             description: input.description,
             feature_type,
             stages,
@@ -532,7 +532,7 @@ mod test {
         const NAME: &str = "Updated Feature";
 
         let input = UpdateFeatureInput {
-            name: NAME.to_string(),
+            key: NAME.to_string(),
             description: Some("Updated description".to_string()),
             feature_type: GraphQLFeatureType::Contextual,
             enabled: Some(true),

@@ -1,4 +1,4 @@
-use async_graphql::{Enum, ID, InputObject, SimpleObject};
+use async_graphql::{Enum, InputObject, SimpleObject, ID};
 use serde::{Deserialize, Serialize};
 
 #[derive(Enum, Copy, Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
@@ -110,7 +110,7 @@ pub struct CreateFeatureInput {
 #[derive(InputObject, Debug)]
 pub struct UpdateFeatureInput {
     #[graphql(validator(min_length = 3, max_length = 100))]
-    pub name: String,
+    pub key: String,
     pub description: Option<String>,
     pub feature_type: FeatureType,
     pub enabled: Option<bool>,

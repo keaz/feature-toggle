@@ -1,11 +1,11 @@
 use crate::graphql::schema::{CreateFeatureInput, FeatureType, UpdateFeatureInput};
 use crate::graphql::validator::{
-    CreateInputValidator, UpdateInputValidator, validate_duplicate_environment_and_index,
-    validate_relationships_and_stages,
+    validate_duplicate_environment_and_index, validate_relationships_and_stages, CreateInputValidator,
+    UpdateInputValidator,
 };
 use crate::logic::feature::FeatureLogic;
 use crate::logic::pipeline::PipelineLogic;
-use async_graphql::{Context, Error, ID, Result};
+use async_graphql::{Context, Error, Result, ID};
 
 impl CreateInputValidator for CreateFeatureInput {
     async fn validate(&self, team_id: Option<ID>, ctx: &Context<'_>) -> Result<(), Error> {
@@ -36,13 +36,13 @@ impl UpdateInputValidator for UpdateFeatureInput {
         let logic = ctx.data::<Box<dyn FeatureLogic>>()?;
         let feature = logic.get_feature_by_id(id.clone().unwrap()).await?;
         let pipelines = logic
-            .get_features(feature.team_id, Some(self.name.clone()), None)
+            .get_features(feature.team_id, Some(self.key.clone()), None)
             .await?;
 
         if !pipelines.is_empty() && pipelines.iter().any(|p| p.id != id.clone().unwrap()) {
             return Err(Error::new(format!(
                 "Feature with name '{:?}' already exists",
-                self.name
+                self.key
             )));
         }
 

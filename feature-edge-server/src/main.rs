@@ -370,7 +370,7 @@ fn setup_logger() -> actix_web::Result<(), Box<dyn std::error::Error>> {
 
 #[actix_web::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    setup_logger().unwrap();
+    setup_logger()?;
     // Config
     let grpc_addr =
         std::env::var("EDGE_BACKEND_GRPC").unwrap_or_else(|_| "http://127.0.0.1:50051".into());
@@ -470,7 +470,7 @@ mod tests {
 
     async fn test_state_with_cache(feature: pb::FeatureFull) -> AppState {
         let cache = Arc::new(FeatureCache::default());
-        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
+        let channel = Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
         let grpc = pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
         let state = AppState {
             cache: cache.clone(),
@@ -486,13 +486,13 @@ mod tests {
 
     fn _make_lazy_channel_client()
         -> pb::feature_evaluation_client::FeatureEvaluationClient<tonic::transport::Channel> {
-        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
+        let channel = Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
         pb::feature_evaluation_client::FeatureEvaluationClient::new(channel)
     }
 
     fn test_state_empty_cache() -> AppState {
         let cache = Arc::new(FeatureCache::default());
-        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
+        let channel = Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
         let grpc = pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
         AppState {
             cache,
@@ -528,7 +528,7 @@ mod tests {
         assert!(eng.enabled);
         assert_eq!(eng.stages.len(), 1);
         assert_eq!(eng.stages[0].environment_id, "env1");
-        assert!(eng.stages[0].criterias.len() > 0);
+        assert!(!eng.stages[0].criterias.is_empty());
     }
 
     #[actix_web::test]
@@ -640,7 +640,6 @@ mod tests {
             .await
             .err()
             .expect("expected error");
-        use actix_web::ResponseError;
         assert_eq!(err.as_response_error().status_code().as_u16(), 502);
     }
 
