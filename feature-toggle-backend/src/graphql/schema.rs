@@ -340,3 +340,43 @@ pub struct CreateStageCriterionInput {
     #[graphql(validator(minimum = 0, maximum = 100))]
     pub rollout_percentage: i32,
 }
+
+// Users GraphQL types
+#[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
+pub struct User {
+    pub id: ID,
+    pub username: String,
+    pub first_name: String,
+    pub last_name: String,
+    pub email: String,
+    pub is_admin: bool,
+    pub created_at: String,
+    pub updated_at: String,
+    pub last_login: Option<String>,
+}
+
+#[derive(InputObject, Debug)]
+pub struct RegisterUserInput {
+    pub username: String,
+    pub password: String,
+    pub first_name: String,
+    pub last_name: String,
+    #[graphql(validator(email))]
+    pub email: String,
+    pub is_admin: Option<bool>,
+}
+
+#[derive(InputObject, Debug)]
+pub struct LoginInput {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(InputObject, Debug)]
+pub struct UpdateUserInput {
+    pub first_name: Option<String>,
+    pub last_name: Option<String>,
+    #[graphql(validator(email))]
+    pub email: Option<String>,
+    pub is_admin: Option<bool>,
+}

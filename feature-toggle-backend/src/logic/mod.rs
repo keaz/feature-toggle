@@ -12,6 +12,7 @@ pub mod environment;
 pub mod feature;
 pub mod pipeline;
 pub mod team;
+pub mod user;
 
 fn create_relationships<R: Relationship + 'static>(
     has_stage: bool,

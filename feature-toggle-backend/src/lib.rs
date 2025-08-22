@@ -9,7 +9,7 @@ use crate::graphql::mutation::MutationRoot;
 use crate::graphql::query::Query;
 use crate::middleware::access_log::AccessLogger;
 use actix_cors::Cors;
-use actix_web::{App, HttpRequest, HttpResponse, HttpServer, Result, guard, web};
+use actix_web::{guard, web, App, HttpRequest, HttpResponse, HttpServer, Result};
 use async_graphql::http::GraphiQLSource;
 use async_graphql::{EmptyMutation, EmptySubscription, Schema};
 use async_graphql_actix_web::{GraphQL, GraphQLSubscription};
@@ -47,6 +47,8 @@ pub async fn run() -> std::io::Result<()> {
         logic::client::client_logic(database::client::client_repository(db_pool.clone()));
     let context_logic =
         logic::context::context_logic(database::context::context_repository(db_pool.clone()));
+    let user_logic =
+        logic::user::user_logic(database::user::user_repository(db_pool.clone()));
 
     // Create a broadcast channel for feature updates shared between GraphQL mutations and gRPC streaming
     let (updates_tx, _updates_rx) =
@@ -72,6 +74,7 @@ pub async fn run() -> std::io::Result<()> {
             .data(feature_logic.clone())
             .data(client_logic.clone())
             .data(context_logic.clone())
+            .data(user_logic.clone())
             // .extension(ApolloTracing)
             .finish();
 

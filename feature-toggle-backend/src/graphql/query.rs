@@ -1,5 +1,6 @@
+use crate::graphql::create_user;
 use crate::graphql::schema::{
-    Client, ClientType, Environment, Feature, FeatureType, Pipeline, Team,
+    Client, ClientType, Environment, Feature, FeatureType, Pipeline, Team, User,
 };
 use crate::logic::client::ClientLogic;
 use crate::logic::context::ContextLogic;
@@ -7,7 +8,8 @@ use crate::logic::environment::EnvironmentLogic;
 use crate::logic::feature::FeatureLogic;
 use crate::logic::pipeline::PipelineLogic;
 use crate::logic::team::TeamLogic;
-use async_graphql::{Context, ID, Object, Result as GqlResult};
+use crate::logic::user::UserLogic;
+use async_graphql::{Context, Object, Result as GqlResult, ID};
 use log::debug;
 
 pub struct Query;
@@ -155,6 +157,19 @@ impl Query {
     ) -> GqlResult<Vec<crate::graphql::schema::StageCriterion>> {
         let logic = ctx.data::<Box<dyn FeatureLogic>>().unwrap();
         Ok(logic.get_stage_criteria(stage_id).await?)
+    }
+
+    // Users
+    async fn user(&self, ctx: &Context<'_>, id: ID) -> GqlResult<User> {
+        let logic = ctx.data::<Box<dyn UserLogic>>().unwrap();
+        let u = logic.get_user_by_id(id).await?;
+        create_user(u)
+    }
+
+    async fn user_by_username(&self, ctx: &Context<'_>, username: String) -> GqlResult<User> {
+        let logic = ctx.data::<Box<dyn UserLogic>>().unwrap();
+        let u = logic.get_user_by_username(username).await?;
+        create_user(u)
     }
 }
 

@@ -5,11 +5,12 @@ pub mod environment;
 pub mod feature;
 pub mod pipeline;
 pub mod team;
+pub mod user;
 
 use crate::Error;
 use log::error;
-use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 use std::env;
 use uuid::Uuid;
 
@@ -24,14 +25,35 @@ pub async fn init_pg_pool() -> PgPool {
 
 pub fn handle_error<T>(id: Option<Uuid>, result: Result<T, sqlx::Error>) -> Result<T, Error> {
     if let Ok(record) = result {
-        Ok(record)
-    } else {
-        let error = result.err().unwrap();
-        let x = format!("{error}");
-        error!("Database error: {error}");
-        match error {
-            sqlx::Error::RowNotFound => Err(Error::NotFound(id.unwrap())),
-            _ => Err(Error::DatabaseError(error)),
+        return Ok(record);
+    }
+
+    let error = result.err().unwrap();
+    error!("Database error: {error}");
+
+    match &error {
+        sqlx::Error::RowNotFound => {
+            // When no id context is provided, fall back to DatabaseError to avoid panics
+            if let Some(id) = id {
+                Err(Error::NotFound(id))
+            } else {
+                Err(Error::DatabaseError(error))
+            }
         }
+        sqlx::Error::Database(db_err) => {
+            // Map Postgres unique constraint violations to a friendlier validation error
+            if let Some(code) = db_err.code() && code == "23505" {
+
+                // Unique violation
+                let field = match db_err.constraint() {
+                    Some(c) if c.contains("users_username_key") => "username",
+                    Some(c) if c.contains("users_email_key") => "email",
+                    _ => "record",
+                };
+                return Err(Error::RecordAlreadyExists(field.to_string()));
+            }
+            Err(Error::DatabaseError(error))
+        }
+        _ => Err(Error::DatabaseError(error)),
     }
 }

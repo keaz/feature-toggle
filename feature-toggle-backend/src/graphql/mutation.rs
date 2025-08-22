@@ -1,7 +1,9 @@
+use crate::graphql::create_user;
 use crate::graphql::schema::{
     CreateClientInput, CreateEnvironmentInput, CreateFeatureInput, CreatePipelineInput,
-    CreateTeamInput, Environment, Feature, Pipeline, Team, UpdateClientInput,
-    UpdateEnvironmentInput, UpdateFeatureInput, UpdatePipelineInput,
+    CreateTeamInput, Environment, Feature, LoginInput as GqlLoginInput, Pipeline, RegisterUserInput as GqlRegisterUserInput,
+    Team, UpdateClientInput, UpdateEnvironmentInput,
+    UpdateFeatureInput, UpdatePipelineInput, UpdateUserInput as GqlUpdateUserInput, User,
 };
 use crate::graphql::validator::{CreateInputValidator, UpdateInputValidator};
 use crate::logic::client::ClientLogic;
@@ -9,7 +11,8 @@ use crate::logic::context::ContextLogic;
 use crate::logic::environment::EnvironmentLogic;
 use crate::logic::feature::FeatureLogic;
 use crate::logic::pipeline::PipelineLogic;
-use async_graphql::{Context, ID, Object, Result as GqlResult};
+use crate::logic::user::{GqlUser, RegisterUserInput, UpdateGqlUserInput, UserLogic};
+use async_graphql::{Context, Error, Object, Result as GqlResult, ID};
 use log::info;
 use uuid::Uuid;
 
@@ -228,7 +231,39 @@ impl MutationRoot {
         let logic = ctx.data::<Box<dyn FeatureLogic>>().unwrap();
         Ok(logic.set_stage_criteria(stage_id, criteria).await?)
     }
+
+    // User mutations
+    async fn register_user(&self, ctx: &Context<'_>, input: GqlRegisterUserInput) -> GqlResult<User> {
+        let logic = ctx.data::<Box<dyn UserLogic>>().unwrap();
+        let created = logic.register_user(RegisterUserInput {
+            username: input.username,
+            password: input.password,
+            first_name: input.first_name,
+            last_name: input.last_name,
+            email: input.email,
+            is_admin: input.is_admin.unwrap_or(false),
+        }).await?;
+        create_user(created)
+    }
+
+    async fn login(&self, ctx: &Context<'_>, input: GqlLoginInput) -> GqlResult<User> {
+        let logic = ctx.data::<Box<dyn UserLogic>>().unwrap();
+        let u = logic.authenticate_user(input.username, input.password).await?;
+        create_user(u)
+    }
+
+    async fn update_user(&self, ctx: &Context<'_>, id: ID, input: GqlUpdateUserInput) -> GqlResult<User> {
+        let logic = ctx.data::<Box<dyn UserLogic>>().unwrap();
+        let u = logic.update_user(id, UpdateGqlUserInput {
+            first_name: input.first_name,
+            last_name: input.last_name,
+            email: input.email,
+            is_admin: input.is_admin,
+        }).await?;
+        create_user(u)
+    }
 }
+
 
 async fn map_db_feature_to_full_for_broadcast(
     pool: sqlx::PgPool,
