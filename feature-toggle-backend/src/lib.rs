@@ -3,6 +3,7 @@ mod graphql;
 pub mod grpc;
 mod logic;
 mod middleware;
+mod config;
 
 use crate::database::init_pg_pool;
 use crate::graphql::mutation::MutationRoot;
@@ -31,6 +32,9 @@ pub enum Error {
 pub async fn run() -> std::io::Result<()> {
     setup_logger().unwrap();
 
+    // Load configuration (from TOML or defaults)
+    let cfg = crate::config::Config::load();
+
     let db_pool = init_pg_pool().await;
     let environment_repository = database::environment::environment_repository(db_pool.clone());
     let environment_logic = logic::environment::environment_logic(environment_repository.clone());
@@ -57,7 +61,9 @@ pub async fn run() -> std::io::Result<()> {
     let grpc_pool = db_pool.clone();
     let grpc_updates_tx = updates_tx.clone();
     // Spawn gRPC server on separate task
-    let grpc_addr: std::net::SocketAddr = "0.0.0.0:50051".parse().unwrap();
+    let grpc_addr: std::net::SocketAddr = cfg
+        .grpc_socket_addr()
+        .unwrap_or_else(|_| "0.0.0.0:50051".parse().unwrap());
     tokio::spawn(async move {
         if let Err(e) = crate::grpc::serve(grpc_pool, grpc_addr, grpc_updates_tx).await {
             error!("gRPC server error: {e}");
@@ -79,7 +85,7 @@ pub async fn run() -> std::io::Result<()> {
             .finish();
 
         let cors = Cors::default()
-            .allowed_origin("http://localhost:5173") // Or your frontend's domain
+            .allowed_origin(&cfg.allowed_origin) // configured frontend origin
             .allowed_methods(vec!["GET", "POST", "PUT", "DELETE", "OPTIONS"]) // Or your allowed methods
             .allowed_headers(vec!["content-type", "authorization"]) // Or your allowed headers
             .max_age(3600);
@@ -105,7 +111,7 @@ pub async fn run() -> std::io::Result<()> {
                     .to(index_graphiql),
             )
     })
-    .bind(("127.0.0.1", 8080))?
+    .bind(&cfg.http_addr)?
     .run()
     .await
 }
