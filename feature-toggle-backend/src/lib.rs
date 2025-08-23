@@ -10,11 +10,14 @@ use crate::graphql::mutation::MutationRoot;
 use crate::graphql::query::Query;
 use crate::middleware::access_log::AccessLogger;
 use crate::middleware::admin_guard::{AdminGuard, AdminState};
+use crate::middleware::session_guard::SessionGuard;
 use actix_cors::Cors;
 use actix_web::{guard, web, App, HttpRequest, HttpResponse, HttpServer, Result};
+use actix_session::{Session, SessionMiddleware, storage::CookieSessionStore};
+use actix_web::cookie::Key;
 use async_graphql::http::GraphiQLSource;
 use async_graphql::{EmptyMutation, EmptySubscription, Schema};
-use async_graphql_actix_web::{GraphQL, GraphQLSubscription};
+use async_graphql_actix_web::{GraphQL, GraphQLSubscription, GraphQLRequest, GraphQLResponse};
 use log::error;
 use uuid::Uuid;
 
@@ -94,15 +97,22 @@ pub async fn run() -> std::io::Result<()> {
             .allowed_headers(vec!["content-type", "authorization"]) // Or your allowed headers
             .max_age(3600);
 
+        let session_key = Key::generate();
+
         App::new()
-            // Order of wraps: last registered runs first. We want AccessLogger first, then AdminGuard.
+            // Order of wraps: last registered runs first. We want AdminGuard first, then SessionGuard, then AccessLogger.
+            .wrap(SessionGuard::new(cfg.allowed_origin.clone()))
             .wrap(AdminGuard::new(db_pool.clone(), cfg.allowed_origin.clone(), admin_state.clone()))
+            .wrap(SessionMiddleware::builder(CookieSessionStore::default(), session_key.clone())
+                .cookie_secure(false)
+                .build())
             .wrap(AccessLogger)
             .wrap(cors)
+            .app_data(web::Data::new(schema.clone()))
             .service(
                 web::resource("/graphql")
                     .guard(guard::Post())
-                    .to(GraphQL::new(schema.clone())),
+                    .to(graphql_handler),
             )
             .service(
                 web::resource("/graphql")
@@ -120,6 +130,29 @@ pub async fn run() -> std::io::Result<()> {
     .bind(&cfg.http_addr)?
     .run()
     .await
+}
+
+async fn graphql_handler(
+    schema: web::Data<Schema<Query, MutationRoot, EmptySubscription>>,
+    session: Session,
+    req: GraphQLRequest,
+) -> GraphQLResponse {
+    let inner = req.into_inner();
+    let is_login = inner.query.contains("mutation") && inner.query.contains("login");
+
+    let resp = schema.execute(inner).await;
+
+    // If this was a login mutation and it succeeded, set the session
+    if is_login && resp.errors.is_empty() {
+        // Try to extract the user id from the data payload: { "login": { "id": "..." } }
+        let v = serde_json::to_value(&resp.data).unwrap_or(serde_json::json!({}));
+        let user_id = v.get("login").and_then(|l| l.get("id")).and_then(|id| id.as_str());
+        if let Some(uid) = user_id {
+            let _ = session.insert("user_id", uid);
+        }
+    }
+
+    resp.into()
 }
 
 async fn index_graphiql() -> Result<HttpResponse> {
