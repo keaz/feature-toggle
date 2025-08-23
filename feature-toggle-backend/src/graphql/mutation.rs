@@ -12,6 +12,7 @@ use crate::logic::environment::EnvironmentLogic;
 use crate::logic::feature::FeatureLogic;
 use crate::logic::pipeline::PipelineLogic;
 use crate::logic::user::{GqlUser, RegisterUserInput, UpdateGqlUserInput, UserLogic};
+use crate::middleware::admin_guard::AdminState;
 use async_graphql::{Context, Error, Object, Result as GqlResult, ID};
 use log::info;
 use uuid::Uuid;
@@ -243,7 +244,17 @@ impl MutationRoot {
             email: input.email,
             is_admin: input.is_admin.unwrap_or(false),
         }).await?;
+
+        // If an admin was created, flip the admin-exists cache so middleware stops redirecting.
+        if created.is_admin && let Ok(state) = ctx.data::<AdminState>() {
+            state.set_exists(true);
+        }
         create_user(created)
+    }
+
+    async fn create_admin(&self, ctx: &Context<'_>, mut input: GqlRegisterUserInput) -> GqlResult<User> {
+        input.is_admin = Some(true);
+        self.register_user(ctx, input).await?
     }
 
     async fn login(&self, ctx: &Context<'_>, input: GqlLoginInput) -> GqlResult<User> {

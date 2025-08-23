@@ -9,6 +9,7 @@ use crate::database::init_pg_pool;
 use crate::graphql::mutation::MutationRoot;
 use crate::graphql::query::Query;
 use crate::middleware::access_log::AccessLogger;
+use crate::middleware::admin_guard::{AdminGuard, AdminState};
 use actix_cors::Cors;
 use actix_web::{guard, web, App, HttpRequest, HttpResponse, HttpServer, Result};
 use async_graphql::http::GraphiQLSource;
@@ -71,6 +72,8 @@ pub async fn run() -> std::io::Result<()> {
     });
 
     HttpServer::new(move || {
+        let admin_state = AdminState::new();
+
         let schema = Schema::build(Query, MutationRoot, EmptySubscription)
             .data(db_pool.clone())
             .data(updates_tx.clone())
@@ -81,6 +84,7 @@ pub async fn run() -> std::io::Result<()> {
             .data(client_logic.clone())
             .data(context_logic.clone())
             .data(user_logic.clone())
+            .data(admin_state.clone())
             // .extension(ApolloTracing)
             .finish();
 
@@ -91,6 +95,8 @@ pub async fn run() -> std::io::Result<()> {
             .max_age(3600);
 
         App::new()
+            // Order of wraps: last registered runs first. We want AccessLogger first, then AdminGuard.
+            .wrap(AdminGuard::new(db_pool.clone(), cfg.allowed_origin.clone(), admin_state.clone()))
             .wrap(AccessLogger)
             .wrap(cors)
             .service(
