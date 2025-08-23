@@ -29,6 +29,36 @@ FROM public.environments;
 DELETE
 FROM public.teams;
 
+-- Users cleanup and seed for tests
+DELETE FROM public.users;
+
+-- Seed users
+INSERT INTO public.users(id, username, password_hash, first_name, last_name, email, is_admin, created_at, updated_at, last_login)
+VALUES (
+    'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    'admin',
+    '$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHQ$u9gQh8QH1h0kLxF8lqE3Bw',
+    'Alice',
+    'Admin',
+    'admin@example.com',
+    true,
+    now(),
+    now(),
+    NULL
+), (
+    'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+    'bob',
+    '$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHQ$u9gQh8QH1h0kLxF8lqE3Bw',
+    'Bob',
+    'Builder',
+    'bob@example.com',
+    false,
+    now(),
+    now(),
+    NULL
+)
+ON CONFLICT (id) DO NOTHING;
+
 INSERT INTO public.teams(id, name, description)
 VALUES ('51ecc366-f1cd-4d3d-ab73-fa60bad98f27', 'Test Team', 'This is a test team'),
        ('3eef17bc-9e06-411d-b5f4-7a786e68bb96', 'Update Team', 'This is a test team'),
