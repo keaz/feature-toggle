@@ -268,7 +268,37 @@ impl MutationRoot {
         >,
     ) -> GqlResult<Vec<crate::graphql::schema::StageCriterion>> {
         let logic = ctx.data::<Box<dyn FeatureLogic>>().unwrap();
-        Ok(logic.set_stage_criteria(stage_id, criteria).await?)
+        let result = logic.set_stage_criteria(stage_id.clone(), criteria).await?;
+
+        // After updating criterias for a stage, broadcast an UPSERT for the owning feature
+        if let (Ok(pool), Ok(updates_tx)) = (
+            ctx.data::<sqlx::PgPool>(),
+            ctx.data::<tokio::sync::broadcast::Sender<crate::grpc::pb::FeatureUpdate>>(),
+        ) && let Ok(stage_uuid) = uuid::Uuid::try_from(stage_id.clone()) {
+            // Find the owning feature id for this stage
+            if let Ok(Some(feature_id)) = sqlx::query_scalar!(
+                r#"SELECT feature_id FROM features_pipeline_stages WHERE id = $1"#,
+                stage_uuid
+            )
+            .fetch_optional(pool)
+            .await
+            {
+                let repo = crate::database::feature::feature_repository(pool.clone());
+                if let Ok(db_feature) = repo.get_feature_by_id(feature_id).await && let Ok(full) =
+                    map_db_feature_to_full_for_broadcast(pool.clone(), db_feature).await
+                {
+                    let _ = updates_tx.send(crate::grpc::pb::FeatureUpdate {
+                        message_id: uuid::Uuid::new_v4().to_string(),
+                        action: crate::grpc::pb::feature_update::Action::Upsert as i32,
+                        feature: Some(full),
+                        feature_key: String::new(),
+                        error: String::new(),
+                    });
+                }
+            }
+        }
+
+        Ok(result)
     }
 
     // User mutations
