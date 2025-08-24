@@ -110,9 +110,21 @@ message UserFlagAssignment {
   string feature_id = 2; // UUID as string
   string environment_id = 3; // UUID as string
   bool assigned = 4; // true when evaluated true
-  // include client credentials for auth on the stream
+  // include client credentials for auth on the stream (ignored in responses)
   string client_id = 5;
   string client_secret = 6;
+}
+
+message ListUserFlagAssignmentsRequest {
+  string client_id = 1;
+  string client_secret = 2;
+  // optional filters
+  string environment_id = 3; // if empty -> all
+  string feature_id = 4; // if empty -> all
+}
+
+message ListUserFlagAssignmentsResponse {
+  repeated UserFlagAssignment assignments = 1;
 }
 
 service FeatureEvaluation {
@@ -121,4 +133,6 @@ service FeatureEvaluation {
   rpc StreamUpdates(stream StreamRequest) returns (stream FeatureUpdate);
   // Edge pushes sticky user assignments via client-streaming
   rpc PushUserAssignments(stream UserFlagAssignment) returns (Ack);
+  // Edge can fetch all persisted user assignments on connect/startup
+  rpc ListUserAssignments(ListUserFlagAssignmentsRequest) returns (ListUserFlagAssignmentsResponse);
 }

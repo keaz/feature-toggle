@@ -363,6 +363,29 @@ async fn handle_feature_update(app: &AppState, update: pb::FeatureUpdate) {
     }
 }
 
+async fn load_user_assignments(app: &AppState) -> Result<usize, tonic::Status> {
+    let req = pb::ListUserFlagAssignmentsRequest {
+        client_id: app.client_id.clone(),
+        client_secret: app.client_secret.clone(),
+        environment_id: String::new(),
+        feature_id: String::new(),
+    };
+    let mut client = app.grpc.lock().await.clone();
+    let resp = client.list_user_assignments(req).await?.into_inner();
+    let mut count = 0usize;
+    {
+        let mut set = app.assigned_true.write().await;
+        for a in resp.assignments.into_iter() {
+            if a.assigned {
+                let key = assignment_key(&a.user_id, &a.feature_id, &a.environment_id);
+                set.insert(key);
+                count += 1;
+            }
+        }
+    }
+    Ok(count)
+}
+
 async fn run_stream_task(app: AppState, grpc_addr: String) {
     use std::sync::atomic::Ordering;
     loop {
@@ -539,6 +562,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         pending_assignments: Arc::new(RwLock::new(Vec::new())),
         flush_interval: Duration::from_secs(flush_secs),
     };
+
+    // On startup, fetch persisted user assignments from backend and warm the cache
+    match load_user_assignments(&state).await {
+        Ok(n) => info!("loaded {} user assignments from backend", n),
+        Err(e) => error!("failed to load user assignments: {}", e),
+    }
 
     // Start stream sync task
     let stream_state = state.clone();

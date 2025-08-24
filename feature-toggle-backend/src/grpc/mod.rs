@@ -373,6 +373,113 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
             Ok(Response::new(pb::Ack { message_id: uuid::Uuid::new_v4().to_string() }))
         }
 
+        async fn list_user_assignments(
+            &self,
+            request: Request<pb::ListUserFlagAssignmentsRequest>,
+        ) -> Result<Response<pb::ListUserFlagAssignmentsResponse>, Status> {
+            let req = request.into_inner();
+            if req.client_id.is_empty() || req.client_secret.is_empty() {
+                return Err(Status::invalid_argument("client_id and client_secret are required"));
+            }
+            let client_id = Uuid::parse_str(&req.client_id)
+                .map_err(|_| Status::invalid_argument("client_id must be a UUID"))?;
+            let client_repo = &self.client_repo;
+            let client = client_repo
+                .get_client_by_id(client_id)
+                .await
+                .map_err(|e| Status::not_found(format!("client not found: {}", e)))?;
+            if !client.enabled {
+                return Err(Status::permission_denied("client is disabled"));
+            }
+            if client.api_key != req.client_secret {
+                return Err(Status::unauthenticated("invalid client_secret"));
+            }
+            let team_id = client.team_id;
+
+            // Build and execute query joining features to enforce team scoping
+            #[derive(sqlx::FromRow)]
+            struct AssignmentRow {
+                user_id: String,
+                feature_id: uuid::Uuid,
+                environment_id: uuid::Uuid,
+                assigned: bool,
+            }
+            let rows: Vec<AssignmentRow> = if !req.feature_id.is_empty() && !req.environment_id.is_empty() {
+                let fid = uuid::Uuid::parse_str(&req.feature_id)
+                    .map_err(|_| Status::invalid_argument("feature_id must be a UUID"))?;
+                let eid = uuid::Uuid::parse_str(&req.environment_id)
+                    .map_err(|_| Status::invalid_argument("environment_id must be a UUID"))?;
+                sqlx::query_as!(AssignmentRow,
+                    r#"SELECT ufa.user_id, ufa.feature_id, ufa.environment_id, ufa.assigned
+                       FROM user_flag_assignments ufa
+                       JOIN features f ON f.id = ufa.feature_id
+                       WHERE f.team_id = $1 AND ufa.feature_id = $2 AND ufa.environment_id = $3"#,
+                    team_id,
+                    fid,
+                    eid
+                )
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| Status::internal(format!("db error: {}", e)))?
+            } else if !req.feature_id.is_empty() {
+                let fid = uuid::Uuid::parse_str(&req.feature_id)
+                    .map_err(|_| Status::invalid_argument("feature_id must be a UUID"))?;
+                sqlx::query_as!(AssignmentRow,
+                    r#"SELECT ufa.user_id, ufa.feature_id, ufa.environment_id, ufa.assigned
+                       FROM user_flag_assignments ufa
+                       JOIN features f ON f.id = ufa.feature_id
+                       WHERE f.team_id = $1 AND ufa.feature_id = $2"#,
+                    team_id,
+                    fid
+                )
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| Status::internal(format!("db error: {}", e)))?
+            } else if !req.environment_id.is_empty() {
+                let eid = uuid::Uuid::parse_str(&req.environment_id)
+                    .map_err(|_| Status::invalid_argument("environment_id must be a UUID"))?;
+                sqlx::query_as!(AssignmentRow,
+                    r#"SELECT ufa.user_id, ufa.feature_id, ufa.environment_id, ufa.assigned
+                       FROM user_flag_assignments ufa
+                       JOIN features f ON f.id = ufa.feature_id
+                       WHERE f.team_id = $1 AND EXISTS (
+                           SELECT 1 FROM features_pipeline_stages s
+                           WHERE s.feature_id = f.id AND s.environment_id = $2
+                       )"#,
+                    team_id,
+                    eid
+                )
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| Status::internal(format!("db error: {}", e)))?
+            } else {
+                sqlx::query_as!(AssignmentRow,
+                    r#"SELECT ufa.user_id, ufa.feature_id, ufa.environment_id, ufa.assigned
+                       FROM user_flag_assignments ufa
+                       JOIN features f ON f.id = ufa.feature_id
+                       WHERE f.team_id = $1"#,
+                    team_id
+                )
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| Status::internal(format!("db error: {}", e)))?
+            };
+
+            let assignments = rows
+                .into_iter()
+                .map(|r| pb::UserFlagAssignment {
+                    user_id: r.user_id,
+                    feature_id: r.feature_id.to_string(),
+                    environment_id: r.environment_id.to_string(),
+                    assigned: r.assigned,
+                    client_id: String::new(),
+                    client_secret: String::new(),
+                })
+                .collect::<Vec<_>>();
+
+            Ok(Response::new(pb::ListUserFlagAssignmentsResponse { assignments }))
+        }
+
         type StreamUpdatesStream = ReceiverStream<Result<pb::FeatureUpdate, Status>>;
 
     async fn stream_updates(
