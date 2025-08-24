@@ -200,7 +200,44 @@ impl MutationRoot {
     ) -> GqlResult<crate::graphql::schema::Context> {
         info!("Updating context with id: {id:?}");
         let logic = ctx.data::<Box<dyn ContextLogic>>().unwrap();
-        Ok(logic.update_context(id, input).await?)
+        let updated = logic.update_context(id.clone(), input).await?;
+
+        // Broadcast FeatureFull UPSERTs for all features whose stage criteria reference this context
+        if let (Ok(pool), Ok(updates_tx)) = (
+            ctx.data::<sqlx::PgPool>(),
+            ctx.data::<tokio::sync::broadcast::Sender<crate::grpc::pb::FeatureUpdate>>(),
+        ) && let Ok(context_uuid) = uuid::Uuid::try_from(id.clone()) {
+
+            // Find affected feature ids
+            if let Ok(feature_ids) = sqlx::query_scalar!(
+                    r#"SELECT DISTINCT f.id
+                       FROM features f
+                       JOIN features_pipeline_stages s ON s.feature_id = f.id
+                       JOIN feature_stage_criteria sc ON sc.stage_id = s.id
+                       WHERE sc.context_id = $1"#,
+                    context_uuid
+                )
+                .fetch_all(pool)
+                .await
+            {
+                let repo = crate::database::feature::feature_repository(pool.clone());
+                for fid in feature_ids {
+                    if let Ok(db_feature) = repo.get_feature_by_id(fid).await && let Ok(full) =
+                        map_db_feature_to_full_for_broadcast(pool.clone(), db_feature).await
+                    {
+                        let _ = updates_tx.send(crate::grpc::pb::FeatureUpdate {
+                            message_id: uuid::Uuid::new_v4().to_string(),
+                            action: crate::grpc::pb::feature_update::Action::Upsert as i32,
+                            feature: Some(full),
+                            feature_key: String::new(),
+                            error: String::new(),
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(updated)
     }
 
     async fn delete_context(&self, ctx: &Context<'_>, id: ID) -> GqlResult<bool> {
