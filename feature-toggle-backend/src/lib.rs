@@ -12,12 +12,13 @@ use crate::middleware::access_log::AccessLogger;
 use crate::middleware::admin_guard::{AdminGuard, AdminState};
 use crate::middleware::session_guard::SessionGuard;
 use actix_cors::Cors;
+use actix_session::{storage::CookieSessionStore, Session, SessionMiddleware};
+use actix_web::cookie::{Key, SameSite};
 use actix_web::{guard, web, App, HttpRequest, HttpResponse, HttpServer, Result};
-use actix_session::{Session, SessionMiddleware, storage::CookieSessionStore};
-use actix_web::cookie::Key;
 use async_graphql::http::GraphiQLSource;
 use async_graphql::{EmptyMutation, EmptySubscription, Schema};
-use async_graphql_actix_web::{GraphQL, GraphQLSubscription, GraphQLRequest, GraphQLResponse};
+use async_graphql_actix_web::{GraphQL, GraphQLRequest, GraphQLResponse, GraphQLSubscription};
+use base64::Engine;
 use log::error;
 use uuid::Uuid;
 
@@ -95,16 +96,22 @@ pub async fn run() -> std::io::Result<()> {
             .allowed_origin(&cfg.allowed_origin) // configured frontend origin
             .allowed_methods(vec!["GET", "POST", "PUT", "DELETE", "OPTIONS"]) // Or your allowed methods
             .allowed_headers(vec!["content-type", "authorization"]) // Or your allowed headers
+            .supports_credentials()
             .max_age(3600);
 
-        let session_key = Key::generate();
+        //#FIXME: Move this to a config or database.
+        let session_key = Key::from(&base64::engine::general_purpose::STANDARD
+            .decode("J06X7Bb28hc0bT7kn+OZoLaUQPV5tD/rNIBsSJsP6Ler0K/HHRkEnmu29fVFhefyOV6X096t+te3bnQi3yMwlw==").unwrap());
 
         App::new()
             // Order of wraps: last registered runs first. We want AdminGuard first, then SessionGuard, then AccessLogger.
             .wrap(SessionGuard::new(cfg.allowed_origin.clone()))
             .wrap(AdminGuard::new(db_pool.clone(), cfg.allowed_origin.clone(), admin_state.clone()))
             .wrap(SessionMiddleware::builder(CookieSessionStore::default(), session_key.clone())
-                .cookie_secure(false)
+                .cookie_name("d".to_string())
+                .cookie_secure(false) // This should be changed to true in prod
+                .cookie_http_only(true)
+                .cookie_same_site(SameSite::Lax) // This should be changed to None in prod
                 .build())
             .wrap(AccessLogger)
             .wrap(cors)

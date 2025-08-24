@@ -152,3 +152,125 @@ where
         })
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use actix_web::{test, web, App, HttpResponse};
+    use sqlx::postgres::PgPoolOptions;
+
+    fn test_pool() -> PgPool {
+        // Lazy pool so no actual DB connection attempt until used.
+        PgPoolOptions::new()
+            .connect_lazy("postgres://user:pass@localhost/feature_toggle_test")
+            .expect("lazy pool")
+    }
+
+
+    #[actix_web::test]
+    async fn allows_when_admin_exists_cached() {
+        let pool = test_pool();
+        let state = AdminState::new();
+        state.set_exists(true);
+
+        let app = test::init_service(
+            App::new()
+                .wrap(AdminGuard::new(pool, "http://ui".to_string(), state))
+                .route("/graphql", web::post().to(|| async { HttpResponse::Ok().finish() }))
+                .route("/other", web::get().to(|| async { HttpResponse::Ok().finish() }))
+                .route("/other", web::post().to(|| async { HttpResponse::Ok().finish() }))
+        ).await;
+        let req = test::TestRequest::post()
+            .uri("/graphql")
+            .set_payload(r#"{ "query": "query { ping }" }"#)
+            .insert_header(("content-type", "application/json"))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert!(resp.status().is_success());
+    }
+
+    #[actix_web::test]
+    async fn blocks_graphql_post_without_create_admin_when_no_admin() {
+        let pool = test_pool();
+        let state = AdminState::new();
+        state.set_exists(false);
+
+        let app = test::init_service(
+            App::new()
+                .wrap(AdminGuard::new(pool, "http://localhost:3000".to_string(), state))
+                .route("/graphql", web::post().to(|| async { HttpResponse::Ok().finish() }))
+                .route("/other", web::get().to(|| async { HttpResponse::Ok().finish() }))
+                .route("/other", web::post().to(|| async { HttpResponse::Ok().finish() }))
+        ).await;
+        let req = test::TestRequest::post()
+            .uri("/graphql")
+            .set_payload(r#"{ "query": "mutation { somethingElse }" }"#)
+            .insert_header(("content-type", "application/json"))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), actix_web::http::StatusCode::UNAUTHORIZED);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["error"], "admin_account_missing");
+        assert_eq!(body["redirect"], "http://localhost:3000/create-admin");
+    }
+
+    #[actix_web::test]
+    async fn allows_graphql_post_create_admin_when_no_admin() {
+        let pool = test_pool();
+        let state = AdminState::new();
+        state.set_exists(false);
+
+        let app = test::init_service(
+            App::new()
+                .wrap(AdminGuard::new(pool, "http://ui".to_string(), state))
+                .route("/graphql", web::post().to(|| async { HttpResponse::Ok().finish() }))
+                .route("/other", web::get().to(|| async { HttpResponse::Ok().finish() }))
+                .route("/other", web::post().to(|| async { HttpResponse::Ok().finish() }))
+        ).await;
+        let req = test::TestRequest::post()
+            .uri("/graphql")
+            .set_payload(r#"{ "query": "mutation { createAdmin(input:{}) { id } }" }"#)
+            .insert_header(("content-type", "application/json"))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert!(resp.status().is_success());
+    }
+
+    #[actix_web::test]
+    async fn allows_non_graphql_and_options_when_no_admin() {
+        let pool = test_pool();
+        let state = AdminState::new();
+        state.set_exists(false);
+
+        let app = test::init_service(
+            App::new()
+                .wrap(AdminGuard::new(pool, "http://ui".to_string(), state))
+                .route("/graphql", web::post().to(|| async { HttpResponse::Ok().finish() }))
+                .route("/other", web::get().to(|| async { HttpResponse::Ok().finish() }))
+                .route("/other", web::post().to(|| async { HttpResponse::Ok().finish() }))
+        ).await;
+
+        // OPTIONS preflight
+        let req_options = test::TestRequest::default()
+            .method(actix_web::http::Method::OPTIONS)
+            .uri("/graphql")
+            .to_request();
+        let resp_options = test::call_service(&app, req_options).await;
+        assert_ne!(resp_options.status(), actix_web::http::StatusCode::UNAUTHORIZED);
+
+        // GET non-graphql
+        let req_get = test::TestRequest::get().uri("/other").to_request();
+        let resp_get = test::call_service(&app, req_get).await;
+        assert!(resp_get.status().is_success());
+
+        // POST non-graphql
+        let req_post = test::TestRequest::post()
+            .uri("/other")
+            .set_payload("{}")
+            .insert_header(("content-type", "application/json"))
+            .to_request();
+        let resp_post = test::call_service(&app, req_post).await;
+        assert!(resp_post.status().is_success());
+    }
+}

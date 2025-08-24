@@ -1,16 +1,12 @@
 use crate::graphql::create_user;
-use crate::graphql::schema::{
-    CreateClientInput, CreateEnvironmentInput, CreateFeatureInput, CreatePipelineInput,
-    CreateTeamInput, Environment, Feature, LoginInput as GqlLoginInput, Pipeline, RegisterUserInput as GqlRegisterUserInput,
-    Team, UpdateClientInput, UpdateEnvironmentInput,
-    UpdateFeatureInput, UpdatePipelineInput, UpdateUserInput as GqlUpdateUserInput, User,
-};
+use crate::graphql::schema::{CreateClientInput, CreateEnvironmentInput, CreateFeatureInput, CreatePipelineInput, CreateTeamInput, Environment, Feature, LoginInput as GqlLoginInput, Pipeline, RegisterUserInput as GqlRegisterUserInput, Team, UpdateClientInput, UpdateEnvironmentInput, UpdateFeatureInput, UpdatePipelineInput, UpdateTeamInput, UpdateUserInput as GqlUpdateUserInput, User};
 use crate::graphql::validator::{CreateInputValidator, UpdateInputValidator};
 use crate::logic::client::ClientLogic;
 use crate::logic::context::ContextLogic;
 use crate::logic::environment::EnvironmentLogic;
 use crate::logic::feature::FeatureLogic;
 use crate::logic::pipeline::PipelineLogic;
+use crate::logic::team::TeamLogic;
 use crate::logic::user::{GqlUser, RegisterUserInput, UpdateGqlUserInput, UserLogic};
 use crate::middleware::admin_guard::AdminState;
 use async_graphql::{Context, Error, Object, Result as GqlResult, ID};
@@ -50,13 +46,18 @@ impl MutationRoot {
         Ok(true)
     }
 
-    async fn create_team(&self, input: CreateTeamInput) -> GqlResult<Team> {
-        let id = ID::from(Uuid::new_v4().to_string());
-        Ok(Team {
-            id,
-            name: input.name,
-            description: input.description,
-        })
+    async fn create_team(&self, ctx: &Context<'_>, input: CreateTeamInput) -> GqlResult<Team> {
+        let logic = ctx.data::<Box<dyn TeamLogic>>().unwrap();
+        let team = logic.create_team(input).await?;
+        Ok(team)
+    }
+
+    async fn update_team(&self, ctx: &Context<'_>, #[graphql(
+        desc = "Id of the Team"
+    )] id: ID, input: UpdateTeamInput) -> GqlResult<Team> {
+        let logic = ctx.data::<Box<dyn TeamLogic>>().unwrap();
+        let team = logic.update_team(id, input).await?;
+        Ok(team)
     }
 
     async fn create_pipeline(
