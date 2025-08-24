@@ -25,6 +25,22 @@ pub struct AppState {
     client_id: String,
     client_secret: String,
     connected: Arc<std::sync::atomic::AtomicBool>,
+    // Sticky assignments cache and pending flush queue
+    assigned_true: Arc<RwLock<std::collections::HashSet<String>>>,
+    pending_assignments: Arc<RwLock<Vec<UserAssignment>>>,
+    flush_interval: Duration,
+}
+
+#[derive(Clone, Debug)]
+struct UserAssignment {
+    user_id: String,
+    feature_id: String,
+    environment_id: String,
+    assigned: bool,
+}
+
+fn assignment_key(user_id: &str, feature_id: &str, environment_id: &str) -> String {
+    format!("{}|{}|{}", user_id, feature_id, environment_id)
 }
 
 #[derive(Default)]
@@ -213,13 +229,55 @@ async fn evaluate_handler(
     let feature_key = req.feature_key.clone();
 
     let (client_id, client_secret) = resolve_credentials(&app, &req);
-
     // Get feature from cache or backend
     let feature = get_or_fetch_feature(&app, &feature_key, &client_id, &client_secret).await?;
 
+    let stage = feature.stages.iter()
+        .find(|s| s.environment_id == req.environment_id);
+
+    if stage.is_none() {
+        return Ok(web::Json(EvaluateHttpResponse { enabled: false }));
+    }
+
+    let stage = stage.unwrap();
+    let bucketing_key = stage.bucketing_key.clone();
+
+    // Extract user.id if present
+    let user_id_opt = req
+        .context
+        .iter()
+        .find(|c| c.key == bucketing_key)
+        .map(|c| c.value.clone());
+
+
+    // If we have a prior assignment for this user+feature+env, short-circuit to true
+    if let Some(user_id) = &user_id_opt {
+        let key = assignment_key(user_id, &feature.id, &req.environment_id);
+        if app.assigned_true.read().await.contains(&key) {
+            return Ok(web::Json(EvaluateHttpResponse { enabled: true }));
+        }
+    }
+
     let engine_feature = map_proto_to_engine(&feature);
-    let ec = map_http_context_to_engine(feature_key, req.environment_id, req.context);
+    let ec = map_http_context_to_engine(feature_key, req.environment_id.clone(), req.context);
     let enabled = engine::evaluate(ec, engine_feature);
+
+    // If evaluated true, remember and enqueue for flush
+    if enabled && let Some(user_id) = user_id_opt {
+        let key = assignment_key(&user_id, &feature.id, &req.environment_id);
+        {
+            let mut set = app.assigned_true.write().await;
+            set.insert(key);
+        }
+        let mut pending = app.pending_assignments.write().await;
+        pending.push(UserAssignment {
+            user_id,
+            feature_id: feature.id.clone(),
+            environment_id: req.environment_id,
+            assigned: true,
+        });
+    }
+
     Ok(web::Json(EvaluateHttpResponse { enabled }))
 }
 
@@ -362,6 +420,76 @@ async fn run_stream_task(app: AppState, grpc_addr: String) {
     }
 }
 
+async fn run_flush_task(app: AppState) {
+    loop {
+        tokio::time::sleep(app.flush_interval).await;
+        // Drain pending assignments
+        let to_send: Vec<UserAssignment> = {
+            let mut lock = app.pending_assignments.write().await;
+            if lock.is_empty() {
+                Vec::new()
+            } else {
+                let v = lock.drain(..).collect::<Vec<_>>();
+                v
+            }
+        };
+        if to_send.is_empty() {
+            continue;
+        }
+
+        // Build a request stream
+        let (tx, rx) = tokio::sync::mpsc::channel::<pb::UserFlagAssignment>(to_send.len().max(1));
+        let creds_first = pb::UserFlagAssignment {
+            user_id: to_send[0].user_id.clone(),
+            feature_id: to_send[0].feature_id.clone(),
+            environment_id: to_send[0].environment_id.clone(),
+            assigned: to_send[0].assigned,
+            client_id: app.client_id.clone(),
+            client_secret: app.client_secret.clone(),
+        };
+        // Spawn sender
+        tokio::spawn({
+            let app_clone = app.clone();
+            let rest = to_send[1..].to_vec();
+            let mut tx_clone = tx.clone();
+            async move {
+                let _ = tx_clone.send(creds_first).await;
+                for a in rest {
+                    let _ = tx_clone
+                        .send(pb::UserFlagAssignment {
+                            user_id: a.user_id,
+                            feature_id: a.feature_id,
+                            environment_id: a.environment_id,
+                            assigned: a.assigned,
+                            client_id: String::new(),
+                            client_secret: String::new(),
+                        })
+                        .await;
+                }
+            }
+        });
+
+        // Use a cloned client to avoid holding the lock
+        let mut client = {
+            let guard = app.grpc.lock().await;
+            guard.clone()
+        };
+        use tokio_stream::wrappers::ReceiverStream;
+        let stream = ReceiverStream::new(rx);
+        match client.push_user_assignments(stream).await {
+            Ok(_) => {
+                // success, nothing to do
+            }
+            Err(e) => {
+                error!("failed to push user assignments: {}", e);
+                // requeue
+                let mut lock = app.pending_assignments.write().await;
+                lock.extend(to_send);
+            }
+        }
+    }
+}
+
 fn setup_logger() -> actix_web::Result<(), Box<dyn std::error::Error>> {
     log4rs::init_file("log4rs.yaml", Default::default())?;
     Ok(())
@@ -396,18 +524,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let channel = endpoint.connect().await?;
     let grpc_client = pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
 
+    let flush_secs: u64 = std::env::var("EDGE_ASSIGNMENT_FLUSH_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10);
+
     let state = AppState {
         cache: Arc::new(FeatureCache::default()),
         grpc: Arc::new(tokio::sync::Mutex::new(grpc_client)),
         client_id: client_id.clone(),
         client_secret: client_secret.clone(),
         connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        assigned_true: Arc::new(RwLock::new(std::collections::HashSet::new())),
+        pending_assignments: Arc::new(RwLock::new(Vec::new())),
+        flush_interval: Duration::from_secs(flush_secs),
     };
 
     // Start stream sync task
     let stream_state = state.clone();
     let grpc_addr_clone = grpc_addr.clone();
     tokio::spawn(async move { run_stream_task(stream_state, grpc_addr_clone).await });
+
+    // Start periodic flush task
+    let flush_state = state.clone();
+    tokio::spawn(async move { run_flush_task(flush_state).await });
 
     info!(
         "feature-edge-server listening on {} (HTTP), streaming from {}",
@@ -478,6 +618,9 @@ mod tests {
             client_id: "c".into(),
             client_secret: "s".into(),
             connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            assigned_true: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            pending_assignments: Arc::new(RwLock::new(Vec::new())),
+            flush_interval: Duration::from_secs(10),
         };
         // seed cache
         cache.upsert(feature).await;
@@ -500,6 +643,9 @@ mod tests {
             client_id: "c".into(),
             client_secret: "s".into(),
             connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            assigned_true: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            pending_assignments: Arc::new(RwLock::new(Vec::new())),
+            flush_interval: Duration::from_secs(10),
         }
     }
 

@@ -105,8 +105,20 @@ message FeatureUpdate {
   string error = 5;        // used for ERROR
 }
 
+message UserFlagAssignment {
+  string user_id = 1;
+  string feature_id = 2; // UUID as string
+  string environment_id = 3; // UUID as string
+  bool assigned = 4; // true when evaluated true
+  // include client credentials for auth on the stream
+  string client_id = 5;
+  string client_secret = 6;
+}
+
 service FeatureEvaluation {
   rpc Evaluate(EvaluateRequest) returns (EvaluateResponse);
   rpc GetFeatureByKey(GetFeatureByKeyRequest) returns (GetFeatureByKeyResponse);
   rpc StreamUpdates(stream StreamRequest) returns (stream FeatureUpdate);
+  // Edge pushes sticky user assignments via client-streaming
+  rpc PushUserAssignments(stream UserFlagAssignment) returns (Ack);
 }

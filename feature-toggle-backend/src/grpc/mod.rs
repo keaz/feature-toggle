@@ -295,7 +295,85 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
             feature: Some(feature_msg),
         }))
     }
-    type StreamUpdatesStream = ReceiverStream<Result<pb::FeatureUpdate, Status>>;
+    async fn push_user_assignments(
+            &self,
+            request: Request<tonic::Streaming<pb::UserFlagAssignment>>,
+        ) -> Result<Response<pb::Ack>, Status> {
+            let mut stream = request.into_inner();
+
+            // Read first message to authenticate and then process the rest with same creds
+            let first_msg = match stream.next().await {
+                Some(Ok(m)) => m,
+                Some(Err(e)) => return Err(Status::internal(format!("stream error: {}", e))),
+                None => return Err(Status::invalid_argument("empty stream")),
+            };
+            if first_msg.client_id.is_empty() || first_msg.client_secret.is_empty() {
+                return Err(Status::invalid_argument("client_id and client_secret are required"));
+            }
+            let client_id = Uuid::parse_str(&first_msg.client_id)
+                .map_err(|_| Status::invalid_argument("client_id must be a UUID"))?;
+            let client_repo = &self.client_repo;
+            let client = client_repo
+                .get_client_by_id(client_id)
+                .await
+                .map_err(|e| Status::not_found(format!("client not found: {}", e)))?;
+            if !client.enabled {
+                return Err(Status::permission_denied("client is disabled"));
+            }
+            if client.api_key != first_msg.client_secret {
+                return Err(Status::unauthenticated("invalid client_secret"));
+            }
+
+            // Helper to upsert a single assignment
+            async fn upsert_assignment(
+                pool: &sqlx::PgPool,
+                user_id: &str,
+                feature_id: &str,
+                environment_id: &str,
+                assigned: bool,
+            ) -> Result<(), sqlx::Error> {
+                // Convert to UUIDs
+                let f_id = uuid::Uuid::parse_str(feature_id).map_err(|_| sqlx::Error::Decode("invalid feature_id".into()))?;
+                let e_id = uuid::Uuid::parse_str(environment_id).map_err(|_| sqlx::Error::Decode("invalid environment_id".into()))?;
+                sqlx::query(
+                r#"INSERT INTO user_flag_assignments (user_id, feature_id, environment_id, assigned)
+                   VALUES ($1, $2, $3, $4)
+                   ON CONFLICT (user_id, feature_id, environment_id)
+                   DO UPDATE SET assigned = EXCLUDED.assigned, assigned_at = now()"#
+            )
+            .bind(user_id)
+            .bind(f_id)
+            .bind(e_id)
+            .bind(assigned)
+            .execute(pool)
+            .await?;
+                Ok(())
+            }
+
+            // Process the first payload then the rest
+            if !first_msg.user_id.is_empty() && !first_msg.feature_id.is_empty() && !first_msg.environment_id.is_empty() {
+                upsert_assignment(&self.pool, &first_msg.user_id, &first_msg.feature_id, &first_msg.environment_id, first_msg.assigned)
+                    .await
+                    .map_err(|e| Status::internal(format!("db error: {}", e)))?;
+            }
+
+            while let Some(msg) = stream.next().await {
+                match msg {
+                    Ok(m) => {
+                        if !m.user_id.is_empty() && !m.feature_id.is_empty() && !m.environment_id.is_empty() {
+                            if let Err(e) = upsert_assignment(&self.pool, &m.user_id, &m.feature_id, &m.environment_id, m.assigned).await {
+                                return Err(Status::internal(format!("db error: {}", e)));
+                            }
+                        }
+                    }
+                    Err(e) => return Err(Status::internal(format!("stream error: {}", e))),
+                }
+            }
+
+            Ok(Response::new(pb::Ack { message_id: uuid::Uuid::new_v4().to_string() }))
+        }
+
+        type StreamUpdatesStream = ReceiverStream<Result<pb::FeatureUpdate, Status>>;
 
     async fn stream_updates(
         &self,
