@@ -6,6 +6,7 @@ pub mod feature;
 pub mod pipeline;
 pub mod team;
 pub mod user;
+pub mod user_flag_assignment;
 
 use crate::Error;
 use log::error;
