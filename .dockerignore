@@ -1,0 +1,39 @@
+# Ignore build output and dependencies
+/target
+
+# Ignore environment files
+feature-toggle-backend/.env
+
+# Ignore IDE/editor config
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Ignore logs and temp files
+*.log
+*.tmp
+
+# Ignore test output
+/coverage
+
+# Ignore node_modules if present
+node_modules/
+
+# Ignore version control
+.git
+.gitignore
+
+# Ignore database files
+*.sqlite
+*.db
+
+# Ignore backup files
+*.bak
+*.old
+*.orig
+
+# Ignore cargo specific files
+Cargo.lock
+Dockerfile
