@@ -59,6 +59,7 @@ pub struct UpdateGqlUserInput {
     pub last_name: Option<String>,
     pub email: Option<String>,
     pub is_admin: Option<bool>,
+    pub enabled: Option<bool>,
 }
 
 #[async_trait::async_trait]
@@ -173,6 +174,7 @@ impl UserLogic for UserLogicImpl {
             last_name: input.last_name,
             email: input.email,
             is_admin: input.is_admin,
+            enabled: input.enabled,
         }).await?;
 
         Ok(GqlUser {
@@ -207,6 +209,7 @@ mod tests {
             last_name: "Doe".to_string(),
             email: "john@example.com".to_string(),
             is_admin: false,
+            enabled: true,
             created_at: Utc::now(),
             updated_at: Utc::now(),
             last_login: None,
@@ -263,6 +266,7 @@ mod tests {
                     last_name: input.last_name,
                     email: input.email,
                     is_admin: input.is_admin,
+                    enabled: true,
                     created_at: Utc::now(),
                     updated_at: Utc::now(),
                     last_login: None,
@@ -414,6 +418,7 @@ mod tests {
                 last_name: input.last_name.unwrap_or("Doe".to_string()),
                 email: input.email.unwrap_or("john@example.com".to_string()),
                 is_admin: input.is_admin.unwrap_or(false),
+                enabled: input.enabled.unwrap_or(true),
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
                 last_login: None,
@@ -426,6 +431,7 @@ mod tests {
                 last_name: None,
                 email: Some("new@example.com".to_string()),
                 is_admin: Some(true),
+                enabled: Some(true),
             })
             .await
             .unwrap();
@@ -449,6 +455,7 @@ mod tests {
                 last_name: None,
                 email: Some("dup@example.com".to_string()),
                 is_admin: None,
+                enabled: None,
             })
             .await
             .err()

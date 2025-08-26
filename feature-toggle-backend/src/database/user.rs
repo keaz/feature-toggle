@@ -14,6 +14,7 @@ pub struct User {
     pub last_name: String,
     pub email: String,
     pub is_admin: bool,
+    pub enabled: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub last_login: Option<DateTime<Utc>>,
@@ -34,6 +35,7 @@ pub struct UpdateUser {
     pub last_name: Option<String>,
     pub email: Option<String>,
     pub is_admin: Option<bool>,
+    pub enabled: Option<bool>,
 }
 
 #[automock]
@@ -75,7 +77,7 @@ impl UserRepositoryImpl {
 impl UserRepository for UserRepositoryImpl {
     async fn get_user_by_id(&self, id: Uuid) -> Result<User, Error> {
         let result = sqlx::query!(
-            r#"SELECT id, username, password_hash, first_name, last_name, email, is_admin,
+            r#"SELECT id, username, password_hash, first_name, last_name, email, is_admin, enabled,
                        created_at, updated_at, last_login
                 FROM users WHERE id = $1"#,
             id
@@ -92,6 +94,7 @@ impl UserRepository for UserRepositoryImpl {
             last_name: row.last_name,
             email: row.email,
             is_admin: row.is_admin,
+            enabled: row.enabled,
             created_at: row.created_at,
             updated_at: row.updated_at,
             last_login: row.last_login,
@@ -100,7 +103,7 @@ impl UserRepository for UserRepositoryImpl {
 
     async fn get_user_by_username(&self, username: &str) -> Result<User, Error> {
         let result = sqlx::query!(
-            r#"SELECT id, username, password_hash, first_name, last_name, email, is_admin,
+            r#"SELECT id, username, password_hash, first_name, last_name, email, is_admin, enabled,
                        created_at, updated_at, last_login
                 FROM users WHERE username = $1"#,
             username
@@ -117,6 +120,7 @@ impl UserRepository for UserRepositoryImpl {
             last_name: row.last_name,
             email: row.email,
             is_admin: row.is_admin,
+            enabled: row.enabled,
             created_at: row.created_at,
             updated_at: row.updated_at,
             last_login: row.last_login,
@@ -125,7 +129,7 @@ impl UserRepository for UserRepositoryImpl {
 
     async fn get_user_by_email(&self, email: &str) -> Result<User, Error> {
         let result = sqlx::query!(
-            r#"SELECT id, username, password_hash, first_name, last_name, email, is_admin,
+            r#"SELECT id, username, password_hash, first_name, last_name, email, is_admin, enabled,
                        created_at, updated_at, last_login
                 FROM users WHERE email = $1"#,
             email
@@ -142,6 +146,7 @@ impl UserRepository for UserRepositoryImpl {
             last_name: row.last_name,
             email: row.email,
             is_admin: row.is_admin,
+            enabled: row.enabled,
             created_at: row.created_at,
             updated_at: row.updated_at,
             last_login: row.last_login,
@@ -153,7 +158,7 @@ impl UserRepository for UserRepositoryImpl {
         let result = sqlx::query!(
             r#"INSERT INTO users (id, username, password_hash, first_name, last_name, email, is_admin)
                VALUES ($1, $2, $3, $4, $5, $6, $7)
-               RETURNING id, username, password_hash, first_name, last_name, email, is_admin, created_at, updated_at, last_login"#,
+               RETURNING id, username, password_hash, first_name, last_name, email, is_admin, enabled, created_at, updated_at, last_login"#,
             id,
             input.username,
             input.password_hash,
@@ -174,6 +179,7 @@ impl UserRepository for UserRepositoryImpl {
             last_name: row.last_name,
             email: row.email,
             is_admin: row.is_admin,
+            enabled: row.enabled,
             created_at: row.created_at,
             updated_at: row.updated_at,
             last_login: row.last_login,
@@ -184,13 +190,14 @@ impl UserRepository for UserRepositoryImpl {
         let existing = self.get_user_by_id(input.id).await?;
         let result = sqlx::query!(
             r#"UPDATE users
-               SET first_name = $1, last_name = $2, email = $3, is_admin = $4, updated_at = now()
-               WHERE id = $5
-               RETURNING id, username, password_hash, first_name, last_name, email, is_admin, created_at, updated_at, last_login"#,
+               SET first_name = $1, last_name = $2, email = $3, is_admin = $4, enabled = $5, updated_at = now()
+               WHERE id = $6
+               RETURNING id, username, password_hash, first_name, last_name, email, is_admin, enabled, created_at, updated_at, last_login"#,
             input.first_name.unwrap_or(existing.first_name),
             input.last_name.unwrap_or(existing.last_name),
             input.email.unwrap_or(existing.email),
             input.is_admin.unwrap_or(existing.is_admin),
+            input.enabled.unwrap_or(existing.enabled),
             input.id
         )
         .fetch_one(&self.pool)
@@ -205,6 +212,7 @@ impl UserRepository for UserRepositoryImpl {
             last_name: row.last_name,
             email: row.email,
             is_admin: row.is_admin,
+            enabled: row.enabled,
             created_at: row.created_at,
             updated_at: row.updated_at,
             last_login: row.last_login,

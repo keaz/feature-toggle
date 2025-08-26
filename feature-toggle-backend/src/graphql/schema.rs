@@ -379,4 +379,5 @@ pub struct UpdateUserInput {
     #[graphql(validator(email))]
     pub email: Option<String>,
     pub is_admin: Option<bool>,
+    pub enabled: Option<bool>,
 }

@@ -1,8 +1,8 @@
+use chrono::{TimeZone, Utc};
 use feature_toggle_backend::database::init_pg_pool;
 use feature_toggle_backend::database::user::{user_repository, CreateUser, UpdateUser, UserRepository};
 use feature_toggle_backend::Error;
 use uuid::Uuid;
-use chrono::{Utc, TimeZone};
 
 // Helper to init repo
 async fn repo() -> Box<dyn UserRepository> {
@@ -61,6 +61,7 @@ async fn create_and_update_user_and_last_login() {
         last_name: None,
         email: Some("charles@example.com".into()),
         is_admin: Some(true),
+        enabled: Some(true),
     }).await.unwrap();
 
     assert_eq!(updated.first_name, "Charles");

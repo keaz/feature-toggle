@@ -338,6 +338,7 @@ impl MutationRoot {
             last_name: input.last_name,
             email: input.email,
             is_admin: input.is_admin,
+            enabled: input.enabled,
         }).await?;
         create_user(u)
     }
