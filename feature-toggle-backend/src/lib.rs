@@ -52,16 +52,19 @@ pub async fn run() -> std::io::Result<()> {
         database::feature::feature_repository(db_pool.clone()),
         environment_logic.clone(),
     );
-    let client_logic =
-        logic::client::client_logic(database::client::client_repository(db_pool.clone()));
-    let context_logic =
-        logic::context::context_logic(database::context::context_repository(db_pool.clone()));
-    let user_logic =
-        logic::user::user_logic(database::user::user_repository(db_pool.clone()));
-
     // Create a broadcast channel for feature updates shared between GraphQL mutations and gRPC streaming
     let (updates_tx, _updates_rx) =
         tokio::sync::broadcast::channel::<crate::grpc::pb::FeatureUpdate>(128);
+
+    let client_logic =
+        logic::client::client_logic(database::client::client_repository(db_pool.clone()));
+    let context_logic = logic::context::context_logic(
+        database::context::context_repository(db_pool.clone()),
+        database::feature::feature_repository(db_pool.clone()),
+        updates_tx.clone(),
+    );
+    let user_logic =
+        logic::user::user_logic(database::user::user_repository(db_pool.clone()));
 
     let grpc_pool = db_pool.clone();
     let grpc_updates_tx = updates_tx.clone();

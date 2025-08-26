@@ -1,11 +1,12 @@
-use crate::Error;
 use crate::database::context::{
     ContextRepository, CreateContextInput as DbCreate, UpdateContextInput as DbUpdate,
 };
 use crate::database::entity;
+use crate::database::feature::FeatureRepository;
 use crate::graphql::schema::{
     Context as GqlContext, ContextEntry as GqlContextEntry, CreateContextInput, UpdateContextInput,
 };
+use crate::Error;
 use async_graphql::ID;
 use mockall::automock;
 use uuid::Uuid;
@@ -35,13 +36,75 @@ impl Clone for Box<dyn ContextLogic> {
     }
 }
 
-pub fn context_logic(repository: Box<dyn ContextRepository>) -> Box<dyn ContextLogic> {
-    Box::new(ContextLogicImpl { repository })
+pub fn context_logic(
+    repository: Box<dyn ContextRepository>,
+    feature_repo: Box<dyn FeatureRepository>,
+    updates_tx: tokio::sync::broadcast::Sender<crate::grpc::pb::FeatureUpdate>,
+) -> Box<dyn ContextLogic> {
+    Box::new(ContextLogicImpl { repository, feature_repo, updates_tx })
 }
 
 #[derive(Clone)]
 struct ContextLogicImpl {
     repository: Box<dyn ContextRepository>,
+    feature_repo: Box<dyn FeatureRepository>,
+    updates_tx: tokio::sync::broadcast::Sender<crate::grpc::pb::FeatureUpdate>,
+}
+
+// Helper to map DB Feature to gRPC FeatureFull using repository to load criteria
+async fn map_db_feature_to_full_for_broadcast(
+    repo: &dyn FeatureRepository,
+    f: crate::database::entity::Feature,
+) -> Result<crate::grpc::pb::FeatureFull, crate::Error> {
+    use crate::grpc::pb;
+    // stages with criterias
+    let mut stage_msgs: Vec<pb::FeatureStageFull> = Vec::with_capacity(f.stages.len());
+    for s in f.stages.iter() {
+        let crits = repo.get_stage_criteria(s.id).await?;
+        let criterias = crits
+            .into_iter()
+            .map(|c| pb::StageCriterionFull {
+                id: c.id.to_string(),
+                context_key: c.context_key,
+                context: Some(pb::CriterionContext {
+                    key: c.context.key,
+                    entries: c.context.entries.into_iter().map(|e| e.value).collect(),
+                }),
+                rollout_percentage: c.rollout_percentage,
+            })
+            .collect::<Vec<_>>();
+
+        stage_msgs.push(pb::FeatureStageFull {
+            id: s.id.to_string(),
+            environment_id: s.environment_id.to_string(),
+            order_index: s.order_index,
+            position: s.position.clone(),
+            enabled: s.enabled,
+            bucketing_key: s.bucketing_key.clone().unwrap_or_default(),
+            criterias,
+        });
+    }
+
+    let deps = f
+        .dependencies
+        .iter()
+        .map(|d| pb::FeatureDependencyFull {
+            feature_id: d.feature_id.to_string(),
+            depends_on_id: d.depends_on_id.to_string(),
+        })
+        .collect::<Vec<_>>();
+
+    let feature = pb::FeatureFull {
+        id: f.id.to_string(),
+        key: f.key,
+        description: f.description.unwrap_or_default(),
+        feature_type: format!("{:?}", f.feature_type),
+        team_id: f.team_id.to_string(),
+        created_at: f.created_at.to_rfc3339(),
+        stages: stage_msgs,
+        dependencies: deps,
+    };
+    Ok(feature)
 }
 
 #[async_trait::async_trait]
@@ -109,17 +172,35 @@ impl ContextLogic for ContextLogicImpl {
                 }
             }
         }
-        let id = Uuid::try_from(id).unwrap();
+        let id_uuid = Uuid::try_from(id.clone()).unwrap();
         let updated = self
             .repository
             .update_context(
-                id,
+                id_uuid,
                 DbUpdate {
                     key: input.key,
                     entries: input.entries,
                 },
             )
             .await?;
+
+        // After successful update, broadcast FeatureFull UPSERTs for all features referencing this context
+        if self.updates_tx.receiver_count() > 0 && let Ok(feature_ids) = self.feature_repo.get_feature_ids_by_context_id(id_uuid).await {
+            for fid in feature_ids {
+                if let Ok(db_feature) = self.feature_repo.get_feature_by_id(fid).await {
+                    if let Ok(full) = map_db_feature_to_full_for_broadcast(&*self.feature_repo, db_feature).await {
+                        let _ = self.updates_tx.send(crate::grpc::pb::FeatureUpdate {
+                            message_id: uuid::Uuid::new_v4().to_string(),
+                            action: crate::grpc::pb::feature_update::Action::Upsert as i32,
+                            feature: Some(full),
+                            feature_key: String::new(),
+                            error: String::new(),
+                        });
+                    }
+                }
+            }
+        }
+
         Ok(map_db_to_gql(updated))
     }
 
@@ -154,6 +235,7 @@ mod tests {
     use super::*;
     use crate::database::context::MockContextRepository;
     use crate::database::entity::{Context as DbContext, ContextEntry as DbContextEntry};
+    use crate::database::feature::MockFeatureRepository;
 
     fn sample_db_context(team_id: Uuid) -> DbContext {
         DbContext {
@@ -175,7 +257,13 @@ mod tests {
 
     #[tokio::test]
     async fn create_context_rejects_empty_key() {
-        let logic = super::context_logic(Box::new(MockContextRepository::new()));
+        let (tx, rx) = tokio::sync::broadcast::channel::<crate::grpc::pb::FeatureUpdate>(8);
+        drop(rx);
+        let logic = super::context_logic(
+            Box::new(MockContextRepository::new()),
+            Box::new(MockFeatureRepository::new()),
+            tx,
+        );
         let input = CreateContextInput {
             key: "  ".into(),
             entries: vec!["A".into()],
@@ -186,7 +274,13 @@ mod tests {
 
     #[tokio::test]
     async fn create_context_rejects_duplicate_entries() {
-        let logic = super::context_logic(Box::new(MockContextRepository::new()));
+        let (tx, rx) = tokio::sync::broadcast::channel::<crate::grpc::pb::FeatureUpdate>(8);
+        drop(rx);
+        let logic = super::context_logic(
+            Box::new(MockContextRepository::new()),
+            Box::new(MockFeatureRepository::new()),
+            tx,
+        );
         let input = CreateContextInput {
             key: "k".into(),
             entries: vec!["A".into(), "A".into()],
@@ -199,7 +293,13 @@ mod tests {
 
     #[tokio::test]
     async fn update_context_rejects_empty_key() {
-        let logic = super::context_logic(Box::new(MockContextRepository::new()));
+        let (tx, rx) = tokio::sync::broadcast::channel::<crate::grpc::pb::FeatureUpdate>(8);
+        drop(rx);
+        let logic = super::context_logic(
+            Box::new(MockContextRepository::new()),
+            Box::new(MockFeatureRepository::new()),
+            tx,
+        );
         let input = UpdateContextInput {
             key: Some("".into()),
             entries: None,
@@ -210,7 +310,13 @@ mod tests {
 
     #[tokio::test]
     async fn update_context_rejects_duplicate_entries() {
-        let logic = super::context_logic(Box::new(MockContextRepository::new()));
+        let (tx, rx) = tokio::sync::broadcast::channel::<crate::grpc::pb::FeatureUpdate>(8);
+        drop(rx);
+        let logic = super::context_logic(
+            Box::new(MockContextRepository::new()),
+            Box::new(MockFeatureRepository::new()),
+            tx,
+        );
         let input = UpdateContextInput {
             key: None,
             entries: Some(vec!["X".into(), "X".into()]),
@@ -237,7 +343,13 @@ mod tests {
             .times(1)
             .returning(|tid, _| Ok(sample_db_context(tid)));
 
-        let logic = super::context_logic(Box::new(repo));
+        let (tx, rx) = tokio::sync::broadcast::channel::<crate::grpc::pb::FeatureUpdate>(8);
+        drop(rx);
+        let logic = super::context_logic(
+            Box::new(repo),
+            Box::new(MockFeatureRepository::new()),
+            tx,
+        );
         let input = CreateContextInput {
             key: expected_key.clone(),
             entries: vec!["US".into(), "UK".into()],
@@ -265,7 +377,13 @@ mod tests {
                     ..ctx.clone()
                 })
             });
-        let logic = super::context_logic(Box::new(repo));
+        let (tx, rx) = tokio::sync::broadcast::channel::<crate::grpc::pb::FeatureUpdate>(8);
+        drop(rx);
+        let logic = super::context_logic(
+            Box::new(repo),
+            Box::new(MockFeatureRepository::new()),
+            tx,
+        );
         let input = UpdateContextInput {
             key: Some("country".into()),
             entries: Some(vec!["US".into()]),
@@ -283,7 +401,13 @@ mod tests {
             .withf(move |i| i.to_string() == id_s)
             .times(1)
             .returning(|_| Ok(()));
-        let logic = super::context_logic(Box::new(repo));
+        let (tx, rx) = tokio::sync::broadcast::channel::<crate::grpc::pb::FeatureUpdate>(8);
+        drop(rx);
+        let logic = super::context_logic(
+            Box::new(repo),
+            Box::new(MockFeatureRepository::new()),
+            tx,
+        );
         logic.delete_context(ID::from(id)).await.unwrap();
     }
 }

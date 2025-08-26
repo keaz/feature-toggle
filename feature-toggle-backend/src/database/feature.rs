@@ -125,6 +125,9 @@ pub trait FeatureRepository: Send + Sync {
         criteria: Vec<CreateStageCriterion>,
     ) -> Result<Vec<crate::database::entity::StageCriterion>, Error>;
 
+    // New: get features referencing a given context id
+    async fn get_feature_ids_by_context_id(&self, context_id: Uuid) -> Result<Vec<Uuid>, Error>;
+
     fn clone_box(&self) -> Box<dyn FeatureRepository>;
 }
 
@@ -972,6 +975,20 @@ impl FeatureRepository for FeatureRepositoryImpl {
         }
         tx.commit().await.map_err(Error::DatabaseError)?;
         self.get_stage_contexts(stage_id).await
+    }
+
+    async fn get_feature_ids_by_context_id(&self, context_id: Uuid) -> Result<Vec<Uuid>, Error> {
+        let rows = sqlx::query_scalar!(
+            r#"SELECT DISTINCT f.id
+               FROM features f
+               JOIN features_pipeline_stages s ON s.feature_id = f.id
+               JOIN feature_stage_criteria sc ON sc.stage_id = s.id
+               WHERE sc.context_id = $1"#,
+            context_id
+        )
+        .fetch_all(&self.pool)
+        .await;
+        handle_error(Some(context_id), rows)
     }
 
     fn clone_box(&self) -> Box<dyn FeatureRepository> {
