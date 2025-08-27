@@ -1,6 +1,7 @@
 use chrono::{TimeZone, Utc};
 use feature_toggle_backend::database::init_pg_pool;
 use feature_toggle_backend::database::user::{user_repository, CreateUser, UpdateUser, UserRepository};
+use sqlx::Row;
 use feature_toggle_backend::Error;
 use uuid::Uuid;
 
@@ -101,4 +102,48 @@ async fn unique_violation_is_mapped() {
     }).await.err().unwrap();
 
     match err2 { Error::RecordAlreadyExists(field) => assert_eq!(field, "email"), _ => panic!("unexpected error: {:?}", err2) }
+}
+
+#[tokio::test]
+async fn assign_user_teams_replaces_assignments() {
+    let pool = init_pg_pool().await;
+    let repo = user_repository(pool.clone());
+
+    let user_id: Uuid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".parse().unwrap(); // bob from seed
+    let team_a: Uuid = "51ecc366-f1cd-4d3d-ab73-fa60bad98f27".parse().unwrap(); // Test Team
+    let team_b: Uuid = "3eef17bc-9e06-411d-b5f4-7a786e68bb96".parse().unwrap(); // Update Team
+
+    // Ensure some initial state: set a single team
+    repo.set_user_teams(user_id, vec![team_a]).await.unwrap();
+
+    // Verify one row
+    let count1 = sqlx::query("SELECT COUNT(*) AS c FROM user_teams WHERE user_id = $1")
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .get::<i64, _>("c");
+    assert_eq!(count1, 1);
+
+    // Now replace with two teams
+    repo.set_user_teams(user_id, vec![team_a, team_b]).await.unwrap();
+
+    // Verify two rows
+    let count2 = sqlx::query("SELECT COUNT(*) AS c FROM user_teams WHERE user_id = $1")
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .get::<i64, _>("c");
+    assert_eq!(count2, 2);
+
+    // Replace with zero -> should delete all
+    repo.set_user_teams(user_id, vec![]).await.unwrap();
+    let count3 = sqlx::query("SELECT COUNT(*) AS c FROM user_teams WHERE user_id = $1")
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .get::<i64, _>("c");
+    assert_eq!(count3, 0);
 }

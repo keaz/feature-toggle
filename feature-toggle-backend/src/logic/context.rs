@@ -157,12 +157,10 @@ impl ContextLogic for ContextLogicImpl {
     }
 
     async fn update_context(&self, id: ID, input: UpdateContextInput) -> Result<GqlContext, Error> {
-        if let Some(k) = &input.key {
-            if k.trim().is_empty() {
+        if let Some(k) = &input.key && k.trim().is_empty() {
                 return Err(Error::InvalidInput(
                     "Context key cannot be empty".to_string(),
                 ));
-            }
         }
         if let Some(entries) = &input.entries {
             let mut set = std::collections::HashSet::new();

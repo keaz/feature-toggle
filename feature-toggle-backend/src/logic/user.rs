@@ -25,6 +25,7 @@ pub trait UserLogic: Send + Sync {
     async fn register_user(&self, input: RegisterUserInput) -> Result<GqlUser, Error>;
     async fn authenticate_user(&self, username: String, password: String) -> Result<GqlUser, Error>;
     async fn update_user(&self, id: ID, input: UpdateGqlUserInput) -> Result<GqlUser, Error>;
+    async fn assign_user_teams(&self, id: ID, team_ids: Vec<ID>) -> Result<bool, Error>;
     fn clone_box(&self) -> Box<dyn UserLogic>;
 }
 
@@ -188,6 +189,14 @@ impl UserLogic for UserLogicImpl {
             updated_at: updated.updated_at,
             last_login: updated.last_login,
         })
+    }
+
+    async fn assign_user_teams(&self, id: ID, team_ids: Vec<ID>) -> Result<bool, Error> {
+        let user_id = Uuid::try_from(id).unwrap();
+        let team_ids_uuid: Result<Vec<Uuid>, _> = team_ids.into_iter().map(Uuid::try_from).collect();
+        let team_ids_uuid = team_ids_uuid.map_err(|e| Error::InvalidInput(format!("Invalid team id: {e}")))?;
+        self.repository.set_user_teams(user_id, team_ids_uuid).await?;
+        Ok(true)
     }
 
     fn clone_box(&self) -> Box<dyn UserLogic> { Box::new(self.clone()) }
@@ -461,5 +470,19 @@ mod tests {
             .err()
             .unwrap();
         match err { Error::RecordAlreadyExists(field) => assert_eq!(field, "email"), _ => panic!("wrong error") }
+    }
+
+    #[tokio::test]
+    async fn test_assign_user_teams_delegates_to_repo() {
+        let id = Uuid::new_v4();
+        let t1 = Uuid::new_v4();
+        let t2 = Uuid::new_v4();
+        let mut mock = MockUserRepository::new();
+        mock.expect_set_user_teams()
+            .with(eq(id), function(move |vec: &Vec<Uuid>| vec.len() == 2 && vec.contains(&t1) && vec.contains(&t2)))
+            .return_once(|_, _| Ok(()));
+        let logic = user_logic(Box::new(mock));
+        let ok = logic.assign_user_teams(ID::from(id), vec![ID::from(t1), ID::from(t2)]).await.unwrap();
+        assert!(ok);
     }
 }

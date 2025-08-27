@@ -49,6 +49,7 @@ pub trait UserRepository: Send + Sync {
     async fn create_user(&self, input: CreateUser) -> Result<User, Error>;
     async fn update_user(&self, input: UpdateUser) -> Result<User, Error>;
     async fn update_last_login(&self, id: Uuid, when: DateTime<Utc>) -> Result<(), Error>;
+    async fn set_user_teams(&self, id: Uuid, team_ids: Vec<Uuid>) -> Result<(), Error>;
     fn clone_box(&self) -> Box<dyn UserRepository>;
 }
 
@@ -256,6 +257,34 @@ impl UserRepository for UserRepositoryImpl {
         let row = handle_error(None, query.fetch_one(&self.pool).await)?;
         let exists: bool = row.get::<bool, _>("exists");
         Ok(exists)
+    }
+
+    async fn set_user_teams(&self, id: Uuid, team_ids: Vec<Uuid>) -> Result<(), Error> {
+        let mut tx = self.pool.begin().await.map_err(|e| Error::DatabaseError(e.into()))?;
+        // delete existing assignments
+        handle_error(
+            Some(id),
+            sqlx::query("DELETE FROM user_teams WHERE user_id = $1").bind(id).execute(&mut *tx).await,
+        )?;
+        // insert new ones, if any
+        if !team_ids.is_empty() {
+            // Build a single multi-values insert for efficiency
+            // Use UNNEST for cleaner binding
+            let user_ids: Vec<Uuid> = team_ids.iter().map(|_| id).collect();
+            handle_error(
+                Some(id),
+                sqlx::query(
+                    r#"INSERT INTO user_teams (user_id, team_id)
+                       SELECT * FROM UNNEST($1::uuid[], $2::uuid[])"#,
+                )
+                .bind(&user_ids)
+                .bind(&team_ids)
+                .execute(&mut *tx)
+                .await,
+            )?;
+        }
+        tx.commit().await.map_err(|e| Error::DatabaseError(e.into()))?;
+        Ok(())
     }
 
     fn clone_box(&self) -> Box<dyn UserRepository> {

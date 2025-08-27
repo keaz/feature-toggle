@@ -6,6 +6,13 @@ ALTER TABLE IF EXISTS public.features_pipeline_stages ADD CONSTRAINT features_pi
 ALTER TABLE IF EXISTS public.features_pipeline_stages DROP CONSTRAINT IF EXISTS features_pipeline_stages_parent_stage_id_fkey;
 ALTER TABLE IF EXISTS public.features_pipeline_stages ADD CONSTRAINT features_pipeline_stages_parent_stage_id_fkey FOREIGN KEY (parent_stage_id) REFERENCES public.features_pipeline_stages(id) ON DELETE CASCADE;
 
+-- Ensure user_teams join table exists for seeding
+CREATE TABLE IF NOT EXISTS public.user_teams (
+    user_id UUID NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+    team_id UUID NOT NULL REFERENCES public.teams(id) ON DELETE CASCADE,
+    PRIMARY KEY (user_id, team_id)
+);
+
 -- Delete data in the correct order to avoid foreign key constraint violations
 DELETE
 FROM public.feature_dependencies;
@@ -64,6 +71,13 @@ VALUES ('51ecc366-f1cd-4d3d-ab73-fa60bad98f27', 'Test Team', 'This is a test tea
        ('3eef17bc-9e06-411d-b5f4-7a786e68bb96', 'Update Team', 'This is a test team'),
        ('1ab6ca79-a4fc-44ba-87e2-12884edf17f7', 'Delete Team', 'This is a delete team')
 ON CONFLICT (id) DO NOTHING;
+
+-- Seed user-team assignments
+INSERT INTO public.user_teams(user_id, team_id)
+VALUES ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '51ecc366-f1cd-4d3d-ab73-fa60bad98f27'),
+       ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '3eef17bc-9e06-411d-b5f4-7a786e68bb96'),
+       ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', '51ecc366-f1cd-4d3d-ab73-fa60bad98f27')
+ON CONFLICT (user_id, team_id) DO NOTHING;
 
 INSERT INTO public.environments(id, name, active, team_id)
 VALUES ('51ecc366-f1cd-4d3d-ab73-fa60bad98f27', 'Test Environment', true, '51ecc366-f1cd-4d3d-ab73-fa60bad98f27'),

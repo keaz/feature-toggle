@@ -306,6 +306,12 @@ impl MutationRoot {
         }).await?;
         create_user(u)
     }
+
+    async fn assign_user_teams(&self, ctx: &Context<'_>, user_id: ID, team_ids: Vec<ID>) -> GqlResult<bool> {
+        let logic = ctx.data::<Box<dyn UserLogic>>().unwrap();
+        let ok = logic.assign_user_teams(user_id, team_ids).await?;
+        Ok(ok)
+    }
 }
 
 

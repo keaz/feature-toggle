@@ -108,14 +108,14 @@ pub async fn run() -> std::io::Result<()> {
 
         App::new()
             // Order of wraps: last registered runs first. We want AdminGuard first, then SessionGuard, then AccessLogger.
-            .wrap(SessionGuard::new(cfg.allowed_origin.clone()))
-            .wrap(AdminGuard::new(db_pool.clone(), cfg.allowed_origin.clone(), admin_state.clone()))
-            .wrap(SessionMiddleware::builder(CookieSessionStore::default(), session_key.clone())
-                .cookie_name("d".to_string())
-                .cookie_secure(false) // This should be changed to true in prod
-                .cookie_http_only(true)
-                .cookie_same_site(SameSite::Lax) // This should be changed to None in prod
-                .build())
+            // .wrap(SessionGuard::new(cfg.allowed_origin.clone()))
+            // .wrap(AdminGuard::new(db_pool.clone(), cfg.allowed_origin.clone(), admin_state.clone()))
+            // .wrap(SessionMiddleware::builder(CookieSessionStore::default(), session_key.clone())
+            //     .cookie_name("d".to_string())
+            //     .cookie_secure(false) // This should be changed to true in prod
+            //     .cookie_http_only(true)
+            //     .cookie_same_site(SameSite::Lax) // This should be changed to None in prod
+            //     .build())
             .wrap(AccessLogger)
             .wrap(cors)
             .app_data(web::Data::new(schema.clone()))
