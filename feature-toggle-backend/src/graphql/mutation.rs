@@ -568,3 +568,65 @@ mod tests {
         assert!(!resp_bad.errors.is_empty());
     }
 }
+
+
+#[cfg(test)]
+mod more_mutation_tests {
+    use super::*;
+    use crate::graphql::query::Query as GqlQuery;
+    use crate::logic::context::MockContextLogic;
+    use async_graphql::{EmptySubscription, Request, Schema};
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn test_update_context_mutation_calls_logic() {
+        let mut mock = MockContextLogic::new();
+        let ctx_id = ID::from(Uuid::new_v4());
+        let expected = crate::graphql::schema::Context {
+            id: ctx_id.clone(),
+            team_id: ID::from(Uuid::new_v4()),
+            key: "k".into(),
+            entries: vec![crate::graphql::schema::ContextEntry { id: ID::from(Uuid::new_v4()), value: "A".into() }],
+        };
+        let ctx_id_check = ctx_id.clone();
+        mock.expect_update_context()
+            .times(1)
+            .withf(move |id, input| id == &ctx_id_check && input.key.as_deref() == Some("k2"))
+            .return_once(move |_, _| Ok(expected));
+
+        let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
+            .data::<Box<dyn crate::logic::context::ContextLogic>>(Box::new(mock))
+            .finish();
+
+        let gql = r#"mutation($id: ID!){ updateContext(id: $id, input: { key: "k2" }) { key entries { value } } }"#;
+        let mut req = Request::new(gql);
+        req = req.variables(async_graphql::Variables::from_json(serde_json::json!({"id": ctx_id.to_string()})));
+        let resp = schema.execute(req).await;
+        assert!(resp.errors.is_empty(), "{}", serde_json::to_string(&resp.errors).unwrap());
+        let data = resp.data.into_json().unwrap();
+        assert_eq!(data["updateContext"]["key"], "k");
+    }
+
+    #[tokio::test]
+    async fn test_delete_context_mutation_returns_true() {
+        let mut mock = MockContextLogic::new();
+        let ctx_id = ID::from(Uuid::new_v4());
+        let ctx_id_check = ctx_id.clone();
+        mock.expect_delete_context()
+            .times(1)
+            .withf(move |id| id == &ctx_id_check)
+            .return_once(|_| Ok(()));
+
+        let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
+            .data::<Box<dyn crate::logic::context::ContextLogic>>(Box::new(mock))
+            .finish();
+
+        let gql = r#"mutation($id: ID!){ deleteContext(id: $id) }"#;
+        let mut req = Request::new(gql);
+        req = req.variables(async_graphql::Variables::from_json(serde_json::json!({"id": ctx_id.to_string()})));
+        let resp = schema.execute(req).await;
+        assert!(resp.errors.is_empty(), "{}", serde_json::to_string(&resp.errors).unwrap());
+        let data = resp.data.into_json().unwrap();
+        assert_eq!(data["deleteContext"], true);
+    }
+}
