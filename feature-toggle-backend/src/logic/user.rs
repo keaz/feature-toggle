@@ -26,6 +26,7 @@ pub trait UserLogic: Send + Sync {
     async fn authenticate_user(&self, username: String, password: String) -> Result<GqlUser, Error>;
     async fn update_user(&self, id: ID, input: UpdateGqlUserInput) -> Result<GqlUser, Error>;
     async fn assign_user_teams(&self, id: ID, team_ids: Vec<ID>) -> Result<bool, Error>;
+    async fn search_users(&self, team_id: Option<ID>, name: Option<String>, page_number: i32, page_size: i32) -> Result<(Vec<GqlUser>, i64), Error>;
     fn clone_box(&self) -> Box<dyn UserLogic>;
 }
 
@@ -197,6 +198,23 @@ impl UserLogic for UserLogicImpl {
         let team_ids_uuid = team_ids_uuid.map_err(|e| Error::InvalidInput(format!("Invalid team id: {e}")))?;
         self.repository.set_user_teams(user_id, team_ids_uuid).await?;
         Ok(true)
+    }
+
+    async fn search_users(&self, team_id: Option<ID>, name: Option<String>, page_number: i32, page_size: i32) -> Result<(Vec<GqlUser>, i64), Error> {
+        let team_uuid: Option<Uuid> = match team_id { Some(id) => Some(Uuid::try_from(id).unwrap()), None => None };
+        let (items, total) = self.repository.search_users(team_uuid, name, page_number, page_size).await?;
+        let mapped = items.into_iter().map(|u| GqlUser{
+            id: ID::from(u.id),
+            username: u.username,
+            first_name: u.first_name,
+            last_name: u.last_name,
+            email: u.email,
+            is_admin: u.is_admin,
+            created_at: u.created_at,
+            updated_at: u.updated_at,
+            last_login: u.last_login,
+        }).collect();
+        Ok((mapped, total))
     }
 
     fn clone_box(&self) -> Box<dyn UserLogic> { Box::new(self.clone()) }

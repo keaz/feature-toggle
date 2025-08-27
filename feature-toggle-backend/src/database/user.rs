@@ -2,8 +2,9 @@ use crate::database::handle_error;
 use crate::database::Error;
 use chrono::{DateTime, Utc};
 use mockall::automock;
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Row, Postgres, QueryBuilder};
 use uuid::Uuid;
+use crate::database::entity::Team;
 
 #[derive(Debug, Clone)]
 pub struct User {
@@ -50,6 +51,8 @@ pub trait UserRepository: Send + Sync {
     async fn update_user(&self, input: UpdateUser) -> Result<User, Error>;
     async fn update_last_login(&self, id: Uuid, when: DateTime<Utc>) -> Result<(), Error>;
     async fn set_user_teams(&self, id: Uuid, team_ids: Vec<Uuid>) -> Result<(), Error>;
+    async fn search_users(&self, team_id: Option<Uuid>, name: Option<String>, page_number: i32, page_size: i32) -> Result<(Vec<User>, i64), Error>;
+    async fn get_user_teams(&self, id: Uuid) -> Result<Vec<Team>, Error>;
     fn clone_box(&self) -> Box<dyn UserRepository>;
 }
 
@@ -285,6 +288,83 @@ impl UserRepository for UserRepositoryImpl {
         }
         tx.commit().await.map_err(|e| Error::DatabaseError(e.into()))?;
         Ok(())
+    }
+
+    async fn search_users(&self, team_id: Option<Uuid>, name: Option<String>, page_number: i32, page_size: i32) -> Result<(Vec<User>, i64), Error> {
+        let mut base = QueryBuilder::<Postgres>::new("SELECT u.id, u.username, u.password_hash, u.first_name, u.last_name, u.email, u.is_admin, u.enabled, u.created_at, u.updated_at, u.last_login FROM users u");
+        if team_id.is_some() {
+            base.push(" JOIN user_teams ut ON ut.user_id = u.id");
+        }
+        base.push(" WHERE 1=1");
+        if let Some(tid) = team_id {
+            base.push(" AND ut.team_id = ").push_bind(tid);
+        }
+        if let Some(n) = name.clone() {
+            let pattern = format!("%{}%", n);
+            base.push(" AND (u.first_name ILIKE ").push_bind(pattern.clone())
+                .push(" OR u.last_name ILIKE ").push_bind(pattern.clone())
+                .push(" OR u.username ILIKE ").push_bind(pattern)
+                .push(")");
+        }
+        // Pagination
+        let page = if page_number < 1 { 1 } else { page_number } as i64;
+        let size = if page_size < 1 { 10 } else { page_size } as i64;
+        let offset = (page - 1) * size;
+        base.push(" ORDER BY u.username ASC LIMIT ").push_bind(size).push(" OFFSET ").push_bind(offset);
+
+        let rows = handle_error(None, base.build().fetch_all(&self.pool).await)?;
+        let mut users: Vec<User> = Vec::with_capacity(rows.len());
+        for row in rows {
+            users.push(User {
+                id: row.get::<Uuid, _>(0),
+                username: row.get::<String, _>(1),
+                password_hash: row.get::<String, _>(2),
+                first_name: row.get::<String, _>(3),
+                last_name: row.get::<String, _>(4),
+                email: row.get::<String, _>(5),
+                is_admin: row.get::<bool, _>(6),
+                enabled: row.get::<bool, _>(7),
+                created_at: row.get::<DateTime<Utc>, _>(8),
+                updated_at: row.get::<DateTime<Utc>, _>(9),
+                last_login: row.try_get::<DateTime<Utc>, _>(10).ok(),
+            });
+        }
+
+        // Total count
+        let mut cnt = QueryBuilder::<Postgres>::new("SELECT COUNT(DISTINCT u.id) AS c FROM users u");
+        if team_id.is_some() {
+            cnt.push(" JOIN user_teams ut ON ut.user_id = u.id");
+        }
+        cnt.push(" WHERE 1=1");
+        if let Some(tid) = team_id {
+            cnt.push(" AND ut.team_id = ").push_bind(tid);
+        }
+        if let Some(n) = name {
+            let pattern = format!("%{}%", n);
+            cnt.push(" AND (u.first_name ILIKE ").push_bind(pattern.clone())
+                .push(" OR u.last_name ILIKE ").push_bind(pattern.clone())
+                .push(" OR u.username ILIKE ").push_bind(pattern)
+                .push(")");
+        }
+        let row = handle_error(None, cnt.build().fetch_one(&self.pool).await)?;
+        let total: i64 = row.get::<i64, _>(0);
+
+        Ok((users, total))
+    }
+
+    async fn get_user_teams(&self, id: Uuid) -> Result<Vec<Team>, Error> {
+        let result = sqlx::query_as::<_, Team>(
+            r#"SELECT t.id, t.name, t.description
+               FROM teams t
+               INNER JOIN user_teams ut ON ut.team_id = t.id
+               WHERE ut.user_id = $1
+               ORDER BY t.name"#
+        )
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await;
+        let teams = handle_error(Some(id), result)?;
+        Ok(teams)
     }
 
     fn clone_box(&self) -> Box<dyn UserRepository> {

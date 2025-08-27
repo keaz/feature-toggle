@@ -307,10 +307,21 @@ impl MutationRoot {
         create_user(u)
     }
 
-    async fn assign_user_teams(&self, ctx: &Context<'_>, user_id: ID, team_ids: Vec<ID>) -> GqlResult<bool> {
+    async fn assign_user_teams(&self, ctx: &Context<'_>, user_id: ID, team_ids: Vec<ID>) -> GqlResult<Vec<Team>> {
         let logic = ctx.data::<Box<dyn UserLogic>>().unwrap();
-        let ok = logic.assign_user_teams(user_id, team_ids).await?;
-        Ok(ok)
+        let _ = logic.assign_user_teams(user_id.clone(), team_ids).await?;
+        // Fetch assigned teams to return
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        let uid = uuid::Uuid::try_from(user_id).map_err(|e| async_graphql::Error::new(e.to_string()))?;
+        let repo = crate::database::user::user_repository(pool.clone());
+        let teams = repo
+            .get_user_teams(uid)
+            .await
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+        Ok(teams
+            .into_iter()
+            .map(|t| Team { id: async_graphql::ID::from(t.id), name: t.name, description: t.description })
+            .collect())
     }
 }
 

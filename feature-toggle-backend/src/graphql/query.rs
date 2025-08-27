@@ -1,6 +1,6 @@
 use crate::graphql::create_user;
 use crate::graphql::schema::{
-    Client, ClientType, Environment, Feature, FeatureType, Pipeline, Team, User,
+    Client, ClientType, Environment, Feature, FeatureType, Pipeline, Team, User, UsersPage,
 };
 use crate::logic::client::ClientLogic;
 use crate::logic::context::ContextLogic;
@@ -170,6 +170,25 @@ impl Query {
         let logic = ctx.data::<Box<dyn UserLogic>>().unwrap();
         let u = logic.get_user_by_username(username).await?;
         create_user(u)
+    }
+
+    async fn users(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Filter by team id")] team_id: Option<ID>,
+        #[graphql(desc = "Search by first/last/username (ILIKE)")] name: Option<String>,
+        #[graphql(desc = "Page number (1-based)")] page_number: i32,
+        #[graphql(desc = "Page size")] page_size: i32,
+    ) -> GqlResult<UsersPage> {
+        let logic = ctx.data::<Box<dyn UserLogic>>().unwrap();
+        let (items, total) = logic
+            .search_users(team_id, name, page_number, page_size)
+            .await?;
+        let items: Vec<User> = items
+            .into_iter()
+            .map(create_user)
+            .collect::<Result<_, _>>()?;
+        Ok(UsersPage { items, page_number, page_size, total })
     }
 }
 

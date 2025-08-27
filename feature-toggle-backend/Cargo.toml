@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 actix-web = "4.11.0"
-async-graphql = { version = "7.0.17", features = ["uuid", "apollo_tracing"] }
+async-graphql = { version = "7.0.17", features = ["uuid", "apollo_tracing", "dataloader"] }
 async-graphql-actix-web = "7.0.17"
 tokio = { version = "1.45.1", features = ["full"] }
 evaluation-engine = { path = "../evaluation-engine" }

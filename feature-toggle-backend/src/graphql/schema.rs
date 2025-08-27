@@ -1,4 +1,4 @@
-use async_graphql::{Enum, InputObject, SimpleObject, ID};
+use async_graphql::{ComplexObject, Enum, InputObject, Result as GqlResult, SimpleObject, ID};
 use serde::{Deserialize, Serialize};
 
 #[derive(Enum, Copy, Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
@@ -343,6 +343,7 @@ pub struct CreateStageCriterionInput {
 
 // Users GraphQL types
 #[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
+#[graphql(complex)]
 pub struct User {
     pub id: ID,
     pub username: String,
@@ -353,6 +354,42 @@ pub struct User {
     pub created_at: String,
     pub updated_at: String,
     pub last_login: Option<String>,
+}
+
+#[ComplexObject]
+impl User {
+    pub async fn teams(&self, ctx: &async_graphql::Context<'_>) -> GqlResult<Vec<Team>> {
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        let uid = uuid::Uuid::try_from(self.id.clone()).map_err(|e| async_graphql::Error::new(e.to_string()))?;
+        let repo = crate::database::user::user_repository(pool.clone());
+        let teams = repo
+            .get_user_teams(uid)
+            .await
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+        Ok(teams
+            .into_iter()
+            .map(|t| Team { id: async_graphql::ID::from(t.id), name: t.name, description: t.description })
+            .collect())
+    }
+
+    pub async fn team_ids(&self, ctx: &async_graphql::Context<'_>) -> GqlResult<Vec<ID>> {
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        let uid = uuid::Uuid::try_from(self.id.clone()).map_err(|e| async_graphql::Error::new(e.to_string()))?;
+        let repo = crate::database::user::user_repository(pool.clone());
+        let teams = repo
+            .get_user_teams(uid)
+            .await
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+        Ok(teams.into_iter().map(|t| ID::from(t.id)).collect())
+    }
+}
+
+#[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
+pub struct UsersPage {
+    pub items: Vec<User>,
+    pub page_number: i32,
+    pub page_size: i32,
+    pub total: i64,
 }
 
 #[derive(InputObject, Debug)]
