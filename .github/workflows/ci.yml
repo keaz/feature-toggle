@@ -65,6 +65,8 @@ jobs:
           cargo install cargo-llvm-cov
 
       - name: Run coverage
+        env:
+          DATABASE_URL: postgres://postgres:local123@localhost:5432/feature_toggle
         run: |
           cargo llvm-cov --lcov --output-path lcov.info
 
@@ -74,6 +76,4 @@ jobs:
           files: lcov.info
           flags: unittests
           fail_ci_if_error: true
-        env:
-          DATABASE_URL: postgres://postgres:local123@localhost:5432/feature_toggle
         
