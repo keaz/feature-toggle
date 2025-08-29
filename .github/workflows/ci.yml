@@ -73,7 +73,8 @@ jobs:
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
-          files: lcov.info
-          flags: unittests
-          fail_ci_if_error: true
+            files: lcov.info
+            flags: unittests
+            fail_ci_if_error: true
+            token: ${{ secrets.CODECOV_TOKEN }}
         
