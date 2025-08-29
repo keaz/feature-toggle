@@ -360,8 +360,15 @@ impl FeatureLogic for FeatureLogicImpl {
             StageChangeRequestType::RollbackRejected => "ROLLBACK_REJECTED",
             StageChangeRequestType::Rollbacked => "ROLLBACKED",
         };
-        let now = chrono::Utc::now();
-        let ok = self.repository.request_stage_change(stage_uuid, status_str, user_id, now).await?;
+        let ok = match request {
+            StageChangeRequestType::DeploymentRequested | StageChangeRequestType::RollbackRequested => {
+                let now = chrono::Utc::now();
+                self.repository.request_stage_change(stage_uuid, status_str, user_id, now).await?
+            }
+            StageChangeRequestType::DeploymentRejected | StageChangeRequestType::Deployed | StageChangeRequestType::RollbackRejected | StageChangeRequestType::Rollbacked => {
+                self.repository.approve_or_reject_stage_change(stage_uuid, status_str, user_id).await?
+            }
+        };
         if !ok {
             return Err(Error::NotFound(Uuid::try_from(stage_id).unwrap()));
         }

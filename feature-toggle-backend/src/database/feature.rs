@@ -132,6 +132,9 @@ pub trait FeatureRepository: Send + Sync {
     // New (deployment workflow): request stage change
     async fn request_stage_change(&self, stage_id: Uuid, status: &str, requested_user: Uuid, when: chrono::DateTime<chrono::Utc>) -> Result<bool, Error>;
 
+    // Approve or reject a stage change (sets approved_user and approved_time)
+    async fn approve_or_reject_stage_change(&self, stage_id: Uuid, status: &str, user_id: Uuid) -> Result<bool, Error>;
+
     // Helper: find owning feature id for a stage
     async fn get_feature_id_by_stage_id(&self, stage_id: Uuid) -> Result<Option<Uuid>, Error>;
 
@@ -1008,6 +1011,23 @@ impl FeatureRepository for FeatureRepositoryImpl {
         .bind(status)
         .bind(requested_user)
         .bind(when)
+        .bind(stage_id)
+        .execute(&self.pool)
+        .await;
+        let res = handle_error(Some(stage_id), result)?;
+        Ok(res.rows_affected() == 1)
+    }
+
+    async fn approve_or_reject_stage_change(&self, stage_id: Uuid, status: &str, user_id: Uuid) -> Result<bool, Error> {
+        let now = chrono::Utc::now();
+        let result = sqlx::query(
+            r#"UPDATE features_pipeline_stages
+               SET status = $1, approved_user = $2, approved_time = $3
+               WHERE id = $4"#,
+        )
+        .bind(status)
+        .bind(user_id)
+        .bind(now)
         .bind(stage_id)
         .execute(&self.pool)
         .await;
