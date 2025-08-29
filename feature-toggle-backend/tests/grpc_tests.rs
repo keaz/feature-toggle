@@ -90,6 +90,7 @@ async fn evaluate_validation_errors() {
                         position: "Start".into(),
                         enabled: true,
                         bucketing_key: None,
+                        status: "NOT_DEPLOYED".into(),
                     };
                     Ok(vec![db::Feature {
                         id: fid,
@@ -236,6 +237,7 @@ async fn evaluate_auth_and_success() {
                         position: "Start".into(),
                         enabled: true,
                         bucketing_key: None,
+                        status: "NOT_DEPLOYED".into(),
                     };
                     Ok(vec![db::Feature {
                         id: fid,
@@ -359,6 +361,7 @@ async fn get_feature_by_key_and_stream_branches() {
                         position: "Start".into(),
                         enabled: true,
                         bucketing_key: None,
+                        status: "NOT_DEPLOYED".into(),
                     };
                     Ok(vec![db::Feature {
                         id: fid,

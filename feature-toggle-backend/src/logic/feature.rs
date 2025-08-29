@@ -14,6 +14,16 @@ use uuid::Uuid;
 
 use mockall::automock;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StageChangeRequestType {
+    DeploymentRequested,
+    DeploymentRejected,
+    Deployed,
+    RollbackRequested,
+    RollbackRejected,
+    Rollbacked,
+}
+
 #[automock]
 #[async_trait::async_trait]
 pub trait FeatureLogic: Send + Sync {
@@ -50,6 +60,12 @@ pub trait FeatureLogic: Send + Sync {
         stage_id: ID,
         criteria: Vec<crate::graphql::schema::CreateStageCriterionInput>,
     ) -> Result<Vec<crate::graphql::schema::StageCriterion>, Error>;
+
+    // Deployment workflow
+    async fn request_stage_change(&self, stage_id: ID, request: StageChangeRequestType, user_id: Uuid) -> Result<Feature, Error>;
+
+    // Helper for GraphQL broadcasting: get owning feature id by stage id
+    async fn get_feature_id_by_stage_id(&self, stage_id: ID) -> Result<Option<Uuid>, Error>;
 
     fn clone_box(&self) -> Box<dyn FeatureLogic>;
 }
@@ -223,8 +239,20 @@ impl FeatureLogic for FeatureLogicImpl {
                 stage.bucketing_key = b.clone();
             }
         }
+        // Populate status on stages from the database entity
+        let status_map: std::collections::HashMap<String, String> = feature
+            .stages
+            .iter()
+            .map(|s| (s.id.to_string(), s.status.clone()))
+            .collect();
+        for stage in stages.iter_mut() {
+            if let Some(st) = status_map.get(&stage.id.to_string()) {
+                stage.status = st.clone();
+            }
+        }
 
         let mut feature = Self::map_entity_to_graphql_feature(feature);
+        stages.sort_by(|a, b| a.order_index.cmp(&b.order_index));
         feature.stages = stages;
         feature.relationships = relationships;
         Ok(feature)
@@ -322,6 +350,34 @@ impl FeatureLogic for FeatureLogicImpl {
         Ok(list.into_iter().map(map_db_criterion_to_gql).collect())
     }
 
+    async fn request_stage_change(&self, stage_id: ID, request: StageChangeRequestType, user_id: Uuid) -> Result<Feature, Error> {
+        let stage_uuid = Uuid::try_from(stage_id.clone()).unwrap();
+        let status_str = match request {
+            StageChangeRequestType::DeploymentRequested => "DEPLOYMENT_REQUESTED",
+            StageChangeRequestType::DeploymentRejected => "DEPLOYMENT_REJECTED",
+            StageChangeRequestType::Deployed => "DEPLOYED",
+            StageChangeRequestType::RollbackRequested => "ROLLBACK_REQUESTED",
+            StageChangeRequestType::RollbackRejected => "ROLLBACK_REJECTED",
+            StageChangeRequestType::Rollbacked => "ROLLBACKED",
+        };
+        let now = chrono::Utc::now();
+        let ok = self.repository.request_stage_change(stage_uuid, status_str, user_id, now).await?;
+        if !ok {
+            return Err(Error::NotFound(Uuid::try_from(stage_id).unwrap()));
+        }
+        // Load the owning feature of this stage and return it, mapped to GraphQL Feature
+        if let Some(fid) = self.repository.get_feature_id_by_stage_id(stage_uuid).await? {
+            let db_feature = self.repository.get_feature_by_id(fid).await?;
+            return Ok(FeatureLogicImpl::map_entity_to_graphql_feature(db_feature));
+        }
+        Err(Error::NotFound(stage_uuid))
+    }
+
+    async fn get_feature_id_by_stage_id(&self, stage_id: ID) -> Result<Option<Uuid>, Error> {
+        let stage_uuid = Uuid::try_from(stage_id).unwrap();
+        self.repository.get_feature_id_by_stage_id(stage_uuid).await
+    }
+
     fn clone_box(&self) -> Box<dyn FeatureLogic> {
         Box::new(self.clone())
     }
@@ -376,6 +432,7 @@ fn stage_factory(
         position,
         enabled,
         bucketing_key: None,
+        status: "NOT_DEPLOYED".to_string(),
     }
 }
 

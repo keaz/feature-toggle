@@ -108,14 +108,14 @@ pub async fn run() -> std::io::Result<()> {
 
         App::new()
             // Order of wraps: last registered runs first. We want AdminGuard first, then SessionGuard, then AccessLogger.
-            // .wrap(SessionGuard::new(cfg.allowed_origin.clone()))
-            // .wrap(AdminGuard::new(db_pool.clone(), cfg.allowed_origin.clone(), admin_state.clone()))
-            // .wrap(SessionMiddleware::builder(CookieSessionStore::default(), session_key.clone())
-            //     .cookie_name("d".to_string())
-            //     .cookie_secure(false) // This should be changed to true in prod
-            //     .cookie_http_only(true)
-            //     .cookie_same_site(SameSite::Lax) // This should be changed to None in prod
-            //     .build())
+            .wrap(SessionGuard::new(cfg.allowed_origin.clone()))
+            .wrap(AdminGuard::new(db_pool.clone(), cfg.allowed_origin.clone(), admin_state.clone()))
+            .wrap(SessionMiddleware::builder(CookieSessionStore::default(), session_key.clone())
+                .cookie_name("d".to_string())
+                .cookie_secure(false) // This should be changed to true in prod
+                .cookie_http_only(true)
+                .cookie_same_site(SameSite::Lax) // This should be changed to None in prod
+                .build())
             .wrap(AccessLogger)
             .wrap(cors)
             .app_data(web::Data::new(schema.clone()))
@@ -142,12 +142,27 @@ pub async fn run() -> std::io::Result<()> {
     .await
 }
 
+#[derive(Clone)]
+pub struct SessionUser {
+    pub id: uuid::Uuid,
+}
+
 async fn graphql_handler(
     schema: web::Data<Schema<Query, MutationRoot, EmptySubscription>>,
     session: Session,
     req: GraphQLRequest,
 ) -> GraphQLResponse {
-    let inner = req.into_inner();
+    let mut inner = req.into_inner();
+
+    // Inject session user id into the GraphQL request data (if present)
+    if let Ok(maybe_uid) = session.get::<String>("user_id") {
+        if let Some(uid_str) = maybe_uid {
+            if let Ok(uid) = uuid::Uuid::parse_str(&uid_str) {
+                inner = inner.data(SessionUser { id: uid });
+            }
+        }
+    }
+
     let is_login = inner.query.contains("mutation") && inner.query.contains("login");
 
     let resp = schema.execute(inner).await;

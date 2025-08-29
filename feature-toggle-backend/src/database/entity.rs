@@ -54,6 +54,7 @@ pub struct FeaturePipelineStage {
     pub position: String,
     pub enabled: bool,
     pub bucketing_key: Option<String>,
+    pub status: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]

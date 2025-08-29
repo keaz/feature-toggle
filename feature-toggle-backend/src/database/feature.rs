@@ -83,6 +83,7 @@ struct FeatureWithStageRow {
     position: Option<String>,
     enabled: Option<bool>,
     bucketing_key: Option<String>,
+    status: Option<String>,
 }
 
 #[derive(Debug, sqlx::FromRow, Clone)]
@@ -128,6 +129,12 @@ pub trait FeatureRepository: Send + Sync {
     // New: get features referencing a given context id
     async fn get_feature_ids_by_context_id(&self, context_id: Uuid) -> Result<Vec<Uuid>, Error>;
 
+    // New (deployment workflow): request stage change
+    async fn request_stage_change(&self, stage_id: Uuid, status: &str, requested_user: Uuid, when: chrono::DateTime<chrono::Utc>) -> Result<bool, Error>;
+
+    // Helper: find owning feature id for a stage
+    async fn get_feature_id_by_stage_id(&self, stage_id: Uuid) -> Result<Option<Uuid>, Error>;
+
     fn clone_box(&self) -> Box<dyn FeatureRepository>;
 }
 
@@ -165,7 +172,7 @@ impl FeatureRepositoryImpl {
         parent_stage_id: Option<&Uuid>,
     ) -> Result<Vec<FeaturePipelineStage>, Error> {
         let mut query_builder = sqlx::QueryBuilder::new(
-            r#"SELECT id, feature_id, environment_id, order_index, parent_stage_id, position, enabled, bucketing_key FROM features_pipeline_stages"#,
+            r#"SELECT id, feature_id, environment_id, order_index, parent_stage_id, position, enabled, bucketing_key, status FROM features_pipeline_stages"#,
         );
 
         let mut has_where = false;
@@ -507,6 +514,7 @@ impl FeatureRepositoryImpl {
                     position: r.position.unwrap(),
                     enabled: r.enabled.unwrap(),
                     bucketing_key: r.bucketing_key,
+                    status: r.status.unwrap_or_else(|| "NOT_DEPLOYED".to_string()),
                 })
             })
             .collect::<Vec<FeaturePipelineStage>>();
@@ -720,7 +728,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
         let result = sqlx::query_as::<_, FeatureWithStageRow>(
             r#"SELECT f.id as feature_id, f.key as feature_key, f.description, f.feature_type, f.team_id, f.created_at, 
             s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
-            s.parent_stage_id, s.position, s.enabled, s.bucketing_key
+            s.parent_stage_id, s.position, s.enabled, s.bucketing_key, s.status
 			FROM features f LEFT JOIN features_pipeline_stages s ON f.id = s.feature_id
 			WHERE f.id = $1"#,
         )
@@ -751,7 +759,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
         let mut query_builder = sqlx::QueryBuilder::new(
             r#"SELECT f.id as feature_id, f.key as feature_key, f.description, f.feature_type, f.team_id, f.created_at, 
             s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
-            s.parent_stage_id, s.position, s.enabled, s.bucketing_key
+            s.parent_stage_id, s.position, s.enabled, s.bucketing_key, s.status
 			FROM features f LEFT JOIN features_pipeline_stages s ON f.id = s.feature_id"#,
         );
         query_builder.push(" WHERE f.team_id = ").push_bind(team_id);
@@ -989,6 +997,32 @@ impl FeatureRepository for FeatureRepositoryImpl {
         .fetch_all(&self.pool)
         .await;
         handle_error(Some(context_id), rows)
+    }
+
+    async fn request_stage_change(&self, stage_id: Uuid, status: &str, requested_user: Uuid, when: chrono::DateTime<chrono::Utc>) -> Result<bool, Error> {
+        let result = sqlx::query(
+            r#"UPDATE features_pipeline_stages
+               SET status = $1, requested_user = $2, requested_time = $3, approved_user = NULL, approved_time = NULL
+               WHERE id = $4"#,
+        )
+        .bind(status)
+        .bind(requested_user)
+        .bind(when)
+        .bind(stage_id)
+        .execute(&self.pool)
+        .await;
+        let res = handle_error(Some(stage_id), result)?;
+        Ok(res.rows_affected() == 1)
+    }
+
+    async fn get_feature_id_by_stage_id(&self, stage_id: Uuid) -> Result<Option<Uuid>, Error> {
+        let row = sqlx::query_scalar!(
+            r#"SELECT feature_id FROM features_pipeline_stages WHERE id = $1"#,
+            stage_id
+        )
+        .fetch_optional(&self.pool)
+        .await;
+        handle_error(Some(stage_id), row)
     }
 
     fn clone_box(&self) -> Box<dyn FeatureRepository> {

@@ -13,6 +13,22 @@ use async_graphql::{Context, Error, Object, Result as GqlResult, ID};
 use log::info;
 use uuid::Uuid;
 
+#[derive(async_graphql::Enum, Copy, Clone, Eq, PartialEq, Debug)]
+pub enum StageChangeRequest {
+    #[graphql(name = "DEPLOYMENT_REQUESTED")]
+    DeploymentRequested,
+    #[graphql(name = "DEPLOYMENT_REJECTED")]
+    DeploymentRejected,
+    #[graphql(name = "DEPLOYED")]
+    Deployed,
+    #[graphql(name = "ROLLBACK_REQUESTED")]
+    RollbackRequested,
+    #[graphql(name = "ROLLBACK_REJECTED")]
+    RollbackRejected,
+    #[graphql(name = "ROLLBACKED")]
+    Rollbacked,
+}
+
 pub struct MutationRoot;
 
 #[Object]
@@ -235,18 +251,12 @@ impl MutationRoot {
         let result = logic.set_stage_criteria(stage_id.clone(), criteria).await?;
 
         // After updating criterias for a stage, broadcast an UPSERT for the owning feature
-        if let (Ok(pool), Ok(updates_tx)) = (
+        if let (Ok(pool), Ok(updates_tx), Ok(feature_logic)) = (
             ctx.data::<sqlx::PgPool>(),
             ctx.data::<tokio::sync::broadcast::Sender<crate::grpc::pb::FeatureUpdate>>(),
-        ) && let Ok(stage_uuid) = uuid::Uuid::try_from(stage_id.clone()) {
-            // Find the owning feature id for this stage
-            if let Ok(Some(feature_id)) = sqlx::query_scalar!(
-                r#"SELECT feature_id FROM features_pipeline_stages WHERE id = $1"#,
-                stage_uuid
-            )
-            .fetch_optional(pool)
-            .await
-            {
+            ctx.data::<Box<dyn crate::logic::feature::FeatureLogic>>()
+        ) {
+            if let Ok(Some(feature_id)) = feature_logic.get_feature_id_by_stage_id(stage_id.clone()).await {
                 let repo = crate::database::feature::feature_repository(pool.clone());
                 if let Ok(db_feature) = repo.get_feature_by_id(feature_id).await && let Ok(full) =
                     map_db_feature_to_full_for_broadcast(pool.clone(), db_feature).await
@@ -263,6 +273,29 @@ impl MutationRoot {
         }
 
         Ok(result)
+    }
+
+    // Deployment workflow: request stage change
+    async fn request_stage_change(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Id of the feature stage")] stage_id: ID,
+        #[graphql(desc = "Requested change type")] request: StageChangeRequest,
+    ) -> GqlResult<Feature> {
+        // Get user id from session (injected in request data by graphql_handler)
+        let session_user = ctx.data_opt::<crate::SessionUser>().cloned();
+        let user = session_user.ok_or_else(|| async_graphql::Error::new("User session not found"))?;
+        let logic = ctx.data::<Box<dyn crate::logic::feature::FeatureLogic>>().unwrap();
+        let req = match request {
+            StageChangeRequest::DeploymentRequested => crate::logic::feature::StageChangeRequestType::DeploymentRequested,
+            StageChangeRequest::DeploymentRejected => crate::logic::feature::StageChangeRequestType::DeploymentRejected,
+            StageChangeRequest::Deployed => crate::logic::feature::StageChangeRequestType::Deployed,
+            StageChangeRequest::RollbackRequested => crate::logic::feature::StageChangeRequestType::RollbackRequested,
+            StageChangeRequest::RollbackRejected => crate::logic::feature::StageChangeRequestType::RollbackRejected,
+            StageChangeRequest::Rollbacked => crate::logic::feature::StageChangeRequestType::Rollbacked,
+        };
+        let feature = logic.request_stage_change(stage_id.clone(), req, user.id).await.map_err(|e| async_graphql::Error::new(e.to_string()))?;
+        Ok(feature)
     }
 
     // User mutations

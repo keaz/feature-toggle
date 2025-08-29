@@ -43,6 +43,7 @@ pub struct FeatureStage {
     pub position: String,
     pub enabled: bool,
     pub bucketing_key: Option<String>,
+    pub status: String,
 }
 
 #[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
