@@ -54,7 +54,26 @@ jobs:
           DATABASE_URL: postgres://postgres:local123@localhost:5432/feature_toggle
         run: cargo build --verbose
 
-      - name: Run tests
+      # - name: Run tests
+      #   env:
+      #     DATABASE_URL: postgres://postgres:local123@localhost:5432/feature_toggle
+      #   run: cargo test --verbose
+
+      - name: Install llvm-tools and cargo-llvm-cov
+        run: |
+          rustup component add llvm-tools-preview
+          cargo install cargo-llvm-cov
+
+      - name: Run coverage
+        run: |
+          cargo llvm-cov --lcov --output-path lcov.info
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: lcov.info
+          flags: unittests
+          fail_ci_if_error: true
         env:
           DATABASE_URL: postgres://postgres:local123@localhost:5432/feature_toggle
-        run: cargo test --verbose
+        
