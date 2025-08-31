@@ -118,9 +118,14 @@ impl FeatureEvaluationSvc {
                     rollout_percentage: c.rollout_percentage,
                 })
                 .collect::<Vec<_>>();
+            let effective_status = if s.status == "DEPLOYED" || s.enabled {
+                "DEPLOYED".to_string()
+            } else {
+                s.status
+            };
             stages.push(engine::FeatureStage {
                 environment_id: s.environment_id.to_string(),
-                enabled: s.enabled,
+                status: effective_status,
                 bucketing_key: s.bucketing_key,
                 criterias: mapped_criteria,
             });

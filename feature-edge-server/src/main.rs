@@ -111,7 +111,7 @@ fn map_proto_to_engine(f: &pb::FeatureFull) -> engine::Feature {
         .iter()
         .map(|s| engine::FeatureStage {
             environment_id: s.environment_id.clone(),
-            enabled: s.enabled,
+            status: if s.enabled { "DEPLOYED".to_string() } else { "NOT_DEPLOYED".to_string() },
             bucketing_key: if s.bucketing_key.is_empty() {
                 None
             } else {

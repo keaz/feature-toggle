@@ -18,13 +18,13 @@ fn mk_ctx(feature: &str, env: &str, pairs: &[(&str, &str)]) -> FeatureEvaluation
 
 fn stage(
     env: &str,
-    enabled: bool,
+    status: &str,
     bucketing: Option<&str>,
     criterias: Vec<StageCriterion>,
 ) -> FeatureStage {
     FeatureStage {
         environment_id: env.to_string(),
-        enabled,
+        status: status.to_string(),
         bucketing_key: bucketing.map(|s| s.to_string()),
         criterias,
     }
@@ -55,7 +55,7 @@ fn evaluate_returns_false_when_feature_disabled() {
 #[test]
 fn evaluate_requires_matching_environment_stage() {
     let ctx = mk_ctx("feat", "env-a", &[]);
-    let stg = stage("env-b", true, None, vec![]);
+    let stg = stage("env-b", "DEPLOYED", None, vec![]);
     let feature = Feature {
         enabled: true,
         dependencies: vec![],
@@ -67,7 +67,7 @@ fn evaluate_requires_matching_environment_stage() {
 #[test]
 fn evaluate_requires_stage_enabled() {
     let ctx = mk_ctx("feat", "env-a", &[]);
-    let stg = stage("env-a", false, None, vec![]);
+    let stg = stage("env-a", "NOT_DEPLOYED", None, vec![]);
     let feature = Feature {
         enabled: true,
         dependencies: vec![],
@@ -79,7 +79,7 @@ fn evaluate_requires_stage_enabled() {
 #[test]
 fn evaluate_passes_when_no_criteria_and_enabled_stage() {
     let ctx = mk_ctx("feat", "env-a", &[]);
-    let stg = stage("env-a", true, None, vec![]);
+    let stg = stage("env-a", "DEPLOYED", None, vec![]);
     let feature = Feature {
         enabled: true,
         dependencies: vec![],
@@ -94,7 +94,7 @@ fn evaluate_fails_without_bucketing_identity_when_criteria_present() {
     let ctx = mk_ctx("feat", "env-a", &[("irrelevant", "x")]);
     let stg = stage(
         "env-a",
-        true,
+        "DEPLOYED",
         None,
         vec![criterion("country", &["US"], 100)],
     );
@@ -112,7 +112,7 @@ fn evaluate_respects_custom_bucketing_key() {
     let ctx = mk_ctx("feat", "env-a", &[("userId", "alice"), ("country", "US")]);
     let stg = stage(
         "env-a",
-        true,
+        "DEPLOYED",
         Some("userId"),
         vec![criterion("country", &["US"], 100)],
     );
@@ -128,7 +128,7 @@ fn evaluate_respects_custom_bucketing_key() {
 fn evaluate_respects_rollout_percentage_thresholds() {
     // Use a deterministic sticky value so hash bucket is stable; try two identities and assert
     let mk = |user: &str| mk_ctx("my-feature", "prod", &[("user.id", user), ("segment", "A")]);
-    let stg = |pct: i32| stage("prod", true, None, vec![criterion("segment", &["A"], pct)]);
+    let stg = |pct: i32| stage("prod", "DEPLOYED", None, vec![criterion("segment", &["A"], pct)]);
 
     // With 0% rollout nobody should pass
     let f0 = Feature {
@@ -154,7 +154,7 @@ fn evaluate_requires_matching_context_value() {
     let ctx = mk_ctx("feat", "env-a", &[("user.id", "bob"), ("country", "UK")]);
     let stg = stage(
         "env-a",
-        true,
+        "DEPLOYED",
         None,
         vec![criterion("country", &["US", "CA"], 100)],
     );
@@ -174,18 +174,18 @@ fn evaluate_all_dependencies_must_pass() {
     let dep1 = Feature {
         enabled: true,
         dependencies: vec![],
-        stages: vec![stage("env", true, None, vec![])],
+        stages: vec![stage("env", "DEPLOYED", None, vec![])],
     };
     let dep2 = Feature {
         enabled: true,
         dependencies: vec![],
-        stages: vec![stage("env", false, None, vec![])],
+        stages: vec![stage("env", "NOT_DEPLOYED", None, vec![])],
     };
 
     let root = Feature {
         enabled: true,
         dependencies: vec![dep1, dep2],
-        stages: vec![stage("env", true, None, vec![])],
+        stages: vec![stage("env", "DEPLOYED", None, vec![])],
     };
 
     assert!(!evaluation_engine::evaluate(ctx, root));
@@ -198,17 +198,17 @@ fn evaluate_nested_dependencies_true() {
     let leaf = Feature {
         enabled: true,
         dependencies: vec![],
-        stages: vec![stage("env", true, None, vec![])],
+        stages: vec![stage("env", "DEPLOYED", None, vec![])],
     };
     let mid = Feature {
         enabled: true,
         dependencies: vec![leaf],
-        stages: vec![stage("env", true, None, vec![])],
+        stages: vec![stage("env", "DEPLOYED", None, vec![])],
     };
     let root = Feature {
         enabled: true,
         dependencies: vec![mid],
-        stages: vec![stage("env", true, None, vec![])],
+        stages: vec![stage("env", "DEPLOYED", None, vec![])],
     };
     assert!(evaluation_engine::evaluate(ctx, root));
 }

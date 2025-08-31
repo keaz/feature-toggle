@@ -1,5 +1,5 @@
 use crate::database::entity::{Feature, FeatureDependency, FeaturePipelineStage, FeatureType};
-use crate::database::{Error, handle_error};
+use crate::database::{handle_error, Error};
 use chrono::{DateTime, Utc};
 use mockall::automock;
 use serde::{Deserialize, Serialize};
@@ -32,7 +32,6 @@ pub struct CreateFeatureStage {
     pub order_index: i32,
     pub parent_stage: Option<Box<CreateFeatureStage>>,
     pub position: String,
-    pub enabled: bool,
     pub bucketing_key: Option<String>,
 }
 
@@ -43,7 +42,6 @@ impl CreateFeatureStage {
         order_index: i32,
         parent_stage: Option<Box<CreateFeatureStage>>,
         position: String,
-        enabled: bool,
     ) -> Self {
         Self {
             id,
@@ -51,7 +49,6 @@ impl CreateFeatureStage {
             order_index,
             parent_stage,
             position,
-            enabled,
             bucketing_key: None,
         }
     }
@@ -81,7 +78,6 @@ struct FeatureWithStageRow {
     order_index: Option<i32>,
     parent_stage_id: Option<Uuid>,
     position: Option<String>,
-    enabled: Option<bool>,
     bucketing_key: Option<String>,
     status: Option<String>,
 }
@@ -90,6 +86,18 @@ struct FeatureWithStageRow {
 struct FeatureDependencyRow {
     feature_id: Uuid,
     depends_on_id: Uuid,
+}
+
+#[derive(Debug, sqlx::FromRow, Clone)]
+struct FeaturePipelineStageRow {
+    pub id: Uuid,
+    pub feature_id: Uuid,
+    pub environment_id: Uuid,
+    pub order_index: i32,
+    pub parent_stage_id: Option<Uuid>,
+    pub position: String,
+    pub bucketing_key: Option<String>,
+    pub status: String,
 }
 
 #[automock]
@@ -175,7 +183,7 @@ impl FeatureRepositoryImpl {
         parent_stage_id: Option<&Uuid>,
     ) -> Result<Vec<FeaturePipelineStage>, Error> {
         let mut query_builder = sqlx::QueryBuilder::new(
-            r#"SELECT id, feature_id, environment_id, order_index, parent_stage_id, position, enabled, bucketing_key, status FROM features_pipeline_stages"#,
+            r#"SELECT id, feature_id, environment_id, order_index, parent_stage_id, position, bucketing_key, status FROM features_pipeline_stages"#,
         );
 
         let mut has_where = false;
@@ -198,11 +206,26 @@ impl FeatureRepositoryImpl {
         }
 
         let result = query_builder
-            .build_query_as::<FeaturePipelineStage>()
+            .build_query_as::<FeaturePipelineStageRow>()
             .fetch_all(&self.pool)
             .await;
 
-        handle_error(None, result)
+        let rows = handle_error(None, result)?;
+        let stages = rows
+            .into_iter()
+            .map(|r| FeaturePipelineStage {
+                id: r.id,
+                feature_id: r.feature_id,
+                environment_id: r.environment_id,
+                order_index: r.order_index,
+                parent_stage_id: r.parent_stage_id,
+                position: r.position,
+                enabled: r.status == "DEPLOYED",
+                bucketing_key: r.bucketing_key,
+                status: r.status,
+            })
+            .collect::<Vec<FeaturePipelineStage>>();
+        Ok(stages)
     }
 
     async fn get_feature_dependencies(
@@ -264,26 +287,25 @@ impl FeatureRepositoryImpl {
             .map(|stage| stage.position.clone())
             .collect::<Vec<String>>();
 
-        let enabled_values = &stages
-            .iter()
-            .map(|stage| stage.enabled)
-            .collect::<Vec<bool>>();
-
         let bucketing_keys: Vec<Option<String>> = stages
             .iter()
             .map(|stage| stage.bucketing_key.clone())
             .collect();
+        let statuses: Vec<String> = stages
+            .iter()
+            .map(|_| "NOT_DEPLOYED".to_string())
+            .collect();
 
         let result = sqlx::query(
-            r#"INSERT INTO features_pipeline_stages (id, feature_id, environment_id, order_index, parent_stage_id, position, enabled, bucketing_key)
+            r#"INSERT INTO features_pipeline_stages (id, feature_id, environment_id, order_index, parent_stage_id, position, bucketing_key, status)
                SELECT unnest($1::uuid[]) AS id,
                unnest($2::uuid[]) AS feature_id,
                unnest($3::uuid[]) AS environment_id,
                unnest($4::int[]) AS order_index,
                unnest($5::uuid[]) AS parent_stage_id,
                unnest($6::varchar[]) AS position,
-               unnest($7::boolean[]) AS enabled,
-               unnest($8::varchar[]) AS bucketing_key
+               unnest($7::varchar[]) AS bucketing_key,
+               unnest($8::text[]) AS status
                "#,
         )
             .bind(ids)
@@ -292,8 +314,8 @@ impl FeatureRepositoryImpl {
             .bind(order_indices)
             .bind(parent_stage_ids as &[Option<Uuid>])
             .bind(positions)
-            .bind(enabled_values)
             .bind(&bucketing_keys[..])
+            .bind(&statuses[..])
             .execute(&mut *tx)
             .await;
 
@@ -389,15 +411,13 @@ impl FeatureRepositoryImpl {
                        order_index = $2,
                        parent_stage_id = $3,
                        position = $4,
-                       enabled = $5,
-                       bucketing_key = $6
-                   WHERE id = $7"#,
+                       bucketing_key = $5
+                   WHERE id = $6"#, 
             )
             .bind(stage.environment_id)
             .bind(stage.order_index)
             .bind(parent_stage_id)
             .bind(&stage.position)
-            .bind(stage.enabled)
             .bind(stage.bucketing_key.clone())
             .bind(stage.id)
             .execute(&mut *tx)
@@ -515,7 +535,7 @@ impl FeatureRepositoryImpl {
                     order_index: r.order_index.unwrap(),
                     parent_stage_id: r.parent_stage_id,
                     position: r.position.unwrap(),
-                    enabled: r.enabled.unwrap(),
+                    enabled: matches!(r.status.as_deref(), Some("DEPLOYED")),
                     bucketing_key: r.bucketing_key,
                     status: r.status.unwrap_or_else(|| "NOT_DEPLOYED".to_string()),
                 })
@@ -731,7 +751,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
         let result = sqlx::query_as::<_, FeatureWithStageRow>(
             r#"SELECT f.id as feature_id, f.key as feature_key, f.description, f.feature_type, f.team_id, f.created_at, 
             s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
-            s.parent_stage_id, s.position, s.enabled, s.bucketing_key, s.status
+            s.parent_stage_id, s.position, s.bucketing_key, s.status
 			FROM features f LEFT JOIN features_pipeline_stages s ON f.id = s.feature_id
 			WHERE f.id = $1"#,
         )
@@ -762,8 +782,8 @@ impl FeatureRepository for FeatureRepositoryImpl {
         let mut query_builder = sqlx::QueryBuilder::new(
             r#"SELECT f.id as feature_id, f.key as feature_key, f.description, f.feature_type, f.team_id, f.created_at, 
             s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
-            s.parent_stage_id, s.position, s.enabled, s.bucketing_key, s.status
-			FROM features f LEFT JOIN features_pipeline_stages s ON f.id = s.feature_id"#,
+            s.parent_stage_id, s.position, s.bucketing_key, s.status
+			FROM features f LEFT JOIN features_pipeline_stages s ON f.id = s.feature_id"#, 
         );
         query_builder.push(" WHERE f.team_id = ").push_bind(team_id);
 

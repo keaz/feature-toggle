@@ -138,7 +138,6 @@ impl FeatureLogicImpl {
                 environment_id: Uuid::try_from(stage.environment_id.clone()).unwrap(),
                 order_index: stage.order_index,
                 position: stage.position,
-                enabled: stage.enabled,
                 bucketing_key: stage.bucketing_key.clone(),
                 parent_stage: None,
             })
@@ -430,14 +429,12 @@ fn stage_factory(
     environment: Environment,
     order_index: i32,
     position: String,
-    enabled: bool,
 ) -> FeatureStage {
     FeatureStage {
         id,
         environment,
         order_index,
         position,
-        enabled,
         bucketing_key: None,
         status: "NOT_DEPLOYED".to_string(),
     }
@@ -485,7 +482,6 @@ mod test {
                 environment_id: ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"),
                 order_index: 0,
                 position: "top".to_string(),
-                enabled: true,
                 bucketing_key: None,
             },
             CreateFeatureStageInput {
@@ -493,7 +489,6 @@ mod test {
                 environment_id: ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"),
                 order_index: 1,
                 position: "bottom".to_string(),
-                enabled: true,
                 bucketing_key: None,
             },
         ];

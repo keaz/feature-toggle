@@ -46,7 +46,7 @@ fn map_stages<R: Stage + 'static>(
     has_stage: bool,
     environment_map: &HashMap<Uuid, Environment>,
     stages: &Vec<Box<dyn DBStage>>,
-    stage_factory: impl Fn(ID, Environment, i32, String, bool) -> R,
+    stage_factory: impl Fn(ID, Environment, i32, String) -> R,
 ) -> Vec<R> {
     let mut mapped_stages: Vec<R> = vec![];
     if has_stage {
@@ -59,7 +59,6 @@ fn map_stages<R: Stage + 'static>(
                     .to_owned(),
                 stage.order_index(),
                 stage.position(),
-                stage.enabled(),
             );
 
             mapped_stages.push(feature_stage);
@@ -205,7 +204,7 @@ mod tests {
             false,
             &environment_map,
             &stages,
-            |id, environment, order_index, position, _| MockStage {
+            |id, environment, order_index, position| MockStage {
                 id: id.parse().unwrap(),
                 environment_id: environment.id.parse().unwrap(),
                 order_index,
@@ -263,7 +262,7 @@ mod tests {
             true,
             &environment_map,
             &stages,
-            |id, environment, order_index, position, enabled| MockStage {
+            |id, environment, order_index, position| MockStage {
                 id: id.parse().unwrap(),
                 environment_id: environment.id.parse().unwrap(),
                 order_index,

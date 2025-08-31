@@ -41,7 +41,6 @@ pub struct FeatureStage {
     pub environment: Environment,
     pub order_index: i32,
     pub position: String,
-    pub enabled: bool,
     pub bucketing_key: Option<String>,
     pub status: String,
 }
@@ -131,7 +130,6 @@ pub struct CreateFeatureStageInput {
     pub order_index: i32,
     #[graphql(validator(min_length = 1, max_length = 50))]
     pub position: String,
-    pub enabled: bool,
     pub bucketing_key: Option<String>,
 }
 
