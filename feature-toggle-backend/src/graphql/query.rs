@@ -22,7 +22,7 @@ impl Query {
         #[graphql(desc = "Id of object")] id: ID,
     ) -> GqlResult<Environment> {
         debug!("Fetching environment with id: {id:?}");
-        let repository = ctx.data::<Box<dyn EnvironmentLogic>>().unwrap();
+        let repository = ctx.data::<Box<dyn EnvironmentLogic>>()?;
         Ok(repository.get_environment_by_id(id).await?)
     }
 
@@ -34,13 +34,13 @@ impl Query {
         #[graphql(desc = "Active status of the environment")] active: Option<bool>,
     ) -> GqlResult<Vec<Environment>> {
         debug!("Fetching environments with name: {name:?} and active: {active:?}");
-        let repository = ctx.data::<Box<dyn EnvironmentLogic>>().unwrap();
+        let repository = ctx.data::<Box<dyn EnvironmentLogic>>()?;
         Ok(repository.get_environments(team_id, name, active).await?)
     }
 
     async fn teams(&self, ctx: &Context<'_>) -> GqlResult<Vec<Team>> {
         debug!("Fetching teams");
-        let repository = ctx.data::<Box<dyn TeamLogic>>().unwrap();
+        let repository = ctx.data::<Box<dyn TeamLogic>>()?;
         Ok(repository.get_teams(None).await?)
     }
 
@@ -58,7 +58,7 @@ impl Query {
             fields.push("stages".to_string());
         }
 
-        let logic = ctx.data::<Box<dyn PipelineLogic>>().unwrap();
+        let logic = ctx.data::<Box<dyn PipelineLogic>>()?;
         Ok(logic.get_pipelines(team_id, name, active, fields).await?)
     }
 
@@ -68,7 +68,7 @@ impl Query {
         #[graphql(desc = "Id of the Pipeline")] id: ID,
     ) -> GqlResult<Pipeline> {
         debug!("Fetching pipeline with id: {id:?}");
-        let logic = ctx.data::<Box<dyn PipelineLogic>>().unwrap();
+        let logic = ctx.data::<Box<dyn PipelineLogic>>()?;
         Ok(logic.get_pipeline_by_id(id).await?)
     }
 
@@ -78,7 +78,7 @@ impl Query {
         #[graphql(desc = "Id of the feature")] id: ID,
     ) -> GqlResult<Feature> {
         debug!("Fetching feature with id: {id:?}");
-        let logic = ctx.data::<Box<dyn FeatureLogic>>().unwrap();
+        let logic = ctx.data::<Box<dyn FeatureLogic>>()?;
         Ok(logic.get_feature_by_id(id).await?)
     }
 
@@ -90,7 +90,7 @@ impl Query {
         #[graphql(desc = "Type of the feature")] feature_type: Option<FeatureType>,
     ) -> GqlResult<Vec<Feature>> {
         debug!("Fetching features for team with id: {team_id:?}");
-        let logic = ctx.data::<Box<dyn FeatureLogic>>().unwrap();
+        let logic = ctx.data::<Box<dyn FeatureLogic>>()?;
         Ok(logic.get_features(team_id, name, feature_type).await?)
     }
 
@@ -100,7 +100,7 @@ impl Query {
         #[graphql(desc = "Id of the client")] id: ID,
     ) -> GqlResult<Client> {
         debug!("Fetching client with id: {id:?}");
-        let logic = ctx.data::<Box<dyn ClientLogic>>().unwrap();
+        let logic = ctx.data::<Box<dyn ClientLogic>>()?;
         Ok(logic.get_client_by_id(id).await?)
     }
 
@@ -113,7 +113,7 @@ impl Query {
         #[graphql(desc = "Type of the client")] client_type: Option<ClientType>,
     ) -> GqlResult<Vec<Client>> {
         debug!("Fetching clients for team with id: {team_id:?}");
-        let logic = ctx.data::<Box<dyn ClientLogic>>().unwrap();
+        let logic = ctx.data::<Box<dyn ClientLogic>>()?;
         Ok(logic
             .get_clients(team_id, name, enabled, client_type)
             .await?)
@@ -125,7 +125,7 @@ impl Query {
         #[graphql(desc = "Id of the context")] id: ID,
     ) -> GqlResult<crate::graphql::schema::Context> {
         debug!("Fetching context with id: {id:?}");
-        let logic = ctx.data::<Box<dyn ContextLogic>>().unwrap();
+        let logic = ctx.data::<Box<dyn ContextLogic>>()?;
         Ok(logic.get_context_by_id(id).await?)
     }
 
@@ -146,7 +146,7 @@ impl Query {
         #[graphql(desc = "Id of the feature stage")] stage_id: ID,
     ) -> GqlResult<Vec<crate::graphql::schema::Context>> {
         debug!("Fetching contexts for stage id: {stage_id:?}");
-        let logic = ctx.data::<Box<dyn FeatureLogic>>().unwrap();
+        let logic = ctx.data::<Box<dyn FeatureLogic>>()?;
         Ok(logic.get_stage_contexts(stage_id).await?)
     }
 

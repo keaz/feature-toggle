@@ -499,9 +499,9 @@ async fn run_flush_task(app: AppState) {
         };
         // Spawn sender
         tokio::spawn({
-            let app_clone = app.clone();
+            let _app_clone = app.clone();
             let rest = to_send[1..].to_vec();
-            let mut tx_clone = tx.clone();
+            let tx_clone = tx.clone();
             async move {
                 let _ = tx_clone.send(creds_first).await;
                 for a in rest {

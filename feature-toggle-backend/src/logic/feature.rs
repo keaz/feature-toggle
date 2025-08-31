@@ -210,22 +210,24 @@ impl FeatureLogic for FeatureLogicImpl {
             .repository
             .get_feature_by_id(Uuid::try_from(id).unwrap())
             .await?;
-        let features = vec![feature.clone()]; // Wrap in a vector to reuse the same logic
-        let stages = features
-            .iter()
-            .flat_map(|feature| &feature.stages)
-            .map(|stage| Box::new(stage.clone()) as Box<dyn DBStage>)
-            .collect::<Vec<Box<dyn DBStage>>>();
-
-        let environment_map = get_environment_map(&*self.environment_logic, &stages, true).await?;
-        let db_stages = feature
+        // Build stage vectors: one for borrowing (environment map) and another for ownership (relationships)
+        let db_stages_for_env: Vec<Box<dyn DBStage>> = feature
             .stages
             .iter()
             .map(|stage| Box::new(stage.clone()) as Box<dyn DBStage>)
             .collect();
 
-        let mut stages = map_stages(true, &environment_map, &db_stages, stage_factory);
-        let relationships = create_relationships(true, db_stages, relationship_factory);
+        let environment_map = get_environment_map(&*self.environment_logic, &db_stages_for_env, true).await?;
+
+        // Separate owned vector for relationships (create_relationships consumes the vector)
+        let db_stages_for_rels: Vec<Box<dyn DBStage>> = feature
+            .stages
+            .iter()
+            .map(|stage| Box::new(stage.clone()) as Box<dyn DBStage>)
+            .collect();
+
+        let mut stages = map_stages(true, &environment_map, &db_stages_for_env, stage_factory);
+        let relationships = create_relationships(true, db_stages_for_rels, relationship_factory);
 
         // Populate bucketing_key on stages from the database entity
         use std::collections::HashMap;
@@ -352,7 +354,7 @@ impl FeatureLogic for FeatureLogicImpl {
 
     async fn request_stage_change(&self, stage_id: ID, request: StageChangeRequestType, user_id: Uuid) -> Result<Feature, Error> {
         let stage_uuid = Uuid::try_from(stage_id.clone()).unwrap();
-        let status_str = match request {
+        let next_status = match request {
             StageChangeRequestType::DeploymentRequested => "DEPLOYMENT_REQUESTED",
             StageChangeRequestType::DeploymentRejected => "DEPLOYMENT_REJECTED",
             StageChangeRequestType::Deployed => "DEPLOYED",
@@ -360,13 +362,28 @@ impl FeatureLogic for FeatureLogicImpl {
             StageChangeRequestType::RollbackRejected => "ROLLBACK_REJECTED",
             StageChangeRequestType::Rollbacked => "ROLLBACKED",
         };
+        // Validate transition based on current status
+        if let Some(fid) = self.repository.get_feature_id_by_stage_id(stage_uuid).await? {
+            let db_feature = self.repository.get_feature_by_id(fid).await?;
+            if let Some(stage) = db_feature.stages.iter().find(|s| s.id == stage_uuid) {
+                // Use the GraphQL validator to validate transition
+                if let Err(e) = crate::graphql::validator::feature::validate_stage_transition(&stage.status, next_status) {
+                    return Err(Error::InvalidInput(format!("{:?}", e)));
+                }
+            } else {
+                return Err(Error::NotFound(stage_uuid));
+            }
+        } else {
+            return Err(Error::NotFound(stage_uuid));
+        }
+
         let ok = match request {
             StageChangeRequestType::DeploymentRequested | StageChangeRequestType::RollbackRequested => {
                 let now = chrono::Utc::now();
-                self.repository.request_stage_change(stage_uuid, status_str, user_id, now).await?
+                self.repository.request_stage_change(stage_uuid, next_status, user_id, now).await?
             }
             StageChangeRequestType::DeploymentRejected | StageChangeRequestType::Deployed | StageChangeRequestType::RollbackRejected | StageChangeRequestType::Rollbacked => {
-                self.repository.approve_or_reject_stage_change(stage_uuid, status_str, user_id).await?
+                self.repository.approve_or_reject_stage_change(stage_uuid, next_status, user_id).await?
             }
         };
         if !ok {

@@ -7,7 +7,7 @@ use crate::logic::environment::EnvironmentLogic;
 use crate::logic::feature::FeatureLogic;
 use crate::logic::pipeline::PipelineLogic;
 use crate::logic::team::TeamLogic;
-use crate::logic::user::{GqlUser, RegisterUserInput, UpdateGqlUserInput, UserLogic};
+use crate::logic::user::{RegisterUserInput, UpdateGqlUserInput, UserLogic};
 use crate::middleware::admin_guard::AdminState;
 use async_graphql::{Context, Error, Object, Result as GqlResult, ID};
 use log::info;
@@ -40,7 +40,7 @@ impl MutationRoot {
         input: CreateEnvironmentInput,
     ) -> GqlResult<Environment> {
         info!("Creating environment with input: {input:?}");
-        let logic = ctx.data::<Box<dyn EnvironmentLogic>>().unwrap();
+        let logic = ctx.data::<Box<dyn EnvironmentLogic>>()?;
         Ok(logic.create_environment(team_id, input).await?)
     }
 
@@ -51,19 +51,19 @@ impl MutationRoot {
         input: UpdateEnvironmentInput,
     ) -> GqlResult<Environment> {
         info!("Updating environment with id: {id:?} and input: {input:?}");
-        let logic = ctx.data::<Box<dyn EnvironmentLogic>>().unwrap();
+        let logic = ctx.data::<Box<dyn EnvironmentLogic>>()?;
         Ok(logic.update_environment(id, input).await?)
     }
 
     async fn delete_environment(&self, ctx: &Context<'_>, id: ID) -> GqlResult<bool> {
         info!("Deleting environment with id: {id:?}");
-        let logic = ctx.data::<Box<dyn EnvironmentLogic>>().unwrap();
+        let logic = ctx.data::<Box<dyn EnvironmentLogic>>()?;
         logic.delete_environment(id).await?;
         Ok(true)
     }
 
     async fn create_team(&self, ctx: &Context<'_>, input: CreateTeamInput) -> GqlResult<Team> {
-        let logic = ctx.data::<Box<dyn TeamLogic>>().unwrap();
+        let logic = ctx.data::<Box<dyn TeamLogic>>()?;
         let team = logic.create_team(input).await?;
         Ok(team)
     }
@@ -71,7 +71,7 @@ impl MutationRoot {
     async fn update_team(&self, ctx: &Context<'_>, #[graphql(
         desc = "Id of the Team"
     )] id: ID, input: UpdateTeamInput) -> GqlResult<Team> {
-        let logic = ctx.data::<Box<dyn TeamLogic>>().unwrap();
+        let logic = ctx.data::<Box<dyn TeamLogic>>()?;
         let team = logic.update_team(id, input).await?;
         Ok(team)
     }
@@ -84,7 +84,7 @@ impl MutationRoot {
     ) -> GqlResult<ID> {
         info!("Creating pipeline with input: {input:?}");
         input.validate(Some(team_id.clone()), ctx).await?;
-        let logic = ctx.data::<Box<dyn PipelineLogic>>().unwrap();
+        let logic = ctx.data::<Box<dyn PipelineLogic>>()?;
         let pipeline_id = logic.create_pipeline(team_id, input).await?;
         Ok(pipeline_id)
     }
@@ -97,14 +97,14 @@ impl MutationRoot {
     ) -> GqlResult<Pipeline> {
         info!("Updating pipeline with input: {input:?}");
         input.validate(Some(id.clone()), ctx).await?;
-        let logic = ctx.data::<Box<dyn PipelineLogic>>().unwrap();
+        let logic = ctx.data::<Box<dyn PipelineLogic>>()?;
         let pipeline = logic.update_pipeline(id, input).await?;
         Ok(pipeline)
     }
 
     async fn delete_pipeline(&self, ctx: &Context<'_>, id: ID) -> GqlResult<bool> {
         info!("Deleting pipeline with id: {id:?}");
-        let logic = ctx.data::<Box<dyn PipelineLogic>>().unwrap();
+        let logic = ctx.data::<Box<dyn PipelineLogic>>()?;
         logic.delete_pipeline(id).await?;
         Ok(true)
     }
@@ -116,7 +116,7 @@ impl MutationRoot {
         input: CreateFeatureInput,
     ) -> GqlResult<ID> {
         info!("Creating feature with input: {input:?}");
-        let logic = ctx.data::<Box<dyn FeatureLogic>>().unwrap();
+        let logic = ctx.data::<Box<dyn FeatureLogic>>()?;
         let feature_id = logic.create_feature(team_id, input).await?;
         Ok(feature_id)
     }
@@ -128,7 +128,7 @@ impl MutationRoot {
         input: UpdateFeatureInput,
     ) -> GqlResult<Feature> {
         info!("Updating feature with input: {input:?}");
-        let logic = ctx.data::<Box<dyn FeatureLogic>>().unwrap();
+        let logic = ctx.data::<Box<dyn FeatureLogic>>()?;
         let feature = logic.update_feature(id.clone(), input).await?;
 
         // After successful update, publish to gRPC streaming subscribers
@@ -138,10 +138,7 @@ impl MutationRoot {
         ) {
             // Try to load the updated feature from DB and broadcast an UPSERT
             let repo = crate::database::feature::feature_repository(pool.clone());
-            if let Ok(db_feature) = repo
-                .get_feature_by_id(uuid::Uuid::try_from(id.clone()).unwrap())
-                .await
-            {
+            if let Ok(fid) = uuid::Uuid::try_from(id.clone()) && let Ok(db_feature) = repo.get_feature_by_id(fid).await {
                 // Map db_feature -> pb::FeatureFull
                 if let Ok(full) =
                     map_db_feature_to_full_for_broadcast(pool.clone(), db_feature).await
@@ -162,7 +159,7 @@ impl MutationRoot {
 
     async fn delete_feature(&self, ctx: &Context<'_>, id: ID) -> GqlResult<bool> {
         info!("Deleting feature with id: {id:?}");
-        let logic = ctx.data::<Box<dyn FeatureLogic>>().unwrap();
+        let logic = ctx.data::<Box<dyn FeatureLogic>>()?;
         logic.delete_feature(id).await?;
         Ok(true)
     }
@@ -222,7 +219,7 @@ impl MutationRoot {
 
     async fn delete_context(&self, ctx: &Context<'_>, id: ID) -> GqlResult<bool> {
         info!("Deleting context with id: {id:?}");
-        let logic = ctx.data::<Box<dyn ContextLogic>>().unwrap();
+        let logic = ctx.data::<Box<dyn ContextLogic>>()?;
         logic.delete_context(id).await?;
         Ok(true)
     }
@@ -235,7 +232,7 @@ impl MutationRoot {
         #[graphql(desc = "List of context IDs to assign")] context_ids: Vec<ID>,
     ) -> GqlResult<Vec<crate::graphql::schema::Context>> {
         info!("Setting contexts for stage {stage_id:?}");
-        let logic = ctx.data::<Box<dyn FeatureLogic>>().unwrap();
+        let logic = ctx.data::<Box<dyn FeatureLogic>>()?;
         Ok(logic.set_stage_contexts(stage_id, context_ids).await?)
     }
 
@@ -247,7 +244,7 @@ impl MutationRoot {
             crate::graphql::schema::CreateStageCriterionInput,
         >,
     ) -> GqlResult<Vec<crate::graphql::schema::StageCriterion>> {
-        let logic = ctx.data::<Box<dyn FeatureLogic>>().unwrap();
+        let logic = ctx.data::<Box<dyn FeatureLogic>>()?;
         let result = logic.set_stage_criteria(stage_id.clone(), criteria).await?;
 
         // After updating criterias for a stage, broadcast an UPSERT for the owning feature
@@ -285,7 +282,7 @@ impl MutationRoot {
         // Get user id from session (injected in request data by graphql_handler)
         let session_user = ctx.data_opt::<crate::SessionUser>().cloned();
         let user = session_user.ok_or_else(|| async_graphql::Error::new("User session not found"))?;
-        let logic = ctx.data::<Box<dyn crate::logic::feature::FeatureLogic>>().unwrap();
+        let logic = ctx.data::<Box<dyn crate::logic::feature::FeatureLogic>>()?;
         let req = match request {
             StageChangeRequest::DeploymentRequested => crate::logic::feature::StageChangeRequestType::DeploymentRequested,
             StageChangeRequest::DeploymentRejected => crate::logic::feature::StageChangeRequestType::DeploymentRejected,
@@ -300,7 +297,7 @@ impl MutationRoot {
 
     // User mutations
     async fn register_user(&self, ctx: &Context<'_>, input: GqlRegisterUserInput) -> GqlResult<User> {
-        let logic = ctx.data::<Box<dyn UserLogic>>().unwrap();
+        let logic = ctx.data::<Box<dyn UserLogic>>()?;
         let created = logic.register_user(RegisterUserInput {
             username: input.username,
             password: input.password,
@@ -323,13 +320,13 @@ impl MutationRoot {
     }
 
     async fn login(&self, ctx: &Context<'_>, input: GqlLoginInput) -> GqlResult<User> {
-        let logic = ctx.data::<Box<dyn UserLogic>>().unwrap();
+        let logic = ctx.data::<Box<dyn UserLogic>>()?;
         let u = logic.authenticate_user(input.username, input.password).await?;
         create_user(u)
     }
 
     async fn update_user(&self, ctx: &Context<'_>, id: ID, input: GqlUpdateUserInput) -> GqlResult<User> {
-        let logic = ctx.data::<Box<dyn UserLogic>>().unwrap();
+        let logic = ctx.data::<Box<dyn UserLogic>>()?;
         let u = logic.update_user(id, UpdateGqlUserInput {
             first_name: input.first_name,
             last_name: input.last_name,
@@ -341,7 +338,7 @@ impl MutationRoot {
     }
 
     async fn assign_user_teams(&self, ctx: &Context<'_>, user_id: ID, team_ids: Vec<ID>) -> GqlResult<Vec<Team>> {
-        let logic = ctx.data::<Box<dyn UserLogic>>().unwrap();
+        let logic = ctx.data::<Box<dyn UserLogic>>()?;
         let _ = logic.assign_user_teams(user_id.clone(), team_ids).await?;
         // Fetch assigned teams to return
         let pool = ctx.data::<sqlx::PgPool>()?;
