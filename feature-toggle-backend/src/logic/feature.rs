@@ -138,6 +138,7 @@ impl FeatureLogicImpl {
                 environment_id: Uuid::try_from(stage.environment_id.clone()).unwrap(),
                 order_index: stage.order_index,
                 position: stage.position,
+                enabled: false,
                 bucketing_key: stage.bucketing_key.clone(),
                 parent_stage: None,
             })

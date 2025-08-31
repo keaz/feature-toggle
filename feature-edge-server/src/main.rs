@@ -7,6 +7,8 @@ use tokio::sync::RwLock;
 use tokio_stream::StreamExt;
 use tonic::transport::Endpoint;
 use tracing::{error, info};
+use utoipa::{OpenApi, ToSchema};
+use utoipa_swagger_ui::SwaggerUi;
 
 mod pb {
     #![allow(clippy::all)]
@@ -85,23 +87,31 @@ impl FeatureCache {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct EvaluateHttpRequest {
+    /// The feature key to evaluate
     feature_key: String,
+    /// Environment identifier (e.g., "prod", "staging")
     environment_id: String,
+    /// Context entries used for evaluation (key/value)
     context: Vec<HttpContext>,
+    /// Optional client credentials overriding server defaults
     client_id: Option<String>,
+    /// Optional client credentials overriding server defaults
     client_secret: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct HttpContext {
+    /// Context key, e.g., "user.id" or a bucketing key
     key: String,
+    /// Context value as string
     value: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct EvaluateHttpResponse {
+    /// Whether the feature is enabled under provided context
     enabled: bool,
 }
 
@@ -221,6 +231,17 @@ async fn get_or_fetch_feature(
     Ok(feature)
 }
 
+#[utoipa::path(
+    post,
+    path = "/evaluate",
+    request_body = EvaluateHttpRequest,
+    responses(
+        (status = 200, description = "Evaluation result", body = EvaluateHttpResponse),
+        (status = 502, description = "Backend unavailable"),
+        (status = 400, description = "Invalid request")
+    ),
+    tag = "edge"
+)]
 async fn evaluate_handler(
     app: web::Data<AppState>,
     req: web::Json<EvaluateHttpRequest>,
@@ -281,6 +302,12 @@ async fn evaluate_handler(
     Ok(web::Json(EvaluateHttpResponse { enabled }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/health",
+    responses((status = 200, description = "Service is healthy"), (status = 503, description = "Service is not connected to backend")),
+    tag = "edge"
+)]
 pub async fn health_handler(app: web::Data<AppState>) -> impl Responder {
     use std::sync::atomic::Ordering;
     if app.connected.load(Ordering::Relaxed) {
@@ -519,6 +546,14 @@ fn setup_logger() -> actix_web::Result<(), Box<dyn std::error::Error>> {
 }
 
 
+#[derive(OpenApi)]
+#[openapi(
+    paths(evaluate_handler, health_handler),
+    components(schemas(EvaluateHttpRequest, EvaluateHttpResponse, HttpContext)),
+    tags((name = "edge", description = "Edge evaluation API"))
+)]
+struct ApiDoc;
+
 #[actix_web::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     setup_logger()?;
@@ -583,9 +618,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         http_addr, grpc_addr
     );
 
+    let openapi = ApiDoc::openapi();
+
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(state.clone()))
+            .service(SwaggerUi::new("/docs/{_:.*}").url("/api-doc/openapi.json", openapi.clone()))
             .route("/health", web::get().to(health_handler))
             .route("/evaluate", web::post().to(evaluate_handler))
     })
