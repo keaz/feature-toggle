@@ -3,19 +3,39 @@ services:
     hostname: postgres_server
     image: postgres:latest
     environment:
-      - POSTGRES_PASSWORD="local123"
-      - POSTGRES_DB="feature_toggle"
+      - POSTGRES_PASSWORD=local123
+      - POSTGRES_DB=feature_toggle
     ports:
       - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
   feature_toggle_backend:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: feature-toggle-backend/Dockerfile
     environment:
       - DATABASE_URL=postgres://postgres:local123@postgres_server:5432/feature_toggle
-    volumes:
-      - ./init.sql:/app/init.sql
     depends_on:
       - postgres_server
     ports:
       - "8080:8080"
+    restart: unless-stopped
+
+  feature_edge_server:
+    build:
+      context: .
+      dockerfile: feature-edge-server/Dockerfile
+    environment:
+      - EDGE_BACKEND_GRPC=http://feature_toggle_backend:50051
+      - EDGE_HTTP_ADDR=0.0.0.0:8081
+      - EDGE_CLIENT_ID=a1b2c3d4-0000-4000-8000-000000000001
+      - EDGE_CLIENT_SECRET=TEST_WEB_KEY_1
+    depends_on:
+      - feature_toggle_backend
+    ports:
+      - "8081:8081"
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

@@ -1,8 +1,14 @@
 # Ignore build output and dependencies
-/target
+target/
+!target/.gitkeep
+
+# Don't ignore .sqlx directory (needed for offline sqlx compilation)
+!.sqlx/
 
 # Ignore environment files
 feature-toggle-backend/.env
+.env
+.env.local
 
 # Ignore IDE/editor config
 .idea/
@@ -14,6 +20,9 @@ feature-toggle-backend/.env
 # Ignore logs and temp files
 *.log
 *.tmp
+logs/
+feature-toggle-backend/logs/
+feature-edge-server/logs/
 
 # Ignore test output
 /coverage
@@ -34,6 +43,13 @@ node_modules/
 *.old
 *.orig
 
-# Ignore cargo specific files
-Cargo.lock
+# Documentation (not needed in containers)
+docs/
+README.md
+DOCKER.md
+
+# Don't ignore individual Dockerfiles since we need them for context
+# But ignore the main one as it's being replaced
 Dockerfile
+docker-compose.yml
+.dockerignore
