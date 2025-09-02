@@ -1,5 +1,5 @@
 use crate::database::entity::{Feature, FeatureDependency, FeaturePipelineStage, FeatureType};
-use crate::database::{handle_error, Error};
+use crate::database::{Error, handle_error};
 use chrono::{DateTime, Utc};
 use mockall::automock;
 use serde::{Deserialize, Serialize};
@@ -82,6 +82,7 @@ struct FeatureWithStageRow {
     position: Option<String>,
     bucketing_key: Option<String>,
     status: Option<String>,
+    enabled: Option<bool>,
 }
 
 #[derive(Debug, sqlx::FromRow, Clone)]
@@ -100,6 +101,7 @@ struct FeaturePipelineStageRow {
     pub position: String,
     pub bucketing_key: Option<String>,
     pub status: String,
+    pub enabled: bool,
 }
 
 #[automock]
@@ -140,10 +142,21 @@ pub trait FeatureRepository: Send + Sync {
     async fn get_feature_ids_by_context_id(&self, context_id: Uuid) -> Result<Vec<Uuid>, Error>;
 
     // New (deployment workflow): request stage change
-    async fn request_stage_change(&self, stage_id: Uuid, status: &str, requested_user: Uuid, when: chrono::DateTime<chrono::Utc>) -> Result<bool, Error>;
+    async fn request_stage_change(
+        &self,
+        stage_id: Uuid,
+        status: &str,
+        requested_user: Uuid,
+        when: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, Error>;
 
     // Approve or reject a stage change (sets approved_user and approved_time)
-    async fn approve_or_reject_stage_change(&self, stage_id: Uuid, status: &str, user_id: Uuid) -> Result<bool, Error>;
+    async fn approve_or_reject_stage_change(
+        &self,
+        stage_id: Uuid,
+        status: &str,
+        user_id: Uuid,
+    ) -> Result<bool, Error>;
 
     // Helper: find owning feature id for a stage
     async fn get_feature_id_by_stage_id(&self, stage_id: Uuid) -> Result<Option<Uuid>, Error>;
@@ -185,7 +198,7 @@ impl FeatureRepositoryImpl {
         parent_stage_id: Option<&Uuid>,
     ) -> Result<Vec<FeaturePipelineStage>, Error> {
         let mut query_builder = sqlx::QueryBuilder::new(
-            r#"SELECT id, feature_id, environment_id, order_index, parent_stage_id, position, bucketing_key, status FROM features_pipeline_stages"#,
+            r#"SELECT id, feature_id, environment_id, order_index, parent_stage_id, position, bucketing_key, status, enabled FROM features_pipeline_stages"#,
         );
 
         let mut has_where = false;
@@ -222,7 +235,7 @@ impl FeatureRepositoryImpl {
                 order_index: r.order_index,
                 parent_stage_id: r.parent_stage_id,
                 position: r.position,
-                enabled: r.status == "DEPLOYED",
+                enabled: r.enabled, // Use the actual enabled field from database
                 bucketing_key: r.bucketing_key,
                 status: r.status,
             })
@@ -295,11 +308,18 @@ impl FeatureRepositoryImpl {
             .collect();
         let statuses: Vec<String> = stages
             .iter()
-            .map(|stage| if stage.enabled { "DEPLOYED".to_string() } else { "NOT_DEPLOYED".to_string() })
+            .map(|stage| {
+                if stage.enabled {
+                    "DEPLOYED".to_string()
+                } else {
+                    "NOT_DEPLOYED".to_string()
+                }
+            })
             .collect();
+        let enabled_values: Vec<bool> = stages.iter().map(|stage| stage.enabled).collect();
 
         let result = sqlx::query(
-            r#"INSERT INTO features_pipeline_stages (id, feature_id, environment_id, order_index, parent_stage_id, position, bucketing_key, status)
+            r#"INSERT INTO features_pipeline_stages (id, feature_id, environment_id, order_index, parent_stage_id, position, bucketing_key, status, enabled)
                SELECT unnest($1::uuid[]) AS id,
                unnest($2::uuid[]) AS feature_id,
                unnest($3::uuid[]) AS environment_id,
@@ -307,7 +327,8 @@ impl FeatureRepositoryImpl {
                unnest($5::uuid[]) AS parent_stage_id,
                unnest($6::varchar[]) AS position,
                unnest($7::varchar[]) AS bucketing_key,
-               unnest($8::text[]) AS status
+               unnest($8::text[]) AS status,
+               unnest($9::bool[]) AS enabled
                "#,
         )
             .bind(ids)
@@ -318,6 +339,7 @@ impl FeatureRepositoryImpl {
             .bind(positions)
             .bind(&bucketing_keys[..])
             .bind(&statuses[..])
+            .bind(&enabled_values[..])
             .execute(&mut *tx)
             .await;
 
@@ -414,15 +436,21 @@ impl FeatureRepositoryImpl {
                        parent_stage_id = $3,
                        position = $4,
                        bucketing_key = $5,
-                       status = $6
-                   WHERE id = $7"#,
+                       status = $6,
+                       enabled = $7
+                   WHERE id = $8"#,
             )
             .bind(stage.environment_id)
             .bind(stage.order_index)
             .bind(parent_stage_id)
             .bind(&stage.position)
             .bind(stage.bucketing_key.clone())
-            .bind(if stage.enabled { "DEPLOYED" } else { "NOT_DEPLOYED" })
+            .bind(if stage.enabled {
+                "DEPLOYED"
+            } else {
+                "NOT_DEPLOYED"
+            })
+            .bind(stage.enabled)
             .bind(stage.id)
             .execute(&mut *tx)
             .await;
@@ -539,7 +567,7 @@ impl FeatureRepositoryImpl {
                     order_index: r.order_index.unwrap(),
                     parent_stage_id: r.parent_stage_id,
                     position: r.position.unwrap(),
-                    enabled: matches!(r.status.as_deref(), Some("DEPLOYED")),
+                    enabled: r.enabled.unwrap_or(false), // Use the actual enabled field from database
                     bucketing_key: r.bucketing_key,
                     status: r.status.unwrap_or_else(|| "NOT_DEPLOYED".to_string()),
                 })
@@ -755,7 +783,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
         let result = sqlx::query_as::<_, FeatureWithStageRow>(
             r#"SELECT f.id as feature_id, f.key as feature_key, f.description, f.feature_type, f.team_id, f.created_at, 
             s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
-            s.parent_stage_id, s.position, s.bucketing_key, s.status
+            s.parent_stage_id, s.position, s.bucketing_key, s.status, s.enabled
 			FROM features f LEFT JOIN features_pipeline_stages s ON f.id = s.feature_id
 			WHERE f.id = $1"#,
         )
@@ -786,8 +814,8 @@ impl FeatureRepository for FeatureRepositoryImpl {
         let mut query_builder = sqlx::QueryBuilder::new(
             r#"SELECT f.id as feature_id, f.key as feature_key, f.description, f.feature_type, f.team_id, f.created_at, 
             s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
-            s.parent_stage_id, s.position, s.bucketing_key, s.status
-			FROM features f LEFT JOIN features_pipeline_stages s ON f.id = s.feature_id"#, 
+            s.parent_stage_id, s.position, s.bucketing_key, s.status, s.enabled
+			FROM features f LEFT JOIN features_pipeline_stages s ON f.id = s.feature_id"#,
         );
         query_builder.push(" WHERE f.team_id = ").push_bind(team_id);
 
@@ -1026,13 +1054,40 @@ impl FeatureRepository for FeatureRepositoryImpl {
         handle_error(Some(context_id), rows)
     }
 
-    async fn request_stage_change(&self, stage_id: Uuid, status: &str, requested_user: Uuid, when: chrono::DateTime<chrono::Utc>) -> Result<bool, Error> {
+    async fn request_stage_change(
+        &self,
+        stage_id: Uuid,
+        status: &str,
+        requested_user: Uuid,
+        when: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, Error> {
+        // Determine the enabled value based on the status
+        let enabled = match status {
+            "DEPLOYED" => true,
+            "ROLLBACKED" => false,
+            _ => {
+                // For other statuses (NOT_DEPLOYED, DEPLOYMENT_REQUESTED, etc.), keep current enabled value
+                let current_enabled = sqlx::query_scalar!(
+                    "SELECT enabled FROM features_pipeline_stages WHERE id = $1",
+                    stage_id
+                )
+                .fetch_optional(&self.pool)
+                .await;
+
+                match handle_error(Some(stage_id), current_enabled)? {
+                    Some(current) => current,
+                    None => return Err(Error::NotFound(stage_id)),
+                }
+            }
+        };
+
         let result = sqlx::query(
             r#"UPDATE features_pipeline_stages
-               SET status = $1, requested_user = $2, requested_time = $3, approved_user = NULL, approved_time = NULL
-               WHERE id = $4"#,
+               SET status = $1, enabled = $2, requested_user = $3, requested_time = $4, approved_user = NULL, approved_time = NULL
+               WHERE id = $5"#,
         )
         .bind(status)
+        .bind(enabled)
         .bind(requested_user)
         .bind(when)
         .bind(stage_id)
@@ -1042,14 +1097,41 @@ impl FeatureRepository for FeatureRepositoryImpl {
         Ok(res.rows_affected() == 1)
     }
 
-    async fn approve_or_reject_stage_change(&self, stage_id: Uuid, status: &str, user_id: Uuid) -> Result<bool, Error> {
+    async fn approve_or_reject_stage_change(
+        &self,
+        stage_id: Uuid,
+        status: &str,
+        user_id: Uuid,
+    ) -> Result<bool, Error> {
         let now = chrono::Utc::now();
+
+        // Determine the enabled value based on the status
+        let enabled = match status {
+            "DEPLOYED" => true,
+            "ROLLBACKED" => false,
+            _ => {
+                // For other statuses, keep current enabled value
+                let current_enabled = sqlx::query_scalar!(
+                    "SELECT enabled FROM features_pipeline_stages WHERE id = $1",
+                    stage_id
+                )
+                .fetch_optional(&self.pool)
+                .await;
+
+                match handle_error(Some(stage_id), current_enabled)? {
+                    Some(current) => current,
+                    None => return Err(Error::NotFound(stage_id)),
+                }
+            }
+        };
+
         let result = sqlx::query(
             r#"UPDATE features_pipeline_stages
-               SET status = $1, approved_user = $2, approved_time = $3
-               WHERE id = $4"#,
+               SET status = $1, enabled = $2, approved_user = $3, approved_time = $4
+               WHERE id = $5"#,
         )
         .bind(status)
+        .bind(enabled)
         .bind(user_id)
         .bind(now)
         .bind(stage_id)

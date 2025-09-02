@@ -1,24 +1,21 @@
+mod config;
 pub mod database;
 mod graphql;
 pub mod grpc;
 mod logic;
 mod middleware;
-mod config;
 
 use crate::database::init_pg_pool;
 use crate::graphql::mutation::MutationRoot;
 use crate::graphql::query::Query;
 use crate::middleware::access_log::AccessLogger;
 use crate::middleware::admin_guard::{AdminGuard, AdminState};
-use crate::middleware::session_guard::SessionGuard;
+use crate::middleware::jwt_guard::JwtGuard;
 use actix_cors::Cors;
-use actix_session::{storage::CookieSessionStore, Session, SessionMiddleware};
-use actix_web::cookie::{Key, SameSite};
-use actix_web::{guard, web, App, HttpRequest, HttpResponse, HttpServer, Result};
+use actix_web::{guard, web, App, HttpMessage, HttpRequest, HttpResponse, HttpServer, Result};
 use async_graphql::http::GraphiQLSource;
 use async_graphql::{EmptyMutation, EmptySubscription, Schema};
-use async_graphql_actix_web::{GraphQL, GraphQLRequest, GraphQLResponse, GraphQLSubscription};
-use base64::Engine;
+use async_graphql_actix_web::{GraphQLRequest, GraphQLResponse, GraphQLSubscription};
 use log::error;
 use uuid::Uuid;
 
@@ -63,8 +60,7 @@ pub async fn run() -> std::io::Result<()> {
         database::feature::feature_repository(db_pool.clone()),
         updates_tx.clone(),
     );
-    let user_logic =
-        logic::user::user_logic(database::user::user_repository(db_pool.clone()));
+    let user_logic = logic::user::user_logic(database::user::user_repository(db_pool.clone()));
 
     let grpc_pool = db_pool.clone();
     let grpc_updates_tx = updates_tx.clone();
@@ -92,6 +88,7 @@ pub async fn run() -> std::io::Result<()> {
             .data(context_logic.clone())
             .data(user_logic.clone())
             .data(admin_state.clone())
+            .data(cfg.jwt_secret.clone()) // Add JWT secret to schema data for mutations
             // .extension(ApolloTracing)
             .finish();
 
@@ -102,20 +99,18 @@ pub async fn run() -> std::io::Result<()> {
             .supports_credentials()
             .max_age(3600);
 
-        //#FIXME: Move this to a config or database.
-        let session_key = Key::from(&base64::engine::general_purpose::STANDARD
-            .decode("J06X7Bb28hc0bT7kn+OZoLaUQPV5tD/rNIBsSJsP6Ler0K/HHRkEnmu29fVFhefyOV6X096t+te3bnQi3yMwlw==").unwrap());
-
         App::new()
-            // Order of wraps: last registered runs first. We want AdminGuard first, then SessionGuard, then AccessLogger.
-            // .wrap(SessionGuard::new(cfg.allowed_origin.clone()))
-            // .wrap(AdminGuard::new(db_pool.clone(), cfg.allowed_origin.clone(), admin_state.clone()))
-            // .wrap(SessionMiddleware::builder(CookieSessionStore::default(), session_key.clone())
-            //     .cookie_name("d".to_string())
-            //     .cookie_secure(false) // This should be changed to true in prod
-            //     .cookie_http_only(true)
-            //     .cookie_same_site(SameSite::Lax) // This should be changed to None in prod
-            //     .build())
+            // Order of wraps: last registered runs first. We want AdminGuard first, then JwtGuard, then AccessLogger.
+            .wrap(JwtGuard::new(
+                cfg.allowed_origin.clone(),
+                cfg.jwt_secret.clone(),
+                db_pool.clone(),
+            ))
+            .wrap(AdminGuard::new(
+                db_pool.clone(),
+                cfg.allowed_origin.clone(),
+                admin_state.clone(),
+            ))
             .wrap(AccessLogger)
             .wrap(cors)
             .app_data(web::Data::new(schema.clone()))
@@ -143,38 +138,34 @@ pub async fn run() -> std::io::Result<()> {
 }
 
 #[derive(Clone)]
-pub struct SessionUser {
+pub struct JwtUser {
     pub id: uuid::Uuid,
+    pub username: String,
+    pub is_admin: bool,
+    pub token_hash: String, // SHA256 hash of the current token for logout
 }
 
 async fn graphql_handler(
     schema: web::Data<Schema<Query, MutationRoot, EmptySubscription>>,
-    session: Session,
-    req: GraphQLRequest,
+    req: HttpRequest,
+    gql_req: GraphQLRequest,
 ) -> GraphQLResponse {
-    let mut inner = req.into_inner();
+    let mut inner = gql_req.into_inner();
 
-    // Inject session user id into the GraphQL request data (if present)
-    if let Ok(maybe_uid) = session.get::<String>("user_id") {
-        if let Some(uid_str) = maybe_uid {
-            if let Ok(uid) = uuid::Uuid::parse_str(&uid_str) {
-                inner = inner.data(SessionUser { id: uid });
-            }
-        }
+    // Inject JWT user data into the GraphQL request data (if present from middleware)
+    if let Some(jwt_user) = req.extensions().get::<JwtUser>() {
+        inner = inner.data(jwt_user.clone());
     }
 
     let is_login = inner.query.contains("mutation") && inner.query.contains("login");
 
     let resp = schema.execute(inner).await;
 
-    // If this was a login mutation and it succeeded, set the session
+    // If this was a login mutation and it succeeded, we don't need to set session anymore
+    // The JWT token will be returned in the response data
     if is_login && resp.errors.is_empty() {
-        // Try to extract the user id from the data payload: { "login": { "id": "..." } }
-        let v = serde_json::to_value(&resp.data).unwrap_or(serde_json::json!({}));
-        let user_id = v.get("login").and_then(|l| l.get("id")).and_then(|id| id.as_str());
-        if let Some(uid) = user_id {
-            let _ = session.insert("user_id", uid);
-        }
+        // The login mutation should return the JWT token in its response
+        // No additional session handling needed
     }
 
     resp.into()

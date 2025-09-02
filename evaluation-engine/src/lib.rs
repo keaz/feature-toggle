@@ -24,7 +24,7 @@ pub struct Feature {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct FeatureStage {
     pub environment_id: String,
-    pub status: String,
+    pub enabled: bool,
     pub bucketing_key: Option<String>,
     pub criterias: Vec<StageCriterion>,
 }
@@ -122,8 +122,8 @@ pub fn evaluate(evaluation_context: FeatureEvaluationContext, feature: Feature) 
         Some(stage) => stage,
     };
 
-    // Stage must be active (status == DEPLOYED)
-    if stage.status.as_str() != "DEPLOYED" {
+    // Stage must be enabled
+    if !stage.enabled {
         return false;
     }
 

@@ -9,3 +9,7 @@ http_addr = "127.0.0.1:8080"
 
 # Address that the gRPC server binds to
 grpc_addr = "0.0.0.0:50051"
+
+# JWT secret for token signing and verification
+# IMPORTANT: Change this to a secure random string in production
+jwt_secret = "your_secure_jwt_secret_change_in_production_minimum_32_characters"

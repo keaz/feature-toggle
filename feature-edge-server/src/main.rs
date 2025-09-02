@@ -1,8 +1,8 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
-
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use evaluation_engine as engine;
 use serde::{Deserialize, Serialize};
+use std::os::macos::raw::stat;
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 use tokio_stream::StreamExt;
 use tonic::transport::Endpoint;
@@ -121,7 +121,7 @@ fn map_proto_to_engine(f: &pb::FeatureFull) -> engine::Feature {
         .iter()
         .map(|s| engine::FeatureStage {
             environment_id: s.environment_id.clone(),
-            status: if s.enabled { "DEPLOYED".to_string() } else { "NOT_DEPLOYED".to_string() },
+            enabled: s.enabled,
             bucketing_key: if s.bucketing_key.is_empty() {
                 None
             } else {
@@ -253,10 +253,12 @@ async fn evaluate_handler(
     // Get feature from cache or backend
     let feature = get_or_fetch_feature(&app, &feature_key, &client_id, &client_secret).await?;
 
-    let stage = feature.stages.iter()
+    let stage = feature
+        .stages
+        .iter()
         .find(|s| s.environment_id == req.environment_id);
 
-    if stage.is_none() {
+    if stage.is_none() || !stage.unwrap().enabled {
         return Ok(web::Json(EvaluateHttpResponse { enabled: false }));
     }
 
@@ -269,7 +271,6 @@ async fn evaluate_handler(
         .iter()
         .find(|c| c.key == bucketing_key)
         .map(|c| c.value.clone());
-
 
     // If we have a prior assignment for this user+feature+env, short-circuit to true
     if let Some(user_id) = &user_id_opt {
@@ -329,10 +330,7 @@ fn build_endpoint(grpc_addr: &str) -> Endpoint {
         .tcp_nodelay(true)
 }
 
-async fn send_initial_subscribe(
-    tx: &tokio::sync::mpsc::Sender<pb::StreamRequest>,
-    app: &AppState,
-) {
+async fn send_initial_subscribe(tx: &tokio::sync::mpsc::Sender<pb::StreamRequest>, app: &AppState) {
     let subscribe = pb::SubscribeRequest {
         client_id: app.client_id.clone(),
         client_secret: app.client_secret.clone(),
@@ -544,7 +542,6 @@ fn setup_logger() -> actix_web::Result<(), Box<dyn std::error::Error>> {
     log4rs::init_file("log4rs.yaml", Default::default())?;
     Ok(())
 }
-
 
 #[derive(OpenApi)]
 #[openapi(
@@ -860,7 +857,9 @@ mod tests {
     async fn test_health_endpoint() {
         let state = test_state_empty_cache();
         // mark as connected to simulate healthy state
-        state.connected.store(true, std::sync::atomic::Ordering::Relaxed);
+        state
+            .connected
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(state.clone()))
@@ -872,7 +871,9 @@ mod tests {
         assert!(resp.status().is_success());
 
         // now mark disconnected and expect 503
-        state.connected.store(false, std::sync::atomic::Ordering::Relaxed);
+        state
+            .connected
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         let req2 = test::TestRequest::get().uri("/health").to_request();
         let resp2 = test::call_service(&app, req2).await;
         assert_eq!(resp2.status().as_u16(), 503);

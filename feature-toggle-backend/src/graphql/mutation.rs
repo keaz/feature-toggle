@@ -1,5 +1,5 @@
 use crate::graphql::create_user;
-use crate::graphql::schema::{CreateClientInput, CreateEnvironmentInput, CreateFeatureInput, CreatePipelineInput, CreateTeamInput, Environment, Feature, LoginInput as GqlLoginInput, Pipeline, RegisterUserInput as GqlRegisterUserInput, Team, UpdateClientInput, UpdateEnvironmentInput, UpdateFeatureInput, UpdatePipelineInput, UpdateTeamInput, UpdateUserInput as GqlUpdateUserInput, User};
+use crate::graphql::schema::{CreateClientInput, CreateEnvironmentInput, CreateFeatureInput, CreatePipelineInput, CreateTeamInput, Environment, Feature, LoginInput as GqlLoginInput, LoginResponse, Pipeline, RegisterUserInput as GqlRegisterUserInput, Team, UpdateClientInput, UpdateEnvironmentInput, UpdateFeatureInput, UpdatePipelineInput, UpdateTeamInput, UpdateUserInput as GqlUpdateUserInput, User};
 use crate::graphql::validator::{CreateInputValidator, UpdateInputValidator};
 use crate::logic::client::ClientLogic;
 use crate::logic::context::ContextLogic;
@@ -9,8 +9,10 @@ use crate::logic::pipeline::PipelineLogic;
 use crate::logic::team::TeamLogic;
 use crate::logic::user::{RegisterUserInput, UpdateGqlUserInput, UserLogic};
 use crate::middleware::admin_guard::AdminState;
-use async_graphql::{Context, Error, Object, Result as GqlResult, ID};
+use async_graphql::{Context, Object, Result as GqlResult, ID};
 use log::info;
+
+#[cfg(test)]
 use uuid::Uuid;
 
 #[derive(async_graphql::Enum, Copy, Clone, Eq, PartialEq, Debug)]
@@ -279,9 +281,9 @@ impl MutationRoot {
         #[graphql(desc = "Id of the feature stage")] stage_id: ID,
         #[graphql(desc = "Requested change type")] request: StageChangeRequest,
     ) -> GqlResult<Feature> {
-        // Get user id from session (injected in request data by graphql_handler)
-        let session_user = ctx.data_opt::<crate::SessionUser>().cloned();
-        let user = session_user.ok_or_else(|| async_graphql::Error::new("User session not found"))?;
+        // Get user id from JWT user data (injected by JWT middleware)
+        let jwt_user = ctx.data_opt::<crate::JwtUser>().cloned();
+        let user = jwt_user.ok_or_else(|| async_graphql::Error::new("User authentication not found"))?;
         let logic = ctx.data::<Box<dyn crate::logic::feature::FeatureLogic>>()?;
         let req = match request {
             StageChangeRequest::DeploymentRequested => crate::logic::feature::StageChangeRequestType::DeploymentRequested,
@@ -319,10 +321,69 @@ impl MutationRoot {
         self.register_user(ctx, input).await?
     }
 
-    async fn login(&self, ctx: &Context<'_>, input: GqlLoginInput) -> GqlResult<User> {
+    async fn login(&self, ctx: &Context<'_>, input: GqlLoginInput) -> GqlResult<LoginResponse> {
         let logic = ctx.data::<Box<dyn UserLogic>>()?;
+        let jwt_secret = ctx.data::<String>()?;
+        let pool = ctx.data::<sqlx::PgPool>()?;
         let u = logic.authenticate_user(input.username, input.password).await?;
-        create_user(u)
+        
+        // Generate JWT token
+        let user_id = uuid::Uuid::try_from(u.id.clone())
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+        let token = crate::middleware::jwt_guard::create_jwt_token(
+            user_id, 
+            &u.username, 
+            u.is_admin, 
+            jwt_secret
+        ).map_err(|e| async_graphql::Error::new(format!("Failed to create token: {}", e)))?;
+        
+        // Store token hash in database
+        let token_hash = crate::middleware::jwt_guard::hash_token(&token);
+        let expires_at = chrono::Utc::now() + chrono::Duration::hours(24);
+        let token_repo = crate::database::jwt_token::jwt_token_repository(pool.clone());
+        
+        token_repo.store_token(user_id, token_hash, expires_at).await
+            .map_err(|e| async_graphql::Error::new(format!("Failed to store token: {}", e)))?;
+        
+        let user = create_user(u)?;
+        Ok(LoginResponse { user, token })
+    }
+
+    async fn logout(&self, ctx: &Context<'_>) -> GqlResult<bool> {
+        // Get JWT user from context (injected by middleware)
+        let jwt_user = ctx.data_opt::<crate::JwtUser>().cloned();
+        let user = jwt_user.ok_or_else(|| async_graphql::Error::new("User authentication not found"))?;
+        
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        let token_repo = crate::database::jwt_token::jwt_token_repository(pool.clone());
+        
+        // Revoke all tokens for this user (logout from all devices)
+        let revoked_count = token_repo.revoke_all_user_tokens(user.id).await
+            .map_err(|e| async_graphql::Error::new(format!("Failed to revoke tokens: {}", e)))?;
+        
+        info!("Logged out user {} from {} devices", user.username, revoked_count);
+        Ok(true)
+    }
+
+    async fn logout_current(&self, ctx: &Context<'_>) -> GqlResult<bool> {
+        // Get JWT user from context (injected by middleware)
+        let jwt_user = ctx.data_opt::<crate::JwtUser>().cloned();
+        let user = jwt_user.ok_or_else(|| async_graphql::Error::new("User authentication not found"))?;
+        
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        let token_repo = crate::database::jwt_token::jwt_token_repository(pool.clone());
+        
+        // Revoke the specific current token using the hash from JWT user data
+        let revoked = token_repo.revoke_token(&user.token_hash).await
+            .map_err(|e| async_graphql::Error::new(format!("Failed to revoke token: {}", e)))?;
+        
+        if revoked {
+            info!("Logged out user {} from current device", user.username);
+        } else {
+            info!("Token for user {} was already revoked or not found", user.username);
+        }
+        
+        Ok(true)
     }
 
     async fn update_user(&self, ctx: &Context<'_>, id: ID, input: GqlUpdateUserInput) -> GqlResult<User> {

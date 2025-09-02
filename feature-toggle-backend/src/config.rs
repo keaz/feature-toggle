@@ -12,6 +12,8 @@ pub struct Config {
     pub http_addr: String,
     /// Address for gRPC server, e.g., "0.0.0.0:50051"
     pub grpc_addr: String,
+    /// JWT secret for token signing and verification
+    pub jwt_secret: String,
 }
 
 impl Default for Config {
@@ -20,6 +22,7 @@ impl Default for Config {
             allowed_origin: "http://localhost:5173".to_string(),
             http_addr: "127.0.0.1:8080".to_string(),
             grpc_addr: "0.0.0.0:50051".to_string(),
+            jwt_secret: "default_jwt_secret_change_in_production".to_string(),
         }
     }
 }

@@ -402,6 +402,12 @@ pub struct RegisterUserInput {
     pub is_admin: Option<bool>,
 }
 
+#[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
+pub struct LoginResponse {
+    pub user: User,
+    pub token: String,
+}
+
 #[derive(InputObject, Debug)]
 pub struct LoginInput {
     pub username: String,

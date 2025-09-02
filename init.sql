@@ -6,13 +6,6 @@ ALTER TABLE IF EXISTS public.features_pipeline_stages ADD CONSTRAINT features_pi
 ALTER TABLE IF EXISTS public.features_pipeline_stages DROP CONSTRAINT IF EXISTS features_pipeline_stages_parent_stage_id_fkey;
 ALTER TABLE IF EXISTS public.features_pipeline_stages ADD CONSTRAINT features_pipeline_stages_parent_stage_id_fkey FOREIGN KEY (parent_stage_id) REFERENCES public.features_pipeline_stages(id) ON DELETE CASCADE;
 
--- Ensure user_teams join table exists for seeding
-CREATE TABLE IF NOT EXISTS public.user_teams (
-    user_id UUID NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
-    team_id UUID NOT NULL REFERENCES public.teams(id) ON DELETE CASCADE,
-    PRIMARY KEY (user_id, team_id)
-);
-
 -- Delete data in the correct order to avoid foreign key constraint violations
 DELETE
 FROM public.feature_dependencies;
@@ -159,7 +152,7 @@ SET bucketing_key = 'userId'
 WHERE id = '3eef17bc-9e06-411d-b5f4-7a786e68bb96';
 
 -- Set status to DEPLOYED for seeded stages to keep tests passing
-UPDATE public.features_pipeline_stages SET status = 'DEPLOYED';
+UPDATE public.features_pipeline_stages SET status = 'DEPLOYED', enabled = true;
 
 -- Seed contexts for tests (appended by automation)
 -- Ensure contexts tables are clean and then insert deterministic data

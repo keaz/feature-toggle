@@ -20,13 +20,33 @@ struct NoopUserFlagLogic;
 
 #[async_trait::async_trait]
 impl crate::logic::user_flag::UserFlagLogic for NoopUserFlagLogic {
-    async fn authenticate_client(&self, _client_id: &str, _client_secret: &str) -> Result<uuid::Uuid, crate::logic::user_flag::UserFlagLogicError> {
-        Err(crate::logic::user_flag::UserFlagLogicError::InvalidInput("user flag logic not available".into()))
+    async fn authenticate_client(
+        &self,
+        _client_id: &str,
+        _client_secret: &str,
+    ) -> Result<uuid::Uuid, crate::logic::user_flag::UserFlagLogicError> {
+        Err(crate::logic::user_flag::UserFlagLogicError::InvalidInput(
+            "user flag logic not available".into(),
+        ))
     }
-    async fn upsert_after_auth(&self, _user_id: &str, _feature_id: &str, _environment_id: &str, _assigned: bool) -> Result<(), crate::logic::user_flag::UserFlagLogicError> {
+    async fn upsert_after_auth(
+        &self,
+        _user_id: &str,
+        _feature_id: &str,
+        _environment_id: &str,
+        _assigned: bool,
+    ) -> Result<(), crate::logic::user_flag::UserFlagLogicError> {
         Ok(())
     }
-    async fn list_user_assignments(&self, _team_id: uuid::Uuid, _feature_id: Option<String>, _environment_id: Option<String>) -> Result<Vec<crate::database::user_flag_assignment::UserFlagAssignmentRow>, crate::logic::user_flag::UserFlagLogicError> {
+    async fn list_user_assignments(
+        &self,
+        _team_id: uuid::Uuid,
+        _feature_id: Option<String>,
+        _environment_id: Option<String>,
+    ) -> Result<
+        Vec<crate::database::user_flag_assignment::UserFlagAssignmentRow>,
+        crate::logic::user_flag::UserFlagLogicError,
+    > {
         Ok(Vec::new())
     }
     fn clone_box(&self) -> Box<dyn crate::logic::user_flag::UserFlagLogic> {
@@ -57,8 +77,10 @@ impl FeatureEvaluationSvc {
     ) -> Self {
         let feature_repo = crate::database::feature::feature_repository(pool.clone());
         let client_repo = crate::database::client::client_repository(pool.clone());
-        let user_flag_repo = crate::database::user_flag_assignment::user_flag_assignment_repository(pool.clone());
-        let user_flag_logic = crate::logic::user_flag::user_flag_logic(client_repo.clone(), user_flag_repo.clone());
+        let user_flag_repo =
+            crate::database::user_flag_assignment::user_flag_assignment_repository(pool.clone());
+        let user_flag_logic =
+            crate::logic::user_flag::user_flag_logic(client_repo.clone(), user_flag_repo.clone());
         Self {
             pool,
             feature_repo,
@@ -80,11 +102,13 @@ impl FeatureEvaluationSvc {
     ) -> Self {
         // Use a dummy pool; not used when repos are injected
         let pool = sqlx::PgPool::connect_lazy("postgres://unused").expect("lazy pool");
-        let user_flag_repo = crate::database::user_flag_assignment::user_flag_assignment_repository(pool.clone());
+        let user_flag_repo =
+            crate::database::user_flag_assignment::user_flag_assignment_repository(pool.clone());
         // In test/mocked scenarios, avoid cloning the mocked client_repo which would require
         // a mock expectation on clone_box(). The failing tests don't exercise user_flag_* APIs,
         // so it's safe to plug a no-op logic implementation here.
-        let user_flag_logic: Box<dyn crate::logic::user_flag::UserFlagLogic> = Box::new(NoopUserFlagLogic);
+        let user_flag_logic: Box<dyn crate::logic::user_flag::UserFlagLogic> =
+            Box::new(NoopUserFlagLogic);
         Self {
             pool,
             feature_repo,
@@ -118,14 +142,9 @@ impl FeatureEvaluationSvc {
                     rollout_percentage: c.rollout_percentage,
                 })
                 .collect::<Vec<_>>();
-            let effective_status = if s.status == "DEPLOYED" || s.enabled {
-                "DEPLOYED".to_string()
-            } else {
-                s.status
-            };
             stages.push(engine::FeatureStage {
                 environment_id: s.environment_id.to_string(),
-                status: effective_status,
+                enabled: s.enabled,
                 bucketing_key: s.bucketing_key,
                 criterias: mapped_criteria,
             });
@@ -331,35 +350,45 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
         }))
     }
     async fn push_user_assignments(
-            &self,
-            request: Request<tonic::Streaming<pb::UserFlagAssignment>>,
-        ) -> Result<Response<pb::Ack>, Status> {
-            let mut stream = request.into_inner();
+        &self,
+        request: Request<tonic::Streaming<pb::UserFlagAssignment>>,
+    ) -> Result<Response<pb::Ack>, Status> {
+        let mut stream = request.into_inner();
 
-            // Read first message to authenticate and then process the rest with same creds
-            let first_msg = match stream.next().await {
-                Some(Ok(m)) => m,
-                Some(Err(e)) => return Err(Status::internal(format!("stream error: {}", e))),
-                None => return Err(Status::invalid_argument("empty stream")),
-            };
+        // Read first message to authenticate and then process the rest with same creds
+        let first_msg = match stream.next().await {
+            Some(Ok(m)) => m,
+            Some(Err(e)) => return Err(Status::internal(format!("stream error: {}", e))),
+            None => return Err(Status::invalid_argument("empty stream")),
+        };
 
         // Authenticate using logic
         match self
             .user_flag_logic
             .authenticate_client(&first_msg.client_id, &first_msg.client_secret)
-                .await
+            .await
         {
             Ok(_) => {}
             Err(e) => {
                 return Err(match e {
-                    crate::logic::user_flag::UserFlagLogicError::InvalidInput(m) => Status::invalid_argument(m),
-                    crate::logic::user_flag::UserFlagLogicError::NotFound(_) => Status::not_found("client not found"),
-                    crate::logic::user_flag::UserFlagLogicError::PermissionDenied(m) => Status::permission_denied(m),
-                    crate::logic::user_flag::UserFlagLogicError::Unauthenticated(m) => Status::unauthenticated(m),
-                    crate::logic::user_flag::UserFlagLogicError::DatabaseError(e) => Status::internal(format!("db error: {}", e)),
+                    crate::logic::user_flag::UserFlagLogicError::InvalidInput(m) => {
+                        Status::invalid_argument(m)
+                    }
+                    crate::logic::user_flag::UserFlagLogicError::NotFound(_) => {
+                        Status::not_found("client not found")
+                    }
+                    crate::logic::user_flag::UserFlagLogicError::PermissionDenied(m) => {
+                        Status::permission_denied(m)
+                    }
+                    crate::logic::user_flag::UserFlagLogicError::Unauthenticated(m) => {
+                        Status::unauthenticated(m)
+                    }
+                    crate::logic::user_flag::UserFlagLogicError::DatabaseError(e) => {
+                        Status::internal(format!("db error: {}", e))
+                    }
                 });
             }
-            }
+        }
 
         // Process the first payload then the rest via logic
         if let Err(e) = self
@@ -373,89 +402,115 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
             .await
         {
             return Err(match e {
-                crate::logic::user_flag::UserFlagLogicError::InvalidInput(m) => Status::invalid_argument(m),
-                crate::logic::user_flag::UserFlagLogicError::DatabaseError(e) => Status::internal(format!("db error: {}", e)),
+                crate::logic::user_flag::UserFlagLogicError::InvalidInput(m) => {
+                    Status::invalid_argument(m)
+                }
+                crate::logic::user_flag::UserFlagLogicError::DatabaseError(e) => {
+                    Status::internal(format!("db error: {}", e))
+                }
                 _ => Status::internal("unexpected error"),
             });
-            }
+        }
 
-            while let Some(msg) = stream.next().await {
-                match msg {
-                    Ok(m) => {
-                        if let Err(e) = self
-                            .user_flag_logic
-                            .upsert_after_auth(&m.user_id, &m.feature_id, &m.environment_id, m.assigned)
-                            .await
-                        {
-                            return Err(match e {
-                                crate::logic::user_flag::UserFlagLogicError::InvalidInput(m) => Status::invalid_argument(m),
-                                crate::logic::user_flag::UserFlagLogicError::DatabaseError(e) => Status::internal(format!("db error: {}", e)),
-                                _ => Status::internal("unexpected error"),
-                            });
-                        }
+        while let Some(msg) = stream.next().await {
+            match msg {
+                Ok(m) => {
+                    if let Err(e) = self
+                        .user_flag_logic
+                        .upsert_after_auth(&m.user_id, &m.feature_id, &m.environment_id, m.assigned)
+                        .await
+                    {
+                        return Err(match e {
+                            crate::logic::user_flag::UserFlagLogicError::InvalidInput(m) => {
+                                Status::invalid_argument(m)
+                            }
+                            crate::logic::user_flag::UserFlagLogicError::DatabaseError(e) => {
+                                Status::internal(format!("db error: {}", e))
+                            }
+                            _ => Status::internal("unexpected error"),
+                        });
                     }
-                    Err(e) => return Err(Status::internal(format!("stream error: {}", e))),
                 }
+                Err(e) => return Err(Status::internal(format!("stream error: {}", e))),
             }
-
-            Ok(Response::new(pb::Ack { message_id: uuid::Uuid::new_v4().to_string() }))
         }
 
-        async fn list_user_assignments(
-            &self,
-            request: Request<pb::ListUserFlagAssignmentsRequest>,
-        ) -> Result<Response<pb::ListUserFlagAssignmentsResponse>, Status> {
-            let req = request.into_inner();
+        Ok(Response::new(pb::Ack {
+            message_id: uuid::Uuid::new_v4().to_string(),
+        }))
+    }
 
-            // Authenticate using logic to obtain team_id
-            let team_id = match self
-                .user_flag_logic
-                .authenticate_client(&req.client_id, &req.client_secret)
-                .await
-            {
-                Ok(team_id) => team_id,
-                Err(e) => {
-                    return Err(match e {
-                        crate::logic::user_flag::UserFlagLogicError::InvalidInput(m) => Status::invalid_argument(m),
-                        crate::logic::user_flag::UserFlagLogicError::NotFound(_) => Status::not_found("client not found"),
-                        crate::logic::user_flag::UserFlagLogicError::PermissionDenied(m) => Status::permission_denied(m),
-                        crate::logic::user_flag::UserFlagLogicError::Unauthenticated(m) => Status::unauthenticated(m),
-                        crate::logic::user_flag::UserFlagLogicError::DatabaseError(e) => Status::internal(format!("db error: {}", e)),
-                    });
-                }
-            };
+    async fn list_user_assignments(
+        &self,
+        request: Request<pb::ListUserFlagAssignmentsRequest>,
+    ) -> Result<Response<pb::ListUserFlagAssignmentsResponse>, Status> {
+        let req = request.into_inner();
 
-            let rows = match self
-                .user_flag_logic
-                .list_user_assignments(team_id, Some(req.feature_id), Some(req.environment_id))
-                .await
-            {
-                Ok(rows) => rows,
-                Err(e) => {
-                    return Err(match e {
-                        crate::logic::user_flag::UserFlagLogicError::InvalidInput(m) => Status::invalid_argument(m),
-                        crate::logic::user_flag::UserFlagLogicError::DatabaseError(e) => Status::internal(format!("db error: {}", e)),
-                        _ => Status::internal("unexpected error"),
-                    });
-                }
-            };
+        // Authenticate using logic to obtain team_id
+        let team_id = match self
+            .user_flag_logic
+            .authenticate_client(&req.client_id, &req.client_secret)
+            .await
+        {
+            Ok(team_id) => team_id,
+            Err(e) => {
+                return Err(match e {
+                    crate::logic::user_flag::UserFlagLogicError::InvalidInput(m) => {
+                        Status::invalid_argument(m)
+                    }
+                    crate::logic::user_flag::UserFlagLogicError::NotFound(_) => {
+                        Status::not_found("client not found")
+                    }
+                    crate::logic::user_flag::UserFlagLogicError::PermissionDenied(m) => {
+                        Status::permission_denied(m)
+                    }
+                    crate::logic::user_flag::UserFlagLogicError::Unauthenticated(m) => {
+                        Status::unauthenticated(m)
+                    }
+                    crate::logic::user_flag::UserFlagLogicError::DatabaseError(e) => {
+                        Status::internal(format!("db error: {}", e))
+                    }
+                });
+            }
+        };
 
-            let assignments = rows
-                .into_iter()
-                .map(|r| pb::UserFlagAssignment {
-                    user_id: r.user_id,
-                    feature_id: r.feature_id.to_string(),
-                    environment_id: r.environment_id.to_string(),
-                    assigned: r.assigned,
-                    client_id: String::new(),
-                    client_secret: String::new(),
-                })
-                .collect::<Vec<_>>();
+        let rows = match self
+            .user_flag_logic
+            .list_user_assignments(team_id, Some(req.feature_id), Some(req.environment_id))
+            .await
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                return Err(match e {
+                    crate::logic::user_flag::UserFlagLogicError::InvalidInput(m) => {
+                        Status::invalid_argument(m)
+                    }
+                    crate::logic::user_flag::UserFlagLogicError::DatabaseError(e) => {
+                        Status::internal(format!("db error: {}", e))
+                    }
+                    _ => Status::internal("unexpected error"),
+                });
+            }
+        };
 
-            Ok(Response::new(pb::ListUserFlagAssignmentsResponse { assignments }))
-        }
+        let assignments = rows
+            .into_iter()
+            .map(|r| pb::UserFlagAssignment {
+                user_id: r.user_id,
+                feature_id: r.feature_id.to_string(),
+                environment_id: r.environment_id.to_string(),
+                assigned: r.assigned,
+                client_id: String::new(),
+                client_secret: String::new(),
+            })
+            .collect::<Vec<_>>();
 
-        type StreamUpdatesStream = ReceiverStream<Result<pb::FeatureUpdate, Status>>;
+        Ok(Response::new(pb::ListUserFlagAssignmentsResponse {
+            assignments,
+        }))
+    }
+
+    type StreamUpdatesStream = ReceiverStream<Result<pb::FeatureUpdate, Status>>;
 
     async fn stream_updates(
         &self,
