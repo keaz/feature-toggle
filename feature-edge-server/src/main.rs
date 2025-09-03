@@ -1,7 +1,6 @@
-use actix_web::{web, App, HttpResponse, HttpServer, Responder};
+use actix_web::{App, HttpResponse, HttpServer, Responder, web};
 use evaluation_engine as engine;
 use serde::{Deserialize, Serialize};
-use std::os::macos::raw::stat;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 use tokio_stream::StreamExt;
@@ -692,7 +691,7 @@ mod tests {
     }
 
     fn _make_lazy_channel_client()
-        -> pb::feature_evaluation_client::FeatureEvaluationClient<tonic::transport::Channel> {
+    -> pb::feature_evaluation_client::FeatureEvaluationClient<tonic::transport::Channel> {
         let channel = Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
         pb::feature_evaluation_client::FeatureEvaluationClient::new(channel)
     }
@@ -865,7 +864,7 @@ mod tests {
                 .app_data(web::Data::new(state.clone()))
                 .route("/health", web::get().to(health_handler)),
         )
-            .await;
+        .await;
         let req = test::TestRequest::get().uri("/health").to_request();
         let resp = test::call_service(&app, req).await;
         assert!(resp.status().is_success());
