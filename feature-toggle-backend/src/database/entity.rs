@@ -77,6 +77,24 @@ pub struct Team {
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
+pub struct Role {
+    pub id: Uuid,
+    pub name: String,
+    pub description: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
+pub struct UserRole {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub role_id: Uuid,
+    pub assigned_at: DateTime<Utc>,
+    pub assigned_by: Option<Uuid>,
+}
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
 pub struct Context {
     pub id: Uuid,
     pub team_id: Uuid,

@@ -12,7 +12,7 @@ use crate::middleware::access_log::AccessLogger;
 use crate::middleware::admin_guard::{AdminGuard, AdminState};
 use crate::middleware::jwt_guard::JwtGuard;
 use actix_cors::Cors;
-use actix_web::{guard, web, App, HttpMessage, HttpRequest, HttpResponse, HttpServer, Result};
+use actix_web::{App, HttpMessage, HttpRequest, HttpResponse, HttpServer, Result, guard, web};
 use async_graphql::http::GraphiQLSource;
 use async_graphql::{EmptyMutation, EmptySubscription, Schema};
 use async_graphql_actix_web::{GraphQLRequest, GraphQLResponse, GraphQLSubscription};
@@ -61,6 +61,7 @@ pub async fn run() -> std::io::Result<()> {
         updates_tx.clone(),
     );
     let user_logic = logic::user::user_logic(database::user::user_repository(db_pool.clone()));
+    let role_logic = logic::role::role_logic(database::role::role_repository(db_pool.clone()));
 
     let grpc_pool = db_pool.clone();
     let grpc_updates_tx = updates_tx.clone();
@@ -87,6 +88,7 @@ pub async fn run() -> std::io::Result<()> {
             .data(client_logic.clone())
             .data(context_logic.clone())
             .data(user_logic.clone())
+            .data(role_logic.clone())
             .data(admin_state.clone())
             .data(cfg.jwt_secret.clone()) // Add JWT secret to schema data for mutations
             // .extension(ApolloTracing)
@@ -142,6 +144,7 @@ pub struct JwtUser {
     pub id: uuid::Uuid,
     pub username: String,
     pub is_admin: bool,
+    pub roles: Vec<String>,
     pub token_hash: String, // SHA256 hash of the current token for logout
 }
 

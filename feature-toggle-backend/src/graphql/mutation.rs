@@ -1,15 +1,22 @@
 use crate::graphql::create_user;
-use crate::graphql::schema::{CreateClientInput, CreateEnvironmentInput, CreateFeatureInput, CreatePipelineInput, CreateTeamInput, Environment, Feature, LoginInput as GqlLoginInput, LoginResponse, Pipeline, RegisterUserInput as GqlRegisterUserInput, Team, UpdateClientInput, UpdateEnvironmentInput, UpdateFeatureInput, UpdatePipelineInput, UpdateTeamInput, UpdateUserInput as GqlUpdateUserInput, User};
+use crate::graphql::schema::{
+    AssignUserRolesInput, CreateClientInput, CreateEnvironmentInput, CreateFeatureInput,
+    CreatePipelineInput, CreateTeamInput, Environment, Feature, LoginInput as GqlLoginInput,
+    LoginResponse, Pipeline, RegisterUserInput as GqlRegisterUserInput, Role, Team,
+    UpdateClientInput, UpdateEnvironmentInput, UpdateFeatureInput, UpdatePipelineInput,
+    UpdateTeamInput, UpdateUserInput as GqlUpdateUserInput, User,
+};
 use crate::graphql::validator::{CreateInputValidator, UpdateInputValidator};
 use crate::logic::client::ClientLogic;
 use crate::logic::context::ContextLogic;
 use crate::logic::environment::EnvironmentLogic;
 use crate::logic::feature::FeatureLogic;
 use crate::logic::pipeline::PipelineLogic;
+use crate::logic::role::RoleLogic;
 use crate::logic::team::TeamLogic;
 use crate::logic::user::{RegisterUserInput, UpdateGqlUserInput, UserLogic};
 use crate::middleware::admin_guard::AdminState;
-use async_graphql::{Context, Object, Result as GqlResult, ID};
+use async_graphql::{Context, ID, Object, Result as GqlResult};
 use log::info;
 
 #[cfg(test)]
@@ -70,9 +77,12 @@ impl MutationRoot {
         Ok(team)
     }
 
-    async fn update_team(&self, ctx: &Context<'_>, #[graphql(
-        desc = "Id of the Team"
-    )] id: ID, input: UpdateTeamInput) -> GqlResult<Team> {
+    async fn update_team(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Id of the Team")] id: ID,
+        input: UpdateTeamInput,
+    ) -> GqlResult<Team> {
         let logic = ctx.data::<Box<dyn TeamLogic>>()?;
         let team = logic.update_team(id, input).await?;
         Ok(team)
@@ -140,7 +150,9 @@ impl MutationRoot {
         ) {
             // Try to load the updated feature from DB and broadcast an UPSERT
             let repo = crate::database::feature::feature_repository(pool.clone());
-            if let Ok(fid) = uuid::Uuid::try_from(id.clone()) && let Ok(db_feature) = repo.get_feature_by_id(fid).await {
+            if let Ok(fid) = uuid::Uuid::try_from(id.clone())
+                && let Ok(db_feature) = repo.get_feature_by_id(fid).await
+            {
                 // Map db_feature -> pb::FeatureFull
                 if let Ok(full) =
                     map_db_feature_to_full_for_broadcast(pool.clone(), db_feature).await
@@ -253,12 +265,16 @@ impl MutationRoot {
         if let (Ok(pool), Ok(updates_tx), Ok(feature_logic)) = (
             ctx.data::<sqlx::PgPool>(),
             ctx.data::<tokio::sync::broadcast::Sender<crate::grpc::pb::FeatureUpdate>>(),
-            ctx.data::<Box<dyn crate::logic::feature::FeatureLogic>>()
+            ctx.data::<Box<dyn crate::logic::feature::FeatureLogic>>(),
         ) {
-            if let Ok(Some(feature_id)) = feature_logic.get_feature_id_by_stage_id(stage_id.clone()).await {
+            if let Ok(Some(feature_id)) = feature_logic
+                .get_feature_id_by_stage_id(stage_id.clone())
+                .await
+            {
                 let repo = crate::database::feature::feature_repository(pool.clone());
-                if let Ok(db_feature) = repo.get_feature_by_id(feature_id).await && let Ok(full) =
-                    map_db_feature_to_full_for_broadcast(pool.clone(), db_feature).await
+                if let Ok(db_feature) = repo.get_feature_by_id(feature_id).await
+                    && let Ok(full) =
+                        map_db_feature_to_full_for_broadcast(pool.clone(), db_feature).await
                 {
                     let _ = updates_tx.send(crate::grpc::pb::FeatureUpdate {
                         message_id: uuid::Uuid::new_v4().to_string(),
@@ -283,68 +299,105 @@ impl MutationRoot {
     ) -> GqlResult<Feature> {
         // Get user id from JWT user data (injected by JWT middleware)
         let jwt_user = ctx.data_opt::<crate::JwtUser>().cloned();
-        let user = jwt_user.ok_or_else(|| async_graphql::Error::new("User authentication not found"))?;
+        let user =
+            jwt_user.ok_or_else(|| async_graphql::Error::new("User authentication not found"))?;
         let logic = ctx.data::<Box<dyn crate::logic::feature::FeatureLogic>>()?;
         let req = match request {
-            StageChangeRequest::DeploymentRequested => crate::logic::feature::StageChangeRequestType::DeploymentRequested,
-            StageChangeRequest::DeploymentRejected => crate::logic::feature::StageChangeRequestType::DeploymentRejected,
+            StageChangeRequest::DeploymentRequested => {
+                crate::logic::feature::StageChangeRequestType::DeploymentRequested
+            }
+            StageChangeRequest::DeploymentRejected => {
+                crate::logic::feature::StageChangeRequestType::DeploymentRejected
+            }
             StageChangeRequest::Deployed => crate::logic::feature::StageChangeRequestType::Deployed,
-            StageChangeRequest::RollbackRequested => crate::logic::feature::StageChangeRequestType::RollbackRequested,
-            StageChangeRequest::RollbackRejected => crate::logic::feature::StageChangeRequestType::RollbackRejected,
-            StageChangeRequest::Rollbacked => crate::logic::feature::StageChangeRequestType::Rollbacked,
+            StageChangeRequest::RollbackRequested => {
+                crate::logic::feature::StageChangeRequestType::RollbackRequested
+            }
+            StageChangeRequest::RollbackRejected => {
+                crate::logic::feature::StageChangeRequestType::RollbackRejected
+            }
+            StageChangeRequest::Rollbacked => {
+                crate::logic::feature::StageChangeRequestType::Rollbacked
+            }
         };
-        let feature = logic.request_stage_change(stage_id.clone(), req, user.id).await.map_err(|e| async_graphql::Error::new(e.to_string()))?;
+        let feature = logic
+            .request_stage_change(stage_id.clone(), req, user.id)
+            .await
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
         Ok(feature)
     }
 
     // User mutations
-    async fn register_user(&self, ctx: &Context<'_>, input: GqlRegisterUserInput) -> GqlResult<User> {
+    async fn register_user(
+        &self,
+        ctx: &Context<'_>,
+        input: GqlRegisterUserInput,
+    ) -> GqlResult<User> {
         let logic = ctx.data::<Box<dyn UserLogic>>()?;
-        let created = logic.register_user(RegisterUserInput {
-            username: input.username,
-            password: input.password,
-            first_name: input.first_name,
-            last_name: input.last_name,
-            email: input.email,
-            is_admin: input.is_admin.unwrap_or(false),
-        }).await?;
+        let created = logic
+            .register_user(RegisterUserInput {
+                username: input.username,
+                password: input.password,
+                first_name: input.first_name,
+                last_name: input.last_name,
+                email: input.email,
+                is_admin: input.is_admin.unwrap_or(false),
+            })
+            .await?;
 
         // If an admin was created, flip the admin-exists cache so middleware stops redirecting.
-        if created.is_admin && let Ok(state) = ctx.data::<AdminState>() {
+        if created.is_admin
+            && let Ok(state) = ctx.data::<AdminState>()
+        {
             state.set_exists(true);
         }
         create_user(created)
     }
 
-    async fn create_admin(&self, ctx: &Context<'_>, mut input: GqlRegisterUserInput) -> GqlResult<User> {
+    async fn create_admin(
+        &self,
+        ctx: &Context<'_>,
+        mut input: GqlRegisterUserInput,
+    ) -> GqlResult<User> {
         input.is_admin = Some(true);
         self.register_user(ctx, input).await?
     }
 
     async fn login(&self, ctx: &Context<'_>, input: GqlLoginInput) -> GqlResult<LoginResponse> {
         let logic = ctx.data::<Box<dyn UserLogic>>()?;
+        let role_logic = ctx.data::<Box<dyn crate::logic::role::RoleLogic>>()?;
         let jwt_secret = ctx.data::<String>()?;
         let pool = ctx.data::<sqlx::PgPool>()?;
-        let u = logic.authenticate_user(input.username, input.password).await?;
-        
-        // Generate JWT token
+        let u = logic
+            .authenticate_user(input.username, input.password)
+            .await?;
+
+        // Fetch user roles
         let user_id = uuid::Uuid::try_from(u.id.clone())
             .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+        let roles = role_logic.get_user_roles(u.id.clone()).await?;
+        let role_names: Vec<String> = roles.into_iter().map(|r| r.name).collect();
+
+        // Generate JWT token
         let token = crate::middleware::jwt_guard::create_jwt_token(
-            user_id, 
-            &u.username, 
-            u.is_admin, 
-            jwt_secret
-        ).map_err(|e| async_graphql::Error::new(format!("Failed to create token: {}", e)))?;
-        
+            user_id,
+            &u.username,
+            u.is_admin,
+            role_names,
+            jwt_secret,
+        )
+        .map_err(|e| async_graphql::Error::new(format!("Failed to create token: {}", e)))?;
+
         // Store token hash in database
         let token_hash = crate::middleware::jwt_guard::hash_token(&token);
         let expires_at = chrono::Utc::now() + chrono::Duration::hours(24);
         let token_repo = crate::database::jwt_token::jwt_token_repository(pool.clone());
-        
-        token_repo.store_token(user_id, token_hash, expires_at).await
+
+        token_repo
+            .store_token(user_id, token_hash, expires_at)
+            .await
             .map_err(|e| async_graphql::Error::new(format!("Failed to store token: {}", e)))?;
-        
+
         let user = create_user(u)?;
         Ok(LoginResponse { user, token })
     }
@@ -352,58 +405,86 @@ impl MutationRoot {
     async fn logout(&self, ctx: &Context<'_>) -> GqlResult<bool> {
         // Get JWT user from context (injected by middleware)
         let jwt_user = ctx.data_opt::<crate::JwtUser>().cloned();
-        let user = jwt_user.ok_or_else(|| async_graphql::Error::new("User authentication not found"))?;
-        
+        let user =
+            jwt_user.ok_or_else(|| async_graphql::Error::new("User authentication not found"))?;
+
         let pool = ctx.data::<sqlx::PgPool>()?;
         let token_repo = crate::database::jwt_token::jwt_token_repository(pool.clone());
-        
+
         // Revoke all tokens for this user (logout from all devices)
-        let revoked_count = token_repo.revoke_all_user_tokens(user.id).await
+        let revoked_count = token_repo
+            .revoke_all_user_tokens(user.id)
+            .await
             .map_err(|e| async_graphql::Error::new(format!("Failed to revoke tokens: {}", e)))?;
-        
-        info!("Logged out user {} from {} devices", user.username, revoked_count);
+
+        info!(
+            "Logged out user {} from {} devices",
+            user.username, revoked_count
+        );
         Ok(true)
     }
 
     async fn logout_current(&self, ctx: &Context<'_>) -> GqlResult<bool> {
         // Get JWT user from context (injected by middleware)
         let jwt_user = ctx.data_opt::<crate::JwtUser>().cloned();
-        let user = jwt_user.ok_or_else(|| async_graphql::Error::new("User authentication not found"))?;
-        
+        let user =
+            jwt_user.ok_or_else(|| async_graphql::Error::new("User authentication not found"))?;
+
         let pool = ctx.data::<sqlx::PgPool>()?;
         let token_repo = crate::database::jwt_token::jwt_token_repository(pool.clone());
-        
+
         // Revoke the specific current token using the hash from JWT user data
-        let revoked = token_repo.revoke_token(&user.token_hash).await
+        let revoked = token_repo
+            .revoke_token(&user.token_hash)
+            .await
             .map_err(|e| async_graphql::Error::new(format!("Failed to revoke token: {}", e)))?;
-        
+
         if revoked {
             info!("Logged out user {} from current device", user.username);
         } else {
-            info!("Token for user {} was already revoked or not found", user.username);
+            info!(
+                "Token for user {} was already revoked or not found",
+                user.username
+            );
         }
-        
+
         Ok(true)
     }
 
-    async fn update_user(&self, ctx: &Context<'_>, id: ID, input: GqlUpdateUserInput) -> GqlResult<User> {
+    async fn update_user(
+        &self,
+        ctx: &Context<'_>,
+        id: ID,
+        input: GqlUpdateUserInput,
+    ) -> GqlResult<User> {
         let logic = ctx.data::<Box<dyn UserLogic>>()?;
-        let u = logic.update_user(id, UpdateGqlUserInput {
-            first_name: input.first_name,
-            last_name: input.last_name,
-            email: input.email,
-            is_admin: input.is_admin,
-            enabled: input.enabled,
-        }).await?;
+        let u = logic
+            .update_user(
+                id,
+                UpdateGqlUserInput {
+                    first_name: input.first_name,
+                    last_name: input.last_name,
+                    email: input.email,
+                    is_admin: input.is_admin,
+                    enabled: input.enabled,
+                },
+            )
+            .await?;
         create_user(u)
     }
 
-    async fn assign_user_teams(&self, ctx: &Context<'_>, user_id: ID, team_ids: Vec<ID>) -> GqlResult<Vec<Team>> {
+    async fn assign_user_teams(
+        &self,
+        ctx: &Context<'_>,
+        user_id: ID,
+        team_ids: Vec<ID>,
+    ) -> GqlResult<Vec<Team>> {
         let logic = ctx.data::<Box<dyn UserLogic>>()?;
         let _ = logic.assign_user_teams(user_id.clone(), team_ids).await?;
         // Fetch assigned teams to return
         let pool = ctx.data::<sqlx::PgPool>()?;
-        let uid = uuid::Uuid::try_from(user_id).map_err(|e| async_graphql::Error::new(e.to_string()))?;
+        let uid =
+            uuid::Uuid::try_from(user_id).map_err(|e| async_graphql::Error::new(e.to_string()))?;
         let repo = crate::database::user::user_repository(pool.clone());
         let teams = repo
             .get_user_teams(uid)
@@ -411,11 +492,43 @@ impl MutationRoot {
             .map_err(|e| async_graphql::Error::new(e.to_string()))?;
         Ok(teams
             .into_iter()
-            .map(|t| Team { id: async_graphql::ID::from(t.id), name: t.name, description: t.description })
+            .map(|t| Team {
+                id: async_graphql::ID::from(t.id),
+                name: t.name,
+                description: t.description,
+            })
+            .collect())
+    }
+
+    async fn assign_user_roles(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "User ID to assign roles to")] user_id: ID,
+        input: AssignUserRolesInput,
+    ) -> GqlResult<Vec<Role>> {
+        info!("Assigning roles to user: {user_id:?}");
+
+        // Get user info from JWT context for assigned_by field
+        let jwt_user = ctx.data_opt::<crate::JwtUser>().cloned();
+        let assigned_by = jwt_user.map(|u| ID::from(u.id));
+
+        let logic = ctx.data::<Box<dyn RoleLogic>>()?;
+        let roles = logic
+            .assign_user_roles(user_id, input.role_ids, assigned_by)
+            .await?;
+
+        Ok(roles
+            .into_iter()
+            .map(|r| Role {
+                id: r.id,
+                name: r.name,
+                description: r.description,
+                created_at: r.created_at,
+                updated_at: r.updated_at,
+            })
             .collect())
     }
 }
-
 
 async fn map_db_feature_to_full_for_broadcast(
     pool: sqlx::PgPool,
@@ -660,7 +773,6 @@ mod tests {
     }
 }
 
-
 #[cfg(test)]
 mod more_mutation_tests {
     use super::*;
@@ -677,7 +789,10 @@ mod more_mutation_tests {
             id: ctx_id.clone(),
             team_id: ID::from(Uuid::new_v4()),
             key: "k".into(),
-            entries: vec![crate::graphql::schema::ContextEntry { id: ID::from(Uuid::new_v4()), value: "A".into() }],
+            entries: vec![crate::graphql::schema::ContextEntry {
+                id: ID::from(Uuid::new_v4()),
+                value: "A".into(),
+            }],
         };
         let ctx_id_check = ctx_id.clone();
         mock.expect_update_context()
@@ -691,9 +806,15 @@ mod more_mutation_tests {
 
         let gql = r#"mutation($id: ID!){ updateContext(id: $id, input: { key: "k2" }) { key entries { value } } }"#;
         let mut req = Request::new(gql);
-        req = req.variables(async_graphql::Variables::from_json(serde_json::json!({"id": ctx_id.to_string()})));
+        req = req.variables(async_graphql::Variables::from_json(
+            serde_json::json!({"id": ctx_id.to_string()}),
+        ));
         let resp = schema.execute(req).await;
-        assert!(resp.errors.is_empty(), "{}", serde_json::to_string(&resp.errors).unwrap());
+        assert!(
+            resp.errors.is_empty(),
+            "{}",
+            serde_json::to_string(&resp.errors).unwrap()
+        );
         let data = resp.data.into_json().unwrap();
         assert_eq!(data["updateContext"]["key"], "k");
     }
@@ -714,10 +835,64 @@ mod more_mutation_tests {
 
         let gql = r#"mutation($id: ID!){ deleteContext(id: $id) }"#;
         let mut req = Request::new(gql);
-        req = req.variables(async_graphql::Variables::from_json(serde_json::json!({"id": ctx_id.to_string()})));
+        req = req.variables(async_graphql::Variables::from_json(
+            serde_json::json!({"id": ctx_id.to_string()}),
+        ));
         let resp = schema.execute(req).await;
-        assert!(resp.errors.is_empty(), "{}", serde_json::to_string(&resp.errors).unwrap());
+        assert!(
+            resp.errors.is_empty(),
+            "{}",
+            serde_json::to_string(&resp.errors).unwrap()
+        );
         let data = resp.data.into_json().unwrap();
         assert_eq!(data["deleteContext"], true);
+    }
+
+    #[tokio::test]
+    async fn test_assign_user_roles_mutation() {
+        use crate::logic::role::MockRoleLogic;
+        let mut mock = MockRoleLogic::new();
+        let user_id = ID::from(Uuid::new_v4());
+        let role_id = ID::from(Uuid::new_v4());
+
+        // Mock the assign operation to return assigned roles
+        let expected_role = crate::logic::role::GqlRole {
+            id: role_id.clone(),
+            name: "Approver".to_string(),
+            description: "Can approve deployment requests".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        };
+
+        mock.expect_assign_user_roles()
+            .times(1)
+            .return_once(move |_, _, _| Ok(vec![expected_role]));
+
+        let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
+            .data::<Box<dyn crate::logic::role::RoleLogic>>(Box::new(mock))
+            .finish();
+
+        let gql = r#"
+            mutation($userId: ID!, $roleIds: [ID!]!) {
+                assignUserRoles(userId: $userId, input: { roleIds: $roleIds }) {
+                    id
+                    name
+                    description
+                }
+            }
+        "#;
+        let mut req = Request::new(gql);
+        req = req.variables(async_graphql::Variables::from_json(serde_json::json!({
+            "userId": user_id.to_string(),
+            "roleIds": [role_id.to_string()]
+        })));
+        let resp = schema.execute(req).await;
+        assert!(
+            resp.errors.is_empty(),
+            "{}",
+            serde_json::to_string(&resp.errors).unwrap()
+        );
+        let data = resp.data.into_json().unwrap();
+        assert_eq!(data["assignUserRoles"][0]["name"], "Approver");
     }
 }

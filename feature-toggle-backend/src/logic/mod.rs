@@ -11,6 +11,7 @@ pub mod context;
 pub mod environment;
 pub mod feature;
 pub mod pipeline;
+pub mod role;
 pub mod team;
 pub mod user;
 pub mod user_flag;

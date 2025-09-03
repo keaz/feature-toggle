@@ -104,7 +104,7 @@ impl ContextRepository for ContextRepositoryImpl {
         let rows = qb.build().fetch_all(&self.pool).await;
         let rows = handle_error(None, rows)?;
         // collect ids to batch entries
-        let ids: Vec<Uuid> = rows.iter().map(|r| r.get::<Uuid, _>(0)).collect();
+        let _ids: Vec<Uuid> = rows.iter().map(|r| r.get::<Uuid, _>(0)).collect();
         // Since QueryBuilder::build returns generic Row, we'll fetch entries per id for simplicity
         let mut result = Vec::with_capacity(rows.len());
         for row in rows {

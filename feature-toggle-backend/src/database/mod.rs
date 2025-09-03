@@ -5,14 +5,15 @@ pub mod environment;
 pub mod feature;
 pub mod jwt_token;
 pub mod pipeline;
+pub mod role;
 pub mod team;
 pub mod user;
 pub mod user_flag_assignment;
 
 use crate::Error;
 use log::error;
-use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use sqlx::postgres::PgPoolOptions;
 use std::env;
 use uuid::Uuid;
 
@@ -44,8 +45,9 @@ pub fn handle_error<T>(id: Option<Uuid>, result: Result<T, sqlx::Error>) -> Resu
         }
         sqlx::Error::Database(db_err) => {
             // Map Postgres unique constraint violations to a friendlier validation error
-            if let Some(code) = db_err.code() && code == "23505" {
-
+            if let Some(code) = db_err.code()
+                && code == "23505"
+            {
                 // Unique violation
                 let field = match db_err.constraint() {
                     Some(c) if c.contains("users_username_key") => "username",

@@ -1,12 +1,13 @@
 use crate::graphql::create_user;
 use crate::graphql::schema::{
-    Client, ClientType, Environment, Feature, FeatureType, Pipeline, Team, User, UsersPage,
+    Client, ClientType, Environment, Feature, FeatureType, Pipeline, Role, Team, User, UsersPage,
 };
 use crate::logic::client::ClientLogic;
 use crate::logic::context::ContextLogic;
 use crate::logic::environment::EnvironmentLogic;
 use crate::logic::feature::FeatureLogic;
 use crate::logic::pipeline::PipelineLogic;
+use crate::logic::role::RoleLogic;
 use crate::logic::team::TeamLogic;
 use crate::logic::user::UserLogic;
 use async_graphql::{Context, Object, Result as GqlResult, ID};
@@ -190,15 +191,43 @@ impl Query {
             .collect::<Result<_, _>>()?;
         Ok(UsersPage { items, page_number, page_size, total })
     }
+
+    async fn roles(&self, ctx: &Context<'_>) -> GqlResult<Vec<Role>> {
+        debug!("Fetching all roles");
+        let logic = ctx.data::<Box<dyn RoleLogic>>()?;
+        let roles = logic.get_all_roles().await?;
+        Ok(roles.into_iter().map(|r| Role {
+            id: r.id,
+            name: r.name,
+            description: r.description,
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+        }).collect())
+    }
+
+    async fn user_roles(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "User ID to get roles for")] user_id: ID,
+    ) -> GqlResult<Vec<Role>> {
+        debug!("Fetching roles for user: {user_id:?}");
+        let logic = ctx.data::<Box<dyn RoleLogic>>()?;
+        let roles = logic.get_user_roles(user_id).await?;
+        Ok(roles.into_iter().map(|r| Role {
+            id: r.id,
+            name: r.name,
+            description: r.description,
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+        }).collect())
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::logic::context::MockContextLogic;
-    use async_graphql::{EmptySubscription, Request, Schema};
-
-    #[tokio::test]
+use super::*;
+use crate::logic::context::MockContextLogic;
+use async_graphql::{EmptySubscription, Request, Schema};    #[tokio::test]
     async fn test_contexts_query() {
         let mut mock = MockContextLogic::new();
         let team_id = ID::from("11111111-1111-1111-1111-111111111111");
@@ -403,5 +432,55 @@ mod more_query_tests {
         req = req.variables(async_graphql::Variables::from_json(serde_json::json!({"id": env_id.to_string()})));
         let resp = schema.execute(req).await;
         assert!(resp.errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_roles_query() {
+        use crate::logic::role::MockRoleLogic;
+        let mut mock = MockRoleLogic::new();
+        let expected_roles = vec![
+            crate::logic::role::GqlRole {
+                id: ID::from(uuid::Uuid::new_v4()),
+                name: "Approver".to_string(),
+                description: "Can approve deployment requests".to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                updated_at: chrono::Utc::now().to_rfc3339(),
+            },
+            crate::logic::role::GqlRole {
+                id: ID::from(uuid::Uuid::new_v4()),
+                name: "Requester".to_string(),
+                description: "Can request deployments".to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                updated_at: chrono::Utc::now().to_rfc3339(),
+            },
+        ];
+
+        mock.expect_get_all_roles()
+            .times(1)
+            .return_once(move || Ok(expected_roles));
+
+        let schema = Schema::build(super::Query, crate::graphql::mutation::MutationRoot, EmptySubscription)
+            .data::<Box<dyn crate::logic::role::RoleLogic>>(Box::new(mock))
+            .finish();
+
+        let gql = r#"
+            query {
+                roles {
+                    id
+                    name
+                    description
+                }
+            }
+        "#;
+        let resp = schema.execute(Request::new(gql)).await;
+        assert!(
+            resp.errors.is_empty(),
+            "{}",
+            serde_json::to_string(&resp.errors).unwrap()
+        );
+        let data = resp.data.into_json().unwrap();
+        assert_eq!(data["roles"].as_array().unwrap().len(), 2);
+        assert_eq!(data["roles"][0]["name"], "Approver");
+        assert_eq!(data["roles"][1]["name"], "Requester");
     }
 }

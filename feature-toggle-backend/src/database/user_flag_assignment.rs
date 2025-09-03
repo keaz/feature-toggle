@@ -1,7 +1,7 @@
-use crate::database::handle_error;
 use crate::database::Error;
+use crate::database::handle_error;
 use mockall::automock;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, sqlx::FromRow)]

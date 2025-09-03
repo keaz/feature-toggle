@@ -381,6 +381,19 @@ impl User {
             .map_err(|e| async_graphql::Error::new(e.to_string()))?;
         Ok(teams.into_iter().map(|t| ID::from(t.id)).collect())
     }
+
+    pub async fn roles(&self, ctx: &async_graphql::Context<'_>) -> GqlResult<Vec<Role>> {
+        let logic = ctx.data::<Box<dyn crate::logic::role::RoleLogic>>()?;
+        let roles = logic.get_user_roles(self.id.clone()).await
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+        Ok(roles.into_iter().map(|r| Role {
+            id: r.id,
+            name: r.name,
+            description: r.description,
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+        }).collect())
+    }
 }
 
 #[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
@@ -422,4 +435,18 @@ pub struct UpdateUserInput {
     pub email: Option<String>,
     pub is_admin: Option<bool>,
     pub enabled: Option<bool>,
+}
+
+#[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
+pub struct Role {
+    pub id: ID,
+    pub name: String,
+    pub description: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(InputObject, Debug)]
+pub struct AssignUserRolesInput {
+    pub role_ids: Vec<ID>,
 }

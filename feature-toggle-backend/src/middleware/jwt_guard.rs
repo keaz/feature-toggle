@@ -14,6 +14,7 @@ pub struct Claims {
     pub sub: String, // user id
     pub username: String,
     pub is_admin: bool,
+    pub roles: Vec<String>, // user role names
     pub exp: usize, // expiration timestamp
     pub iat: usize, // issued at timestamp
 }
@@ -138,6 +139,7 @@ where
                                             .unwrap_or_default(),
                                         username: token_data.claims.username,
                                         is_admin: token_data.claims.is_admin,
+                                        roles: token_data.claims.roles,
                                         token_hash: token_hash.clone(),
                                     });
 
@@ -168,6 +170,7 @@ pub fn create_jwt_token(
     user_id: Uuid,
     username: &str,
     is_admin: bool,
+    roles: Vec<String>,
     secret: &str,
 ) -> Result<String, jsonwebtoken::errors::Error> {
     let now = chrono::Utc::now();
@@ -177,6 +180,7 @@ pub fn create_jwt_token(
         sub: user_id.to_string(),
         username: username.to_string(),
         is_admin,
+        roles,
         exp: exp.timestamp() as usize,
         iat: now.timestamp() as usize,
     };
@@ -265,7 +269,7 @@ mod tests {
     async fn allows_graphql_post_with_valid_token() {
         let secret = "test_secret";
         let user_id = Uuid::new_v4();
-        let token = create_jwt_token(user_id, "testuser", false, secret).unwrap();
+        let token = create_jwt_token(user_id, "testuser", false, vec![], secret).unwrap();
 
         let app = test::init_service(
             App::new()
@@ -324,7 +328,7 @@ mod tests {
     async fn allows_logout_mutation_with_valid_token() {
         let secret = "test_secret";
         let user_id = Uuid::new_v4();
-        let token = create_jwt_token(user_id, "testuser", false, secret).unwrap();
+        let token = create_jwt_token(user_id, "testuser", false, vec![], secret).unwrap();
 
         let app = test::init_service(
             App::new()
@@ -378,5 +382,30 @@ mod tests {
 
         // Hash should be 64 characters (SHA256 in hex)
         assert_eq!(hash1.len(), 64);
+    }
+
+    #[tokio::test]
+    async fn test_create_jwt_token_with_roles() {
+        let user_id = Uuid::new_v4();
+        let secret = "test_secret";
+        let roles = vec!["Approver".to_string(), "Team Admin".to_string()];
+        let token = create_jwt_token(user_id, "testuser", true, roles.clone(), secret).unwrap();
+
+        // Verify the token is not empty
+        assert!(!token.is_empty());
+
+        // Verify the token has the expected format (header.payload.signature)
+        let parts: Vec<&str> = token.split('.').collect();
+        assert_eq!(parts.len(), 3);
+
+        // Decode and verify the token contains the roles
+        let decoding_key = jsonwebtoken::DecodingKey::from_secret(secret.as_ref());
+        let validation = jsonwebtoken::Validation::new(Algorithm::HS256);
+        let token_data = jsonwebtoken::decode::<Claims>(&token, &decoding_key, &validation).unwrap();
+        
+        assert_eq!(token_data.claims.sub, user_id.to_string());
+        assert_eq!(token_data.claims.username, "testuser");
+        assert_eq!(token_data.claims.is_admin, true);
+        assert_eq!(token_data.claims.roles, roles);
     }
 }

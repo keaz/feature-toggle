@@ -71,7 +71,10 @@ impl UserFlagLogicImpl {
         client_repo: Box<dyn ClientRepository>,
         user_flag_repo: Box<dyn UserFlagAssignmentRepository>,
     ) -> Self {
-        Self { client_repo, user_flag_repo }
+        Self {
+            client_repo,
+            user_flag_repo,
+        }
     }
 
     fn parse_uuid(label: &str, value: &str) -> Result<Uuid, UserFlagLogicError> {
@@ -102,10 +105,14 @@ impl UserFlagLogic for UserFlagLogicImpl {
                 other => UserFlagLogicError::DatabaseError(other),
             })?;
         if !client.enabled {
-            return Err(UserFlagLogicError::PermissionDenied("client is disabled".to_string()));
+            return Err(UserFlagLogicError::PermissionDenied(
+                "client is disabled".to_string(),
+            ));
         }
         if client.api_key != client_secret {
-            return Err(UserFlagLogicError::Unauthenticated("invalid client_secret".to_string()));
+            return Err(UserFlagLogicError::Unauthenticated(
+                "invalid client_secret".to_string(),
+            ));
         }
         Ok(client.team_id)
     }
@@ -123,8 +130,7 @@ impl UserFlagLogic for UserFlagLogicImpl {
         }
         let fid = Self::parse_uuid("feature_id", feature_id)?;
         let eid = Self::parse_uuid("environment_id", environment_id)?;
-        self
-            .user_flag_repo
+        self.user_flag_repo
             .upsert(user_id, fid, eid, assigned)
             .await
             .map_err(UserFlagLogicError::DatabaseError)
@@ -153,7 +159,10 @@ impl UserFlagLogic for UserFlagLogicImpl {
     }
 
     fn clone_box(&self) -> Box<dyn UserFlagLogic> {
-        Box::new(Self::new(self.client_repo.clone(), self.user_flag_repo.clone()))
+        Box::new(Self::new(
+            self.client_repo.clone(),
+            self.user_flag_repo.clone(),
+        ))
     }
 }
 
@@ -162,7 +171,9 @@ mod tests {
     use super::*;
     use crate::database::client::MockClientRepository;
     use crate::database::entity::ClientType;
-    use crate::database::user_flag_assignment::{MockUserFlagAssignmentRepository, UserFlagAssignmentRow};
+    use crate::database::user_flag_assignment::{
+        MockUserFlagAssignmentRepository, UserFlagAssignmentRow,
+    };
 
     fn sample_client(enabled: bool, api_key: &str) -> crate::database::entity::Client {
         crate::database::entity::Client {
@@ -189,7 +200,10 @@ mod tests {
 
         let uf_repo = MockUserFlagAssignmentRepository::new();
         let logic = UserFlagLogicImpl::new(Box::new(mock_client), Box::new(uf_repo));
-        let team_id = logic.authenticate_client(&id.to_string(), "secret").await.unwrap();
+        let team_id = logic
+            .authenticate_client(&id.to_string(), "secret")
+            .await
+            .unwrap();
         assert_eq!(team_id, expected_team);
     }
 
@@ -198,7 +212,11 @@ mod tests {
         let mock_client = MockClientRepository::new();
         let uf_repo = MockUserFlagAssignmentRepository::new();
         let logic = UserFlagLogicImpl::new(Box::new(mock_client), Box::new(uf_repo));
-        let err = logic.authenticate_client("not-a-uuid", "s").await.err().unwrap();
+        let err = logic
+            .authenticate_client("not-a-uuid", "s")
+            .await
+            .err()
+            .unwrap();
         matches!(err, UserFlagLogicError::InvalidInput(_));
     }
 
@@ -222,14 +240,18 @@ mod tests {
     #[tokio::test]
     async fn authenticate_client_disabled() {
         let mut mock_client = MockClientRepository::new();
-        let mut client = sample_client(false, "secret");
+        let client = sample_client(false, "secret");
         let id = client.id;
         mock_client
             .expect_get_client_by_id()
             .returning(move |_| Ok(client.clone()));
         let uf_repo = MockUserFlagAssignmentRepository::new();
         let logic = UserFlagLogicImpl::new(Box::new(mock_client), Box::new(uf_repo));
-        let err = logic.authenticate_client(&id.to_string(), "secret").await.err().unwrap();
+        let err = logic
+            .authenticate_client(&id.to_string(), "secret")
+            .await
+            .err()
+            .unwrap();
         assert!(matches!(err, UserFlagLogicError::PermissionDenied(_)));
     }
 
@@ -243,7 +265,11 @@ mod tests {
             .returning(move |_| Ok(client.clone()));
         let uf_repo = MockUserFlagAssignmentRepository::new();
         let logic = UserFlagLogicImpl::new(Box::new(mock_client), Box::new(uf_repo));
-        let err = logic.authenticate_client(&id.to_string(), "wrong").await.err().unwrap();
+        let err = logic
+            .authenticate_client(&id.to_string(), "wrong")
+            .await
+            .err()
+            .unwrap();
         assert!(matches!(err, UserFlagLogicError::Unauthenticated(_)));
     }
 
@@ -251,15 +277,11 @@ mod tests {
     async fn upsert_after_auth_happy_path() {
         let mock_client = MockClientRepository::new();
         let mut uf_repo = MockUserFlagAssignmentRepository::new();
-        uf_repo
-            .expect_upsert()
-            .returning(|_, _, _, _| Ok(()));
+        uf_repo.expect_upsert().returning(|_, _, _, _| Ok(()));
         let logic = UserFlagLogicImpl::new(Box::new(mock_client), Box::new(uf_repo));
         let fid = Uuid::new_v4().to_string();
         let eid = Uuid::new_v4().to_string();
-        let res = logic
-            .upsert_after_auth("user", &fid, &eid, true)
-            .await;
+        let res = logic.upsert_after_auth("user", &fid, &eid, true).await;
         assert!(res.is_ok());
     }
 
@@ -285,7 +307,12 @@ mod tests {
             .returning(|_, _, _, _| Err(Error::InvalidInput("x".into())));
         let logic = UserFlagLogicImpl::new(Box::new(mock_client), Box::new(uf_repo));
         let err = logic
-            .upsert_after_auth("user", &Uuid::new_v4().to_string(), &Uuid::new_v4().to_string(), true)
+            .upsert_after_auth(
+                "user",
+                &Uuid::new_v4().to_string(),
+                &Uuid::new_v4().to_string(),
+                true,
+            )
             .await
             .err()
             .unwrap();
@@ -297,7 +324,12 @@ mod tests {
         let mock_client = MockClientRepository::new();
         let mut uf_repo = MockUserFlagAssignmentRepository::new();
         let team_id = Uuid::new_v4();
-        let sample = UserFlagAssignmentRow { user_id: "u".into(), feature_id: Uuid::new_v4(), environment_id: Uuid::new_v4(), assigned: true };
+        let sample = UserFlagAssignmentRow {
+            user_id: "u".into(),
+            feature_id: Uuid::new_v4(),
+            environment_id: Uuid::new_v4(),
+            assigned: true,
+        };
         uf_repo
             .expect_list()
             .returning(move |_, _, _| Ok(vec![sample.clone()]));
