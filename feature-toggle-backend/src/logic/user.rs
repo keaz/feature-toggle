@@ -1,6 +1,10 @@
-use crate::database::user::{CreateUser, UpdateUser, UserRepository};
 use crate::Error;
-use argon2::{password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString}, Argon2};
+use crate::database::user::{CreateUser, UpdateUser, UserRepository};
+use crate::graphql::schema::Team;
+use argon2::{
+    Argon2,
+    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
+};
 use async_graphql::ID;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
@@ -23,10 +27,18 @@ pub trait UserLogic: Send + Sync {
     async fn get_user_by_id(&self, id: ID) -> Result<GqlUser, Error>;
     async fn get_user_by_username(&self, username: String) -> Result<GqlUser, Error>;
     async fn register_user(&self, input: RegisterUserInput) -> Result<GqlUser, Error>;
-    async fn authenticate_user(&self, username: String, password: String) -> Result<GqlUser, Error>;
+    async fn authenticate_user(&self, username: String, password: String)
+    -> Result<GqlUser, Error>;
     async fn update_user(&self, id: ID, input: UpdateGqlUserInput) -> Result<GqlUser, Error>;
     async fn assign_user_teams(&self, id: ID, team_ids: Vec<ID>) -> Result<bool, Error>;
-    async fn search_users(&self, team_id: Option<ID>, name: Option<String>, page_number: i32, page_size: i32) -> Result<(Vec<GqlUser>, i64), Error>;
+    async fn get_user_teams(&self, id: ID) -> Result<Vec<Team>, Error>;
+    async fn search_users(
+        &self,
+        team_id: Option<ID>,
+        name: Option<String>,
+        page_number: i32,
+        page_size: i32,
+    ) -> Result<(Vec<GqlUser>, i64), Error>;
     fn clone_box(&self) -> Box<dyn UserLogic>;
 }
 
@@ -99,14 +111,24 @@ impl UserLogic for UserLogicImpl {
 
     async fn register_user(&self, input: RegisterUserInput) -> Result<GqlUser, Error> {
         if input.username.is_empty() || input.password.is_empty() {
-            return Err(Error::InvalidInput("Username and password are required".to_string()));
+            return Err(Error::InvalidInput(
+                "Username and password are required".to_string(),
+            ));
         }
 
-        if self.repository.user_exists_by_username(&input.username).await? {
+        if self
+            .repository
+            .user_exists_by_username(&input.username)
+            .await?
+        {
             return Err(Error::RecordAlreadyExists("username".to_string()));
         }
 
-        if self.repository.user_exists_by_email(&input.email, None).await? {
+        if self
+            .repository
+            .user_exists_by_email(&input.email, None)
+            .await?
+        {
             return Err(Error::RecordAlreadyExists("email".to_string()));
         }
 
@@ -117,14 +139,17 @@ impl UserLogic for UserLogicImpl {
             .map_err(|_| Error::InvalidInput("Failed to hash password".to_string()))?
             .to_string();
 
-        let created = self.repository.create_user(CreateUser{
-            username: input.username,
-            password_hash,
-            first_name: input.first_name,
-            last_name: input.last_name,
-            email: input.email,
-            is_admin: input.is_admin,
-        }).await?;
+        let created = self
+            .repository
+            .create_user(CreateUser {
+                username: input.username,
+                password_hash,
+                first_name: input.first_name,
+                last_name: input.last_name,
+                email: input.email,
+                is_admin: input.is_admin,
+            })
+            .await?;
 
         Ok(GqlUser {
             id: ID::from(created.id),
@@ -139,7 +164,11 @@ impl UserLogic for UserLogicImpl {
         })
     }
 
-    async fn authenticate_user(&self, username: String, password: String) -> Result<GqlUser, Error> {
+    async fn authenticate_user(
+        &self,
+        username: String,
+        password: String,
+    ) -> Result<GqlUser, Error> {
         let u = self.repository.get_user_by_username(&username).await?;
         let parsed_hash = PasswordHash::new(&u.password_hash)
             .map_err(|_| Error::InvalidInput("Stored password hash is invalid".to_string()))?;
@@ -166,18 +195,26 @@ impl UserLogic for UserLogicImpl {
         let id = Uuid::try_from(id).unwrap();
 
         // If updating email, validate uniqueness (allow unchanged or same owner)
-        if let Some(ref new_email) = input.email && self.repository.user_exists_by_email(new_email, Some(id)).await?{
+        if let Some(ref new_email) = input.email
+            && self
+                .repository
+                .user_exists_by_email(new_email, Some(id))
+                .await?
+        {
             return Err(Error::RecordAlreadyExists("email".to_string()));
         }
 
-        let updated = self.repository.update_user(UpdateUser {
-            id,
-            first_name: input.first_name,
-            last_name: input.last_name,
-            email: input.email,
-            is_admin: input.is_admin,
-            enabled: input.enabled,
-        }).await?;
+        let updated = self
+            .repository
+            .update_user(UpdateUser {
+                id,
+                first_name: input.first_name,
+                last_name: input.last_name,
+                email: input.email,
+                is_admin: input.is_admin,
+                enabled: input.enabled,
+            })
+            .await?;
 
         Ok(GqlUser {
             id: ID::from(updated.id),
@@ -193,31 +230,69 @@ impl UserLogic for UserLogicImpl {
     }
 
     async fn assign_user_teams(&self, id: ID, team_ids: Vec<ID>) -> Result<bool, Error> {
-        let user_id = Uuid::try_from(id).unwrap();
-        let team_ids_uuid: Result<Vec<Uuid>, _> = team_ids.into_iter().map(Uuid::try_from).collect();
-        let team_ids_uuid = team_ids_uuid.map_err(|e| Error::InvalidInput(format!("Invalid team id: {e}")))?;
-        self.repository.set_user_teams(user_id, team_ids_uuid).await?;
+        let user_id =
+            Uuid::try_from(id).map_err(|e| Error::InvalidInput(format!("Invalid user id: {e}")))?;
+        let team_ids_uuid: Result<Vec<Uuid>, _> = team_ids
+            .iter()
+            .map(|id| Uuid::try_from(id.clone()))
+            .collect();
+        let team_ids_uuid =
+            team_ids_uuid.map_err(|e| Error::InvalidInput(format!("Invalid team id: {e}")))?;
+        self.repository
+            .set_user_teams(user_id, team_ids_uuid)
+            .await?;
         Ok(true)
     }
 
-    async fn search_users(&self, team_id: Option<ID>, name: Option<String>, page_number: i32, page_size: i32) -> Result<(Vec<GqlUser>, i64), Error> {
-        let team_uuid: Option<Uuid> = match team_id { Some(id) => Some(Uuid::try_from(id).unwrap()), None => None };
-        let (items, total) = self.repository.search_users(team_uuid, name, page_number, page_size).await?;
-        let mapped = items.into_iter().map(|u| GqlUser{
-            id: ID::from(u.id),
-            username: u.username,
-            first_name: u.first_name,
-            last_name: u.last_name,
-            email: u.email,
-            is_admin: u.is_admin,
-            created_at: u.created_at,
-            updated_at: u.updated_at,
-            last_login: u.last_login,
-        }).collect();
+    async fn get_user_teams(&self, id: ID) -> Result<Vec<Team>, Error> {
+        let user_id =
+            Uuid::try_from(id).map_err(|e| Error::InvalidInput(format!("Invalid user id: {e}")))?;
+        let teams = self.repository.get_user_teams(user_id).await?;
+        Ok(teams
+            .into_iter()
+            .map(|t| Team {
+                id: ID::from(t.id),
+                name: t.name,
+                description: t.description,
+            })
+            .collect())
+    }
+
+    async fn search_users(
+        &self,
+        team_id: Option<ID>,
+        name: Option<String>,
+        page_number: i32,
+        page_size: i32,
+    ) -> Result<(Vec<GqlUser>, i64), Error> {
+        let team_uuid: Option<Uuid> = match team_id {
+            Some(id) => Some(Uuid::try_from(id).unwrap()),
+            None => None,
+        };
+        let (items, total) = self
+            .repository
+            .search_users(team_uuid, name, page_number, page_size)
+            .await?;
+        let mapped = items
+            .into_iter()
+            .map(|u| GqlUser {
+                id: ID::from(u.id),
+                username: u.username,
+                first_name: u.first_name,
+                last_name: u.last_name,
+                email: u.email,
+                is_admin: u.is_admin,
+                created_at: u.created_at,
+                updated_at: u.updated_at,
+                last_login: u.last_login,
+            })
+            .collect();
         Ok((mapped, total))
     }
 
-    fn clone_box(&self) -> Box<dyn UserLogic> { Box::new(self.clone()) }
+    fn clone_box(&self) -> Box<dyn UserLogic> {
+        Box::new(self.clone())
+    }
 }
 
 #[cfg(test)]
@@ -266,7 +341,10 @@ mod tests {
             .with(eq("jdoe"))
             .returning(move |_| Ok(u.clone()));
         let logic = user_logic(Box::new(mock));
-        let gql = logic.get_user_by_username("jdoe".to_string()).await.unwrap();
+        let gql = logic
+            .get_user_by_username("jdoe".to_string())
+            .await
+            .unwrap();
         assert_eq!(gql.first_name, "John");
         assert_eq!(gql.last_name, "Doe");
     }
@@ -283,22 +361,21 @@ mod tests {
             .returning(|_, _| Ok(false));
 
         // For create_user, we don't know the actual password hash because logic generates it, so accept any
-        mock.expect_create_user()
-            .returning(|input| {
-                Ok(User {
-                    id: Uuid::new_v4(),
-                    username: input.username,
-                    password_hash: input.password_hash,
-                    first_name: input.first_name,
-                    last_name: input.last_name,
-                    email: input.email,
-                    is_admin: input.is_admin,
-                    enabled: true,
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
-                    last_login: None,
-                })
-            });
+        mock.expect_create_user().returning(|input| {
+            Ok(User {
+                id: Uuid::new_v4(),
+                username: input.username,
+                password_hash: input.password_hash,
+                first_name: input.first_name,
+                last_name: input.last_name,
+                email: input.email,
+                is_admin: input.is_admin,
+                enabled: true,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                last_login: None,
+            })
+        });
 
         let logic = user_logic(Box::new(mock));
         let res = logic
@@ -333,7 +410,10 @@ mod tests {
             .await
             .err()
             .unwrap();
-        match err { Error::InvalidInput(msg) => assert!(msg.contains("Username and password")), _ => panic!("wrong error") }
+        match err {
+            Error::InvalidInput(msg) => assert!(msg.contains("Username and password")),
+            _ => panic!("wrong error"),
+        }
     }
 
     #[tokio::test]
@@ -355,11 +435,16 @@ mod tests {
             .await
             .err()
             .unwrap();
-        match err1 { Error::RecordAlreadyExists(field) => assert_eq!(field, "username"), _ => panic!("wrong error") }
+        match err1 {
+            Error::RecordAlreadyExists(field) => assert_eq!(field, "username"),
+            _ => panic!("wrong error"),
+        }
 
         // Second scenario: username ok but email exists
         let mut mock2 = MockUserRepository::new();
-        mock2.expect_user_exists_by_username().returning(|_| Ok(false));
+        mock2
+            .expect_user_exists_by_username()
+            .returning(|_| Ok(false));
         mock2
             .expect_user_exists_by_email()
             .returning(|_, _| Ok(true));
@@ -376,21 +461,28 @@ mod tests {
             .await
             .err()
             .unwrap();
-        match err2 { Error::RecordAlreadyExists(field) => assert_eq!(field, "email"), _ => panic!("wrong error") }
+        match err2 {
+            Error::RecordAlreadyExists(field) => assert_eq!(field, "email"),
+            _ => panic!("wrong error"),
+        }
     }
 
     #[tokio::test]
     async fn test_authenticate_user_success_updates_last_login() {
         // Build a real argon2 password hash from a known password for verification
         let salt = SaltString::generate(&mut OsRng);
-        let hash = Argon2::default().hash_password("topsecret".as_bytes(), &salt).unwrap().to_string();
+        let hash = Argon2::default()
+            .hash_password("topsecret".as_bytes(), &salt)
+            .unwrap()
+            .to_string();
         let mut u = sample_user();
         u.password_hash = hash.clone();
         let id = u.id;
 
         let mut mock = MockUserRepository::new();
         let u_clone = u.clone();
-        mock.expect_get_user_by_username().returning(move |_| Ok(u_clone.clone()));
+        mock.expect_get_user_by_username()
+            .returning(move |_| Ok(u_clone.clone()));
         // Expect update_last_login to be called
         mock.expect_update_last_login()
             .with(eq(id), function(|_| true))
@@ -398,7 +490,8 @@ mod tests {
         // After update, logic reloads by id
         let mut u_after = u.clone();
         u_after.last_login = Some(Utc::now());
-        mock.expect_get_user_by_id().returning(move |_| Ok(u_after.clone()));
+        mock.expect_get_user_by_id()
+            .returning(move |_| Ok(u_after.clone()));
 
         let logic = user_logic(Box::new(mock));
         let res = logic
@@ -413,16 +506,23 @@ mod tests {
         let mut u = sample_user();
         // set a hash for password "abc"
         let salt = SaltString::generate(&mut OsRng);
-        u.password_hash = Argon2::default().hash_password("abc".as_bytes(), &salt).unwrap().to_string();
+        u.password_hash = Argon2::default()
+            .hash_password("abc".as_bytes(), &salt)
+            .unwrap()
+            .to_string();
         let mut mock = MockUserRepository::new();
-        mock.expect_get_user_by_username().returning(move |_| Ok(u.clone()));
+        mock.expect_get_user_by_username()
+            .returning(move |_| Ok(u.clone()));
         let logic = user_logic(Box::new(mock));
         let err = logic
             .authenticate_user("jdoe".to_string(), "wrong".to_string())
             .await
             .err()
             .unwrap();
-        match err { Error::InvalidInput(msg) => assert!(msg.contains("Invalid username or password")), _ => panic!("wrong error") }
+        match err {
+            Error::InvalidInput(msg) => assert!(msg.contains("Invalid username or password")),
+            _ => panic!("wrong error"),
+        }
     }
 
     #[tokio::test]
@@ -453,13 +553,16 @@ mod tests {
         });
         let logic = user_logic(Box::new(mock));
         let res = logic
-            .update_user(ID::from(id), UpdateGqlUserInput {
-                first_name: Some("Jane".to_string()),
-                last_name: None,
-                email: Some("new@example.com".to_string()),
-                is_admin: Some(true),
-                enabled: Some(true),
-            })
+            .update_user(
+                ID::from(id),
+                UpdateGqlUserInput {
+                    first_name: Some("Jane".to_string()),
+                    last_name: None,
+                    email: Some("new@example.com".to_string()),
+                    is_admin: Some(true),
+                    enabled: Some(true),
+                },
+            )
             .await
             .unwrap();
         assert_eq!(res.first_name, "Jane");
@@ -477,17 +580,23 @@ mod tests {
             .returning(|_, _| Ok(true));
         let logic = user_logic(Box::new(mock));
         let err = logic
-            .update_user(ID::from(id), UpdateGqlUserInput {
-                first_name: None,
-                last_name: None,
-                email: Some("dup@example.com".to_string()),
-                is_admin: None,
-                enabled: None,
-            })
+            .update_user(
+                ID::from(id),
+                UpdateGqlUserInput {
+                    first_name: None,
+                    last_name: None,
+                    email: Some("dup@example.com".to_string()),
+                    is_admin: None,
+                    enabled: None,
+                },
+            )
             .await
             .err()
             .unwrap();
-        match err { Error::RecordAlreadyExists(field) => assert_eq!(field, "email"), _ => panic!("wrong error") }
+        match err {
+            Error::RecordAlreadyExists(field) => assert_eq!(field, "email"),
+            _ => panic!("wrong error"),
+        }
     }
 
     #[tokio::test]
@@ -497,10 +606,18 @@ mod tests {
         let t2 = Uuid::new_v4();
         let mut mock = MockUserRepository::new();
         mock.expect_set_user_teams()
-            .with(eq(id), function(move |vec: &Vec<Uuid>| vec.len() == 2 && vec.contains(&t1) && vec.contains(&t2)))
+            .with(
+                eq(id),
+                function(move |vec: &Vec<Uuid>| {
+                    vec.len() == 2 && vec.contains(&t1) && vec.contains(&t2)
+                }),
+            )
             .return_once(|_, _| Ok(()));
         let logic = user_logic(Box::new(mock));
-        let ok = logic.assign_user_teams(ID::from(id), vec![ID::from(t1), ID::from(t2)]).await.unwrap();
+        let ok = logic
+            .assign_user_teams(ID::from(id), vec![ID::from(t1), ID::from(t2)])
+            .await
+            .unwrap();
         assert!(ok);
     }
 }

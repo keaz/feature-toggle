@@ -10,7 +10,7 @@ use crate::logic::pipeline::PipelineLogic;
 use crate::logic::role::RoleLogic;
 use crate::logic::team::TeamLogic;
 use crate::logic::user::UserLogic;
-use async_graphql::{Context, Object, Result as GqlResult, ID};
+use async_graphql::{Context, ID, Object, Result as GqlResult};
 use log::debug;
 
 pub struct Query;
@@ -40,9 +40,20 @@ impl Query {
     }
 
     async fn teams(&self, ctx: &Context<'_>) -> GqlResult<Vec<Team>> {
-        debug!("Fetching teams");
-        let repository = ctx.data::<Box<dyn TeamLogic>>()?;
-        Ok(repository.get_teams(None).await?)
+        let jwt_user = ctx.data::<crate::JwtUser>()?;
+
+        if jwt_user.is_admin {
+            debug!("Fetching all teams for admin user: {}", jwt_user.username);
+            let team_logic = ctx.data::<Box<dyn TeamLogic>>()?;
+            Ok(team_logic.get_teams(None).await?)
+        } else {
+            debug!(
+                "Fetching teams for user: {} (user_id: {})",
+                jwt_user.username, jwt_user.id
+            );
+            let user_logic = ctx.data::<Box<dyn UserLogic>>()?;
+            Ok(user_logic.get_user_teams(ID::from(jwt_user.id)).await?)
+        }
     }
 
     async fn pipelines(
@@ -189,20 +200,28 @@ impl Query {
             .into_iter()
             .map(create_user)
             .collect::<Result<_, _>>()?;
-        Ok(UsersPage { items, page_number, page_size, total })
+        Ok(UsersPage {
+            items,
+            page_number,
+            page_size,
+            total,
+        })
     }
 
     async fn roles(&self, ctx: &Context<'_>) -> GqlResult<Vec<Role>> {
         debug!("Fetching all roles");
         let logic = ctx.data::<Box<dyn RoleLogic>>()?;
         let roles = logic.get_all_roles().await?;
-        Ok(roles.into_iter().map(|r| Role {
-            id: r.id,
-            name: r.name,
-            description: r.description,
-            created_at: r.created_at,
-            updated_at: r.updated_at,
-        }).collect())
+        Ok(roles
+            .into_iter()
+            .map(|r| Role {
+                id: r.id,
+                name: r.name,
+                description: r.description,
+                created_at: r.created_at,
+                updated_at: r.updated_at,
+            })
+            .collect())
     }
 
     async fn user_roles(
@@ -213,21 +232,25 @@ impl Query {
         debug!("Fetching roles for user: {user_id:?}");
         let logic = ctx.data::<Box<dyn RoleLogic>>()?;
         let roles = logic.get_user_roles(user_id).await?;
-        Ok(roles.into_iter().map(|r| Role {
-            id: r.id,
-            name: r.name,
-            description: r.description,
-            created_at: r.created_at,
-            updated_at: r.updated_at,
-        }).collect())
+        Ok(roles
+            .into_iter()
+            .map(|r| Role {
+                id: r.id,
+                name: r.name,
+                description: r.description,
+                created_at: r.created_at,
+                updated_at: r.updated_at,
+            })
+            .collect())
     }
 }
 
 #[cfg(test)]
 mod tests {
-use super::*;
-use crate::logic::context::MockContextLogic;
-use async_graphql::{EmptySubscription, Request, Schema};    #[tokio::test]
+    use super::*;
+    use crate::logic::context::MockContextLogic;
+    use async_graphql::{EmptySubscription, Request, Schema};
+    #[tokio::test]
     async fn test_contexts_query() {
         let mut mock = MockContextLogic::new();
         let team_id = ID::from("11111111-1111-1111-1111-111111111111");
@@ -319,7 +342,6 @@ use async_graphql::{EmptySubscription, Request, Schema};    #[tokio::test]
     }
 }
 
-
 #[cfg(test)]
 mod more_query_tests {
     use super::*;
@@ -334,15 +356,41 @@ mod more_query_tests {
     }
     #[async_trait::async_trait]
     impl crate::logic::pipeline::PipelineLogic for StubPipelineLogic {
-        async fn get_pipelines(&self, _team_id: ID, _name: Option<String>, _active: Option<bool>, fields: Vec<String>) -> Result<Vec<Pipeline>, crate::Error> {
+        async fn get_pipelines(
+            &self,
+            _team_id: ID,
+            _name: Option<String>,
+            _active: Option<bool>,
+            fields: Vec<String>,
+        ) -> Result<Vec<Pipeline>, crate::Error> {
             *self.captured_fields.lock().unwrap() = Some(fields);
             Ok(Vec::new())
         }
-        async fn get_pipeline_by_id(&self, _id: ID) -> Result<Pipeline, crate::Error> { unreachable!() }
-        async fn create_pipeline(&self, _team_id: ID, _input: crate::graphql::schema::CreatePipelineInput) -> Result<ID, crate::Error> { unreachable!() }
-        async fn update_pipeline(&self, _id: ID, _input: crate::graphql::schema::UpdatePipelineInput) -> Result<Pipeline, crate::Error> { unreachable!() }
-        async fn delete_pipeline(&self, _id: ID) -> Result<(), crate::Error> { unreachable!() }
-        fn clone_box(&self) -> Box<dyn crate::logic::pipeline::PipelineLogic> { Box::new(Self { captured_fields: self.captured_fields.clone() }) }
+        async fn get_pipeline_by_id(&self, _id: ID) -> Result<Pipeline, crate::Error> {
+            unreachable!()
+        }
+        async fn create_pipeline(
+            &self,
+            _team_id: ID,
+            _input: crate::graphql::schema::CreatePipelineInput,
+        ) -> Result<ID, crate::Error> {
+            unreachable!()
+        }
+        async fn update_pipeline(
+            &self,
+            _id: ID,
+            _input: crate::graphql::schema::UpdatePipelineInput,
+        ) -> Result<Pipeline, crate::Error> {
+            unreachable!()
+        }
+        async fn delete_pipeline(&self, _id: ID) -> Result<(), crate::Error> {
+            unreachable!()
+        }
+        fn clone_box(&self) -> Box<dyn crate::logic::pipeline::PipelineLogic> {
+            Box::new(Self {
+                captured_fields: self.captured_fields.clone(),
+            })
+        }
     }
 
     struct StubUserLogic {
@@ -351,33 +399,92 @@ mod more_query_tests {
     }
     #[async_trait::async_trait]
     impl crate::logic::user::UserLogic for StubUserLogic {
-        async fn get_user_by_id(&self, _id: ID) -> Result<crate::logic::user::GqlUser, crate::Error> { unreachable!() }
-        async fn get_user_by_username(&self, _username: String) -> Result<crate::logic::user::GqlUser, crate::Error> { unreachable!() }
-        async fn register_user(&self, _input: crate::logic::user::RegisterUserInput) -> Result<crate::logic::user::GqlUser, crate::Error> { unreachable!() }
-        async fn authenticate_user(&self, _username: String, _password: String) -> Result<crate::logic::user::GqlUser, crate::Error> { unreachable!() }
-        async fn update_user(&self, _id: ID, _input: crate::logic::user::UpdateGqlUserInput) -> Result<crate::logic::user::GqlUser, crate::Error> { unreachable!() }
-        async fn assign_user_teams(&self, _id: ID, _team_ids: Vec<ID>) -> Result<bool, crate::Error> { unreachable!() }
-        async fn search_users(&self, _team_id: Option<ID>, _name: Option<String>, _page_number: i32, _page_size: i32) -> Result<(Vec<crate::logic::user::GqlUser>, i64), crate::Error> {
+        async fn get_user_by_id(
+            &self,
+            _id: ID,
+        ) -> Result<crate::logic::user::GqlUser, crate::Error> {
+            unreachable!()
+        }
+        async fn get_user_by_username(
+            &self,
+            _username: String,
+        ) -> Result<crate::logic::user::GqlUser, crate::Error> {
+            unreachable!()
+        }
+        async fn register_user(
+            &self,
+            _input: crate::logic::user::RegisterUserInput,
+        ) -> Result<crate::logic::user::GqlUser, crate::Error> {
+            unreachable!()
+        }
+        async fn authenticate_user(
+            &self,
+            _username: String,
+            _password: String,
+        ) -> Result<crate::logic::user::GqlUser, crate::Error> {
+            unreachable!()
+        }
+        async fn update_user(
+            &self,
+            _id: ID,
+            _input: crate::logic::user::UpdateGqlUserInput,
+        ) -> Result<crate::logic::user::GqlUser, crate::Error> {
+            unreachable!()
+        }
+        async fn assign_user_teams(
+            &self,
+            _id: ID,
+            _team_ids: Vec<ID>,
+        ) -> Result<bool, crate::Error> {
+            unreachable!()
+        }
+        async fn get_user_teams(&self, _id: ID) -> Result<Vec<Team>, crate::Error> {
+            unreachable!()
+        }
+        async fn search_users(
+            &self,
+            _team_id: Option<ID>,
+            _name: Option<String>,
+            _page_number: i32,
+            _page_size: i32,
+        ) -> Result<(Vec<crate::logic::user::GqlUser>, i64), crate::Error> {
             Ok((self.items.clone(), self.total))
         }
-        fn clone_box(&self) -> Box<dyn crate::logic::user::UserLogic> { Box::new(Self { items: self.items.clone(), total: self.total }) }
+        fn clone_box(&self) -> Box<dyn crate::logic::user::UserLogic> {
+            Box::new(Self {
+                items: self.items.clone(),
+                total: self.total,
+            })
+        }
     }
 
     #[tokio::test]
     async fn test_pipelines_lookahead_includes_stages_field() {
         let team_id = ID::from("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
         let captured = Arc::new(Mutex::new(None));
-        let stub = StubPipelineLogic { captured_fields: captured.clone() };
+        let stub = StubPipelineLogic {
+            captured_fields: captured.clone(),
+        };
 
-        let schema = Schema::build(super::Query, crate::graphql::mutation::MutationRoot, EmptySubscription)
-            .data::<Box<dyn crate::logic::pipeline::PipelineLogic>>(Box::new(stub))
-            .finish();
+        let schema = Schema::build(
+            super::Query,
+            crate::graphql::mutation::MutationRoot,
+            EmptySubscription,
+        )
+        .data::<Box<dyn crate::logic::pipeline::PipelineLogic>>(Box::new(stub))
+        .finish();
 
         let q = r#"query($tid: ID!){ pipelines(teamId: $tid){ id stages { id } } }"#;
         let mut req = Request::new(q);
-        req = req.variables(async_graphql::Variables::from_json(serde_json::json!({"tid": team_id.to_string()})));
+        req = req.variables(async_graphql::Variables::from_json(
+            serde_json::json!({"tid": team_id.to_string()}),
+        ));
         let resp = schema.execute(req).await;
-        assert!(resp.errors.is_empty(), "{}", serde_json::to_string(&resp.errors).unwrap());
+        assert!(
+            resp.errors.is_empty(),
+            "{}",
+            serde_json::to_string(&resp.errors).unwrap()
+        );
         let fields = captured.lock().unwrap().clone().unwrap();
         assert!(fields.contains(&"stages".to_string()));
     }
@@ -387,21 +494,46 @@ mod more_query_tests {
         use chrono::Utc;
         let u1 = crate::logic::user::GqlUser {
             id: ID::from("11111111-1111-1111-1111-111111111111"),
-            username: "u1".into(), first_name: "F1".into(), last_name: "L1".into(),
-            email: "u1@example.com".into(), is_admin: false, created_at: Utc::now(), updated_at: Utc::now(), last_login: None };
+            username: "u1".into(),
+            first_name: "F1".into(),
+            last_name: "L1".into(),
+            email: "u1@example.com".into(),
+            is_admin: false,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_login: None,
+        };
         let u2 = crate::logic::user::GqlUser {
             id: ID::from("22222222-2222-2222-2222-222222222222"),
-            username: "u2".into(), first_name: "F2".into(), last_name: "L2".into(),
-            email: "u2@example.com".into(), is_admin: true, created_at: Utc::now(), updated_at: Utc::now(), last_login: None };
-        let stub = StubUserLogic { items: vec![u1, u2], total: 42 };
+            username: "u2".into(),
+            first_name: "F2".into(),
+            last_name: "L2".into(),
+            email: "u2@example.com".into(),
+            is_admin: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_login: None,
+        };
+        let stub = StubUserLogic {
+            items: vec![u1, u2],
+            total: 42,
+        };
 
-        let schema = Schema::build(super::Query, crate::graphql::mutation::MutationRoot, EmptySubscription)
-            .data::<Box<dyn crate::logic::user::UserLogic>>(Box::new(stub))
-            .finish();
+        let schema = Schema::build(
+            super::Query,
+            crate::graphql::mutation::MutationRoot,
+            EmptySubscription,
+        )
+        .data::<Box<dyn crate::logic::user::UserLogic>>(Box::new(stub))
+        .finish();
 
         let q = r#"query{ users(pageNumber: 2, pageSize: 10){ pageNumber pageSize total items { username isAdmin } } }"#;
         let resp = schema.execute(Request::new(q)).await;
-        assert!(resp.errors.is_empty(), "{}", serde_json::to_string(&resp.errors).unwrap());
+        assert!(
+            resp.errors.is_empty(),
+            "{}",
+            serde_json::to_string(&resp.errors).unwrap()
+        );
         let data = resp.data.into_json().unwrap();
         assert_eq!(data["users"]["pageNumber"], 2);
         assert_eq!(data["users"]["pageSize"], 10);
@@ -416,20 +548,31 @@ mod more_query_tests {
     async fn test_environment_query_calls_logic() {
         let mut mock = MockEnvironmentLogic::new();
         let env_id = ID::from("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
-        let expected = Environment { id: env_id.clone(), name: "prod".into(), active: true, team_id: ID::from("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb") };
+        let expected = Environment {
+            id: env_id.clone(),
+            name: "prod".into(),
+            active: true,
+            team_id: ID::from("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+        };
         let env_id_for_check = env_id.clone();
         mock.expect_get_environment_by_id()
             .times(1)
             .withf(move |id| id.to_string() == env_id_for_check.to_string())
             .return_once(move |_| Ok(expected));
 
-        let schema = Schema::build(super::Query, crate::graphql::mutation::MutationRoot, EmptySubscription)
-            .data::<Box<dyn crate::logic::environment::EnvironmentLogic>>(Box::new(mock))
-            .finish();
+        let schema = Schema::build(
+            super::Query,
+            crate::graphql::mutation::MutationRoot,
+            EmptySubscription,
+        )
+        .data::<Box<dyn crate::logic::environment::EnvironmentLogic>>(Box::new(mock))
+        .finish();
 
         let q = r#"query($id: ID!){ environment(id: $id){ id name active } }"#;
         let mut req = Request::new(q);
-        req = req.variables(async_graphql::Variables::from_json(serde_json::json!({"id": env_id.to_string()})));
+        req = req.variables(async_graphql::Variables::from_json(
+            serde_json::json!({"id": env_id.to_string()}),
+        ));
         let resp = schema.execute(req).await;
         assert!(resp.errors.is_empty());
     }
@@ -459,9 +602,13 @@ mod more_query_tests {
             .times(1)
             .return_once(move || Ok(expected_roles));
 
-        let schema = Schema::build(super::Query, crate::graphql::mutation::MutationRoot, EmptySubscription)
-            .data::<Box<dyn crate::logic::role::RoleLogic>>(Box::new(mock))
-            .finish();
+        let schema = Schema::build(
+            super::Query,
+            crate::graphql::mutation::MutationRoot,
+            EmptySubscription,
+        )
+        .data::<Box<dyn crate::logic::role::RoleLogic>>(Box::new(mock))
+        .finish();
 
         let gql = r#"
             query {
@@ -482,5 +629,210 @@ mod more_query_tests {
         assert_eq!(data["roles"].as_array().unwrap().len(), 2);
         assert_eq!(data["roles"][0]["name"], "Approver");
         assert_eq!(data["roles"][1]["name"], "Requester");
+    }
+
+    #[tokio::test]
+    async fn test_teams_query_admin_user() {
+        use crate::logic::team::TeamLogic;
+
+        struct StubTeamLogic {
+            teams: Vec<Team>,
+        }
+
+        #[async_trait::async_trait]
+        impl TeamLogic for StubTeamLogic {
+            async fn get_team_by_id(&self, _env_id: uuid::Uuid) -> Result<Team, crate::Error> {
+                unreachable!()
+            }
+            async fn get_teams(&self, _name: Option<String>) -> Result<Vec<Team>, crate::Error> {
+                Ok(self.teams.clone())
+            }
+            async fn create_team(
+                &self,
+                _input: crate::graphql::schema::CreateTeamInput,
+            ) -> Result<Team, crate::Error> {
+                unreachable!()
+            }
+            async fn update_team(
+                &self,
+                _id: ID,
+                _input: crate::graphql::schema::UpdateTeamInput,
+            ) -> Result<Team, crate::Error> {
+                unreachable!()
+            }
+            async fn delete_team(&self, _id: uuid::Uuid) -> Result<(), crate::Error> {
+                unreachable!()
+            }
+            fn clone_box(&self) -> Box<dyn TeamLogic> {
+                Box::new(Self {
+                    teams: self.teams.clone(),
+                })
+            }
+        }
+
+        let expected_teams = vec![
+            Team {
+                id: ID::from("team1"),
+                name: "Team 1".to_string(),
+                description: "First team".to_string(),
+            },
+            Team {
+                id: ID::from("team2"),
+                name: "Team 2".to_string(),
+                description: "Second team".to_string(),
+            },
+        ];
+
+        let jwt_user = crate::JwtUser {
+            id: uuid::Uuid::new_v4(),
+            username: "admin".to_string(),
+            is_admin: true,
+            roles: vec!["Admin".to_string()],
+            token_hash: "hash123".to_string(),
+        };
+
+        let schema = Schema::build(
+            super::Query,
+            crate::graphql::mutation::MutationRoot,
+            EmptySubscription,
+        )
+        .data::<Box<dyn TeamLogic>>(Box::new(StubTeamLogic {
+            teams: expected_teams.clone(),
+        }))
+        .data(jwt_user)
+        .finish();
+
+        let gql = r#"
+            query {
+                teams {
+                    id
+                    name
+                    description
+                }
+            }
+        "#;
+        let resp = schema.execute(Request::new(gql)).await;
+        assert!(
+            resp.errors.is_empty(),
+            "{}",
+            serde_json::to_string(&resp.errors).unwrap()
+        );
+        let data = resp.data.into_json().unwrap();
+        assert_eq!(data["teams"].as_array().unwrap().len(), 2);
+        assert_eq!(data["teams"][0]["name"], "Team 1");
+        assert_eq!(data["teams"][1]["name"], "Team 2");
+    }
+
+    #[tokio::test]
+    async fn test_teams_query_regular_user() {
+        use crate::logic::user::UserLogic;
+
+        struct StubUserLogicForTeams {
+            user_teams: Vec<Team>,
+        }
+
+        #[async_trait::async_trait]
+        impl UserLogic for StubUserLogicForTeams {
+            async fn get_user_by_id(
+                &self,
+                _id: ID,
+            ) -> Result<crate::logic::user::GqlUser, crate::Error> {
+                unreachable!()
+            }
+            async fn get_user_by_username(
+                &self,
+                _username: String,
+            ) -> Result<crate::logic::user::GqlUser, crate::Error> {
+                unreachable!()
+            }
+            async fn register_user(
+                &self,
+                _input: crate::logic::user::RegisterUserInput,
+            ) -> Result<crate::logic::user::GqlUser, crate::Error> {
+                unreachable!()
+            }
+            async fn authenticate_user(
+                &self,
+                _username: String,
+                _password: String,
+            ) -> Result<crate::logic::user::GqlUser, crate::Error> {
+                unreachable!()
+            }
+            async fn update_user(
+                &self,
+                _id: ID,
+                _input: crate::logic::user::UpdateGqlUserInput,
+            ) -> Result<crate::logic::user::GqlUser, crate::Error> {
+                unreachable!()
+            }
+            async fn assign_user_teams(
+                &self,
+                _id: ID,
+                _team_ids: Vec<ID>,
+            ) -> Result<bool, crate::Error> {
+                unreachable!()
+            }
+            async fn get_user_teams(&self, _id: ID) -> Result<Vec<Team>, crate::Error> {
+                Ok(self.user_teams.clone())
+            }
+            async fn search_users(
+                &self,
+                _team_id: Option<ID>,
+                _name: Option<String>,
+                _page_number: i32,
+                _page_size: i32,
+            ) -> Result<(Vec<crate::logic::user::GqlUser>, i64), crate::Error> {
+                unreachable!()
+            }
+            fn clone_box(&self) -> Box<dyn UserLogic> {
+                Box::new(Self {
+                    user_teams: self.user_teams.clone(),
+                })
+            }
+        }
+
+        let expected_teams = vec![Team {
+            id: ID::from("team1"),
+            name: "User Team".to_string(),
+            description: "User's assigned team".to_string(),
+        }];
+
+        let jwt_user = crate::JwtUser {
+            id: uuid::Uuid::new_v4(),
+            username: "regular_user".to_string(),
+            is_admin: false,
+            roles: vec!["User".to_string()],
+            token_hash: "hash123".to_string(),
+        };
+
+        let schema = Schema::build(
+            super::Query,
+            crate::graphql::mutation::MutationRoot,
+            EmptySubscription,
+        )
+        .data::<Box<dyn UserLogic>>(Box::new(StubUserLogicForTeams {
+            user_teams: expected_teams.clone(),
+        }))
+        .data(jwt_user)
+        .finish();
+
+        let gql = r#"
+            query {
+                teams {
+                    id
+                    name
+                    description
+                }
+            }
+        "#;
+        let resp = schema.execute(Request::new(gql)).await;
+        assert!(
+            resp.errors.is_empty(),
+            "{}",
+            serde_json::to_string(&resp.errors).unwrap()
+        );
+        let data = resp.data.into_json().unwrap();
+        assert_eq!(data["teams"].as_array().unwrap().len(), 1);
+        assert_eq!(data["teams"][0]["name"], "User Team");
     }
 }
