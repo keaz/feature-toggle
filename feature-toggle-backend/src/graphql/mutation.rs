@@ -384,7 +384,7 @@ impl MutationRoot {
     async fn login(&self, ctx: &Context<'_>, input: GqlLoginInput) -> GqlResult<LoginResponse> {
         let logic = ctx.data::<Box<dyn UserLogic>>()?;
         let role_logic = ctx.data::<Box<dyn crate::logic::role::RoleLogic>>()?;
-        let jwt_secret = ctx.data::<String>()?;
+        let jwt_secret_logic = ctx.data::<Box<dyn crate::logic::jwt_secret::JwtSecretLogic>>()?;
         let pool = ctx.data::<sqlx::PgPool>()?;
         let u = logic
             .authenticate_user(input.username, input.password)
@@ -396,13 +396,17 @@ impl MutationRoot {
         let roles = role_logic.get_user_roles(u.id.clone()).await?;
         let role_names: Vec<String> = roles.into_iter().map(|r| r.name).collect();
 
+        // Get current JWT secret from database
+        let jwt_secret = jwt_secret_logic.get_current_secret().await
+            .map_err(|e| async_graphql::Error::new(format!("Failed to get JWT secret: {}", e)))?;
+
         // Generate JWT token
         let token = crate::middleware::jwt_guard::create_jwt_token(
             user_id,
             &u.username,
             u.is_admin,
             role_names,
-            jwt_secret,
+            &jwt_secret,
         )
         .map_err(|e| async_graphql::Error::new(format!("Failed to create token: {}", e)))?;
 
@@ -545,6 +549,94 @@ impl MutationRoot {
                 updated_at: r.updated_at,
             })
             .collect())
+    }
+
+    /// Generate a new JWT signing secret (admin only)
+    async fn generate_jwt_secret(
+        &self,
+        ctx: &Context<'_>,
+    ) -> GqlResult<crate::graphql::schema::JwtSecretResponse> {
+        info!("Generating new JWT secret");
+
+        // Get user info from JWT context
+        let jwt_user = ctx.data::<crate::JwtUser>()?;
+        
+        // Check if user is admin
+        if !jwt_user.is_admin {
+            return Err(async_graphql::Error::new("Unauthorized: Admin access required"));
+        }
+
+        let logic = ctx.data::<Box<dyn crate::logic::jwt_secret::JwtSecretLogic>>()?;
+        let secret = logic.generate_new_secret(Some(jwt_user.id)).await?;
+
+        Ok(crate::graphql::schema::JwtSecretResponse {
+            id: secret.id.into(),
+            is_active: secret.is_active,
+            created_at: secret.created_at,
+            created_by: secret.created_by.map(|id| id.into()),
+            expires_at: secret.expires_at,
+            // Don't return the actual secret for security
+            secret_preview: format!("{}...{}", 
+                &secret.secret[..8], 
+                &secret.secret[secret.secret.len()-4..]
+            ),
+        })
+    }
+
+    /// Check JWT secret status (admin only)
+    async fn jwt_secret_status(
+        &self,
+        ctx: &Context<'_>,
+    ) -> GqlResult<Vec<crate::graphql::schema::JwtSecretResponse>> {
+        info!("Checking JWT secret status");
+
+        // Get user info from JWT context
+        let jwt_user = ctx.data::<crate::JwtUser>()?;
+        
+        // Check if user is admin
+        if !jwt_user.is_admin {
+            return Err(async_graphql::Error::new("Unauthorized: Admin access required"));
+        }
+
+        let logic = ctx.data::<Box<dyn crate::logic::jwt_secret::JwtSecretLogic>>()?;
+        let secrets = logic.get_all_secrets().await?;
+
+        Ok(secrets
+            .into_iter()
+            .map(|secret| crate::graphql::schema::JwtSecretResponse {
+                id: secret.id.into(),
+                is_active: secret.is_active,
+                created_at: secret.created_at,
+                created_by: secret.created_by.map(|id| id.into()),
+                expires_at: secret.expires_at,
+                // Don't return the actual secret for security
+                secret_preview: format!("{}...{}", 
+                    &secret.secret[..8], 
+                    &secret.secret[secret.secret.len()-4..]
+                ),
+            })
+            .collect())
+    }
+
+    /// Emergency deactivate all JWT secrets (admin only) 
+    async fn deactivate_all_jwt_secrets(
+        &self,
+        ctx: &Context<'_>,
+    ) -> GqlResult<bool> {
+        info!("Deactivating all JWT secrets");
+
+        // Get user info from JWT context
+        let jwt_user = ctx.data::<crate::JwtUser>()?;
+        
+        // Check if user is admin
+        if !jwt_user.is_admin {
+            return Err(async_graphql::Error::new("Unauthorized: Admin access required"));
+        }
+
+        let logic = ctx.data::<Box<dyn crate::logic::jwt_secret::JwtSecretLogic>>()?;
+        logic.deactivate_all_secrets().await?;
+
+        Ok(true)
     }
 }
 

@@ -450,3 +450,13 @@ pub struct Role {
 pub struct AssignUserRolesInput {
     pub role_ids: Vec<ID>,
 }
+
+#[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
+pub struct JwtSecretResponse {
+    pub id: ID,
+    pub is_active: bool,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub created_by: Option<ID>,
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub secret_preview: String, // Truncated version for security
+}

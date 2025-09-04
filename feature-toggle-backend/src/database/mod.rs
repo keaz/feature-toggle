@@ -3,6 +3,7 @@ pub mod context;
 pub mod entity;
 pub mod environment;
 pub mod feature;
+pub mod jwt_secret;
 pub mod jwt_token;
 pub mod pipeline;
 pub mod role;

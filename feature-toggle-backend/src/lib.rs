@@ -62,6 +62,17 @@ pub async fn run() -> std::io::Result<()> {
     );
     let user_logic = logic::user::user_logic(database::user::user_repository(db_pool.clone()));
     let role_logic = logic::role::role_logic(database::role::role_repository(db_pool.clone()));
+    let jwt_secret_logic = logic::jwt_secret::jwt_secret_logic(db_pool.clone());
+
+    // Initialize JWT secret on startup
+    jwt_secret_logic.initialize_secret().await
+        .expect("Failed to initialize JWT secret");
+    log::info!("JWT secret initialized successfully");
+
+    // Initialize JWT secret on startup
+    jwt_secret_logic.initialize_secret().await
+        .expect("Failed to initialize JWT secret");
+    log::info!("JWT secret initialized successfully");
 
     let grpc_pool = db_pool.clone();
     let grpc_updates_tx = updates_tx.clone();
@@ -74,6 +85,9 @@ pub async fn run() -> std::io::Result<()> {
             error!("gRPC server error: {e}");
         }
     });
+
+    // Clone values for use in the HttpServer closure
+    let jwt_secret_logic_for_server = jwt_secret_logic.clone();
 
     HttpServer::new(move || {
         let admin_state = AdminState::new();
@@ -89,8 +103,8 @@ pub async fn run() -> std::io::Result<()> {
             .data(context_logic.clone())
             .data(user_logic.clone())
             .data(role_logic.clone())
+            .data(jwt_secret_logic_for_server.clone())
             .data(admin_state.clone())
-            .data(cfg.jwt_secret.clone()) // Add JWT secret to schema data for mutations
             // .extension(ApolloTracing)
             .finish();
 
@@ -105,7 +119,7 @@ pub async fn run() -> std::io::Result<()> {
             // Order of wraps: last registered runs first. We want AdminGuard first, then JwtGuard, then AccessLogger.
             .wrap(JwtGuard::new(
                 cfg.allowed_origin.clone(),
-                cfg.jwt_secret.clone(),
+                jwt_secret_logic_for_server.clone(),
                 db_pool.clone(),
             ))
             .wrap(AdminGuard::new(

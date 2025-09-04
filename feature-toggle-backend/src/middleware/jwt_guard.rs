@@ -21,15 +21,15 @@ pub struct Claims {
 
 pub struct JwtGuard {
     ui_origin: String,
-    jwt_secret: String,
+    jwt_secret_logic: Box<dyn crate::logic::jwt_secret::JwtSecretLogic>,
     pool: sqlx::PgPool,
 }
 
 impl JwtGuard {
-    pub fn new(ui_origin: String, jwt_secret: String, pool: sqlx::PgPool) -> Self {
+    pub fn new(ui_origin: String, jwt_secret_logic: Box<dyn crate::logic::jwt_secret::JwtSecretLogic>, pool: sqlx::PgPool) -> Self {
         Self {
             ui_origin,
-            jwt_secret,
+            jwt_secret_logic,
             pool,
         }
     }
@@ -51,7 +51,7 @@ where
         ready(Ok(JwtGuardMiddleware {
             service: Rc::new(service),
             ui_origin: self.ui_origin.clone(),
-            jwt_secret: self.jwt_secret.clone(),
+            jwt_secret_logic: self.jwt_secret_logic.clone(),
             pool: self.pool.clone(),
         }))
     }
@@ -60,7 +60,7 @@ where
 pub struct JwtGuardMiddleware<S> {
     service: Rc<S>,
     ui_origin: String,
-    jwt_secret: String,
+    jwt_secret_logic: Box<dyn crate::logic::jwt_secret::JwtSecretLogic>,
     pool: sqlx::PgPool,
 }
 
@@ -79,7 +79,7 @@ where
     fn call(&self, mut req: ServiceRequest) -> Self::Future {
         let service = self.service.clone();
         let ui_origin = self.ui_origin.clone();
-        let jwt_secret = self.jwt_secret.clone();
+        let jwt_secret_logic = self.jwt_secret_logic.clone();
         let pool = self.pool.clone();
 
         Box::pin(async move {
@@ -121,6 +121,17 @@ where
             if let Some(auth_value) = auth_header {
                 if let Ok(auth_str) = auth_value.to_str() {
                     if let Some(token) = auth_str.strip_prefix("Bearer ") {
+                        // Get current JWT secret from database
+                        let jwt_secret = match jwt_secret_logic.get_current_secret().await {
+                            Ok(secret) => secret,
+                            Err(_) => {
+                                // If we can't get the secret, reject the token
+                                let response = HttpResponse::Unauthorized()
+                                    .json(serde_json::json!({"error": "JWT secret unavailable"}));
+                                return Ok(req.into_response(response).map_into_right_body());
+                            }
+                        };
+                        
                         // Verify JWT token
                         let decoding_key = DecodingKey::from_secret(jwt_secret.as_ref());
                         let validation = Validation::new(Algorithm::HS256);
@@ -211,13 +222,35 @@ mod tests {
             .expect("Failed to create test pool")
     }
 
+    fn mock_jwt_secret_logic() -> Box<dyn crate::logic::jwt_secret::JwtSecretLogic> {
+        use crate::logic::jwt_secret::MockJwtSecretLogic;
+        let mut mock = MockJwtSecretLogic::new();
+        mock.expect_get_current_secret()
+            .returning(|| Ok("test_secret".to_string()));
+        mock.expect_clone_box()
+            .returning(|| {
+                let mut cloned_mock = MockJwtSecretLogic::new();
+                cloned_mock.expect_get_current_secret()
+                    .returning(|| Ok("test_secret".to_string()));
+                cloned_mock.expect_clone_box()
+                    .returning(|| {
+                        let mut inner_mock = MockJwtSecretLogic::new();
+                        inner_mock.expect_get_current_secret()
+                            .returning(|| Ok("test_secret".to_string()));
+                        Box::new(inner_mock)
+                    });
+                Box::new(cloned_mock)
+            });
+        Box::new(mock)
+    }
+
     #[actix_web::test]
     async fn allows_login_mutation_without_token() {
         let app = test::init_service(
             App::new()
                 .wrap(JwtGuard::new(
                     "http://ui".to_string(),
-                    "test_secret".to_string(),
+                    mock_jwt_secret_logic(),
                     test_pool(),
                 ))
                 .route(
@@ -242,7 +275,7 @@ mod tests {
             App::new()
                 .wrap(JwtGuard::new(
                     "http://localhost:3000".to_string(),
-                    "test_secret".to_string(),
+                    mock_jwt_secret_logic(),
                     test_pool(),
                 ))
                 .route(
@@ -275,7 +308,7 @@ mod tests {
             App::new()
                 .wrap(JwtGuard::new(
                     "http://ui".to_string(),
-                    secret.to_string(),
+                    mock_jwt_secret_logic(),
                     test_pool(),
                 ))
                 .route(
@@ -306,7 +339,7 @@ mod tests {
             App::new()
                 .wrap(JwtGuard::new(
                     "http://ui".to_string(),
-                    "test_secret".to_string(),
+                    mock_jwt_secret_logic(),
                     test_pool(),
                 ))
                 .route(
@@ -334,7 +367,7 @@ mod tests {
             App::new()
                 .wrap(JwtGuard::new(
                     "http://ui".to_string(),
-                    secret.to_string(),
+                    mock_jwt_secret_logic(),
                     test_pool(),
                 ))
                 .route(

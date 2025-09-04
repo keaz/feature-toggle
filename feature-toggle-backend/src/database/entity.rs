@@ -195,3 +195,13 @@ impl DBStage for FeaturePipelineStage {
         self.enabled
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JwtSecret {
+    pub id: Uuid,
+    pub secret: String,
+    pub is_active: bool,
+    pub created_at: DateTime<Utc>,
+    pub created_by: Option<Uuid>,
+    pub expires_at: Option<DateTime<Utc>>,
+}

@@ -11,6 +11,7 @@ pub mod client;
 pub mod context;
 pub mod environment;
 pub mod feature;
+pub mod jwt_secret;
 pub mod pipeline;
 pub mod role;
 pub mod team;
