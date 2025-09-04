@@ -1,11 +1,12 @@
+use crate::Error;
 use crate::database::entity::DBStage;
 use crate::graphql::schema::{Environment, Relationship, Stage};
 use crate::logic::environment::EnvironmentLogic;
-use crate::Error;
 use async_graphql::ID;
 use std::collections::HashMap;
 use uuid::Uuid;
 
+pub mod authorization;
 pub mod client;
 pub mod context;
 pub mod environment;

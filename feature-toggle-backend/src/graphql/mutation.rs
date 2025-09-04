@@ -301,6 +301,24 @@ impl MutationRoot {
         let jwt_user = ctx.data_opt::<crate::JwtUser>().cloned();
         let user =
             jwt_user.ok_or_else(|| async_graphql::Error::new("User authentication not found"))?;
+
+        // Convert request to string for authorization check
+        let request_type = match request {
+            StageChangeRequest::DeploymentRequested => "DEPLOYMENT_REQUESTED",
+            StageChangeRequest::DeploymentRejected => "DEPLOYMENT_REJECTED",
+            StageChangeRequest::Deployed => "DEPLOYED",
+            StageChangeRequest::RollbackRequested => "ROLLBACK_REQUESTED",
+            StageChangeRequest::RollbackRejected => "ROLLBACK_REJECTED",
+            StageChangeRequest::Rollbacked => "ROLLBACKED",
+        };
+
+        // Check authorization based on user roles
+        crate::logic::authorization::RoleAuthorizer::authorize_stage_change_request(
+            &user.roles,
+            request_type,
+        )
+        .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+
         let logic = ctx.data::<Box<dyn crate::logic::feature::FeatureLogic>>()?;
         let req = match request {
             StageChangeRequest::DeploymentRequested => {
@@ -894,5 +912,236 @@ mod more_mutation_tests {
         );
         let data = resp.data.into_json().unwrap();
         assert_eq!(data["assignUserRoles"][0]["name"], "Approver");
+    }
+
+    #[tokio::test]
+    async fn test_request_stage_change_with_requester_role_allows_deployment_request() {
+        use crate::logic::feature::MockFeatureLogic;
+
+        let mut mock = MockFeatureLogic::new();
+        let stage_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+
+        // Mock the expected feature to be returned
+        let expected_feature = create_mock_feature();
+        mock.expect_request_stage_change()
+            .times(1)
+            .returning(move |_, _, _| Ok(expected_feature.clone()));
+
+        let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
+            .data::<Box<dyn crate::logic::feature::FeatureLogic>>(Box::new(mock))
+            .data(crate::JwtUser {
+                id: user_id,
+                username: "requester_user".to_string(),
+                is_admin: false,
+                roles: vec!["Requester".to_string()],
+                token_hash: "hash".to_string(),
+            })
+            .finish();
+
+        let gql = r#"
+            mutation($stageId: ID!, $request: StageChangeRequest!) {
+                requestStageChange(stageId: $stageId, request: $request) {
+                    id
+                    key
+                }
+            }
+        "#;
+        let mut req = Request::new(gql);
+        req = req.variables(async_graphql::Variables::from_json(serde_json::json!({
+            "stageId": stage_id.to_string(),
+            "request": "DEPLOYMENT_REQUESTED"
+        })));
+
+        let resp = schema.execute(req).await;
+        assert!(
+            resp.errors.is_empty(),
+            "Expected no errors, but got: {}",
+            serde_json::to_string(&resp.errors).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_request_stage_change_without_requester_role_denies_deployment_request() {
+        let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
+            .data(crate::JwtUser {
+                id: Uuid::new_v4(),
+                username: "non_requester_user".to_string(),
+                is_admin: false,
+                roles: vec!["Team Admin".to_string()], // No Requester role
+                token_hash: "hash".to_string(),
+            })
+            .finish();
+
+        let gql = r#"
+            mutation($stageId: ID!, $request: StageChangeRequest!) {
+                requestStageChange(stageId: $stageId, request: $request) {
+                    id
+                    key
+                }
+            }
+        "#;
+        let mut req = Request::new(gql);
+        req = req.variables(async_graphql::Variables::from_json(serde_json::json!({
+            "stageId": Uuid::new_v4().to_string(),
+            "request": "DEPLOYMENT_REQUESTED"
+        })));
+
+        let resp = schema.execute(req).await;
+        assert!(!resp.errors.is_empty(), "Expected authorization error");
+        assert!(
+            resp.errors[0]
+                .message
+                .contains("Only users with 'Requester' role")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_request_stage_change_with_approver_role_allows_deployment_approval() {
+        use crate::logic::feature::MockFeatureLogic;
+
+        let mut mock = MockFeatureLogic::new();
+        let stage_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+
+        let expected_feature = create_mock_feature();
+        mock.expect_request_stage_change()
+            .times(1)
+            .returning(move |_, _, _| Ok(expected_feature.clone()));
+
+        let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
+            .data::<Box<dyn crate::logic::feature::FeatureLogic>>(Box::new(mock))
+            .data(crate::JwtUser {
+                id: user_id,
+                username: "approver_user".to_string(),
+                is_admin: false,
+                roles: vec!["Approver".to_string()],
+                token_hash: "hash".to_string(),
+            })
+            .finish();
+
+        let gql = r#"
+            mutation($stageId: ID!, $request: StageChangeRequest!) {
+                requestStageChange(stageId: $stageId, request: $request) {
+                    id
+                    key
+                }
+            }
+        "#;
+        let mut req = Request::new(gql);
+        req = req.variables(async_graphql::Variables::from_json(serde_json::json!({
+            "stageId": stage_id.to_string(),
+            "request": "DEPLOYED"
+        })));
+
+        let resp = schema.execute(req).await;
+        assert!(
+            resp.errors.is_empty(),
+            "Expected no errors, but got: {}",
+            serde_json::to_string(&resp.errors).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_request_stage_change_without_approver_role_denies_deployment_approval() {
+        let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
+            .data(crate::JwtUser {
+                id: Uuid::new_v4(),
+                username: "non_approver_user".to_string(),
+                is_admin: false,
+                roles: vec!["Requester".to_string()], // No Approver role
+                token_hash: "hash".to_string(),
+            })
+            .finish();
+
+        let gql = r#"
+            mutation($stageId: ID!, $request: StageChangeRequest!) {
+                requestStageChange(stageId: $stageId, request: $request) {
+                    id
+                    key
+                }
+            }
+        "#;
+        let mut req = Request::new(gql);
+        req = req.variables(async_graphql::Variables::from_json(serde_json::json!({
+            "stageId": Uuid::new_v4().to_string(),
+            "request": "DEPLOYED"
+        })));
+
+        let resp = schema.execute(req).await;
+        assert!(!resp.errors.is_empty(), "Expected authorization error");
+        assert!(
+            resp.errors[0]
+                .message
+                .contains("Only users with 'Approver' role")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_request_stage_change_with_both_roles_allows_all_operations() {
+        use crate::logic::feature::MockFeatureLogic;
+
+        let mut mock = MockFeatureLogic::new();
+        let stage_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+
+        let expected_feature = create_mock_feature();
+        mock.expect_request_stage_change()
+            .times(2) // We'll test two operations
+            .returning(move |_, _, _| Ok(expected_feature.clone()));
+
+        let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
+            .data::<Box<dyn crate::logic::feature::FeatureLogic>>(Box::new(mock))
+            .data(crate::JwtUser {
+                id: user_id,
+                username: "both_roles_user".to_string(),
+                is_admin: false,
+                roles: vec!["Requester".to_string(), "Approver".to_string()],
+                token_hash: "hash".to_string(),
+            })
+            .finish();
+
+        // Test requester operation
+        let gql = r#"
+            mutation($stageId: ID!, $request: StageChangeRequest!) {
+                requestStageChange(stageId: $stageId, request: $request) {
+                    id
+                    key
+                }
+            }
+        "#;
+        let mut req = Request::new(gql);
+        req = req.variables(async_graphql::Variables::from_json(serde_json::json!({
+            "stageId": stage_id.to_string(),
+            "request": "DEPLOYMENT_REQUESTED"
+        })));
+
+        let resp = schema.execute(req).await;
+        assert!(resp.errors.is_empty(), "Requester operation should succeed");
+
+        // Test approver operation
+        let mut req = Request::new(gql);
+        req = req.variables(async_graphql::Variables::from_json(serde_json::json!({
+            "stageId": stage_id.to_string(),
+            "request": "DEPLOYED"
+        })));
+
+        let resp = schema.execute(req).await;
+        assert!(resp.errors.is_empty(), "Approver operation should succeed");
+    }
+
+    // Helper function to create a mock feature for testing
+    fn create_mock_feature() -> crate::graphql::schema::Feature {
+        crate::graphql::schema::Feature {
+            id: async_graphql::ID::from(Uuid::new_v4().to_string()),
+            key: "test_feature".to_string(),
+            description: Some("Test description".to_string()),
+            feature_type: crate::graphql::schema::FeatureType::Simple,
+            enabled: Some(true),
+            dependencies: vec![],
+            relationships: vec![],
+            stages: vec![],
+            team_id: async_graphql::ID::from(Uuid::new_v4().to_string()),
+        }
     }
 }
