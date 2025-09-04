@@ -54,13 +54,13 @@ impl crate::logic::user_flag::UserFlagLogic for NoopUserFlagLogic {
     }
 }
 
-#[derive(Clone)]
 pub struct FeatureEvaluationSvc {
     pool: sqlx::PgPool,
     feature_repo: Box<dyn crate::database::feature::FeatureRepository>,
     client_repo: Box<dyn crate::database::client::ClientRepository>,
     user_flag_repo: Box<dyn crate::database::user_flag_assignment::UserFlagAssignmentRepository>,
     user_flag_logic: Box<dyn crate::logic::user_flag::UserFlagLogic>,
+    feature_evaluation_logic: Box<dyn crate::logic::feature_evaluation::FeatureEvaluationLogic>,
     updates_tx: tokio::sync::broadcast::Sender<pb::FeatureUpdate>,
     // Tracks, per client_id, the set of feature keys that the client explicitly requested via GetFeatureByKeyRequest
     requested_keys: std::sync::Arc<
@@ -68,6 +68,21 @@ pub struct FeatureEvaluationSvc {
             std::collections::HashMap<uuid::Uuid, std::collections::HashSet<String>>,
         >,
     >,
+}
+
+impl Clone for FeatureEvaluationSvc {
+    fn clone(&self) -> Self {
+        Self {
+            pool: self.pool.clone(),
+            feature_repo: self.feature_repo.clone_box(),
+            client_repo: self.client_repo.clone_box(),
+            user_flag_repo: self.user_flag_repo.clone_box(),
+            user_flag_logic: self.user_flag_logic.clone_box(),
+            feature_evaluation_logic: self.feature_evaluation_logic.clone_box(),
+            updates_tx: self.updates_tx.clone(),
+            requested_keys: self.requested_keys.clone(),
+        }
+    }
 }
 
 impl FeatureEvaluationSvc {
@@ -81,12 +96,15 @@ impl FeatureEvaluationSvc {
             crate::database::user_flag_assignment::user_flag_assignment_repository(pool.clone());
         let user_flag_logic =
             crate::logic::user_flag::user_flag_logic(client_repo.clone(), user_flag_repo.clone());
+        let feature_evaluation_repo = crate::database::feature_evaluation::feature_evaluation_repository(pool.clone());
+        let feature_evaluation_logic = crate::logic::feature_evaluation::feature_evaluation_logic(feature_evaluation_repo);
         Self {
             pool,
             feature_repo,
             client_repo,
             user_flag_repo,
             user_flag_logic,
+            feature_evaluation_logic,
             updates_tx,
             requested_keys: std::sync::Arc::new(tokio::sync::RwLock::new(
                 std::collections::HashMap::new(),
@@ -109,12 +127,15 @@ impl FeatureEvaluationSvc {
         // so it's safe to plug a no-op logic implementation here.
         let user_flag_logic: Box<dyn crate::logic::user_flag::UserFlagLogic> =
             Box::new(NoopUserFlagLogic);
+        let feature_evaluation_repo = crate::database::feature_evaluation::feature_evaluation_repository(pool.clone());
+        let feature_evaluation_logic = crate::logic::feature_evaluation::feature_evaluation_logic(feature_evaluation_repo);
         Self {
             pool,
             feature_repo,
             client_repo,
             user_flag_repo,
             user_flag_logic,
+            feature_evaluation_logic,
             updates_tx,
             requested_keys: std::sync::Arc::new(tokio::sync::RwLock::new(
                 std::collections::HashMap::new(),
@@ -630,7 +651,7 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
             while let Some(msg) = in_stream.next().await {
                 match msg {
                     Ok(pb::StreamRequest {
-                        payload: Some(pb::stream_request::Payload::Heartbeat(hb)),
+                        payload: Some(pb::stream_request::Payload::Heartbeat(_hb)),
                     }) => {
                         let _ = drain_tx
                             .send(Ok(pb::FeatureUpdate {
@@ -649,6 +670,104 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
         });
 
         Ok(Response::new(ReceiverStream::new(out_rx)))
+    }
+
+    async fn push_evaluation_events(
+        &self,
+        request: Request<pb::PushEvaluationEventsRequest>,
+    ) -> Result<Response<pb::PushEvaluationEventsResponse>, Status> {
+        let req = request.into_inner();
+
+        if req.events.is_empty() {
+            return Ok(Response::new(pb::PushEvaluationEventsResponse {
+                message_id: uuid::Uuid::new_v4().to_string(),
+                processed_count: 0,
+            }));
+        }
+
+        // Authenticate using the first event (all events from same client)
+        let first_event = &req.events[0];
+        if first_event.client_id.is_empty() || first_event.client_secret.is_empty() {
+            return Err(Status::invalid_argument(
+                "client_id and client_secret are required",
+            ));
+        }
+
+        let client_id = Uuid::parse_str(&first_event.client_id)
+            .map_err(|_| Status::invalid_argument("client_id must be a UUID"))?;
+
+        // Fetch and validate client
+        let client = self.client_repo
+            .get_client_by_id(client_id)
+            .await
+            .map_err(|e| Status::not_found(format!("client not found: {}", e)))?;
+
+        if !client.enabled {
+            return Err(Status::permission_denied("client is disabled"));
+        }
+        if client.api_key != first_event.client_secret {
+            return Err(Status::unauthenticated("invalid client_secret"));
+        }
+
+        // Convert proto events to database format
+        let mut evaluations = Vec::new();
+        for event in req.events {
+            if event.feature_key.is_empty() {
+                return Err(Status::invalid_argument("feature_key cannot be empty"));
+            }
+            if event.environment_id.is_empty() {
+                return Err(Status::invalid_argument("environment_id cannot be empty"));
+            }
+
+            let evaluated_at = if event.evaluated_at_unix_ms > 0 {
+                sqlx::types::chrono::DateTime::from_timestamp_millis(event.evaluated_at_unix_ms)
+                    .unwrap_or_else(sqlx::types::chrono::Utc::now)
+            } else {
+                sqlx::types::chrono::Utc::now()
+            };
+
+            // Convert context to JSON
+            let evaluation_context = if event.evaluation_context.is_empty() {
+                None
+            } else {
+                let context_map: std::collections::HashMap<String, String> = event
+                    .evaluation_context
+                    .iter()
+                    .map(|c| (c.key.clone(), c.value.clone()))
+                    .collect();
+                Some(serde_json::to_value(context_map).unwrap_or(serde_json::Value::Null))
+            };
+
+            let user_context = if event.user_context.is_empty() {
+                None
+            } else {
+                Some(event.user_context)
+            };
+
+            evaluations.push(crate::database::feature_evaluation::CreateFeatureEvaluation {
+                feature_key: event.feature_key,
+                environment_id: event.environment_id,
+                client_id,
+                evaluated_at,
+                evaluation_result: event.evaluation_result,
+                evaluation_context,
+                user_context,
+            });
+        }
+
+        // Store evaluations in bulk
+        match self.feature_evaluation_logic.record_evaluations_bulk(evaluations).await {
+            Ok(stored) => {
+                Ok(Response::new(pb::PushEvaluationEventsResponse {
+                    message_id: uuid::Uuid::new_v4().to_string(),
+                    processed_count: stored.len() as i32,
+                }))
+            }
+            Err(e) => {
+                log::error!("Failed to store evaluation events: {}", e);
+                Err(Status::internal("failed to store evaluation events"))
+            }
+        }
     }
 }
 

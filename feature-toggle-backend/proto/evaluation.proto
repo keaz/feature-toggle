@@ -127,6 +127,29 @@ message ListUserFlagAssignmentsResponse {
   repeated UserFlagAssignment assignments = 1;
 }
 
+// Feature evaluation event for tracking and analytics
+message FeatureEvaluationEvent {
+  string feature_key = 1;
+  string environment_id = 2;
+  string client_id = 3;
+  string client_secret = 4; // for authentication
+  bool evaluation_result = 5;
+  repeated Context evaluation_context = 6; // the context used during evaluation
+  string user_context = 7; // extracted user identifier for easier querying
+  int64 evaluated_at_unix_ms = 8; // timestamp when evaluation occurred
+}
+
+// Request message for pushing evaluation events
+message PushEvaluationEventsRequest {
+  repeated FeatureEvaluationEvent events = 1;
+}
+
+// Response acknowledging receipt of evaluation events
+message PushEvaluationEventsResponse {
+  string message_id = 1;
+  int32 processed_count = 2;
+}
+
 service FeatureEvaluation {
   rpc Evaluate(EvaluateRequest) returns (EvaluateResponse);
   rpc GetFeatureByKey(GetFeatureByKeyRequest) returns (GetFeatureByKeyResponse);
@@ -135,4 +158,6 @@ service FeatureEvaluation {
   rpc PushUserAssignments(stream UserFlagAssignment) returns (Ack);
   // Edge can fetch all persisted user assignments on connect/startup
   rpc ListUserAssignments(ListUserFlagAssignmentsRequest) returns (ListUserFlagAssignmentsResponse);
+  // Edge pushes evaluation events periodically for analytics and tracking
+  rpc PushEvaluationEvents(PushEvaluationEventsRequest) returns (PushEvaluationEventsResponse);
 }

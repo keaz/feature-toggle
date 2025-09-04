@@ -1,4 +1,4 @@
-use actix_web::{App, HttpResponse, HttpServer, Responder, web};
+use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use evaluation_engine as engine;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
@@ -30,6 +30,9 @@ pub struct AppState {
     assigned_true: Arc<RwLock<std::collections::HashSet<String>>>,
     pending_assignments: Arc<RwLock<Vec<UserAssignment>>>,
     flush_interval: Duration,
+    // Evaluation events tracking
+    pending_evaluation_events: Arc<RwLock<Vec<EvaluationEvent>>>,
+    evaluation_flush_interval: Duration,
 }
 
 #[derive(Clone, Debug)]
@@ -38,6 +41,16 @@ struct UserAssignment {
     feature_id: String,
     environment_id: String,
     assigned: bool,
+}
+
+#[derive(Clone, Debug)]
+struct EvaluationEvent {
+    feature_key: String,
+    environment_id: String,
+    evaluation_result: bool,
+    evaluation_context: Vec<HttpContext>,
+    user_context: Option<String>,
+    evaluated_at: std::time::SystemTime,
 }
 
 fn assignment_key(user_id: &str, feature_id: &str, environment_id: &str) -> String {
@@ -100,7 +113,7 @@ struct EvaluateHttpRequest {
     client_secret: Option<String>,
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema, Clone, Debug)]
 struct HttpContext {
     /// Context key, e.g., "user.id" or a bucketing key
     key: String,
@@ -280,8 +293,23 @@ async fn evaluate_handler(
     }
 
     let engine_feature = map_proto_to_engine(&feature);
-    let ec = map_http_context_to_engine(feature_key, req.environment_id.clone(), req.context);
+    let ec = map_http_context_to_engine(feature_key, req.environment_id.clone(), req.context.clone());
     let enabled = engine::evaluate(ec, engine_feature);
+
+    // Record the evaluation event for analytics
+    let evaluation_event = EvaluationEvent {
+        feature_key: feature.key.clone(),
+        environment_id: req.environment_id.clone(),
+        evaluation_result: enabled,
+        evaluation_context: req.context.clone(),
+        user_context: user_id_opt.clone(),
+        evaluated_at: std::time::SystemTime::now(),
+    };
+
+    {
+        let mut pending_events = app.pending_evaluation_events.write().await;
+        pending_events.push(evaluation_event);
+    }
 
     // If evaluated true, remember and enqueue for flush
     if enabled && let Some(user_id) = user_id_opt {
@@ -537,6 +565,80 @@ async fn run_flush_task(app: AppState) {
     }
 }
 
+async fn run_evaluation_flush_task(app: AppState) {
+    loop {
+        tokio::time::sleep(app.evaluation_flush_interval).await;
+
+        // Drain pending evaluation events
+        let to_send: Vec<EvaluationEvent> = {
+            let mut lock = app.pending_evaluation_events.write().await;
+            if lock.is_empty() {
+                Vec::new()
+            } else {
+                let v = lock.drain(..).collect::<Vec<_>>();
+                v
+            }
+        };
+
+        if to_send.is_empty() {
+            continue;
+        }
+
+        // Convert to proto format
+        let mut proto_events = Vec::new();
+        for event in to_send.iter() {
+            let evaluated_at_unix_ms = event
+                .evaluated_at
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+
+            let proto_context = event
+                .evaluation_context
+                .iter()
+                .map(|ctx| pb::Context {
+                    key: ctx.key.clone(),
+                    value: ctx.value.clone(),
+                })
+                .collect();
+
+            proto_events.push(pb::FeatureEvaluationEvent {
+                feature_key: event.feature_key.clone(),
+                environment_id: event.environment_id.clone(),
+                client_id: app.client_id.clone(),
+                client_secret: app.client_secret.clone(),
+                evaluation_result: event.evaluation_result,
+                evaluation_context: proto_context,
+                user_context: event.user_context.clone().unwrap_or_default(),
+                evaluated_at_unix_ms,
+            });
+        }
+
+        let request = pb::PushEvaluationEventsRequest {
+            events: proto_events,
+        };
+
+        // Use a cloned client to avoid holding the lock
+        let mut client = {
+            let guard = app.grpc.lock().await;
+            guard.clone()
+        };
+
+        match client.push_evaluation_events(request).await {
+            Ok(response) => {
+                let resp = response.into_inner();
+                info!("Successfully pushed {} evaluation events", resp.processed_count);
+            }
+            Err(e) => {
+                error!("Failed to push evaluation events: {}", e);
+                // Requeue the events on failure
+                let mut lock = app.pending_evaluation_events.write().await;
+                lock.extend(to_send);
+            }
+        }
+    }
+}
+
 fn setup_logger() -> actix_web::Result<(), Box<dyn std::error::Error>> {
     log4rs::init_file("log4rs.yaml", Default::default())?;
     Ok(())
@@ -583,6 +685,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(10);
 
+    let evaluation_flush_secs: u64 = std::env::var("EDGE_EVALUATION_FLUSH_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(30); // Default to 30 seconds for evaluation events
+
     let state = AppState {
         cache: Arc::new(FeatureCache::default()),
         grpc: Arc::new(tokio::sync::Mutex::new(grpc_client)),
@@ -592,6 +699,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         assigned_true: Arc::new(RwLock::new(std::collections::HashSet::new())),
         pending_assignments: Arc::new(RwLock::new(Vec::new())),
         flush_interval: Duration::from_secs(flush_secs),
+        pending_evaluation_events: Arc::new(RwLock::new(Vec::new())),
+        evaluation_flush_interval: Duration::from_secs(evaluation_flush_secs),
     };
 
     // On startup, fetch persisted user assignments from backend and warm the cache
@@ -608,6 +717,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Start periodic flush task
     let flush_state = state.clone();
     tokio::spawn(async move { run_flush_task(flush_state).await });
+
+    // Start periodic evaluation events flush task
+    let evaluation_flush_state = state.clone();
+    tokio::spawn(async move { run_evaluation_flush_task(evaluation_flush_state).await });
 
     info!(
         "feature-edge-server listening on {} (HTTP), streaming from {}",
@@ -684,6 +797,8 @@ mod tests {
             assigned_true: Arc::new(RwLock::new(std::collections::HashSet::new())),
             pending_assignments: Arc::new(RwLock::new(Vec::new())),
             flush_interval: Duration::from_secs(10),
+            pending_evaluation_events: Arc::new(RwLock::new(Vec::new())),
+            evaluation_flush_interval: Duration::from_secs(30),
         };
         // seed cache
         cache.upsert(feature).await;
@@ -709,6 +824,8 @@ mod tests {
             assigned_true: Arc::new(RwLock::new(std::collections::HashSet::new())),
             pending_assignments: Arc::new(RwLock::new(Vec::new())),
             flush_interval: Duration::from_secs(10),
+            pending_evaluation_events: Arc::new(RwLock::new(Vec::new())),
+            evaluation_flush_interval: Duration::from_secs(30),
         }
     }
 

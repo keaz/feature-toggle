@@ -63,6 +63,9 @@ pub async fn run() -> std::io::Result<()> {
     let user_logic = logic::user::user_logic(database::user::user_repository(db_pool.clone()));
     let role_logic = logic::role::role_logic(database::role::role_repository(db_pool.clone()));
     let jwt_secret_logic = logic::jwt_secret::jwt_secret_logic(db_pool.clone());
+    let feature_evaluation_logic = logic::feature_evaluation::feature_evaluation_logic(
+        database::feature_evaluation::feature_evaluation_repository(db_pool.clone()),
+    );
 
     // Initialize JWT secret on startup
     jwt_secret_logic.initialize_secret().await
@@ -104,6 +107,7 @@ pub async fn run() -> std::io::Result<()> {
             .data(user_logic.clone())
             .data(role_logic.clone())
             .data(jwt_secret_logic_for_server.clone())
+            .data(feature_evaluation_logic.clone())
             .data(admin_state.clone())
             // .extension(ApolloTracing)
             .finish();

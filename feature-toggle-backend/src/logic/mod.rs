@@ -11,6 +11,7 @@ pub mod client;
 pub mod context;
 pub mod environment;
 pub mod feature;
+pub mod feature_evaluation;
 pub mod jwt_secret;
 pub mod pipeline;
 pub mod role;
