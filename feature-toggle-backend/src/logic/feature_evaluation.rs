@@ -1,5 +1,6 @@
 use crate::database::feature_evaluation::{
-    CreateFeatureEvaluation, FeatureEvaluationFilter, FeatureEvaluationRepository, FeatureEvaluationRow
+    CreateFeatureEvaluation, FeatureEvaluationFilter, FeatureEvaluationRepository,
+    FeatureEvaluationRow,
 };
 use sqlx::types::chrono::{DateTime, Utc};
 use uuid::Uuid;
@@ -25,6 +26,7 @@ pub trait FeatureEvaluationLogic: Send + Sync {
         evaluation_result: bool,
         evaluation_context: Option<serde_json::Value>,
         user_context: Option<String>,
+        prior_assignment: bool,
     ) -> Result<FeatureEvaluationRow, FeatureEvaluationLogicError>;
 
     async fn record_evaluations_bulk(
@@ -81,6 +83,7 @@ impl FeatureEvaluationLogic for FeatureEvaluationLogicImpl {
         evaluation_result: bool,
         evaluation_context: Option<serde_json::Value>,
         user_context: Option<String>,
+        prior_assignment: bool,
     ) -> Result<FeatureEvaluationRow, FeatureEvaluationLogicError> {
         if feature_key.is_empty() {
             return Err(FeatureEvaluationLogicError::InvalidInput(
@@ -102,6 +105,7 @@ impl FeatureEvaluationLogic for FeatureEvaluationLogicImpl {
             evaluation_result,
             evaluation_context,
             user_context,
+            prior_assignment,
         };
 
         let result = self.repository.create_evaluation(evaluation).await?;

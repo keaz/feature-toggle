@@ -96,8 +96,10 @@ impl FeatureEvaluationSvc {
             crate::database::user_flag_assignment::user_flag_assignment_repository(pool.clone());
         let user_flag_logic =
             crate::logic::user_flag::user_flag_logic(client_repo.clone(), user_flag_repo.clone());
-        let feature_evaluation_repo = crate::database::feature_evaluation::feature_evaluation_repository(pool.clone());
-        let feature_evaluation_logic = crate::logic::feature_evaluation::feature_evaluation_logic(feature_evaluation_repo);
+        let feature_evaluation_repo =
+            crate::database::feature_evaluation::feature_evaluation_repository(pool.clone());
+        let feature_evaluation_logic =
+            crate::logic::feature_evaluation::feature_evaluation_logic(feature_evaluation_repo);
         Self {
             pool,
             feature_repo,
@@ -127,8 +129,10 @@ impl FeatureEvaluationSvc {
         // so it's safe to plug a no-op logic implementation here.
         let user_flag_logic: Box<dyn crate::logic::user_flag::UserFlagLogic> =
             Box::new(NoopUserFlagLogic);
-        let feature_evaluation_repo = crate::database::feature_evaluation::feature_evaluation_repository(pool.clone());
-        let feature_evaluation_logic = crate::logic::feature_evaluation::feature_evaluation_logic(feature_evaluation_repo);
+        let feature_evaluation_repo =
+            crate::database::feature_evaluation::feature_evaluation_repository(pool.clone());
+        let feature_evaluation_logic =
+            crate::logic::feature_evaluation::feature_evaluation_logic(feature_evaluation_repo);
         Self {
             pool,
             feature_repo,
@@ -697,7 +701,8 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
             .map_err(|_| Status::invalid_argument("client_id must be a UUID"))?;
 
         // Fetch and validate client
-        let client = self.client_repo
+        let client = self
+            .client_repo
             .get_client_by_id(client_id)
             .await
             .map_err(|e| Status::not_found(format!("client not found: {}", e)))?;
@@ -744,25 +749,30 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
                 Some(event.user_context)
             };
 
-            evaluations.push(crate::database::feature_evaluation::CreateFeatureEvaluation {
-                feature_key: event.feature_key,
-                environment_id: event.environment_id,
-                client_id,
-                evaluated_at,
-                evaluation_result: event.evaluation_result,
-                evaluation_context,
-                user_context,
-            });
+            evaluations.push(
+                crate::database::feature_evaluation::CreateFeatureEvaluation {
+                    feature_key: event.feature_key,
+                    environment_id: event.environment_id,
+                    client_id,
+                    evaluated_at,
+                    evaluation_result: event.evaluation_result,
+                    evaluation_context,
+                    user_context,
+                    prior_assignment: event.prior_assignment,
+                },
+            );
         }
 
         // Store evaluations in bulk
-        match self.feature_evaluation_logic.record_evaluations_bulk(evaluations).await {
-            Ok(stored) => {
-                Ok(Response::new(pb::PushEvaluationEventsResponse {
-                    message_id: uuid::Uuid::new_v4().to_string(),
-                    processed_count: stored.len() as i32,
-                }))
-            }
+        match self
+            .feature_evaluation_logic
+            .record_evaluations_bulk(evaluations)
+            .await
+        {
+            Ok(stored) => Ok(Response::new(pb::PushEvaluationEventsResponse {
+                message_id: uuid::Uuid::new_v4().to_string(),
+                processed_count: stored.len() as i32,
+            })),
             Err(e) => {
                 log::error!("Failed to store evaluation events: {}", e);
                 Err(Status::internal("failed to store evaluation events"))

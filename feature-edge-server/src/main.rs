@@ -1,4 +1,4 @@
-use actix_web::{web, App, HttpResponse, HttpServer, Responder};
+use actix_web::{App, HttpResponse, HttpServer, Responder, web};
 use evaluation_engine as engine;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
@@ -51,6 +51,7 @@ struct EvaluationEvent {
     evaluation_context: Vec<HttpContext>,
     user_context: Option<String>,
     evaluated_at: std::time::SystemTime,
+    prior_assignment: bool,
 }
 
 fn assignment_key(user_id: &str, feature_id: &str, environment_id: &str) -> String {
@@ -99,7 +100,7 @@ impl FeatureCache {
     }
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema, Clone)]
 struct EvaluateHttpRequest {
     /// The feature key to evaluate
     feature_key: String,
@@ -113,7 +114,7 @@ struct EvaluateHttpRequest {
     client_secret: Option<String>,
 }
 
-#[derive(Deserialize, ToSchema, Clone, Debug)]
+#[derive(Deserialize, ToSchema, Clone, Debug, PartialEq)]
 struct HttpContext {
     /// Context key, e.g., "user.id" or a bucketing key
     key: String,
@@ -285,16 +286,30 @@ async fn evaluate_handler(
         .map(|c| c.value.clone());
 
     // If we have a prior assignment for this user+feature+env, short-circuit to true
-    if let Some(user_id) = &user_id_opt {
+    let (enabled, prior_assignment) = if let Some(user_id) = &user_id_opt {
         let key = assignment_key(user_id, &feature.id, &req.environment_id);
         if app.assigned_true.read().await.contains(&key) {
-            return Ok(web::Json(EvaluateHttpResponse { enabled: true }));
+            (true, true) // cached assignment
+        } else {
+            let engine_feature = map_proto_to_engine(&feature);
+            let ec = map_http_context_to_engine(
+                feature_key,
+                req.environment_id.clone(),
+                req.context.clone(),
+            );
+            let enabled = engine::evaluate(ec, engine_feature);
+            (enabled, false) // fresh evaluation
         }
-    }
-
-    let engine_feature = map_proto_to_engine(&feature);
-    let ec = map_http_context_to_engine(feature_key, req.environment_id.clone(), req.context.clone());
-    let enabled = engine::evaluate(ec, engine_feature);
+    } else {
+        let engine_feature = map_proto_to_engine(&feature);
+        let ec = map_http_context_to_engine(
+            feature_key,
+            req.environment_id.clone(),
+            req.context.clone(),
+        );
+        let enabled = engine::evaluate(ec, engine_feature);
+        (enabled, false) // fresh evaluation
+    };
 
     // Record the evaluation event for analytics
     let evaluation_event = EvaluationEvent {
@@ -304,6 +319,7 @@ async fn evaluate_handler(
         evaluation_context: req.context.clone(),
         user_context: user_id_opt.clone(),
         evaluated_at: std::time::SystemTime::now(),
+        prior_assignment,
     };
 
     {
@@ -611,6 +627,7 @@ async fn run_evaluation_flush_task(app: AppState) {
                 evaluation_context: proto_context,
                 user_context: event.user_context.clone().unwrap_or_default(),
                 evaluated_at_unix_ms,
+                prior_assignment: event.prior_assignment,
             });
         }
 
@@ -627,7 +644,10 @@ async fn run_evaluation_flush_task(app: AppState) {
         match client.push_evaluation_events(request).await {
             Ok(response) => {
                 let resp = response.into_inner();
-                info!("Successfully pushed {} evaluation events", resp.processed_count);
+                info!(
+                    "Successfully pushed {} evaluation events",
+                    resp.processed_count
+                );
             }
             Err(e) => {
                 error!("Failed to push evaluation events: {}", e);
@@ -993,5 +1013,557 @@ mod tests {
         let req2 = test::TestRequest::get().uri("/health").to_request();
         let resp2 = test::call_service(&app, req2).await;
         assert_eq!(resp2.status().as_u16(), 503);
+    }
+
+    // Helper function to create a test state with sticky assignments pre-populated
+    async fn test_state_with_assignments(
+        feature: pb::FeatureFull,
+        assignments: Vec<(String, String, String)>,
+    ) -> AppState {
+        let state = test_state_with_cache(feature).await;
+        {
+            let mut assigned_true = state.assigned_true.write().await;
+            for (user_id, feature_id, env_id) in assignments {
+                let key = assignment_key(&user_id, &feature_id, &env_id);
+                assigned_true.insert(key);
+            }
+        }
+        state
+    }
+
+    // Helper function to make a feature with specific bucketing key
+    fn make_feature_with_bucketing(
+        key: &str,
+        env: &str,
+        enabled: bool,
+        bucketing_key: &str,
+        context_key: &str,
+        allowed: &[&str],
+        rollout: i32,
+    ) -> pb::FeatureFull {
+        pb::FeatureFull {
+            id: format!("{}_id", key),
+            key: key.to_string(),
+            description: String::new(),
+            feature_type: String::new(),
+            team_id: String::new(),
+            created_at: String::new(),
+            stages: vec![pb::FeatureStageFull {
+                id: "stage1".into(),
+                environment_id: env.into(),
+                order_index: 0,
+                position: "start".into(),
+                enabled,
+                bucketing_key: bucketing_key.into(),
+                criterias: vec![pb::StageCriterionFull {
+                    id: "crit1".into(),
+                    context_key: context_key.into(),
+                    context: Some(pb::CriterionContext {
+                        key: context_key.into(),
+                        entries: allowed.iter().map(|s| s.to_string()).collect(),
+                    }),
+                    rollout_percentage: rollout,
+                }],
+            }],
+            dependencies: vec![],
+        }
+    }
+
+    #[actix_web::test]
+    async fn test_assignment_key_generation() {
+        let key = assignment_key("user123", "feature456", "env789");
+        assert_eq!(key, "user123|feature456|env789");
+    }
+
+    #[actix_web::test]
+    async fn test_evaluate_handler_prior_assignment_true() {
+        // Test that cached assignments return prior_assignment=true and skip evaluation
+        let feature = make_feature_with_bucketing(
+            "featPrior",
+            "env1",
+            true,
+            "user.id",
+            "country",
+            &["US"],
+            100,
+        );
+        let feature_id = feature.id.clone();
+
+        // Pre-populate with a sticky assignment
+        let assignments = vec![("u1".to_string(), feature_id, "env1".to_string())];
+        let state = test_state_with_assignments(feature, assignments).await;
+        let app_data = web::Data::new(state.clone());
+
+        let req = EvaluateHttpRequest {
+            feature_key: "featPrior".into(),
+            environment_id: "env1".into(),
+            context: vec![
+                HttpContext {
+                    key: "user.id".into(),
+                    value: "u1".into(),
+                },
+                HttpContext {
+                    key: "country".into(),
+                    value: "CA".into(), // Note: different from allowed "US" - should still return true due to cache
+                },
+            ],
+            client_id: None,
+            client_secret: None,
+        };
+
+        let resp = evaluate_handler(app_data, web::Json(req)).await.unwrap();
+        assert!(resp.into_inner().enabled); // Should be true due to cached assignment
+
+        // Verify evaluation event was recorded with prior_assignment=true
+        let events = state.pending_evaluation_events.read().await;
+        assert_eq!(events.len(), 1);
+        assert!(events[0].prior_assignment); // This should be true for cached assignment
+        assert_eq!(events[0].feature_key, "featPrior");
+        assert_eq!(events[0].user_context, Some("u1".to_string()));
+        assert!(events[0].evaluation_result); // Result should be true
+    }
+
+    #[actix_web::test]
+    async fn test_evaluate_handler_prior_assignment_false() {
+        // Test that fresh evaluations return prior_assignment=false
+        let feature = make_feature_with_bucketing(
+            "featFresh",
+            "env1",
+            true,
+            "user.id",
+            "country",
+            &["US"],
+            100,
+        );
+        let state = test_state_with_cache(feature).await;
+        let app_data = web::Data::new(state.clone());
+
+        let req = EvaluateHttpRequest {
+            feature_key: "featFresh".into(),
+            environment_id: "env1".into(),
+            context: vec![
+                HttpContext {
+                    key: "user.id".into(),
+                    value: "u2".into(),
+                },
+                HttpContext {
+                    key: "country".into(),
+                    value: "US".into(),
+                },
+            ],
+            client_id: None,
+            client_secret: None,
+        };
+
+        let resp = evaluate_handler(app_data, web::Json(req)).await.unwrap();
+        assert!(resp.into_inner().enabled); // Should be true due to matching criteria
+
+        // Verify evaluation event was recorded with prior_assignment=false
+        let events = state.pending_evaluation_events.read().await;
+        assert_eq!(events.len(), 1);
+        assert!(!events[0].prior_assignment); // This should be false for fresh evaluation
+        assert_eq!(events[0].feature_key, "featFresh");
+        assert_eq!(events[0].user_context, Some("u2".to_string()));
+        assert!(events[0].evaluation_result);
+
+        // Verify that assignment was cached for future use
+        let assignments = state.assigned_true.read().await;
+        let expected_key = assignment_key("u2", "featFresh_id", "env1");
+        assert!(assignments.contains(&expected_key));
+    }
+
+    #[actix_web::test]
+    async fn test_evaluate_handler_fresh_evaluation_false() {
+        // Test fresh evaluation that results in false
+        let feature = make_feature_with_bucketing(
+            "featFalse",
+            "env1",
+            true,
+            "user.id",
+            "country",
+            &["US"],
+            100,
+        );
+        let state = test_state_with_cache(feature).await;
+        let app_data = web::Data::new(state.clone());
+
+        let req = EvaluateHttpRequest {
+            feature_key: "featFalse".into(),
+            environment_id: "env1".into(),
+            context: vec![
+                HttpContext {
+                    key: "user.id".into(),
+                    value: "u3".into(),
+                },
+                HttpContext {
+                    key: "country".into(),
+                    value: "CA".into(), // Not in allowed list ["US"]
+                },
+            ],
+            client_id: None,
+            client_secret: None,
+        };
+
+        let resp = evaluate_handler(app_data, web::Json(req)).await.unwrap();
+        assert!(!resp.into_inner().enabled); // Should be false due to criteria mismatch
+
+        // Verify evaluation event was recorded with prior_assignment=false
+        let events = state.pending_evaluation_events.read().await;
+        assert_eq!(events.len(), 1);
+        assert!(!events[0].prior_assignment); // Fresh evaluation
+        assert!(!events[0].evaluation_result); // Result is false
+        assert_eq!(events[0].user_context, Some("u3".to_string()));
+
+        // Verify no assignment was cached (since result was false)
+        let assignments = state.assigned_true.read().await;
+        assert!(assignments.is_empty());
+    }
+
+    #[actix_web::test]
+    async fn test_evaluate_handler_no_user_context() {
+        // Test evaluation without user context (no bucketing key match)
+        let feature = make_feature_with_bucketing(
+            "featNoUser",
+            "env1",
+            true,
+            "user.id",
+            "country",
+            &["US"],
+            100,
+        );
+        let state = test_state_with_cache(feature).await;
+        let app_data = web::Data::new(state.clone());
+
+        let req = EvaluateHttpRequest {
+            feature_key: "featNoUser".into(),
+            environment_id: "env1".into(),
+            context: vec![HttpContext {
+                key: "country".into(), // Missing user.id context but provides country
+                value: "US".into(),
+            }],
+            client_id: None,
+            client_secret: None,
+        };
+
+        let resp = evaluate_handler(app_data, web::Json(req)).await.unwrap();
+        let result = resp.into_inner().enabled;
+
+        // Verify evaluation event
+        let events = state.pending_evaluation_events.read().await;
+        assert_eq!(events.len(), 1);
+        assert!(!events[0].prior_assignment); // Fresh evaluation (no cache possible without user context)
+        assert_eq!(events[0].user_context, None); // No user context extracted
+        assert_eq!(events[0].evaluation_result, result); // Result should match the actual evaluation
+
+        // Verify no assignment was cached (no user context)
+        let assignments = state.assigned_true.read().await;
+        assert!(assignments.is_empty());
+    }
+
+    #[actix_web::test]
+    async fn test_evaluate_handler_stage_disabled() {
+        // Test evaluation when stage is disabled
+        let feature = make_feature_with_bucketing(
+            "featDisabled",
+            "env1",
+            false,
+            "user.id",
+            "country",
+            &["US"],
+            100,
+        );
+        let state = test_state_with_cache(feature).await;
+        let app_data = web::Data::new(state.clone());
+
+        let req = EvaluateHttpRequest {
+            feature_key: "featDisabled".into(),
+            environment_id: "env1".into(),
+            context: vec![
+                HttpContext {
+                    key: "user.id".into(),
+                    value: "u4".into(),
+                },
+                HttpContext {
+                    key: "country".into(),
+                    value: "US".into(),
+                },
+            ],
+            client_id: None,
+            client_secret: None,
+        };
+
+        let resp = evaluate_handler(app_data, web::Json(req)).await.unwrap();
+        assert!(!resp.into_inner().enabled); // Should be false due to disabled stage
+
+        // Verify no evaluation event was recorded (early return due to disabled stage)
+        let events = state.pending_evaluation_events.read().await;
+        assert_eq!(events.len(), 0);
+
+        // Verify no assignment was cached
+        let assignments = state.assigned_true.read().await;
+        assert!(assignments.is_empty());
+    }
+
+    #[actix_web::test]
+    async fn test_evaluate_handler_rollout_percentage() {
+        // Test evaluation with partial rollout
+        let feature = make_feature_with_bucketing(
+            "featRollout",
+            "env1",
+            true,
+            "user.id",
+            "country",
+            &["US"],
+            0,
+        );
+        let state = test_state_with_cache(feature).await;
+        let app_data = web::Data::new(state.clone());
+
+        let req = EvaluateHttpRequest {
+            feature_key: "featRollout".into(),
+            environment_id: "env1".into(),
+            context: vec![
+                HttpContext {
+                    key: "user.id".into(),
+                    value: "u5".into(),
+                },
+                HttpContext {
+                    key: "country".into(),
+                    value: "US".into(),
+                },
+            ],
+            client_id: None,
+            client_secret: None,
+        };
+
+        let resp = evaluate_handler(app_data, web::Json(req)).await.unwrap();
+        assert!(!resp.into_inner().enabled); // Should be false due to 0% rollout
+
+        // Verify evaluation event was recorded
+        let events = state.pending_evaluation_events.read().await;
+        assert_eq!(events.len(), 1);
+        assert!(!events[0].prior_assignment);
+        assert!(!events[0].evaluation_result);
+    }
+
+    #[actix_web::test]
+    async fn test_evaluate_handler_multiple_evaluations() {
+        // Test that multiple evaluations are tracked correctly
+        let feature = make_feature_with_bucketing(
+            "featMulti",
+            "env1",
+            true,
+            "user.id",
+            "country",
+            &["US"],
+            100,
+        );
+        let state = test_state_with_cache(feature).await;
+        let app_data = web::Data::new(state.clone());
+
+        // First evaluation (fresh)
+        let req1 = EvaluateHttpRequest {
+            feature_key: "featMulti".into(),
+            environment_id: "env1".into(),
+            context: vec![
+                HttpContext {
+                    key: "user.id".into(),
+                    value: "u6".into(),
+                },
+                HttpContext {
+                    key: "country".into(),
+                    value: "US".into(),
+                },
+            ],
+            client_id: None,
+            client_secret: None,
+        };
+
+        let resp1 = evaluate_handler(app_data.clone(), web::Json(req1))
+            .await
+            .unwrap();
+        assert!(resp1.into_inner().enabled);
+
+        // Second evaluation (should be cached now)
+        let req2 = EvaluateHttpRequest {
+            feature_key: "featMulti".into(),
+            environment_id: "env1".into(),
+            context: vec![
+                HttpContext {
+                    key: "user.id".into(),
+                    value: "u6".into(),
+                },
+                HttpContext {
+                    key: "country".into(),
+                    value: "CA".into(), // Different context, but should still return true from cache
+                },
+            ],
+            client_id: None,
+            client_secret: None,
+        };
+
+        let resp2 = evaluate_handler(app_data, web::Json(req2)).await.unwrap();
+        assert!(resp2.into_inner().enabled);
+
+        // Verify both evaluation events were recorded
+        let events = state.pending_evaluation_events.read().await;
+        assert_eq!(events.len(), 2);
+
+        // First event should be fresh evaluation
+        assert!(!events[0].prior_assignment);
+        assert!(events[0].evaluation_result);
+
+        // Second event should be cached assignment
+        assert!(events[1].prior_assignment);
+        assert!(events[1].evaluation_result);
+    }
+
+    #[actix_web::test]
+    async fn test_evaluate_handler_different_users_same_feature() {
+        // Test that different users are handled independently
+        let feature = make_feature_with_bucketing(
+            "featUsers",
+            "env1",
+            true,
+            "user.id",
+            "country",
+            &["US"],
+            100,
+        );
+        let feature_id = feature.id.clone();
+
+        // Pre-populate assignment for user1 only
+        let assignments = vec![("user1".to_string(), feature_id, "env1".to_string())];
+        let state = test_state_with_assignments(feature, assignments).await;
+        let app_data = web::Data::new(state.clone());
+
+        // Evaluation for user1 (cached)
+        let req1 = EvaluateHttpRequest {
+            feature_key: "featUsers".into(),
+            environment_id: "env1".into(),
+            context: vec![HttpContext {
+                key: "user.id".into(),
+                value: "user1".into(),
+            }],
+            client_id: None,
+            client_secret: None,
+        };
+
+        let resp1 = evaluate_handler(app_data.clone(), web::Json(req1))
+            .await
+            .unwrap();
+        assert!(resp1.into_inner().enabled);
+
+        // Evaluation for user2 (fresh)
+        let req2 = EvaluateHttpRequest {
+            feature_key: "featUsers".into(),
+            environment_id: "env1".into(),
+            context: vec![
+                HttpContext {
+                    key: "user.id".into(),
+                    value: "user2".into(),
+                },
+                HttpContext {
+                    key: "country".into(),
+                    value: "US".into(),
+                },
+            ],
+            client_id: None,
+            client_secret: None,
+        };
+
+        let resp2 = evaluate_handler(app_data, web::Json(req2)).await.unwrap();
+        assert!(resp2.into_inner().enabled);
+
+        // Verify evaluation events
+        let events = state.pending_evaluation_events.read().await;
+        assert_eq!(events.len(), 2);
+
+        // user1 should have prior_assignment=true
+        assert!(events[0].prior_assignment);
+        assert_eq!(events[0].user_context, Some("user1".to_string()));
+
+        // user2 should have prior_assignment=false
+        assert!(!events[1].prior_assignment);
+        assert_eq!(events[1].user_context, Some("user2".to_string()));
+    }
+
+    #[actix_web::test]
+    async fn test_resolve_credentials() {
+        let state = test_state_empty_cache();
+
+        // Test with no overrides
+        let req1 = EvaluateHttpRequest {
+            feature_key: "test".into(),
+            environment_id: "env1".into(),
+            context: vec![],
+            client_id: None,
+            client_secret: None,
+        };
+        let (id1, secret1) = resolve_credentials(&state, &req1);
+        assert_eq!(id1, "c");
+        assert_eq!(secret1, "s");
+
+        // Test with overrides
+        let req2 = EvaluateHttpRequest {
+            feature_key: "test".into(),
+            environment_id: "env1".into(),
+            context: vec![],
+            client_id: Some("override_id".into()),
+            client_secret: Some("override_secret".into()),
+        };
+        let (id2, secret2) = resolve_credentials(&state, &req2);
+        assert_eq!(id2, "override_id");
+        assert_eq!(secret2, "override_secret");
+    }
+
+    #[actix_web::test]
+    async fn test_evaluation_event_structure() {
+        // Test that evaluation events contain all expected fields
+        let feature = make_feature_with_bucketing(
+            "featStructure",
+            "env1",
+            true,
+            "user.id",
+            "country",
+            &["US"],
+            100,
+        );
+        let state = test_state_with_cache(feature).await;
+        let app_data = web::Data::new(state.clone());
+
+        let req = EvaluateHttpRequest {
+            feature_key: "featStructure".into(),
+            environment_id: "env1".into(),
+            context: vec![
+                HttpContext {
+                    key: "user.id".into(),
+                    value: "test_user".into(),
+                },
+                HttpContext {
+                    key: "country".into(),
+                    value: "US".into(),
+                },
+            ],
+            client_id: None,
+            client_secret: None,
+        };
+
+        let _resp = evaluate_handler(app_data, web::Json(req.clone()))
+            .await
+            .unwrap();
+
+        let events = state.pending_evaluation_events.read().await;
+        assert_eq!(events.len(), 1);
+
+        let event = &events[0];
+        assert_eq!(event.feature_key, "featStructure");
+        assert_eq!(event.environment_id, "env1");
+        assert_eq!(event.evaluation_result, true);
+        assert_eq!(event.evaluation_context, req.context);
+        assert_eq!(event.user_context, Some("test_user".to_string()));
+        assert!(!event.prior_assignment);
+        // evaluated_at should be set to a recent timestamp
+        assert!(event.evaluated_at.elapsed().unwrap().as_secs() < 1);
     }
 }

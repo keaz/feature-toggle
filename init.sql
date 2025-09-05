@@ -29,6 +29,9 @@ FROM public.environments;
 DELETE
 FROM public.teams;
 
+DELETE
+FROM public.user_flag_assignments;
+
 -- Users cleanup and seed for tests
 DELETE FROM public.users;
 

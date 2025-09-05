@@ -12,6 +12,7 @@ pub struct FeatureEvaluationRow {
     pub evaluation_result: bool,
     pub evaluation_context: Option<serde_json::Value>,
     pub user_context: Option<String>,
+    pub prior_assignment: bool,
     pub created_at: DateTime<Utc>,
 }
 
@@ -24,6 +25,7 @@ pub struct CreateFeatureEvaluation {
     pub evaluation_result: bool,
     pub evaluation_context: Option<serde_json::Value>,
     pub user_context: Option<String>,
+    pub prior_assignment: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,6 +34,7 @@ pub struct FeatureEvaluationFilter {
     pub environment_id: Option<String>,
     pub client_id: Option<Uuid>,
     pub user_context: Option<String>,
+    pub prior_assignment: Option<bool>,
     pub from_date: Option<DateTime<Utc>>,
     pub to_date: Option<DateTime<Utc>>,
     pub limit: Option<i64>,
@@ -84,9 +87,9 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
             r#"
             INSERT INTO feature_evaluations (
                 feature_key, environment_id, client_id, evaluated_at, 
-                evaluation_result, evaluation_context, user_context
+                evaluation_result, evaluation_context, user_context, prior_assignment
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             RETURNING *
             "#,
         )
@@ -97,6 +100,7 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
         .bind(evaluation.evaluation_result)
         .bind(evaluation.evaluation_context)
         .bind(evaluation.user_context)
+        .bind(evaluation.prior_assignment)
         .fetch_one(&self.pool)
         .await?;
 
@@ -115,7 +119,7 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
             r#"
             INSERT INTO feature_evaluations (
                 feature_key, environment_id, client_id, evaluated_at, 
-                evaluation_result, evaluation_context, user_context
+                evaluation_result, evaluation_context, user_context, prior_assignment
             )
             VALUES
             "#,
@@ -126,16 +130,17 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
             if i > 0 {
                 query.push_str(", ");
             }
-            let base = i * 7;
+            let base = i * 8;
             query.push_str(&format!(
-                "(${}, ${}, ${}, ${}, ${}, ${}, ${})",
+                "(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
                 base + 1,
                 base + 2,
                 base + 3,
                 base + 4,
                 base + 5,
                 base + 6,
-                base + 7
+                base + 7,
+                base + 8
             ));
         }
         query.push_str(" RETURNING *");
@@ -151,7 +156,8 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
                 .bind(evaluation.evaluated_at)
                 .bind(evaluation.evaluation_result)
                 .bind(evaluation.evaluation_context)
-                .bind(evaluation.user_context);
+                .bind(evaluation.user_context)
+                .bind(evaluation.prior_assignment);
         }
 
         let rows = sql_query.fetch_all(&self.pool).await?;
@@ -181,6 +187,10 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
         if filter.user_context.is_some() {
             param_count += 1;
             query.push_str(&format!(" AND user_context = ${}", param_count));
+        }
+        if filter.prior_assignment.is_some() {
+            param_count += 1;
+            query.push_str(&format!(" AND prior_assignment = ${}", param_count));
         }
         if filter.from_date.is_some() {
             param_count += 1;
@@ -216,6 +226,9 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
         }
         if let Some(user_context) = filter.user_context {
             sql_query = sql_query.bind(user_context);
+        }
+        if let Some(prior_assignment) = filter.prior_assignment {
+            sql_query = sql_query.bind(prior_assignment);
         }
         if let Some(from_date) = filter.from_date {
             sql_query = sql_query.bind(from_date);
@@ -258,6 +271,10 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
             param_count += 1;
             query.push_str(&format!(" AND user_context = ${}", param_count));
         }
+        if filter.prior_assignment.is_some() {
+            param_count += 1;
+            query.push_str(&format!(" AND prior_assignment = ${}", param_count));
+        }
         if filter.from_date.is_some() {
             param_count += 1;
             query.push_str(&format!(" AND evaluated_at >= ${}", param_count));
@@ -281,6 +298,9 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
         }
         if let Some(user_context) = filter.user_context {
             sql_query = sql_query.bind(user_context);
+        }
+        if let Some(prior_assignment) = filter.prior_assignment {
+            sql_query = sql_query.bind(prior_assignment);
         }
         if let Some(from_date) = filter.from_date {
             sql_query = sql_query.bind(from_date);
