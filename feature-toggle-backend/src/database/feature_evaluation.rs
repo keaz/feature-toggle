@@ -63,7 +63,73 @@ pub trait FeatureEvaluationRepository: Send + Sync {
         filter: FeatureEvaluationFilter,
     ) -> Result<i64, sqlx::Error>;
 
+    /// Get feature evaluation rates aggregated by time intervals
+    /// Returns evaluation counts grouped by time buckets for dashboard visualization
+    async fn get_evaluation_rates(
+        &self,
+        feature_key: Option<String>,
+        environment_id: Option<String>,
+        client_id: Option<uuid::Uuid>,
+        from_time: chrono::DateTime<chrono::Utc>,
+        to_time: chrono::DateTime<chrono::Utc>,
+        interval_minutes: i32,
+    ) -> Result<Vec<EvaluationRatePoint>, sqlx::Error>;
+
+    /// Get feature evaluation summary statistics for the dashboard
+    /// Returns aggregated metrics like total evaluations, success rate, etc.
+    async fn get_evaluation_summary(
+        &self,
+        feature_key: Option<String>,
+        environment_id: Option<String>,
+        client_id: Option<uuid::Uuid>,
+        from_time: chrono::DateTime<chrono::Utc>,
+        to_time: chrono::DateTime<chrono::Utc>,
+    ) -> Result<EvaluationSummary, sqlx::Error>;
+
     fn clone_box(&self) -> Box<dyn FeatureEvaluationRepository>;
+}
+
+/// Represents a single point in the evaluation rate time series
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct EvaluationRatePoint {
+    /// The timestamp bucket (rounded to interval)
+    pub time_bucket: chrono::DateTime<chrono::Utc>,
+    /// Number of evaluations in this time bucket
+    pub evaluation_count: i64,
+    /// Number of evaluations that resulted in true
+    pub success_count: i64,
+    /// Number of evaluations that were from prior assignments (cached)
+    pub prior_assignment_count: i64,
+}
+
+/// Intermediate struct for the summary query result (without top_feature_key)
+#[derive(sqlx::FromRow)]
+struct EvaluationSummaryPartial {
+    total_evaluations: i64,
+    successful_evaluations: i64,
+    cached_evaluations: i64,
+    unique_users: i64,
+    success_rate: f64,
+    cache_hit_rate: f64,
+}
+
+/// Summary statistics for feature evaluations over a time period
+#[derive(Debug, Clone)]
+pub struct EvaluationSummary {
+    /// Total number of evaluations
+    pub total_evaluations: i64,
+    /// Number of evaluations that resulted in true
+    pub successful_evaluations: i64,
+    /// Number of evaluations from prior assignments (cached)
+    pub cached_evaluations: i64,
+    /// Number of unique users who had evaluations
+    pub unique_users: i64,
+    /// Most frequently evaluated feature key
+    pub top_feature_key: Option<String>,
+    /// Success rate as percentage (0-100)
+    pub success_rate: f64,
+    /// Cache hit rate as percentage (0-100)  
+    pub cache_hit_rate: f64,
 }
 
 #[derive(Clone)]
@@ -311,6 +377,186 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
 
         let count = sql_query.fetch_one(&self.pool).await?;
         Ok(count)
+    }
+
+    /// Get feature evaluation rates aggregated by time intervals
+    /// Uses PostgreSQL's date_trunc function to group evaluations into time buckets
+    async fn get_evaluation_rates(
+        &self,
+        feature_key: Option<String>,
+        environment_id: Option<String>,
+        client_id: Option<uuid::Uuid>,
+        from_time: chrono::DateTime<chrono::Utc>,
+        to_time: chrono::DateTime<chrono::Utc>,
+        interval_minutes: i32,
+    ) -> Result<Vec<EvaluationRatePoint>, sqlx::Error> {
+        let mut query = format!(
+            r#"
+            SELECT 
+                date_trunc('minute', evaluated_at) + 
+                INTERVAL '{} minutes' * floor(extract(minute from evaluated_at) / {}) as time_bucket,
+                COUNT(*) as evaluation_count,
+                COUNT(*) FILTER (WHERE evaluation_result = true) as success_count,
+                COUNT(*) FILTER (WHERE prior_assignment = true) as prior_assignment_count
+            FROM feature_evaluations 
+            WHERE evaluated_at >= $1 AND evaluated_at <= $2
+            "#,
+            interval_minutes, interval_minutes
+        );
+
+        let mut param_count = 2;
+
+        // Add optional filters
+        if feature_key.is_some() {
+            param_count += 1;
+            query.push_str(&format!(" AND feature_key = ${}", param_count));
+        }
+        if environment_id.is_some() {
+            param_count += 1;
+            query.push_str(&format!(" AND environment_id = ${}", param_count));
+        }
+        if client_id.is_some() {
+            param_count += 1;
+            query.push_str(&format!(" AND client_id = ${}", param_count));
+        }
+
+        query.push_str(" GROUP BY time_bucket ORDER BY time_bucket");
+
+        let mut sql_query = sqlx::query_as::<_, EvaluationRatePoint>(&query)
+            .bind(from_time)
+            .bind(to_time);
+
+        // Bind optional parameters
+        if let Some(key) = feature_key {
+            sql_query = sql_query.bind(key);
+        }
+        if let Some(env_id) = environment_id {
+            sql_query = sql_query.bind(env_id);
+        }
+        if let Some(c_id) = client_id {
+            sql_query = sql_query.bind(c_id);
+        }
+
+        let rates = sql_query.fetch_all(&self.pool).await?;
+        Ok(rates)
+    }
+
+    /// Get comprehensive evaluation summary statistics
+    /// Provides aggregated metrics useful for dashboard overview
+    async fn get_evaluation_summary(
+        &self,
+        feature_key: Option<String>,
+        environment_id: Option<String>,
+        client_id: Option<uuid::Uuid>,
+        from_time: chrono::DateTime<chrono::Utc>,
+        to_time: chrono::DateTime<chrono::Utc>,
+    ) -> Result<EvaluationSummary, sqlx::Error> {
+        let mut query = String::from(
+            r#"
+            SELECT 
+                COUNT(*) as total_evaluations,
+                COUNT(*) FILTER (WHERE evaluation_result = true) as successful_evaluations,
+                COUNT(*) FILTER (WHERE prior_assignment = true) as cached_evaluations,
+                COUNT(DISTINCT user_context) FILTER (WHERE user_context IS NOT NULL) as unique_users,
+                CASE 
+                    WHEN COUNT(*) > 0 THEN (COUNT(*) FILTER (WHERE evaluation_result = true) * 100.0 / COUNT(*))::FLOAT8
+                    ELSE 0.0::FLOAT8
+                END as success_rate,
+                CASE 
+                    WHEN COUNT(*) > 0 THEN (COUNT(*) FILTER (WHERE prior_assignment = true) * 100.0 / COUNT(*))::FLOAT8
+                    ELSE 0.0::FLOAT8
+                END as cache_hit_rate
+            FROM feature_evaluations 
+            WHERE evaluated_at >= $1 AND evaluated_at <= $2
+            "#,
+        );
+
+        let mut param_count = 2;
+
+        // Add optional filters
+        if feature_key.is_some() {
+            param_count += 1;
+            query.push_str(&format!(" AND feature_key = ${}", param_count));
+        }
+        if environment_id.is_some() {
+            param_count += 1;
+            query.push_str(&format!(" AND environment_id = ${}", param_count));
+        }
+        if client_id.is_some() {
+            param_count += 1;
+            query.push_str(&format!(" AND client_id = ${}", param_count));
+        }
+
+        let mut sql_query = sqlx::query_as::<_, EvaluationSummaryPartial>(&query)
+            .bind(from_time)
+            .bind(to_time);
+
+        // Bind optional parameters
+        if let Some(ref key) = feature_key {
+            sql_query = sql_query.bind(key);
+        }
+        if let Some(ref env_id) = environment_id {
+            sql_query = sql_query.bind(env_id);
+        }
+        if let Some(c_id) = client_id {
+            sql_query = sql_query.bind(c_id);
+        }
+
+        let partial_summary = sql_query.fetch_one(&self.pool).await?;
+
+        // Get the most frequently evaluated feature key in a separate query
+        let mut top_feature_query = String::from(
+            r#"
+            SELECT feature_key, COUNT(*) as count
+            FROM feature_evaluations 
+            WHERE evaluated_at >= $1 AND evaluated_at <= $2
+            "#,
+        );
+
+        let mut param_count = 2;
+        if feature_key.is_some() {
+            param_count += 1;
+            top_feature_query.push_str(&format!(" AND feature_key = ${}", param_count));
+        }
+        if environment_id.is_some() {
+            param_count += 1;
+            top_feature_query.push_str(&format!(" AND environment_id = ${}", param_count));
+        }
+        if client_id.is_some() {
+            param_count += 1;
+            top_feature_query.push_str(&format!(" AND client_id = ${}", param_count));
+        }
+
+        top_feature_query.push_str(" GROUP BY feature_key ORDER BY count DESC LIMIT 1");
+
+        let mut top_feature_sql = sqlx::query_scalar::<_, String>(&top_feature_query)
+            .bind(from_time)
+            .bind(to_time);
+
+        if let Some(ref key) = feature_key {
+            top_feature_sql = top_feature_sql.bind(key);
+        }
+        if let Some(ref env_id) = environment_id {
+            top_feature_sql = top_feature_sql.bind(env_id);
+        }
+        if let Some(c_id) = client_id {
+            top_feature_sql = top_feature_sql.bind(c_id);
+        }
+
+        let top_feature_key = top_feature_sql.fetch_optional(&self.pool).await?;
+
+        // Construct the complete EvaluationSummary from the partial result and top_feature_key
+        let summary = EvaluationSummary {
+            total_evaluations: partial_summary.total_evaluations,
+            successful_evaluations: partial_summary.successful_evaluations,
+            cached_evaluations: partial_summary.cached_evaluations,
+            unique_users: partial_summary.unique_users,
+            top_feature_key,
+            success_rate: partial_summary.success_rate,
+            cache_hit_rate: partial_summary.cache_hit_rate,
+        };
+
+        Ok(summary)
     }
 
     fn clone_box(&self) -> Box<dyn FeatureEvaluationRepository> {

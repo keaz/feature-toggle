@@ -1,6 +1,6 @@
 use crate::database::feature_evaluation::{
-    CreateFeatureEvaluation, EvaluationRatePoint, EvaluationSummary, FeatureEvaluationFilter,
-    FeatureEvaluationRepository, FeatureEvaluationRow,
+    CreateFeatureEvaluation, FeatureEvaluationFilter, FeatureEvaluationRepository,
+    FeatureEvaluationRow, EvaluationRatePoint, EvaluationSummary,
 };
 use sqlx::types::chrono::{DateTime, Utc};
 use uuid::Uuid;
@@ -200,23 +200,20 @@ impl FeatureEvaluationLogic for FeatureEvaluationLogicImpl {
         }
 
         // Validate interval (must be between 1 minute and 1 hour)
-        if !(1..=60).contains(&interval_minutes) {
+        if interval_minutes < 1 || interval_minutes > 60 {
             return Err(FeatureEvaluationLogicError::InvalidInput(
                 "Interval must be between 1 and 60 minutes".to_string(),
             ));
         }
 
-        let rates = self
-            .repository
-            .get_evaluation_rates(
-                feature_key,
-                environment_id,
-                client_id,
-                from_time,
-                to_time,
-                interval_minutes,
-            )
-            .await?;
+        let rates = self.repository.get_evaluation_rates(
+            feature_key,
+            environment_id,
+            client_id,
+            from_time,
+            to_time,
+            interval_minutes,
+        ).await?;
 
         Ok(rates)
     }
@@ -245,10 +242,13 @@ impl FeatureEvaluationLogic for FeatureEvaluationLogicImpl {
             ));
         }
 
-        let summary = self
-            .repository
-            .get_evaluation_summary(feature_key, environment_id, client_id, from_time, to_time)
-            .await?;
+        let summary = self.repository.get_evaluation_summary(
+            feature_key,
+            environment_id,
+            client_id,
+            from_time,
+            to_time,
+        ).await?;
 
         Ok(summary)
     }

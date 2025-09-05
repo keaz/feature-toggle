@@ -8,13 +8,14 @@ mod middleware;
 use crate::database::init_pg_pool;
 use crate::graphql::mutation::MutationRoot;
 use crate::graphql::query::Query;
+use crate::graphql::subscription::FeatureEvaluationSubscription;
 use crate::middleware::access_log::AccessLogger;
 use crate::middleware::admin_guard::{AdminGuard, AdminState};
 use crate::middleware::jwt_guard::JwtGuard;
 use actix_cors::Cors;
 use actix_web::{App, HttpMessage, HttpRequest, HttpResponse, HttpServer, Result, guard, web};
+use async_graphql::Schema;
 use async_graphql::http::GraphiQLSource;
-use async_graphql::{EmptyMutation, EmptySubscription, Schema};
 use async_graphql_actix_web::{GraphQLRequest, GraphQLResponse, GraphQLSubscription};
 use log::error;
 use uuid::Uuid;
@@ -68,12 +69,16 @@ pub async fn run() -> std::io::Result<()> {
     );
 
     // Initialize JWT secret on startup
-    jwt_secret_logic.initialize_secret().await
+    jwt_secret_logic
+        .initialize_secret()
+        .await
         .expect("Failed to initialize JWT secret");
     log::info!("JWT secret initialized successfully");
 
     // Initialize JWT secret on startup
-    jwt_secret_logic.initialize_secret().await
+    jwt_secret_logic
+        .initialize_secret()
+        .await
         .expect("Failed to initialize JWT secret");
     log::info!("JWT secret initialized successfully");
 
@@ -95,7 +100,7 @@ pub async fn run() -> std::io::Result<()> {
     HttpServer::new(move || {
         let admin_state = AdminState::new();
 
-        let schema = Schema::build(Query, MutationRoot, EmptySubscription)
+        let schema = Schema::build(Query, MutationRoot, FeatureEvaluationSubscription)
             .data(db_pool.clone())
             .data(updates_tx.clone())
             .data(environment_logic.clone())
@@ -167,7 +172,7 @@ pub struct JwtUser {
 }
 
 async fn graphql_handler(
-    schema: web::Data<Schema<Query, MutationRoot, EmptySubscription>>,
+    schema: web::Data<Schema<Query, MutationRoot, FeatureEvaluationSubscription>>,
     req: HttpRequest,
     gql_req: GraphQLRequest,
 ) -> GraphQLResponse {
@@ -204,7 +209,7 @@ async fn index_graphiql() -> Result<HttpResponse> {
 }
 
 async fn index_ws(
-    schema: web::Data<Schema<Query, EmptyMutation, EmptySubscription>>,
+    schema: web::Data<Schema<Query, MutationRoot, FeatureEvaluationSubscription>>,
     req: HttpRequest,
     payload: web::Payload,
 ) -> Result<HttpResponse> {

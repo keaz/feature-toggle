@@ -5,6 +5,7 @@ use async_graphql::Result as GqlResult;
 pub mod mutation;
 pub mod query;
 pub mod schema;
+pub mod subscription;
 pub mod validator;
 
 

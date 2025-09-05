@@ -1,6 +1,98 @@
 use crate::database::feature_evaluation::{
-    CreateFeatureEvaluation, EvaluationRatePoint, EvaluationSummary, FeatureEvaluationFilter,
-    FeatureEvaluationRepository, FeatureEvaluationRow,
+    CreateFeatureEvaluation, FeatureEvaluationFilter, FeatureEvaluationRepository,
+    FeatureEvaluationRow, EvaluationRatePoint, EvaluationSummary,
+};
+use sqlx::types::chrono::{DateTime, Utc};
+use uuid::Uuid;
+
+#[derive(Debug, thiserror::Error)]
+pub enum FeatureEvaluationLogicError {
+    #[error("Database error: {0}")]
+    DatabaseError(#[from] sqlx::Error),
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
+    #[error("Not found")]
+    NotFound,
+}
+    async fn get_evaluation_rates(
+        &self,
+        feature_key: Option<String>,
+        environment_id: Option<String>,
+        client_id: Option<Uuid>,
+        from_time: DateTime<Utc>,
+        to_time: DateTime<Utc>,
+        interval_minutes: i32,
+    ) -> Result<Vec<EvaluationRatePoint>, FeatureEvaluationLogicError> {
+        // Validate time range (max 24 hours)
+        let duration = to_time - from_time;
+        if duration.num_hours() > 24 {
+            return Err(FeatureEvaluationLogicError::InvalidInput(
+                "Time range cannot exceed 24 hours".to_string(),
+            ));
+        }
+
+        // Validate from_time is not in the future
+        if from_time > Utc::now() {
+            return Err(FeatureEvaluationLogicError::InvalidInput(
+                "From time cannot be in the future".to_string(),
+            ));
+        }
+
+        // Validate interval (must be between 1 minute and 1 hour)
+        if interval_minutes < 1 || interval_minutes > 60 {
+            return Err(FeatureEvaluationLogicError::InvalidInput(
+                "Interval must be between 1 and 60 minutes".to_string(),
+            ));
+        }
+
+        let rates = self.repository.get_evaluation_rates(
+            feature_key,
+            environment_id,
+            client_id,
+            from_time,
+            to_time,
+            interval_minutes,
+        ).await?;
+
+        Ok(rates)
+    }
+
+    /// Get evaluation summary with business logic validation
+    async fn get_evaluation_summary(
+        &self,
+        feature_key: Option<String>,
+        environment_id: Option<String>,
+        client_id: Option<Uuid>,
+        from_time: DateTime<Utc>,
+        to_time: DateTime<Utc>,
+    ) -> Result<EvaluationSummary, FeatureEvaluationLogicError> {
+        // Validate time range (max 24 hours)
+        let duration = to_time - from_time;
+        if duration.num_hours() > 24 {
+            return Err(FeatureEvaluationLogicError::InvalidInput(
+                "Time range cannot exceed 24 hours".to_string(),
+            ));
+        }
+
+        // Validate from_time is not in the future
+        if from_time > Utc::now() {
+            return Err(FeatureEvaluationLogicError::InvalidInput(
+                "From time cannot be in the future".to_string(),
+            ));
+        }
+
+        let summary = self.repository.get_evaluation_summary(
+            feature_key,
+            environment_id,
+            client_id,
+            from_time,
+            to_time,
+        ).await?;
+
+        Ok(summary)
+    }
+
+    fn clone_box(&self) -> Box<dyn FeatureEvaluationLogic> {ionSummary,
 };
 use sqlx::types::chrono::{DateTime, Utc};
 use uuid::Uuid;
@@ -17,7 +109,6 @@ pub enum FeatureEvaluationLogicError {
 
 #[async_trait::async_trait]
 pub trait FeatureEvaluationLogic: Send + Sync {
-    /// Record a single feature evaluation event
     async fn record_evaluation(
         &self,
         feature_key: String,
@@ -30,19 +121,16 @@ pub trait FeatureEvaluationLogic: Send + Sync {
         prior_assignment: bool,
     ) -> Result<FeatureEvaluationRow, FeatureEvaluationLogicError>;
 
-    /// Record multiple feature evaluation events in bulk
     async fn record_evaluations_bulk(
         &self,
         evaluations: Vec<CreateFeatureEvaluation>,
     ) -> Result<Vec<FeatureEvaluationRow>, FeatureEvaluationLogicError>;
 
-    /// Get feature evaluations with filtering
     async fn get_evaluations(
         &self,
         filter: FeatureEvaluationFilter,
     ) -> Result<Vec<FeatureEvaluationRow>, FeatureEvaluationLogicError>;
 
-    /// Get count of feature evaluations with filtering
     async fn get_evaluation_count(
         &self,
         filter: FeatureEvaluationFilter,
@@ -81,9 +169,16 @@ impl Clone for Box<dyn FeatureEvaluationLogic> {
     }
 }
 
-/// Implementation of feature evaluation logic using the repository pattern
 pub struct FeatureEvaluationLogicImpl {
     repository: Box<dyn FeatureEvaluationRepository>,
+}
+
+impl Clone for FeatureEvaluationLogicImpl {
+    fn clone(&self) -> Self {
+        Self {
+            repository: self.repository.clone_box(),
+        }
+    }
 }
 
 impl FeatureEvaluationLogicImpl {
@@ -140,14 +235,14 @@ impl FeatureEvaluationLogic for FeatureEvaluationLogicImpl {
             return Ok(vec![]);
         }
 
-        // Validate each evaluation
-        for evaluation in &evaluations {
-            if evaluation.feature_key.is_empty() {
+        // Validate all evaluations
+        for eval in &evaluations {
+            if eval.feature_key.is_empty() {
                 return Err(FeatureEvaluationLogicError::InvalidInput(
                     "Feature key cannot be empty".to_string(),
                 ));
             }
-            if evaluation.environment_id.is_empty() {
+            if eval.environment_id.is_empty() {
                 return Err(FeatureEvaluationLogicError::InvalidInput(
                     "Environment ID cannot be empty".to_string(),
                 ));
@@ -162,95 +257,16 @@ impl FeatureEvaluationLogic for FeatureEvaluationLogicImpl {
         &self,
         filter: FeatureEvaluationFilter,
     ) -> Result<Vec<FeatureEvaluationRow>, FeatureEvaluationLogicError> {
-        let evaluations = self.repository.get_evaluations(filter).await?;
-        Ok(evaluations)
+        let result = self.repository.get_evaluations(filter).await?;
+        Ok(result)
     }
 
     async fn get_evaluation_count(
         &self,
         filter: FeatureEvaluationFilter,
     ) -> Result<i64, FeatureEvaluationLogicError> {
-        let count = self.repository.get_evaluation_count(filter).await?;
-        Ok(count)
-    }
-
-    /// Get evaluation rates with validation and business logic
-    async fn get_evaluation_rates(
-        &self,
-        feature_key: Option<String>,
-        environment_id: Option<String>,
-        client_id: Option<Uuid>,
-        from_time: DateTime<Utc>,
-        to_time: DateTime<Utc>,
-        interval_minutes: i32,
-    ) -> Result<Vec<EvaluationRatePoint>, FeatureEvaluationLogicError> {
-        // Validate time range (max 24 hours)
-        let duration = to_time - from_time;
-        if duration.num_hours() > 24 {
-            return Err(FeatureEvaluationLogicError::InvalidInput(
-                "Time range cannot exceed 24 hours".to_string(),
-            ));
-        }
-
-        // Validate from_time is not in the future
-        if from_time > Utc::now() {
-            return Err(FeatureEvaluationLogicError::InvalidInput(
-                "From time cannot be in the future".to_string(),
-            ));
-        }
-
-        // Validate interval (must be between 1 minute and 1 hour)
-        if !(1..=60).contains(&interval_minutes) {
-            return Err(FeatureEvaluationLogicError::InvalidInput(
-                "Interval must be between 1 and 60 minutes".to_string(),
-            ));
-        }
-
-        let rates = self
-            .repository
-            .get_evaluation_rates(
-                feature_key,
-                environment_id,
-                client_id,
-                from_time,
-                to_time,
-                interval_minutes,
-            )
-            .await?;
-
-        Ok(rates)
-    }
-
-    /// Get evaluation summary with business logic validation
-    async fn get_evaluation_summary(
-        &self,
-        feature_key: Option<String>,
-        environment_id: Option<String>,
-        client_id: Option<Uuid>,
-        from_time: DateTime<Utc>,
-        to_time: DateTime<Utc>,
-    ) -> Result<EvaluationSummary, FeatureEvaluationLogicError> {
-        // Validate time range (max 24 hours)
-        let duration = to_time - from_time;
-        if duration.num_hours() > 24 {
-            return Err(FeatureEvaluationLogicError::InvalidInput(
-                "Time range cannot exceed 24 hours".to_string(),
-            ));
-        }
-
-        // Validate from_time is not in the future
-        if from_time > Utc::now() {
-            return Err(FeatureEvaluationLogicError::InvalidInput(
-                "From time cannot be in the future".to_string(),
-            ));
-        }
-
-        let summary = self
-            .repository
-            .get_evaluation_summary(feature_key, environment_id, client_id, from_time, to_time)
-            .await?;
-
-        Ok(summary)
+        let result = self.repository.get_evaluation_count(filter).await?;
+        Ok(result)
     }
 
     fn clone_box(&self) -> Box<dyn FeatureEvaluationLogic> {
@@ -260,7 +276,6 @@ impl FeatureEvaluationLogic for FeatureEvaluationLogicImpl {
     }
 }
 
-/// Factory function to create feature evaluation logic implementation
 pub fn feature_evaluation_logic(
     repository: Box<dyn FeatureEvaluationRepository>,
 ) -> Box<dyn FeatureEvaluationLogic> {
