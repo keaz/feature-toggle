@@ -10,13 +10,19 @@ use uuid::Uuid;
 pub struct LoginResult {
     pub user: GqlUser,
     pub token: String,
+    pub is_temporary: bool,
 }
 
 #[async_trait::async_trait]
 pub trait JwtTokenLogic: Send + Sync {
     async fn login_user(&self, username: String, password: String) -> Result<LoginResult, Error>;
     async fn logout_user(&self, user_id: Uuid) -> Result<u64, Error>;
-    async fn store_token(&self, user_id: Uuid, token_hash: String, expires_at: DateTime<Utc>) -> Result<JwtToken, Error>;
+    async fn store_token(
+        &self,
+        user_id: Uuid,
+        token_hash: String,
+        expires_at: DateTime<Utc>,
+    ) -> Result<JwtToken, Error>;
     async fn is_token_valid(&self, token_hash: &str) -> Result<bool, Error>;
     async fn revoke_token(&self, token_hash: &str) -> Result<bool, Error>;
     async fn revoke_all_user_tokens(&self, user_id: Uuid) -> Result<u64, Error>;
@@ -69,7 +75,10 @@ impl JwtTokenLogic for JwtTokenLogicImpl {
         let role_names: Vec<String> = roles.into_iter().map(|r| r.name).collect();
 
         // Get current JWT secret from database
-        let jwt_secret = self.jwt_secret_logic.get_current_secret().await
+        let jwt_secret = self
+            .jwt_secret_logic
+            .get_current_secret()
+            .await
             .map_err(|e| Error::InvalidInput(format!("Failed to get JWT secret: {}", e)))?;
 
         // Generate JWT token
@@ -85,20 +94,32 @@ impl JwtTokenLogic for JwtTokenLogicImpl {
         // Store token hash in database
         let token_hash = crate::middleware::jwt_guard::hash_token(&token);
         let expires_at = chrono::Utc::now() + chrono::Duration::hours(24);
-        
+
         self.repository
             .store_token(user_id, token_hash, expires_at)
             .await?;
 
-        Ok(LoginResult { user, token })
+        let is_temporary = user.is_temporary_password;
+        Ok(LoginResult {
+            user,
+            token,
+            is_temporary,
+        })
     }
 
     async fn logout_user(&self, user_id: Uuid) -> Result<u64, Error> {
         self.repository.revoke_all_user_tokens(user_id).await
     }
 
-    async fn store_token(&self, user_id: Uuid, token_hash: String, expires_at: DateTime<Utc>) -> Result<JwtToken, Error> {
-        self.repository.store_token(user_id, token_hash, expires_at).await
+    async fn store_token(
+        &self,
+        user_id: Uuid,
+        token_hash: String,
+        expires_at: DateTime<Utc>,
+    ) -> Result<JwtToken, Error> {
+        self.repository
+            .store_token(user_id, token_hash, expires_at)
+            .await
     }
 
     async fn is_token_valid(&self, token_hash: &str) -> Result<bool, Error> {
@@ -132,11 +153,11 @@ mod tests {
     use crate::database::jwt_token::MockJwtTokenRepository;
     use crate::logic::jwt_secret::MockJwtSecretLogic;
     use crate::logic::role::MockRoleLogic;
-    use crate::logic::user::MockUserLogic;
     use crate::logic::user::GqlUser;
+    use crate::logic::user::MockUserLogic;
     use async_graphql::ID;
-    use mockall::predicate::*;
     use chrono::Utc;
+    use mockall::predicate::*;
     use uuid::Uuid;
 
     fn sample_gql_user() -> GqlUser {
@@ -158,7 +179,7 @@ mod tests {
     async fn test_login_user_success() {
         let user = sample_gql_user();
         let user_uuid = Uuid::try_from(user.id.clone()).unwrap();
-        
+
         let mut mock_user_logic = MockUserLogic::new();
         mock_user_logic
             .expect_authenticate_user()
@@ -204,12 +225,13 @@ mod tests {
 
         assert_eq!(result.user.username, "testuser");
         assert!(!result.token.is_empty());
+        assert_eq!(result.is_temporary, false); // user.is_temporary_password is false
     }
 
     #[tokio::test]
     async fn test_logout_user_success() {
         let user_id = Uuid::new_v4();
-        
+
         let mut mock_repo = MockJwtTokenRepository::new();
         mock_repo
             .expect_revoke_all_user_tokens()
@@ -229,5 +251,58 @@ mod tests {
 
         let result = logic.logout_user(user_id).await.unwrap();
         assert_eq!(result, 2);
+    }
+
+    #[tokio::test]
+    async fn test_login_user_with_temporary_password() {
+        let mut user = sample_gql_user();
+        user.is_temporary_password = true; // Set as temporary password
+
+        let mut mock_user_logic = MockUserLogic::new();
+        mock_user_logic
+            .expect_authenticate_user()
+            .with(eq("testuser".to_string()), eq("temppassword".to_string()))
+            .returning(move |_, _| Ok(user.clone()));
+
+        let mut mock_role_logic = MockRoleLogic::new();
+        mock_role_logic
+            .expect_get_user_roles()
+            .returning(|_| Ok(vec![]));
+
+        let mut mock_jwt_secret_logic = MockJwtSecretLogic::new();
+        mock_jwt_secret_logic
+            .expect_get_current_secret()
+            .returning(|| Ok("secret".to_string()));
+
+        let mut mock_repo = MockJwtTokenRepository::new();
+        mock_repo
+            .expect_store_token()
+            .returning(|user_id, token_hash, expires_at| {
+                Ok(JwtToken {
+                    id: Uuid::new_v4(),
+                    user_id,
+                    token_hash,
+                    expires_at,
+                    created_at: Utc::now(),
+                    revoked_at: None,
+                    is_revoked: false,
+                })
+            });
+
+        let logic = jwt_token_logic(
+            Box::new(mock_repo),
+            Box::new(mock_user_logic),
+            Box::new(mock_role_logic),
+            Box::new(mock_jwt_secret_logic),
+        );
+
+        let result = logic
+            .login_user("testuser".to_string(), "temppassword".to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(result.user.username, "testuser");
+        assert!(!result.token.is_empty());
+        assert_eq!(result.is_temporary, true); // Should reflect the temporary password status
     }
 }

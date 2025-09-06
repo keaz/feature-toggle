@@ -432,6 +432,7 @@ pub struct RegisterUserInput {
 pub struct LoginResponse {
     pub user: User,
     pub token: String,
+    pub is_temporary: bool,
 }
 
 #[derive(InputObject, Debug)]

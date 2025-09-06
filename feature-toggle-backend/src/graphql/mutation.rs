@@ -18,7 +18,7 @@ use crate::logic::role::RoleLogic;
 use crate::logic::team::TeamLogic;
 use crate::logic::user::{RegisterUserInput, UpdateGqlUserInput, UserLogic};
 use crate::middleware::admin_guard::AdminState;
-use async_graphql::{Context, ID, Object, Result as GqlResult};
+use async_graphql::{Context, Object, Result as GqlResult, ID};
 use log::info;
 
 #[cfg(test)]
@@ -362,7 +362,7 @@ impl MutationRoot {
                 last_name: input.last_name,
                 email: input.email,
                 is_admin: input.is_admin.unwrap_or(false),
-                is_temporary_password: input.is_temporary_password.unwrap_or(false),
+                is_temporary_password: input.is_temporary_password.unwrap_or(true), // Default to temporary password
             })
             .await?;
 
@@ -389,7 +389,7 @@ impl MutationRoot {
                 last_name: input.last_name,
                 email: input.email,
                 is_admin: true, // Force admin to true
-                is_temporary_password: input.is_temporary_password.unwrap_or(false),
+                is_temporary_password: false, // Default to temporary password
             })
             .await?;
 
@@ -412,6 +412,7 @@ impl MutationRoot {
         Ok(LoginResponse {
             user,
             token: login_result.token,
+            is_temporary: login_result.is_temporary,
         })
     }
 
