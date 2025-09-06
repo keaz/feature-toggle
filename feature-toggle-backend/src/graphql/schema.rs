@@ -1,4 +1,4 @@
-use async_graphql::{ComplexObject, Enum, InputObject, Result as GqlResult, SimpleObject, ID};
+use async_graphql::{ComplexObject, Enum, ID, InputObject, Result as GqlResult, SimpleObject};
 use serde::{Deserialize, Serialize};
 
 #[derive(Enum, Copy, Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
@@ -353,13 +353,15 @@ pub struct User {
     pub created_at: String,
     pub updated_at: String,
     pub last_login: Option<String>,
+    pub is_temporary_password: bool,
 }
 
 #[ComplexObject]
 impl User {
     pub async fn teams(&self, ctx: &async_graphql::Context<'_>) -> GqlResult<Vec<Team>> {
         let pool = ctx.data::<sqlx::PgPool>()?;
-        let uid = uuid::Uuid::try_from(self.id.clone()).map_err(|e| async_graphql::Error::new(e.to_string()))?;
+        let uid = uuid::Uuid::try_from(self.id.clone())
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
         let repo = crate::database::user::user_repository(pool.clone());
         let teams = repo
             .get_user_teams(uid)
@@ -367,13 +369,18 @@ impl User {
             .map_err(|e| async_graphql::Error::new(e.to_string()))?;
         Ok(teams
             .into_iter()
-            .map(|t| Team { id: async_graphql::ID::from(t.id), name: t.name, description: t.description })
+            .map(|t| Team {
+                id: async_graphql::ID::from(t.id),
+                name: t.name,
+                description: t.description,
+            })
             .collect())
     }
 
     pub async fn team_ids(&self, ctx: &async_graphql::Context<'_>) -> GqlResult<Vec<ID>> {
         let pool = ctx.data::<sqlx::PgPool>()?;
-        let uid = uuid::Uuid::try_from(self.id.clone()).map_err(|e| async_graphql::Error::new(e.to_string()))?;
+        let uid = uuid::Uuid::try_from(self.id.clone())
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
         let repo = crate::database::user::user_repository(pool.clone());
         let teams = repo
             .get_user_teams(uid)
@@ -384,15 +391,20 @@ impl User {
 
     pub async fn roles(&self, ctx: &async_graphql::Context<'_>) -> GqlResult<Vec<Role>> {
         let logic = ctx.data::<Box<dyn crate::logic::role::RoleLogic>>()?;
-        let roles = logic.get_user_roles(self.id.clone()).await
+        let roles = logic
+            .get_user_roles(self.id.clone())
+            .await
             .map_err(|e| async_graphql::Error::new(e.to_string()))?;
-        Ok(roles.into_iter().map(|r| Role {
-            id: r.id,
-            name: r.name,
-            description: r.description,
-            created_at: r.created_at,
-            updated_at: r.updated_at,
-        }).collect())
+        Ok(roles
+            .into_iter()
+            .map(|r| Role {
+                id: r.id,
+                name: r.name,
+                description: r.description,
+                created_at: r.created_at,
+                updated_at: r.updated_at,
+            })
+            .collect())
     }
 }
 
@@ -413,6 +425,7 @@ pub struct RegisterUserInput {
     #[graphql(validator(email))]
     pub email: String,
     pub is_admin: Option<bool>,
+    pub is_temporary_password: Option<bool>,
 }
 
 #[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
@@ -435,6 +448,18 @@ pub struct UpdateUserInput {
     pub email: Option<String>,
     pub is_admin: Option<bool>,
     pub enabled: Option<bool>,
+}
+
+#[derive(InputObject, Debug)]
+pub struct ResetPasswordInput {
+    pub current_password: String,
+    pub new_password: String,
+}
+
+#[derive(InputObject, Debug)]
+pub struct SetTemporaryPasswordInput {
+    pub user_id: ID,
+    pub temporary_password: String,
 }
 
 #[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]

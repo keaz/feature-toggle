@@ -2,9 +2,11 @@ use crate::graphql::create_user;
 use crate::graphql::schema::{
     AssignUserRolesInput, CreateClientInput, CreateEnvironmentInput, CreateFeatureInput,
     CreatePipelineInput, CreateTeamInput, Environment, Feature, LoginInput as GqlLoginInput,
-    LoginResponse, Pipeline, RegisterUserInput as GqlRegisterUserInput, Role, Team,
-    UpdateClientInput, UpdateEnvironmentInput, UpdateFeatureInput, UpdatePipelineInput,
-    UpdateTeamInput, UpdateUserInput as GqlUpdateUserInput, User,
+    LoginResponse, Pipeline, RegisterUserInput as GqlRegisterUserInput,
+    ResetPasswordInput as GqlResetPasswordInput, Role,
+    SetTemporaryPasswordInput as GqlSetTemporaryPasswordInput, Team, UpdateClientInput,
+    UpdateEnvironmentInput, UpdateFeatureInput, UpdatePipelineInput, UpdateTeamInput,
+    UpdateUserInput as GqlUpdateUserInput, User,
 };
 use crate::graphql::validator::{CreateInputValidator, UpdateInputValidator};
 use crate::logic::client::ClientLogic;
@@ -360,6 +362,7 @@ impl MutationRoot {
                 last_name: input.last_name,
                 email: input.email,
                 is_admin: input.is_admin.unwrap_or(false),
+                is_temporary_password: input.is_temporary_password.unwrap_or(false),
             })
             .await?;
 
@@ -375,53 +378,41 @@ impl MutationRoot {
     async fn create_admin(
         &self,
         ctx: &Context<'_>,
-        mut input: GqlRegisterUserInput,
+        input: GqlRegisterUserInput,
     ) -> GqlResult<User> {
-        input.is_admin = Some(true);
-        self.register_user(ctx, input).await?
+        let logic = ctx.data::<Box<dyn UserLogic>>()?;
+        let created = logic
+            .register_user(RegisterUserInput {
+                username: input.username,
+                password: input.password,
+                first_name: input.first_name,
+                last_name: input.last_name,
+                email: input.email,
+                is_admin: true, // Force admin to true
+                is_temporary_password: input.is_temporary_password.unwrap_or(false),
+            })
+            .await?;
+
+        // If an admin was created, flip the admin-exists cache so middleware stops redirecting.
+        if created.is_admin
+            && let Ok(state) = ctx.data::<AdminState>()
+        {
+            state.set_exists(true);
+        }
+        create_user(created)
     }
 
     async fn login(&self, ctx: &Context<'_>, input: GqlLoginInput) -> GqlResult<LoginResponse> {
-        let logic = ctx.data::<Box<dyn UserLogic>>()?;
-        let role_logic = ctx.data::<Box<dyn crate::logic::role::RoleLogic>>()?;
-        let jwt_secret_logic = ctx.data::<Box<dyn crate::logic::jwt_secret::JwtSecretLogic>>()?;
-        let pool = ctx.data::<sqlx::PgPool>()?;
-        let u = logic
-            .authenticate_user(input.username, input.password)
+        let jwt_token_logic = ctx.data::<Box<dyn crate::logic::jwt_token::JwtTokenLogic>>()?;
+        let login_result = jwt_token_logic
+            .login_user(input.username, input.password)
             .await?;
 
-        // Fetch user roles
-        let user_id = uuid::Uuid::try_from(u.id.clone())
-            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
-        let roles = role_logic.get_user_roles(u.id.clone()).await?;
-        let role_names: Vec<String> = roles.into_iter().map(|r| r.name).collect();
-
-        // Get current JWT secret from database
-        let jwt_secret = jwt_secret_logic.get_current_secret().await
-            .map_err(|e| async_graphql::Error::new(format!("Failed to get JWT secret: {}", e)))?;
-
-        // Generate JWT token
-        let token = crate::middleware::jwt_guard::create_jwt_token(
-            user_id,
-            &u.username,
-            u.is_admin,
-            role_names,
-            &jwt_secret,
-        )
-        .map_err(|e| async_graphql::Error::new(format!("Failed to create token: {}", e)))?;
-
-        // Store token hash in database
-        let token_hash = crate::middleware::jwt_guard::hash_token(&token);
-        let expires_at = chrono::Utc::now() + chrono::Duration::hours(24);
-        let token_repo = crate::database::jwt_token::jwt_token_repository(pool.clone());
-
-        token_repo
-            .store_token(user_id, token_hash, expires_at)
-            .await
-            .map_err(|e| async_graphql::Error::new(format!("Failed to store token: {}", e)))?;
-
-        let user = create_user(u)?;
-        Ok(LoginResponse { user, token })
+        let user = create_user(login_result.user)?;
+        Ok(LoginResponse {
+            user,
+            token: login_result.token,
+        })
     }
 
     async fn logout(&self, ctx: &Context<'_>) -> GqlResult<bool> {
@@ -430,12 +421,11 @@ impl MutationRoot {
         let user =
             jwt_user.ok_or_else(|| async_graphql::Error::new("User authentication not found"))?;
 
-        let pool = ctx.data::<sqlx::PgPool>()?;
-        let token_repo = crate::database::jwt_token::jwt_token_repository(pool.clone());
+        let jwt_token_logic = ctx.data::<Box<dyn crate::logic::jwt_token::JwtTokenLogic>>()?;
 
         // Revoke all tokens for this user (logout from all devices)
-        let revoked_count = token_repo
-            .revoke_all_user_tokens(user.id)
+        let revoked_count = jwt_token_logic
+            .logout_user(user.id)
             .await
             .map_err(|e| async_graphql::Error::new(format!("Failed to revoke tokens: {}", e)))?;
 
@@ -452,11 +442,10 @@ impl MutationRoot {
         let user =
             jwt_user.ok_or_else(|| async_graphql::Error::new("User authentication not found"))?;
 
-        let pool = ctx.data::<sqlx::PgPool>()?;
-        let token_repo = crate::database::jwt_token::jwt_token_repository(pool.clone());
+        let jwt_token_logic = ctx.data::<Box<dyn crate::logic::jwt_token::JwtTokenLogic>>()?;
 
         // Revoke the specific current token using the hash from JWT user data
-        let revoked = token_repo
+        let revoked = jwt_token_logic
             .revoke_token(&user.token_hash)
             .await
             .map_err(|e| async_graphql::Error::new(format!("Failed to revoke token: {}", e)))?;
@@ -493,6 +482,35 @@ impl MutationRoot {
             )
             .await?;
         create_user(u)
+    }
+
+    async fn reset_password(
+        &self,
+        ctx: &Context<'_>,
+        input: GqlResetPasswordInput,
+    ) -> GqlResult<bool> {
+        let jwt_user = ctx.data::<crate::JwtUser>()?;
+        let user_id = ID::from(jwt_user.id);
+
+        let logic = ctx.data::<Box<dyn UserLogic>>()?;
+        logic
+            .reset_password(user_id, input.current_password, input.new_password)
+            .await?;
+
+        Ok(true)
+    }
+
+    async fn set_temporary_password(
+        &self,
+        ctx: &Context<'_>,
+        input: GqlSetTemporaryPasswordInput,
+    ) -> GqlResult<bool> {
+        let logic = ctx.data::<Box<dyn UserLogic>>()?;
+        logic
+            .set_temporary_password(input.user_id, input.temporary_password)
+            .await?;
+
+        Ok(true)
     }
 
     async fn assign_user_teams(
@@ -560,10 +578,12 @@ impl MutationRoot {
 
         // Get user info from JWT context
         let jwt_user = ctx.data::<crate::JwtUser>()?;
-        
+
         // Check if user is admin
         if !jwt_user.is_admin {
-            return Err(async_graphql::Error::new("Unauthorized: Admin access required"));
+            return Err(async_graphql::Error::new(
+                "Unauthorized: Admin access required",
+            ));
         }
 
         let logic = ctx.data::<Box<dyn crate::logic::jwt_secret::JwtSecretLogic>>()?;
@@ -576,9 +596,10 @@ impl MutationRoot {
             created_by: secret.created_by.map(|id| id.into()),
             expires_at: secret.expires_at,
             // Don't return the actual secret for security
-            secret_preview: format!("{}...{}", 
-                &secret.secret[..8], 
-                &secret.secret[secret.secret.len()-4..]
+            secret_preview: format!(
+                "{}...{}",
+                &secret.secret[..8],
+                &secret.secret[secret.secret.len() - 4..]
             ),
         })
     }
@@ -592,10 +613,12 @@ impl MutationRoot {
 
         // Get user info from JWT context
         let jwt_user = ctx.data::<crate::JwtUser>()?;
-        
+
         // Check if user is admin
         if !jwt_user.is_admin {
-            return Err(async_graphql::Error::new("Unauthorized: Admin access required"));
+            return Err(async_graphql::Error::new(
+                "Unauthorized: Admin access required",
+            ));
         }
 
         let logic = ctx.data::<Box<dyn crate::logic::jwt_secret::JwtSecretLogic>>()?;
@@ -610,27 +633,27 @@ impl MutationRoot {
                 created_by: secret.created_by.map(|id| id.into()),
                 expires_at: secret.expires_at,
                 // Don't return the actual secret for security
-                secret_preview: format!("{}...{}", 
-                    &secret.secret[..8], 
-                    &secret.secret[secret.secret.len()-4..]
+                secret_preview: format!(
+                    "{}...{}",
+                    &secret.secret[..8],
+                    &secret.secret[secret.secret.len() - 4..]
                 ),
             })
             .collect())
     }
 
-    /// Emergency deactivate all JWT secrets (admin only) 
-    async fn deactivate_all_jwt_secrets(
-        &self,
-        ctx: &Context<'_>,
-    ) -> GqlResult<bool> {
+    /// Emergency deactivate all JWT secrets (admin only)
+    async fn deactivate_all_jwt_secrets(&self, ctx: &Context<'_>) -> GqlResult<bool> {
         info!("Deactivating all JWT secrets");
 
         // Get user info from JWT context
         let jwt_user = ctx.data::<crate::JwtUser>()?;
-        
+
         // Check if user is admin
         if !jwt_user.is_admin {
-            return Err(async_graphql::Error::new("Unauthorized: Admin access required"));
+            return Err(async_graphql::Error::new(
+                "Unauthorized: Admin access required",
+            ));
         }
 
         let logic = ctx.data::<Box<dyn crate::logic::jwt_secret::JwtSecretLogic>>()?;

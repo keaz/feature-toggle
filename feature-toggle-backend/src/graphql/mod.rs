@@ -20,5 +20,6 @@ pub fn create_user(u: GqlUser) -> GqlResult<User> {
         created_at: u.created_at.to_rfc3339(),
         updated_at: u.updated_at.to_rfc3339(),
         last_login: u.last_login.map(|d| d.to_rfc3339()),
+        is_temporary_password: u.is_temporary_password,
     })
 }

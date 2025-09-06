@@ -431,6 +431,12 @@ mod more_query_tests {
         ) -> Result<crate::logic::user::GqlUser, crate::Error> {
             unreachable!()
         }
+        async fn reset_password(&self, _id: ID, _current_password: String, _new_password: String) -> Result<(), crate::Error> {
+            unreachable!()
+        }
+        async fn set_temporary_password(&self, _user_id: ID, _temporary_password: String) -> Result<(), crate::Error> {
+            unreachable!()
+        }
         async fn assign_user_teams(
             &self,
             _id: ID,
@@ -502,6 +508,7 @@ mod more_query_tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             last_login: None,
+            is_temporary_password: false,
         };
         let u2 = crate::logic::user::GqlUser {
             id: ID::from("22222222-2222-2222-2222-222222222222"),
@@ -513,6 +520,7 @@ mod more_query_tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             last_login: None,
+            is_temporary_password: false,
         };
         let stub = StubUserLogic {
             items: vec![u1, u2],
@@ -763,6 +771,12 @@ mod more_query_tests {
                 _id: ID,
                 _input: crate::logic::user::UpdateGqlUserInput,
             ) -> Result<crate::logic::user::GqlUser, crate::Error> {
+                unreachable!()
+            }
+            async fn reset_password(&self, _id: ID, _current_password: String, _new_password: String) -> Result<(), crate::Error> {
+                unreachable!()
+            }
+            async fn set_temporary_password(&self, _user_id: ID, _temporary_password: String) -> Result<(), crate::Error> {
                 unreachable!()
             }
             async fn assign_user_teams(

@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 use crate::Error;
+use mockall::automock;
 
 #[derive(Debug, Clone)]
 pub struct JwtToken {
@@ -15,6 +16,7 @@ pub struct JwtToken {
     pub is_revoked: bool,
 }
 
+#[automock]
 #[async_trait]
 pub trait JwtTokenRepository: Send + Sync {
     async fn store_token(&self, user_id: Uuid, token_hash: String, expires_at: DateTime<Utc>) -> Result<JwtToken, Error>;

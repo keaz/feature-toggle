@@ -50,6 +50,7 @@ async fn create_and_update_user_and_last_login() {
         last_name: "Chaplin".into(),
         email: "charlie@example.com".into(),
         is_admin: false,
+        is_temporary_password: false,
     }).await.unwrap();
 
     assert_eq!(created.username, "charlie");
@@ -87,6 +88,7 @@ async fn unique_violation_is_mapped() {
         last_name: "User".into(),
         email: "other@example.com".into(),
         is_admin: false,
+        is_temporary_password: false,
     }).await.err().unwrap();
 
     match err { Error::RecordAlreadyExists(field) => assert_eq!(field, "username"), _ => panic!("unexpected error: {:?}", err) }
@@ -99,6 +101,7 @@ async fn unique_violation_is_mapped() {
         last_name: "Body".into(),
         email: "admin@example.com".into(),
         is_admin: false,
+        is_temporary_password: false,
     }).await.err().unwrap();
 
     match err2 { Error::RecordAlreadyExists(field) => assert_eq!(field, "email"), _ => panic!("unexpected error: {:?}", err2) }

@@ -7,6 +7,7 @@ use argon2::{
 };
 use async_graphql::ID;
 use chrono::{DateTime, Utc};
+use mockall::automock;
 use uuid::Uuid;
 
 #[derive(Clone, Debug)]
@@ -20,8 +21,10 @@ pub struct GqlUser {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub last_login: Option<DateTime<Utc>>,
+    pub is_temporary_password: bool,
 }
 
+#[automock]
 #[async_trait::async_trait]
 pub trait UserLogic: Send + Sync {
     async fn get_user_by_id(&self, id: ID) -> Result<GqlUser, Error>;
@@ -30,6 +33,17 @@ pub trait UserLogic: Send + Sync {
     async fn authenticate_user(&self, username: String, password: String)
     -> Result<GqlUser, Error>;
     async fn update_user(&self, id: ID, input: UpdateGqlUserInput) -> Result<GqlUser, Error>;
+    async fn reset_password(
+        &self,
+        id: ID,
+        current_password: String,
+        new_password: String,
+    ) -> Result<(), Error>;
+    async fn set_temporary_password(
+        &self,
+        user_id: ID,
+        temporary_password: String,
+    ) -> Result<(), Error>;
     async fn assign_user_teams(&self, id: ID, team_ids: Vec<ID>) -> Result<bool, Error>;
     async fn get_user_teams(&self, id: ID) -> Result<Vec<Team>, Error>;
     async fn search_users(
@@ -65,6 +79,7 @@ pub struct RegisterUserInput {
     pub last_name: String,
     pub email: String,
     pub is_admin: bool,
+    pub is_temporary_password: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -91,6 +106,7 @@ impl UserLogic for UserLogicImpl {
             created_at: u.created_at,
             updated_at: u.updated_at,
             last_login: u.last_login,
+            is_temporary_password: u.is_temporary_password,
         })
     }
 
@@ -106,6 +122,7 @@ impl UserLogic for UserLogicImpl {
             created_at: u.created_at,
             updated_at: u.updated_at,
             last_login: u.last_login,
+            is_temporary_password: u.is_temporary_password,
         })
     }
 
@@ -148,6 +165,7 @@ impl UserLogic for UserLogicImpl {
                 last_name: input.last_name,
                 email: input.email,
                 is_admin: input.is_admin,
+                is_temporary_password: input.is_temporary_password,
             })
             .await?;
 
@@ -161,6 +179,7 @@ impl UserLogic for UserLogicImpl {
             created_at: created.created_at,
             updated_at: created.updated_at,
             last_login: created.last_login,
+            is_temporary_password: created.is_temporary_password,
         })
     }
 
@@ -188,6 +207,7 @@ impl UserLogic for UserLogicImpl {
             created_at: u.created_at,
             updated_at: u.updated_at,
             last_login: u.last_login,
+            is_temporary_password: u.is_temporary_password,
         })
     }
 
@@ -226,7 +246,78 @@ impl UserLogic for UserLogicImpl {
             created_at: updated.created_at,
             updated_at: updated.updated_at,
             last_login: updated.last_login,
+            is_temporary_password: updated.is_temporary_password,
         })
+    }
+
+    async fn reset_password(
+        &self,
+        id: ID,
+        current_password: String,
+        new_password: String,
+    ) -> Result<(), Error> {
+        let user_id = Uuid::try_from(id).unwrap();
+
+        // Get current user to verify current password
+        let user = self.repository.get_user_by_id(user_id).await?;
+
+        // Verify current password
+        let parsed_hash = PasswordHash::new(&user.password_hash)
+            .map_err(|_| Error::InvalidInput("Stored password hash is invalid".to_string()))?;
+        Argon2::default()
+            .verify_password(current_password.as_bytes(), &parsed_hash)
+            .map_err(|_| Error::InvalidInput("Current password is incorrect".to_string()))?;
+
+        // Check if new password is same as current password
+        if Argon2::default()
+            .verify_password(new_password.as_bytes(), &parsed_hash)
+            .is_ok()
+        {
+            return Err(Error::InvalidInput(
+                "New password must be different from current password".to_string(),
+            ));
+        }
+
+        // Hash new password
+        let salt = SaltString::generate(&mut OsRng);
+        let argon2 = Argon2::default();
+        let new_password_hash = argon2
+            .hash_password(new_password.as_bytes(), &salt)
+            .map_err(|_| Error::InvalidInput("Failed to hash new password".to_string()))?
+            .to_string();
+
+        // Update password and reset temporary flag
+        self.repository
+            .update_password(user_id, new_password_hash, false)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn set_temporary_password(
+        &self,
+        user_id: ID,
+        temporary_password: String,
+    ) -> Result<(), Error> {
+        let user_uuid = Uuid::try_from(user_id).unwrap();
+
+        // Verify user exists
+        let _user = self.repository.get_user_by_id(user_uuid).await?;
+
+        // Hash the new temporary password
+        let salt = SaltString::generate(&mut OsRng);
+        let argon2 = Argon2::default();
+        let password_hash = argon2
+            .hash_password(temporary_password.as_bytes(), &salt)
+            .map_err(|_| Error::InvalidInput("Failed to hash temporary password".to_string()))?
+            .to_string();
+
+        // Update password and set temporary flag to true
+        self.repository
+            .update_password(user_uuid, password_hash, true)
+            .await?;
+
+        Ok(())
     }
 
     async fn assign_user_teams(&self, id: ID, team_ids: Vec<ID>) -> Result<bool, Error> {
@@ -285,6 +376,7 @@ impl UserLogic for UserLogicImpl {
                 created_at: u.created_at,
                 updated_at: u.updated_at,
                 last_login: u.last_login,
+                is_temporary_password: u.is_temporary_password,
             })
             .collect();
         Ok((mapped, total))
@@ -315,6 +407,7 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             last_login: None,
+            is_temporary_password: false,
         }
     }
 
@@ -374,6 +467,7 @@ mod tests {
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
                 last_login: None,
+                is_temporary_password: input.is_temporary_password,
             })
         });
 
@@ -386,6 +480,7 @@ mod tests {
                 last_name: "User".to_string(),
                 email: "new@example.com".to_string(),
                 is_admin: true,
+                is_temporary_password: false,
             })
             .await
             .unwrap();
@@ -406,6 +501,7 @@ mod tests {
                 last_name: "B".to_string(),
                 email: "a@b.c".to_string(),
                 is_admin: false,
+                is_temporary_password: false,
             })
             .await
             .err()
@@ -431,6 +527,7 @@ mod tests {
                 last_name: "B".to_string(),
                 email: "x@y.z".to_string(),
                 is_admin: false,
+                is_temporary_password: false,
             })
             .await
             .err()
@@ -457,6 +554,7 @@ mod tests {
                 last_name: "B".to_string(),
                 email: "dup@e.com".to_string(),
                 is_admin: false,
+                is_temporary_password: false,
             })
             .await
             .err()
@@ -549,6 +647,7 @@ mod tests {
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
                 last_login: None,
+                is_temporary_password: false,
             })
         });
         let logic = user_logic(Box::new(mock));
@@ -619,5 +718,28 @@ mod tests {
             .await
             .unwrap();
         assert!(ok);
+    }
+
+    #[tokio::test]
+    async fn test_set_temporary_password_updates_user_with_temp_flag() {
+        let user_id = Uuid::new_v4();
+        let user = sample_user();
+
+        let mut mock = MockUserRepository::new();
+        // Expect get_user_by_id to verify user exists
+        mock.expect_get_user_by_id()
+            .with(eq(user_id))
+            .returning(move |_| Ok(user.clone()));
+        // Expect update_password to be called with temporary flag = true
+        mock.expect_update_password()
+            .with(eq(user_id), function(|_| true), eq(true))
+            .returning(|_, _, _| Ok(()));
+
+        let logic = user_logic(Box::new(mock));
+        let result = logic
+            .set_temporary_password(ID::from(user_id), "temp123".to_string())
+            .await;
+
+        assert!(result.is_ok());
     }
 }

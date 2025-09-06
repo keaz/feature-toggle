@@ -64,6 +64,12 @@ pub async fn run() -> std::io::Result<()> {
     let user_logic = logic::user::user_logic(database::user::user_repository(db_pool.clone()));
     let role_logic = logic::role::role_logic(database::role::role_repository(db_pool.clone()));
     let jwt_secret_logic = logic::jwt_secret::jwt_secret_logic(db_pool.clone());
+    let jwt_token_logic = logic::jwt_token::jwt_token_logic(
+        database::jwt_token::jwt_token_repository(db_pool.clone()),
+        user_logic.clone(),
+        role_logic.clone(),
+        jwt_secret_logic.clone(),
+    );
     let feature_evaluation_logic = logic::feature_evaluation::feature_evaluation_logic(
         database::feature_evaluation::feature_evaluation_repository(db_pool.clone()),
     );
@@ -96,6 +102,7 @@ pub async fn run() -> std::io::Result<()> {
 
     // Clone values for use in the HttpServer closure
     let jwt_secret_logic_for_server = jwt_secret_logic.clone();
+    let jwt_token_logic_for_server = jwt_token_logic.clone();
 
     HttpServer::new(move || {
         let admin_state = AdminState::new();
@@ -112,6 +119,7 @@ pub async fn run() -> std::io::Result<()> {
             .data(user_logic.clone())
             .data(role_logic.clone())
             .data(jwt_secret_logic_for_server.clone())
+            .data(jwt_token_logic_for_server.clone())
             .data(feature_evaluation_logic.clone())
             .data(admin_state.clone())
             // .extension(ApolloTracing)
