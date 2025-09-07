@@ -32,7 +32,7 @@ jobs:
       - name: Build and push ${{ matrix.image }}
         uses: docker/build-push-action@v6
         with:
-          context: ./${{ matrix.crate }}
+          context: .
           file: ./${{ matrix.crate }}/Dockerfile
           push: true
           tags: |
