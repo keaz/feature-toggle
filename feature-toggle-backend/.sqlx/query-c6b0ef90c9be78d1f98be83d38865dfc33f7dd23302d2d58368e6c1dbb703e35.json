@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM feature_dependencies WHERE feature_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c6b0ef90c9be78d1f98be83d38865dfc33f7dd23302d2d58368e6c1dbb703e35"
+}

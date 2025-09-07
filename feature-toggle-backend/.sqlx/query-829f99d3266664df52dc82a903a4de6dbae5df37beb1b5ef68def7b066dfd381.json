@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM feature_stage_criteria WHERE stage_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "829f99d3266664df52dc82a903a4de6dbae5df37beb1b5ef68def7b066dfd381"
+}

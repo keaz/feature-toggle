@@ -1,0 +1,58 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT sc.id, sc.stage_id, sc.context_key, sc.context_id, sc.rollout_percentage,\n                      c.team_id, c.key\n               FROM feature_stage_criteria sc\n               JOIN contexts c ON c.id = sc.context_id\n               WHERE sc.stage_id = $1\n               ORDER BY sc.context_key, c.key",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "stage_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "context_key",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "context_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "rollout_percentage",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "team_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 6,
+        "name": "key",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "64f14304f5699a3678e5fa3b35efa82277d4eab7331881d6b259c7928f5a4424"
+}

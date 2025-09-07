@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT c.id, c.team_id, c.key FROM feature_stage_contexts fsc\n               JOIN contexts c ON c.id = fsc.context_id\n               WHERE fsc.stage_id = $1\n               ORDER BY c.key",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "team_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "key",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "784cbba4d1ef3f54a98e2bd10095789b81b3ba87b25ba23d8e225c9f12c92070"
+}
