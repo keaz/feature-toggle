@@ -71,6 +71,7 @@ pub trait UserRepository: Send + Sync {
         page_size: i32,
     ) -> Result<(Vec<User>, i64), Error>;
     async fn get_user_teams(&self, id: Uuid) -> Result<Vec<Team>, Error>;
+    async fn admin_exists(&self) -> Result<bool, Error>;
     fn clone_box(&self) -> Box<dyn UserRepository>;
 }
 
@@ -443,6 +444,17 @@ impl UserRepository for UserRepositoryImpl {
         .await;
         let teams = handle_error(Some(id), result)?;
         Ok(teams)
+    }
+
+    async fn admin_exists(&self) -> Result<bool, Error> {
+        let row = handle_error(
+            None,
+            sqlx::query("SELECT EXISTS(SELECT 1 FROM users WHERE is_admin = true AND enabled = true) AS exists")
+                .fetch_one(&self.pool)
+                .await,
+        )?;
+        let exists: bool = row.get::<bool, _>("exists");
+        Ok(exists)
     }
 
     fn clone_box(&self) -> Box<dyn UserRepository> {

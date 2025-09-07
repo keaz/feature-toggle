@@ -53,6 +53,7 @@ pub trait UserLogic: Send + Sync {
         page_number: i32,
         page_size: i32,
     ) -> Result<(Vec<GqlUser>, i64), Error>;
+    async fn admin_exists(&self) -> Result<bool, Error>;
     fn clone_box(&self) -> Box<dyn UserLogic>;
 }
 
@@ -380,6 +381,10 @@ impl UserLogic for UserLogicImpl {
             })
             .collect();
         Ok((mapped, total))
+    }
+
+    async fn admin_exists(&self) -> Result<bool, Error> {
+        self.repository.admin_exists().await
     }
 
     fn clone_box(&self) -> Box<dyn UserLogic> {

@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1
+
 FROM rust:1.89.0-slim AS builder
 
 WORKDIR /app

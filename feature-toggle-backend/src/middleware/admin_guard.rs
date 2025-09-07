@@ -1,10 +1,13 @@
 use std::rc::Rc;
-use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
-use actix_web::dev::{forward_ready, Service, ServiceRequest, ServiceResponse, Transform};
+use actix_web::dev::{Service, ServiceRequest, ServiceResponse, Transform, forward_ready};
 use actix_web::{Error, HttpMessage, HttpResponse};
-use futures_util::future::{ready, LocalBoxFuture, Ready};
 use futures_util::StreamExt;
+use futures_util::future::{LocalBoxFuture, Ready, ready};
 use sqlx::PgPool;
 
 #[derive(Clone)]
@@ -43,7 +46,11 @@ pub struct AdminGuard {
 
 impl AdminGuard {
     pub fn new(pool: PgPool, ui_origin: String, state: AdminState) -> Self {
-        Self { pool, ui_origin, state }
+        Self {
+            pool,
+            ui_origin,
+            state,
+        }
     }
 }
 
@@ -97,9 +104,11 @@ where
         Box::pin(async move {
             // Initialize cache once lazily
             if !state.is_initialized() {
-                if let Ok(exists) = sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM users WHERE is_admin = TRUE)")
-                    .fetch_one(&pool)
-                    .await
+                if let Ok(exists) = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS(SELECT 1 FROM users WHERE is_admin = TRUE)",
+                )
+                .fetch_one(&pool)
+                .await
                 {
                     state.set_exists(exists);
                 } else {
@@ -134,7 +143,9 @@ where
             }
 
             let body_str = String::from_utf8_lossy(&body);
-            if body_str.contains("mutation") && body_str.contains("createAdmin") {
+            if (body_str.contains("mutation") && body_str.contains("createAdmin"))
+                || (body_str.contains("query") && body_str.contains("applicationStatus"))
+            {
                 // Replace the payload so Actix can read it again downstream
                 req.set_payload(actix_web::web::Bytes::from(body.clone()).into());
 
@@ -144,20 +155,21 @@ where
 
             // Redirect to UI create-admin page
             let target = format!("{}/create-admin", ui_origin.trim_end_matches('/'));
-            let res = HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "admin_account_missing",
-                "redirect": target
-            })).map_into_right_body();
+            let res = HttpResponse::Unauthorized()
+                .json(serde_json::json!({
+                    "error": "admin_account_missing",
+                    "redirect": target
+                }))
+                .map_into_right_body();
             Ok(req.into_response(res))
         })
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use actix_web::{test, web, App, HttpResponse};
+    use actix_web::{App, HttpResponse, test, web};
     use sqlx::postgres::PgPoolOptions;
 
     fn test_pool() -> PgPool {
@@ -166,7 +178,6 @@ mod tests {
             .connect_lazy("postgres://user:pass@localhost/feature_toggle_test")
             .expect("lazy pool")
     }
-
 
     #[actix_web::test]
     async fn allows_when_admin_exists_cached() {
@@ -177,10 +188,20 @@ mod tests {
         let app = test::init_service(
             App::new()
                 .wrap(AdminGuard::new(pool, "http://ui".to_string(), state))
-                .route("/graphql", web::post().to(|| async { HttpResponse::Ok().finish() }))
-                .route("/other", web::get().to(|| async { HttpResponse::Ok().finish() }))
-                .route("/other", web::post().to(|| async { HttpResponse::Ok().finish() }))
-        ).await;
+                .route(
+                    "/graphql",
+                    web::post().to(|| async { HttpResponse::Ok().finish() }),
+                )
+                .route(
+                    "/other",
+                    web::get().to(|| async { HttpResponse::Ok().finish() }),
+                )
+                .route(
+                    "/other",
+                    web::post().to(|| async { HttpResponse::Ok().finish() }),
+                ),
+        )
+        .await;
         let req = test::TestRequest::post()
             .uri("/graphql")
             .set_payload(r#"{ "query": "query { ping }" }"#)
@@ -198,11 +219,25 @@ mod tests {
 
         let app = test::init_service(
             App::new()
-                .wrap(AdminGuard::new(pool, "http://localhost:3000".to_string(), state))
-                .route("/graphql", web::post().to(|| async { HttpResponse::Ok().finish() }))
-                .route("/other", web::get().to(|| async { HttpResponse::Ok().finish() }))
-                .route("/other", web::post().to(|| async { HttpResponse::Ok().finish() }))
-        ).await;
+                .wrap(AdminGuard::new(
+                    pool,
+                    "http://localhost:3000".to_string(),
+                    state,
+                ))
+                .route(
+                    "/graphql",
+                    web::post().to(|| async { HttpResponse::Ok().finish() }),
+                )
+                .route(
+                    "/other",
+                    web::get().to(|| async { HttpResponse::Ok().finish() }),
+                )
+                .route(
+                    "/other",
+                    web::post().to(|| async { HttpResponse::Ok().finish() }),
+                ),
+        )
+        .await;
         let req = test::TestRequest::post()
             .uri("/graphql")
             .set_payload(r#"{ "query": "mutation { somethingElse }" }"#)
@@ -224,10 +259,20 @@ mod tests {
         let app = test::init_service(
             App::new()
                 .wrap(AdminGuard::new(pool, "http://ui".to_string(), state))
-                .route("/graphql", web::post().to(|| async { HttpResponse::Ok().finish() }))
-                .route("/other", web::get().to(|| async { HttpResponse::Ok().finish() }))
-                .route("/other", web::post().to(|| async { HttpResponse::Ok().finish() }))
-        ).await;
+                .route(
+                    "/graphql",
+                    web::post().to(|| async { HttpResponse::Ok().finish() }),
+                )
+                .route(
+                    "/other",
+                    web::get().to(|| async { HttpResponse::Ok().finish() }),
+                )
+                .route(
+                    "/other",
+                    web::post().to(|| async { HttpResponse::Ok().finish() }),
+                ),
+        )
+        .await;
         let req = test::TestRequest::post()
             .uri("/graphql")
             .set_payload(r#"{ "query": "mutation { createAdmin(input:{}) { id } }" }"#)
@@ -246,10 +291,20 @@ mod tests {
         let app = test::init_service(
             App::new()
                 .wrap(AdminGuard::new(pool, "http://ui".to_string(), state))
-                .route("/graphql", web::post().to(|| async { HttpResponse::Ok().finish() }))
-                .route("/other", web::get().to(|| async { HttpResponse::Ok().finish() }))
-                .route("/other", web::post().to(|| async { HttpResponse::Ok().finish() }))
-        ).await;
+                .route(
+                    "/graphql",
+                    web::post().to(|| async { HttpResponse::Ok().finish() }),
+                )
+                .route(
+                    "/other",
+                    web::get().to(|| async { HttpResponse::Ok().finish() }),
+                )
+                .route(
+                    "/other",
+                    web::post().to(|| async { HttpResponse::Ok().finish() }),
+                ),
+        )
+        .await;
 
         // OPTIONS preflight
         let req_options = test::TestRequest::default()
@@ -257,7 +312,10 @@ mod tests {
             .uri("/graphql")
             .to_request();
         let resp_options = test::call_service(&app, req_options).await;
-        assert_ne!(resp_options.status(), actix_web::http::StatusCode::UNAUTHORIZED);
+        assert_ne!(
+            resp_options.status(),
+            actix_web::http::StatusCode::UNAUTHORIZED
+        );
 
         // GET non-graphql
         let req_get = test::TestRequest::get().uri("/other").to_request();
@@ -272,5 +330,34 @@ mod tests {
             .to_request();
         let resp_post = test::call_service(&app, req_post).await;
         assert!(resp_post.status().is_success());
+    }
+
+    #[actix_web::test]
+    async fn allows_application_status_query_when_no_admin() {
+        let pool = test_pool();
+        let state = AdminState::new();
+        state.set_exists(false);
+
+        let app = test::init_service(
+            App::new()
+                .wrap(AdminGuard::new(
+                    pool,
+                    "http://localhost:3000".to_string(),
+                    state,
+                ))
+                .route(
+                    "/graphql",
+                    web::post().to(|| async { HttpResponse::Ok().finish() }),
+                ),
+        )
+        .await;
+
+        let req = test::TestRequest::post()
+            .uri("/graphql")
+            .set_payload(r#"{ "query": "query { applicationStatus { adminConfigured } }" }"#)
+            .insert_header(("content-type", "application/json"))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert!(resp.status().is_success());
     }
 }

@@ -486,3 +486,8 @@ pub struct JwtSecretResponse {
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
     pub secret_preview: String, // Truncated version for security
 }
+
+#[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
+pub struct ApplicationStatus {
+    pub admin_configured: bool,
+}

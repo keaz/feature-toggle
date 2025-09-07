@@ -1,6 +1,7 @@
 use crate::graphql::create_user;
 use crate::graphql::schema::{
-    Client, ClientType, Environment, Feature, FeatureType, Pipeline, Role, Team, User, UsersPage,
+    ApplicationStatus, Client, ClientType, Environment, Feature, FeatureType, Pipeline, Role, Team,
+    User, UsersPage,
 };
 use crate::logic::client::ClientLogic;
 use crate::logic::context::ContextLogic;
@@ -243,6 +244,13 @@ impl Query {
             })
             .collect())
     }
+
+    async fn application_status(&self, ctx: &Context<'_>) -> GqlResult<ApplicationStatus> {
+        debug!("Checking application status (admin configuration)");
+        let logic = ctx.data::<Box<dyn UserLogic>>()?;
+        let admin_configured = logic.admin_exists().await?;
+        Ok(ApplicationStatus { admin_configured })
+    }
 }
 
 #[cfg(test)]
@@ -431,10 +439,19 @@ mod more_query_tests {
         ) -> Result<crate::logic::user::GqlUser, crate::Error> {
             unreachable!()
         }
-        async fn reset_password(&self, _id: ID, _current_password: String, _new_password: String) -> Result<(), crate::Error> {
+        async fn reset_password(
+            &self,
+            _id: ID,
+            _current_password: String,
+            _new_password: String,
+        ) -> Result<(), crate::Error> {
             unreachable!()
         }
-        async fn set_temporary_password(&self, _user_id: ID, _temporary_password: String) -> Result<(), crate::Error> {
+        async fn set_temporary_password(
+            &self,
+            _user_id: ID,
+            _temporary_password: String,
+        ) -> Result<(), crate::Error> {
             unreachable!()
         }
         async fn assign_user_teams(
@@ -455,6 +472,9 @@ mod more_query_tests {
             _page_size: i32,
         ) -> Result<(Vec<crate::logic::user::GqlUser>, i64), crate::Error> {
             Ok((self.items.clone(), self.total))
+        }
+        async fn admin_exists(&self) -> Result<bool, crate::Error> {
+            unreachable!()
         }
         fn clone_box(&self) -> Box<dyn crate::logic::user::UserLogic> {
             Box::new(Self {
@@ -773,10 +793,19 @@ mod more_query_tests {
             ) -> Result<crate::logic::user::GqlUser, crate::Error> {
                 unreachable!()
             }
-            async fn reset_password(&self, _id: ID, _current_password: String, _new_password: String) -> Result<(), crate::Error> {
+            async fn reset_password(
+                &self,
+                _id: ID,
+                _current_password: String,
+                _new_password: String,
+            ) -> Result<(), crate::Error> {
                 unreachable!()
             }
-            async fn set_temporary_password(&self, _user_id: ID, _temporary_password: String) -> Result<(), crate::Error> {
+            async fn set_temporary_password(
+                &self,
+                _user_id: ID,
+                _temporary_password: String,
+            ) -> Result<(), crate::Error> {
                 unreachable!()
             }
             async fn assign_user_teams(
@@ -796,6 +825,9 @@ mod more_query_tests {
                 _page_number: i32,
                 _page_size: i32,
             ) -> Result<(Vec<crate::logic::user::GqlUser>, i64), crate::Error> {
+                unreachable!()
+            }
+            async fn admin_exists(&self) -> Result<bool, crate::Error> {
                 unreachable!()
             }
             fn clone_box(&self) -> Box<dyn UserLogic> {
@@ -848,5 +880,138 @@ mod more_query_tests {
         let data = resp.data.into_json().unwrap();
         assert_eq!(data["teams"].as_array().unwrap().len(), 1);
         assert_eq!(data["teams"][0]["name"], "User Team");
+    }
+
+    #[tokio::test]
+    async fn test_application_status_query() {
+        use crate::logic::user::UserLogic;
+
+        struct MockUserLogicStatus {
+            admin_exists: bool,
+        }
+
+        #[async_trait::async_trait]
+        impl UserLogic for MockUserLogicStatus {
+            async fn get_user_by_id(
+                &self,
+                _id: ID,
+            ) -> Result<crate::logic::user::GqlUser, crate::Error> {
+                unreachable!()
+            }
+            async fn get_user_by_username(
+                &self,
+                _username: String,
+            ) -> Result<crate::logic::user::GqlUser, crate::Error> {
+                unreachable!()
+            }
+            async fn register_user(
+                &self,
+                _input: crate::logic::user::RegisterUserInput,
+            ) -> Result<crate::logic::user::GqlUser, crate::Error> {
+                unreachable!()
+            }
+            async fn authenticate_user(
+                &self,
+                _username: String,
+                _password: String,
+            ) -> Result<crate::logic::user::GqlUser, crate::Error> {
+                unreachable!()
+            }
+            async fn update_user(
+                &self,
+                _id: ID,
+                _input: crate::logic::user::UpdateGqlUserInput,
+            ) -> Result<crate::logic::user::GqlUser, crate::Error> {
+                unreachable!()
+            }
+            async fn reset_password(
+                &self,
+                _id: ID,
+                _current_password: String,
+                _new_password: String,
+            ) -> Result<(), crate::Error> {
+                unreachable!()
+            }
+            async fn set_temporary_password(
+                &self,
+                _user_id: ID,
+                _temporary_password: String,
+            ) -> Result<(), crate::Error> {
+                unreachable!()
+            }
+            async fn assign_user_teams(
+                &self,
+                _id: ID,
+                _team_ids: Vec<ID>,
+            ) -> Result<bool, crate::Error> {
+                unreachable!()
+            }
+            async fn get_user_teams(&self, _id: ID) -> Result<Vec<Team>, crate::Error> {
+                unreachable!()
+            }
+            async fn search_users(
+                &self,
+                _team_id: Option<ID>,
+                _name: Option<String>,
+                _page_number: i32,
+                _page_size: i32,
+            ) -> Result<(Vec<crate::logic::user::GqlUser>, i64), crate::Error> {
+                unreachable!()
+            }
+            async fn admin_exists(&self) -> Result<bool, crate::Error> {
+                Ok(self.admin_exists)
+            }
+            fn clone_box(&self) -> Box<dyn UserLogic> {
+                Box::new(MockUserLogicStatus {
+                    admin_exists: self.admin_exists,
+                })
+            }
+        }
+
+        // Test with admin configured (true)
+        let schema = Schema::build(
+            super::Query,
+            crate::graphql::mutation::MutationRoot,
+            EmptySubscription,
+        )
+        .data::<Box<dyn UserLogic>>(Box::new(MockUserLogicStatus { admin_exists: true }))
+        .finish();
+
+        let query = r#"
+            query {
+                applicationStatus {
+                    adminConfigured
+                }
+            }
+        "#;
+
+        let response = schema.execute(Request::new(query)).await;
+        assert!(
+            response.errors.is_empty(),
+            "GraphQL errors: {:?}",
+            response.errors
+        );
+        let data = response.data.into_json().unwrap();
+        assert_eq!(data["applicationStatus"]["adminConfigured"], true);
+
+        // Test with no admin configured (false)
+        let schema_no_admin = Schema::build(
+            super::Query,
+            crate::graphql::mutation::MutationRoot,
+            EmptySubscription,
+        )
+        .data::<Box<dyn UserLogic>>(Box::new(MockUserLogicStatus {
+            admin_exists: false,
+        }))
+        .finish();
+
+        let response_no_admin = schema_no_admin.execute(Request::new(query)).await;
+        assert!(
+            response_no_admin.errors.is_empty(),
+            "GraphQL errors: {:?}",
+            response_no_admin.errors
+        );
+        let data_no_admin = response_no_admin.data.into_json().unwrap();
+        assert_eq!(data_no_admin["applicationStatus"]["adminConfigured"], false);
     }
 }

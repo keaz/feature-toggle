@@ -102,15 +102,16 @@ where
                 return Ok(res.map_into_left_body());
             }
 
-            // Read body to inspect the operation name (login/createAdmin only skip JWT validation)
+            // Read body to inspect the operation name (login/createAdmin mutations and applicationStatus query skip JWT validation)
             let mut body = Vec::new();
             while let Some(chunk) = req.take_payload().next().await {
                 body.extend_from_slice(&chunk?);
             }
 
             let body_str = String::from_utf8_lossy(&body);
-            let skip_jwt = body_str.contains("mutation")
-                && (body_str.contains("login") || body_str.contains("createAdmin"));
+            let skip_jwt = (body_str.contains("mutation")
+                && (body_str.contains("login") || body_str.contains("createAdmin")))
+                || (body_str.contains("query") && body_str.contains("applicationStatus"));
 
             // Check if this is a resetPassword mutation (needs special handling)
             let is_reset_password_mutation = body_str.contains("mutation")
@@ -551,5 +552,30 @@ mod tests {
             resp.status() == actix_web::http::StatusCode::UNAUTHORIZED
                 || resp.status().is_success()
         );
+    }
+
+    #[actix_web::test]
+    async fn allows_application_status_query_without_token() {
+        let app = test::init_service(
+            App::new()
+                .wrap(JwtGuard::new(
+                    "http://localhost:3000".to_string(),
+                    mock_jwt_secret_logic(),
+                    test_pool(),
+                ))
+                .route(
+                    "/graphql",
+                    web::post().to(|| async { HttpResponse::Ok().finish() }),
+                ),
+        )
+        .await;
+
+        let req = test::TestRequest::post()
+            .uri("/graphql")
+            .set_payload(r#"{ "query": "query { applicationStatus { adminConfigured } }" }"#)
+            .insert_header(("content-type", "application/json"))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert!(resp.status().is_success());
     }
 }
