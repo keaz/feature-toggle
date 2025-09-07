@@ -51,10 +51,24 @@ jobs:
           DATABASE_URL: postgres://postgres:local123@localhost:5432/feature_toggle
         run: cargo build --release --verbose
 
-      - name: Run tests
+      - name: Install llvm-tools and cargo-llvm-cov
+        run: |
+          rustup component add llvm-tools-preview
+          cargo install cargo-llvm-cov
+
+      - name: Run coverage
         env:
           DATABASE_URL: postgres://postgres:local123@localhost:5432/feature_toggle
-        run: cargo test --verbose
+        run: |
+          cargo llvm-cov --lcov --output-path lcov.info
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+            files: lcov.info
+            flags: unittests
+            fail_ci_if_error: true
+            token: ${{ secrets.CODECOV_TOKEN }}
 
       - name: Create artifact directory
         run: mkdir -p artifacts
@@ -92,3 +106,5 @@ jobs:
           asset_path: ./feature-toggle-release.tar.gz
           asset_name: feature-toggle-release.tar.gz
           asset_content_type: application/gzip
+      
+      

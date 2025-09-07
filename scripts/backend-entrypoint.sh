@@ -20,12 +20,7 @@ echo "PostgreSQL is up - executing migrations"
 # Run migrations
 sqlx migrate run --database-url "${DATABASE_URL}" --source ./migrations
 
-echo "Migrations completed - executing init.sql"
-
-# Execute init.sql
-PGPASSWORD="$DB_PASSWORD" psql -h postgres_server -U postgres -d feature_toggle -f ./init.sql
-
-echo "Init script executed - starting backend application"
+echo "Migrations completed - starting backend application"
 
 # Start the application
 exec feature-toggle-backend

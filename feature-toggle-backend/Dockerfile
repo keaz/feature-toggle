@@ -4,7 +4,7 @@ WORKDIR /app
 
 # Copy workspace configuration
 COPY Cargo.toml Cargo.lock ./
-COPY .sqlx ./.sqlx
+COPY feature-toggle-backend/.sqlx ./.sqlx
 
 # Copy all required workspace members with their source code
 COPY evaluation-engine/ ./evaluation-engine/

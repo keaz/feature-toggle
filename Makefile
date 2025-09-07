@@ -22,10 +22,10 @@ build:
 
 # Build individual services
 build-backend:
-	docker build -f feature-toggle-backend/Dockerfile -t feature-toggle-backend .
+	docker build -f feature-toggle-backend/Dockerfile -t flux-gate-backend .
 
 build-edge:
-	docker build -f feature-edge-server/Dockerfile -t feature-edge-server .
+	docker build -f feature-edge-server/Dockerfile -t flux-gate-edge .
 
 # Start services
 up:
