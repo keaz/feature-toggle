@@ -40,16 +40,17 @@ COPY --from=builder /usr/local/cargo/bin/sqlx /usr/local/bin/sqlx
 
 # Copy migrations and configuration
 COPY feature-toggle-backend/migrations ./migrations
-COPY feature-toggle-backend/config.toml ./config.toml
+COPY feature-toggle-backend/config.toml ./config.toml.default
 COPY feature-toggle-backend/log4rs.yaml ./log4rs.yaml
 COPY init.sql ./init.sql
 
 # Copy entrypoint script
 COPY scripts/backend-entrypoint.sh ./entrypoint.sh
 
-# Update config for Docker networking and set permissions
-RUN sed -i 's/127.0.0.1:8080/0.0.0.0:8080/g' ./config.toml && \
-    chmod +x ./entrypoint.sh
+# Update default config for Docker networking and set permissions
+RUN sed -i 's/127.0.0.1:8080/0.0.0.0:8080/g' ./config.toml.default && \
+    chmod +x ./entrypoint.sh && \
+    mkdir -p /app/config
 
 EXPOSE 8080 50051
 

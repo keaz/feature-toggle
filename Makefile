@@ -15,6 +15,10 @@ help:
 	@echo "  logs-backend  - Follow logs from backend service"
 	@echo "  logs-edge     - Follow logs from edge server"
 	@echo "  test          - Run tests in containers"
+	@echo ""
+	@echo "Docker run examples with custom config:"
+	@echo "  docker run -d -p 8080:8080 -v ./my-config.toml:/app/config/config.toml:ro keaz/flux-gate-backend"
+	@echo "  docker run -d -p 8080:8080 -v /path/to/config:/app/config:ro keaz/flux-gate-backend"
 
 # Build all images
 build:
@@ -22,10 +26,10 @@ build:
 
 # Build individual services
 build-backend:
-	docker build -f feature-toggle-backend/Dockerfile -t flux-gate-backend .
+	docker build -f feature-toggle-backend/Dockerfile -t keaz/flux-gate-backend .
 
 build-edge:
-	docker build -f feature-edge-server/Dockerfile -t flux-gate-edge .
+	docker build -f feature-edge-server/Dockerfile -t keaz/flux-gate-edge .
 
 # Start services
 up:

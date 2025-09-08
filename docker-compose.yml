@@ -21,6 +21,9 @@ services:
     ports:
       - "8080:8080"
     restart: unless-stopped
+    # Uncomment the following line to mount your own config.toml
+    # volumes:
+    #   - ./your-config.toml:/app/config/config.toml:ro
 
   feature_edge_server:
     build:
