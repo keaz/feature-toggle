@@ -1,14 +1,15 @@
 # syntax=docker/dockerfile:1
 
-FROM rust:1.89.0-slim AS builder
-
+FROM rust:1.89.0-slim AS chef
+RUN cargo install cargo-chef
 WORKDIR /app
 
-# Copy workspace configuration
+FROM chef AS planner
+# Copy workspace configuration first
 COPY Cargo.toml Cargo.lock ./
 COPY feature-toggle-backend/.sqlx ./.sqlx
 
-# Copy all required workspace members with their source code
+# Copy all required workspace members
 COPY evaluation-engine/ ./evaluation-engine/
 COPY feature-toggle-shared/ ./feature-toggle-shared/
 COPY feature-toggle-backend/ ./feature-toggle-backend/
@@ -16,15 +17,34 @@ COPY feature-toggle-backend/ ./feature-toggle-backend/
 # Create a temporary workspace configuration that excludes feature-edge-server
 RUN printf '[workspace]\nresolver = "3"\nmembers = [\n    "evaluation-engine",\n    "feature-toggle-backend",\n    "feature-toggle-shared",\n]' > Cargo.toml
 
-# Install dependencies
+RUN cargo chef prepare --recipe-path recipe.json --bin feature-toggle-backend
+
+FROM chef AS builder
+
+# Install dependencies once
 RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 
 # Install sqlx-cli for migrations
 RUN cargo install sqlx-cli --no-default-features --features postgres
 
-# Build the backend service in offline mode
+COPY --from=planner /app/recipe.json recipe.json
+
+# Build dependencies - this layer will be cached unless Cargo.toml or Cargo.lock changes
+RUN cargo chef cook --release --recipe-path recipe.json --bin feature-toggle-backend
+
+# Copy source code and build
+COPY Cargo.toml Cargo.lock ./
+COPY feature-toggle-backend/.sqlx ./.sqlx
+COPY evaluation-engine/ ./evaluation-engine/
+COPY feature-toggle-shared/ ./feature-toggle-shared/
+COPY feature-toggle-backend/ ./feature-toggle-backend/
+
+# Create workspace config
+RUN printf '[workspace]\nresolver = "3"\nmembers = [\n    "evaluation-engine",\n    "feature-toggle-backend",\n    "feature-toggle-shared",\n]' > Cargo.toml
+
+# Build the backend service in offline mode using docker profile for smaller size
 ENV SQLX_OFFLINE=true
-RUN cargo build --release --bin feature-toggle-backend
+RUN cargo build --bin feature-toggle-backend
 
 # Runtime stage
 FROM debian:trixie-slim
@@ -34,7 +54,7 @@ RUN apt-get update && apt-get install -y postgresql-client ca-certificates && rm
 
 WORKDIR /app
 
-# Copy the compiled binary
+# Copy the compiled binary (note: docker profile outputs to target/docker/)
 COPY --from=builder /app/target/release/feature-toggle-backend /usr/local/bin/feature-toggle-backend
 COPY --from=builder /usr/local/cargo/bin/sqlx /usr/local/bin/sqlx
 
