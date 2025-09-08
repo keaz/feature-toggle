@@ -11,8 +11,8 @@ COPY feature-toggle-shared/ ./feature-toggle-shared/
 COPY feature-edge-server/ ./feature-edge-server/
 COPY feature-toggle-backend/proto/ ./feature-toggle-backend/proto/
 
-# Temporarily modify workspace to exclude feature-toggle-backend
-RUN sed -i 's/members = \["evaluation-engine", "feature-edge-server", "feature-toggle-backend", "feature-toggle-shared"\]/members = ["evaluation-engine", "feature-edge-server", "feature-toggle-shared"]/' Cargo.toml
+# Create a temporary workspace configuration that excludes feature-toggle-backend
+RUN printf '[workspace]\nresolver = "3"\nmembers = [\n    "evaluation-engine",\n    "feature-edge-server",\n    "feature-toggle-shared",\n]' > Cargo.toml
 
 # Install dependencies (including curl for swagger-ui)
 RUN apt-get update && apt-get install -y curl libssl-dev pkg-config && rm -rf /var/lib/apt/lists/*
