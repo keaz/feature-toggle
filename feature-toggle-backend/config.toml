@@ -5,7 +5,7 @@
 allowed_origin = "http://localhost:5173"
 
 # Address that the Actix-Web HTTP server binds to
-http_addr = "127.0.0.1:8080"
+http_addr = "0.0.0.0:8080"
 
 # Address that the gRPC server binds to
 grpc_addr = "0.0.0.0:50051"
