@@ -13,8 +13,8 @@ COPY evaluation-engine/ ./evaluation-engine/
 COPY feature-toggle-shared/ ./feature-toggle-shared/
 COPY feature-toggle-backend/ ./feature-toggle-backend/
 
-# Temporarily modify workspace to exclude feature-edge-server
-RUN sed -i 's/members = \["evaluation-engine", "feature-edge-server", "feature-toggle-backend", "feature-toggle-shared"\]/members = ["evaluation-engine", "feature-toggle-backend", "feature-toggle-shared"]/' Cargo.toml
+# Create a temporary workspace configuration that excludes feature-edge-server
+RUN printf '[workspace]\nresolver = "3"\nmembers = [\n    "evaluation-engine",\n    "feature-toggle-backend",\n    "feature-toggle-shared",\n]' > Cargo.toml
 
 # Install dependencies
 RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
