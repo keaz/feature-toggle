@@ -1,3 +1,49 @@
 [workspace]
 resolver = "3"
-members = ["evaluation-engine", "feature-edge-server", "feature-toggle-backend", "feature-toggle-shared"]
+members = [
+    "evaluation-engine",
+    "feature-edge-server",
+    "feature-toggle-backend",
+    "feature-toggle-shared",
+]
+
+# Release optimizations
+[profile.release]
+# Enable all optimizations
+opt-level = 3
+# Enable link-time optimization for better performance
+lto = "fat"
+# Set codegen units to 1 for maximum optimization
+codegen-units = 1
+# Don't include debug symbols in release builds
+debug = false
+# Enable panic=abort for smaller binary size
+panic = "abort"
+# Strip symbols and debug info for smaller binaries
+strip = "symbols"
+# Optimize for size while maintaining good performance
+# opt-level = "s"  # Uncomment this line and comment opt-level = 3 if you prefer size over speed
+
+# Custom release profile for Docker builds (smaller size focused)
+[profile.docker]
+inherits = "release"
+opt-level = "s"
+lto = "thin"
+strip = "symbols"
+panic = "abort"
+
+# Development optimizations (faster compilation, some optimizations)
+[profile.dev]
+# Enable some optimizations for dependencies to improve dev performance
+opt-level = 0
+# Keep debug info for better debugging
+debug = true
+# Allow some overflow checks to be disabled in dev for speed
+overflow-checks = true
+
+# Optimized dev profile for faster dev builds with some optimizations
+[profile.dev-optimized]
+inherits = "dev"
+opt-level = 1
+overflow-checks = false
+debug-assertions = false
