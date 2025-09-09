@@ -62,6 +62,17 @@ VALUES (
 )
 ON CONFLICT (id) DO NOTHING;
 
+-- Seed feature_evaluations for integration tests
+DELETE FROM public.feature_evaluations;
+INSERT INTO public.feature_evaluations (
+        id, feature_key, environment_id, client_id, evaluated_at, evaluation_result, evaluation_context, user_context, prior_assignment, created_at
+) VALUES
+        ('e1111111-1111-4111-8111-111111111111', 'test-feature-create', 'env-123', 'a1b2c3d4-0000-4000-8000-000000000001', now() - interval '1 day', true, '{"user": "user123"}', 'user123', false, now() - interval '1 day'),
+        ('e2222222-2222-4222-8222-222222222222', 'test-feature-create', 'env-123', 'a1b2c3d4-0000-4000-8000-000000000002', now(), false, '{"user": "user456"}', 'user456', true, now()),
+        ('e3333333-3333-4333-8333-333333333333', 'bulk-feature-1', 'env-123', 'a1b2c3d4-0000-4000-8000-000000000001', now(), true, NULL, 'userA', false, now()),
+        ('e4444444-4444-4444-8444-444444444444', 'bulk-feature-2', 'env-123', 'a1b2c3d4-0000-4000-8000-000000000002', now(), false, NULL, 'userB', true, now())
+ON CONFLICT (id) DO NOTHING;
+
 INSERT INTO public.teams(id, name, description)
 VALUES ('51ecc366-f1cd-4d3d-ab73-fa60bad98f27', 'Test Team', 'This is a test team'),
        ('3eef17bc-9e06-411d-b5f4-7a786e68bb96', 'Update Team', 'This is a test team'),
