@@ -1,4 +1,4 @@
-use chrono::{TimeZone, Utc};
+use chrono::Utc;
 use feature_toggle_backend::database::feature_evaluation::{
     CreateFeatureEvaluation, FeatureEvaluationFilter, feature_evaluation_repository,
 };

@@ -1,9 +1,9 @@
-use crate::Error;
 use crate::database::client::{ClientRepository, CreateClient, UpdateClient};
 use crate::database::entity::ClientType as EntityClientType;
 use crate::graphql::schema::{
     Client as GqlClient, ClientType as GqlClientType, CreateClientInput, UpdateClientInput,
 };
+use crate::Error;
 use async_graphql::ID;
 use uuid::Uuid;
 
@@ -168,21 +168,17 @@ impl ClientLogic for ClientLogicImpl {
         if let Some(ct) = input.client_type {
             match ct {
                 GqlClientType::Web => {
-                    if let Some(origins) = &input.web_origins {
-                        if origins.is_empty() {
-                            return Err(Error::InvalidInput(
-                                "Web client must specify at least one web origin".into(),
-                            ));
-                        }
+                    if let Some(origins) = &input.web_origins && origins.is_empty() {
+                        return Err(Error::InvalidInput(
+                            "Web client must specify at least one web origin".into(),
+                        ));
                     }
                 }
                 GqlClientType::Backend => {
-                    if let Some(origins) = &input.web_origins {
-                        if !origins.is_empty() {
-                            return Err(Error::InvalidInput(
-                                "Backend client cannot have web origins".into(),
-                            ));
-                        }
+                    if let Some(origins) = &input.web_origins && !origins.is_empty() {
+                        return Err(Error::InvalidInput(
+                            "Backend client cannot have web origins".into(),
+                        ));
                     }
                 }
             }

@@ -7,7 +7,7 @@ pub mod query;
 pub mod schema;
 pub mod subscription;
 pub mod validator;
-
+mod role_tests;
 
 pub fn create_user(u: GqlUser) -> GqlResult<User> {
     Ok(User {

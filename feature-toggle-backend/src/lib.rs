@@ -1,8 +1,8 @@
 mod config;
 pub mod database;
-mod graphql;
+pub mod graphql;
 pub mod grpc;
-mod logic;
+pub mod logic;
 mod middleware;
 
 use crate::database::init_pg_pool;
@@ -13,9 +13,9 @@ use crate::middleware::access_log::AccessLogger;
 use crate::middleware::admin_guard::{AdminGuard, AdminState};
 use crate::middleware::jwt_guard::JwtGuard;
 use actix_cors::Cors;
-use actix_web::{App, HttpMessage, HttpRequest, HttpResponse, HttpServer, Result, guard, web};
-use async_graphql::Schema;
+use actix_web::{guard, web, App, HttpMessage, HttpRequest, HttpResponse, HttpServer, Result};
 use async_graphql::http::GraphiQLSource;
+use async_graphql::Schema;
 use async_graphql_actix_web::{GraphQLRequest, GraphQLResponse, GraphQLSubscription};
 use log::error;
 use uuid::Uuid;

@@ -264,16 +264,15 @@ impl MutationRoot {
         let result = logic.set_stage_criteria(stage_id.clone(), criteria).await?;
 
         // After updating criterias for a stage, broadcast an UPSERT for the owning feature
-        if let (Ok(pool), Ok(updates_tx), Ok(feature_logic)) = (
+        if let (Ok(pool), Ok(updates_tx),
+            Ok(feature_logic)) = (
             ctx.data::<sqlx::PgPool>(),
             ctx.data::<tokio::sync::broadcast::Sender<crate::grpc::pb::FeatureUpdate>>(),
-            ctx.data::<Box<dyn crate::logic::feature::FeatureLogic>>(),
-        ) {
-            if let Ok(Some(feature_id)) = feature_logic
-                .get_feature_id_by_stage_id(stage_id.clone())
-                .await
-            {
-                let repo = crate::database::feature::feature_repository(pool.clone());
+            ctx.data::<Box<dyn FeatureLogic>>(),
+        ) && let Ok(Some(feature_id)) = feature_logic
+            .get_feature_id_by_stage_id(stage_id.clone())
+            .await {
+            let repo = crate::database::feature::feature_repository(pool.clone());
                 if let Ok(db_feature) = repo.get_feature_by_id(feature_id).await
                     && let Ok(full) =
                         map_db_feature_to_full_for_broadcast(pool.clone(), db_feature).await
@@ -286,7 +285,6 @@ impl MutationRoot {
                         error: String::new(),
                     });
                 }
-            }
         }
 
         Ok(result)
