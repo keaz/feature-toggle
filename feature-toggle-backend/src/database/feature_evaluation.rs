@@ -41,6 +41,7 @@ pub struct FeatureEvaluationFilter {
     pub offset: Option<i64>,
 }
 
+#[cfg_attr(test, mockall::automock)]
 #[async_trait::async_trait]
 pub trait FeatureEvaluationRepository: Send + Sync {
     async fn create_evaluation(
@@ -566,4 +567,120 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
 
 pub fn feature_evaluation_repository(pool: sqlx::PgPool) -> Box<dyn FeatureEvaluationRepository> {
     Box::new(PgFeatureEvaluationRepository::new(pool))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    fn sample_create_evaluation() -> CreateFeatureEvaluation {
+        CreateFeatureEvaluation {
+            feature_key: "test-feature".to_string(),
+            environment_id: "env-123".to_string(),
+            client_id: Uuid::new_v4(),
+            evaluated_at: Utc::now(),
+            evaluation_result: true,
+            evaluation_context: Some(json!({"user": "test-user"})),
+            user_context: Some("user123".to_string()),
+            prior_assignment: false,
+        }
+    }
+
+    #[test]
+    fn test_feature_evaluation_filter_creation() {
+        let filter = FeatureEvaluationFilter {
+            feature_key: Some("test-feature".to_string()),
+            environment_id: Some("env-123".to_string()),
+            client_id: Some(Uuid::new_v4()),
+            user_context: Some("user123".to_string()),
+            prior_assignment: Some(false),
+            from_date: Some(Utc::now() - chrono::Duration::hours(1)),
+            to_date: Some(Utc::now()),
+            limit: Some(10),
+            offset: Some(0),
+        };
+
+        assert_eq!(filter.feature_key, Some("test-feature".to_string()));
+        assert_eq!(filter.environment_id, Some("env-123".to_string()));
+        assert!(filter.client_id.is_some());
+        assert_eq!(filter.limit, Some(10));
+        assert_eq!(filter.offset, Some(0));
+    }
+
+    #[test]
+    fn test_create_evaluation_struct() {
+        let evaluation = sample_create_evaluation();
+
+        assert_eq!(evaluation.feature_key, "test-feature");
+        assert_eq!(evaluation.environment_id, "env-123");
+        assert_eq!(evaluation.evaluation_result, true);
+        assert_eq!(evaluation.prior_assignment, false);
+        assert!(evaluation.evaluation_context.is_some());
+        assert!(evaluation.user_context.is_some());
+    }
+
+    #[test]
+    fn test_evaluation_summary_calculation() {
+        let summary = EvaluationSummary {
+            total_evaluations: 100,
+            successful_evaluations: 80,
+            cached_evaluations: 30,
+            unique_users: 25,
+            top_feature_key: Some("popular-feature".to_string()),
+            success_rate: 80.0,
+            cache_hit_rate: 30.0,
+        };
+
+        assert_eq!(summary.total_evaluations, 100);
+        assert_eq!(summary.successful_evaluations, 80);
+        assert_eq!(summary.success_rate, 80.0);
+        assert_eq!(summary.cache_hit_rate, 30.0);
+        assert_eq!(summary.top_feature_key, Some("popular-feature".to_string()));
+    }
+
+    #[test]
+    fn test_evaluation_rate_point() {
+        let rate_point = EvaluationRatePoint {
+            time_bucket: Utc::now(),
+            evaluation_count: 50,
+            success_count: 40,
+            prior_assignment_count: 15,
+        };
+
+        assert_eq!(rate_point.evaluation_count, 50);
+        assert_eq!(rate_point.success_count, 40);
+        assert_eq!(rate_point.prior_assignment_count, 15);
+    }
+
+    #[test]
+    fn test_repository_creation() {
+        // This test only verifies the factory function signature
+        // In a real test environment, this would use a test database connection
+        use sqlx::PgPool;
+
+        // Just verify this compiles and is the correct function signature
+        fn _verify_signature(_pool: PgPool) -> Box<dyn FeatureEvaluationRepository> {
+            feature_evaluation_repository(_pool)
+        }
+
+        // Test passes if it compiles
+        assert!(true);
+    }
+
+    #[test]
+    fn test_pg_repository_creation() {
+        // This test only verifies the constructor signature
+        use sqlx::PgPool;
+
+        // Just verify this compiles and is the correct function signature
+        fn _verify_signature(_pool: PgPool) -> PgFeatureEvaluationRepository {
+            PgFeatureEvaluationRepository::new(_pool)
+        }
+
+        // Test passes if it compiles
+        assert!(true);
+    }
 }

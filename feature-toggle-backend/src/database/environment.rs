@@ -174,3 +174,240 @@ impl EnvironmentRepository for EnvironmentRepositoryImpl {
         Box::new(self.clone())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    fn sample_environment() -> Environment {
+        Environment {
+            id: Uuid::new_v4(),
+            name: "Test Environment".to_string(),
+            active: true,
+            team_id: Uuid::new_v4(),
+        }
+    }
+
+    fn sample_create_environment() -> CreateEnvironment {
+        CreateEnvironment {
+            name: "New Environment".to_string(),
+            active: true,
+        }
+    }
+
+    fn sample_update_environment() -> UpdateEnvironment {
+        UpdateEnvironment {
+            name: Some("Updated Environment".to_string()),
+            active: Some(false),
+        }
+    }
+
+    #[test]
+    fn test_environment_struct_creation() {
+        let env = sample_environment();
+        assert_eq!(env.name, "Test Environment");
+        assert!(env.active);
+    }
+
+    #[test]
+    fn test_create_environment_struct() {
+        let create_env = sample_create_environment();
+        assert_eq!(create_env.name, "New Environment");
+        assert!(create_env.active);
+    }
+
+    #[test]
+    fn test_update_environment_struct() {
+        let update_env = sample_update_environment();
+        assert_eq!(update_env.name, Some("Updated Environment".to_string()));
+        assert_eq!(update_env.active, Some(false));
+    }
+
+    #[test]
+    fn test_environment_repository_factory() {
+        // Test that the factory function has correct signature
+        use sqlx::PgPool;
+        
+        fn _verify_signature(_pool: PgPool) -> Box<dyn EnvironmentRepository> {
+            environment_repository(_pool)
+        }
+        
+        // Test passes if it compiles
+        assert!(true);
+    }
+
+    #[test] 
+    fn test_environment_repository_impl_creation() {
+        // Test the repository constructor signature
+        use sqlx::PgPool;
+        
+        fn _verify_signature(_pool: PgPool) -> EnvironmentRepositoryImpl {
+            EnvironmentRepositoryImpl::new(_pool)
+        }
+        
+        // Test passes if it compiles
+        assert!(true);
+    }
+
+    #[tokio::test]
+    async fn test_mock_environment_repository_get_environment_by_id() {
+        let mut mock_repo = MockEnvironmentRepository::new();
+        let env = sample_environment();
+        let env_id = env.id;
+        
+        mock_repo
+            .expect_get_environment_by_id()
+            .with(mockall::predicate::eq(env_id))
+            .times(1)
+            .returning(move |_| Ok(env.clone()));
+        
+        let result = mock_repo.get_environment_by_id(env_id).await;
+        assert!(result.is_ok());
+        let retrieved_env = result.unwrap();
+        assert_eq!(retrieved_env.name, "Test Environment");
+        assert!(retrieved_env.active);
+    }
+
+    #[tokio::test]
+    async fn test_mock_environment_repository_get_environments() {
+        let mut mock_repo = MockEnvironmentRepository::new();
+        let team_id = Uuid::new_v4();
+        let environments = vec![sample_environment()];
+        
+        mock_repo
+            .expect_get_environments()
+            .with(
+                mockall::predicate::eq(team_id),
+                mockall::predicate::eq(None::<String>),
+                mockall::predicate::eq(None::<bool>)
+            )
+            .times(1)
+            .returning(move |_, _, _| Ok(environments.clone()));
+        
+        let result = mock_repo.get_environments(team_id, None, None).await;
+        assert!(result.is_ok());
+        let envs = result.unwrap();
+        assert_eq!(envs.len(), 1);
+        assert_eq!(envs[0].name, "Test Environment");
+    }
+
+    #[tokio::test]
+    async fn test_mock_environment_repository_create_environment() {
+        let mut mock_repo = MockEnvironmentRepository::new();
+        let team_id = Uuid::new_v4();
+        let create_input = sample_create_environment();
+        let expected_env = Environment {
+            id: Uuid::new_v4(),
+            name: "New Environment".to_string(),
+            active: true,
+            team_id,
+        };
+        
+        mock_repo
+            .expect_create_environment()
+            .with(
+                mockall::predicate::eq(team_id),
+                mockall::predicate::function(|input: &CreateEnvironment| {
+                    input.name == "New Environment" && input.active
+                })
+            )
+            .times(1)
+            .returning(move |_, _| Ok(expected_env.clone()));
+        
+        let result = mock_repo.create_environment(team_id, create_input).await;
+        assert!(result.is_ok());
+        let created_env = result.unwrap();
+        assert_eq!(created_env.name, "New Environment");
+        assert!(created_env.active);
+    }
+
+    #[tokio::test]
+    async fn test_mock_environment_repository_update_environment() {
+        let mut mock_repo = MockEnvironmentRepository::new();
+        let env_id = Uuid::new_v4();
+        let update_input = sample_update_environment();
+        let expected_env = Environment {
+            id: env_id,
+            name: "Updated Environment".to_string(),
+            active: false,
+            team_id: Uuid::new_v4(),
+        };
+        
+        mock_repo
+            .expect_update_environment()
+            .with(
+                mockall::predicate::eq(env_id),
+                mockall::predicate::function(|input: &UpdateEnvironment| {
+                    input.name == Some("Updated Environment".to_string()) && input.active == Some(false)
+                })
+            )
+            .times(1)
+            .returning(move |_, _| Ok(expected_env.clone()));
+        
+        let result = mock_repo.update_environment(env_id, update_input).await;
+        assert!(result.is_ok());
+        let updated_env = result.unwrap();
+        assert_eq!(updated_env.name, "Updated Environment");
+        assert!(!updated_env.active);
+    }
+
+    #[tokio::test]
+    async fn test_mock_environment_repository_delete_environment() {
+        let mut mock_repo = MockEnvironmentRepository::new();
+        let env_id = Uuid::new_v4();
+        
+        mock_repo
+            .expect_delete_environment()
+            .with(mockall::predicate::eq(env_id))
+            .times(1)
+            .returning(|_| Ok(()));
+        
+        let result = mock_repo.delete_environment(env_id).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_mock_environment_repository_error_scenarios() {
+        let mut mock_repo = MockEnvironmentRepository::new();
+        let env_id = Uuid::new_v4();
+        
+        // Test not found error
+        mock_repo
+            .expect_get_environment_by_id()
+            .with(mockall::predicate::eq(env_id))
+            .times(1)
+            .returning(move |id| Err(Error::NotFound(id)));
+        
+        let result = mock_repo.get_environment_by_id(env_id).await;
+        assert!(result.is_err());
+        match result.err().unwrap() {
+            Error::NotFound(id) => assert_eq!(id, env_id),
+            _ => panic!("Expected NotFound error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mock_environment_repository_with_filters() {
+        let mut mock_repo = MockEnvironmentRepository::new();
+        let team_id = Uuid::new_v4();
+        let name_filter = Some("Test".to_string());
+        let active_filter = Some(true);
+        let environments = vec![sample_environment()];
+        
+        mock_repo
+            .expect_get_environments()
+            .with(
+                mockall::predicate::eq(team_id),
+                mockall::predicate::eq(name_filter.clone()),
+                mockall::predicate::eq(active_filter)
+            )
+            .times(1)
+            .returning(move |_, _, _| Ok(environments.clone()));
+        
+        let result = mock_repo.get_environments(team_id, name_filter, active_filter).await;
+        assert!(result.is_ok());
+        let envs = result.unwrap();
+        assert_eq!(envs.len(), 1);
+    }
+}

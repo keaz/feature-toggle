@@ -461,3 +461,401 @@ impl UserRepository for UserRepositoryImpl {
         Box::new(self.clone())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    fn sample_user() -> User {
+        User {
+            id: Uuid::new_v4(),
+            username: "jdoe".to_string(),
+            password_hash: "hashed_password".to_string(),
+            first_name: "John".to_string(),
+            last_name: "Doe".to_string(),
+            email: "john@example.com".to_string(),
+            is_admin: false,
+            enabled: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_login: None,
+            is_temporary_password: false,
+        }
+    }
+
+    fn sample_create_user() -> CreateUser {
+        CreateUser {
+            username: "newuser".to_string(),
+            password_hash: "hashed_new_password".to_string(),
+            first_name: "New".to_string(),
+            last_name: "User".to_string(),
+            email: "new@example.com".to_string(),
+            is_admin: false,
+            is_temporary_password: false,
+        }
+    }
+
+    fn sample_update_user(id: Uuid) -> UpdateUser {
+        UpdateUser {
+            id,
+            first_name: Some("Updated".to_string()),
+            last_name: Some("Name".to_string()),
+            email: Some("updated@example.com".to_string()),
+            is_admin: Some(true),
+            enabled: Some(false),
+        }
+    }
+
+    #[test]
+    fn test_user_struct_creation() {
+        let user = sample_user();
+        assert_eq!(user.username, "jdoe");
+        assert_eq!(user.email, "john@example.com");
+        assert!(!user.is_admin);
+        assert!(user.enabled);
+        assert!(!user.is_temporary_password);
+    }
+
+    #[test]
+    fn test_create_user_struct() {
+        let create_user = sample_create_user();
+        assert_eq!(create_user.username, "newuser");
+        assert_eq!(create_user.first_name, "New");
+        assert_eq!(create_user.last_name, "User");
+        assert_eq!(create_user.email, "new@example.com");
+        assert!(!create_user.is_admin);
+        assert!(!create_user.is_temporary_password);
+    }
+
+    #[test]
+    fn test_update_user_struct() {
+        let user_id = Uuid::new_v4();
+        let update_user = sample_update_user(user_id);
+        
+        assert_eq!(update_user.id, user_id);
+        assert_eq!(update_user.first_name, Some("Updated".to_string()));
+        assert_eq!(update_user.last_name, Some("Name".to_string()));
+        assert_eq!(update_user.email, Some("updated@example.com".to_string()));
+        assert_eq!(update_user.is_admin, Some(true));
+        assert_eq!(update_user.enabled, Some(false));
+    }
+
+    #[test]
+    fn test_user_repository_factory() {
+        // This test only verifies the factory function signature
+        // In a real test environment, this would use a test database connection
+        use sqlx::PgPool;
+        
+        // We can't actually create a pool in unit tests without a database
+        // Just verify this compiles and is the correct function signature
+        fn _verify_signature(_pool: PgPool) -> Box<dyn UserRepository> {
+            user_repository(_pool)
+        }
+        
+        // Test passes if it compiles
+        assert!(true);
+    }
+
+    #[test] 
+    fn test_user_repository_impl_creation() {
+        // This test only verifies the constructor signature
+        // In a real test environment, this would use a test database connection
+        use sqlx::PgPool;
+        
+        // Just verify this compiles and is the correct function signature
+        fn _verify_signature(_pool: PgPool) -> UserRepositoryImpl {
+            UserRepositoryImpl::new(_pool)
+        }
+        
+        // Test passes if it compiles
+        assert!(true);
+    }
+
+    #[tokio::test]
+    async fn test_mock_user_repository_get_user_by_id() {
+        let mut mock_repo = MockUserRepository::new();
+        let user = sample_user();
+        let user_id = user.id;
+        
+        mock_repo
+            .expect_get_user_by_id()
+            .with(mockall::predicate::eq(user_id))
+            .times(1)
+            .returning(move |_| Ok(user.clone()));
+        
+        let result = mock_repo.get_user_by_id(user_id).await;
+        assert!(result.is_ok());
+        let retrieved_user = result.unwrap();
+        assert_eq!(retrieved_user.username, "jdoe");
+    }
+
+    #[tokio::test]
+    async fn test_mock_user_repository_get_user_by_username() {
+        let mut mock_repo = MockUserRepository::new();
+        let user = sample_user();
+        
+        mock_repo
+            .expect_get_user_by_username()
+            .with(mockall::predicate::eq("jdoe"))
+            .times(1)
+            .returning(move |_| Ok(user.clone()));
+        
+        let result = mock_repo.get_user_by_username("jdoe").await;
+        assert!(result.is_ok());
+        let retrieved_user = result.unwrap();
+        assert_eq!(retrieved_user.username, "jdoe");
+    }
+
+    #[tokio::test]
+    async fn test_mock_user_repository_get_user_by_email() {
+        let mut mock_repo = MockUserRepository::new();
+        let user = sample_user();
+        
+        mock_repo
+            .expect_get_user_by_email()
+            .with(mockall::predicate::eq("john@example.com"))
+            .times(1)
+            .returning(move |_| Ok(user.clone()));
+        
+        let result = mock_repo.get_user_by_email("john@example.com").await;
+        assert!(result.is_ok());
+        let retrieved_user = result.unwrap();
+        assert_eq!(retrieved_user.email, "john@example.com");
+    }
+
+    #[tokio::test]
+    async fn test_mock_user_repository_user_exists_by_username() {
+        let mut mock_repo = MockUserRepository::new();
+        
+        mock_repo
+            .expect_user_exists_by_username()
+            .with(mockall::predicate::eq("existing_user"))
+            .times(1)
+            .returning(|_| Ok(true));
+        
+        mock_repo
+            .expect_user_exists_by_username()
+            .with(mockall::predicate::eq("nonexistent_user"))
+            .times(1)
+            .returning(|_| Ok(false));
+        
+        let exists = mock_repo.user_exists_by_username("existing_user").await.unwrap();
+        assert!(exists);
+        
+        let not_exists = mock_repo.user_exists_by_username("nonexistent_user").await.unwrap();
+        assert!(!not_exists);
+    }
+
+    #[tokio::test]
+    async fn test_mock_user_repository_user_exists_by_email() {
+        let mut mock_repo = MockUserRepository::new();
+        
+        mock_repo
+            .expect_user_exists_by_email()
+            .with(
+                mockall::predicate::eq("existing@example.com"), 
+                mockall::predicate::eq(None)
+            )
+            .times(1)
+            .returning(|_, _| Ok(true));
+        
+        let exists = mock_repo.user_exists_by_email("existing@example.com", None).await.unwrap();
+        assert!(exists);
+    }
+
+    #[tokio::test]
+    async fn test_mock_user_repository_create_user() {
+        let mut mock_repo = MockUserRepository::new();
+        let create_input = sample_create_user();
+        let expected_user = sample_user();
+        
+        mock_repo
+            .expect_create_user()
+            .withf(|input| input.username == "newuser")
+            .times(1)
+            .returning(move |_| Ok(expected_user.clone()));
+        
+        let result = mock_repo.create_user(create_input).await;
+        assert!(result.is_ok());
+        let created_user = result.unwrap();
+        assert_eq!(created_user.username, "jdoe");
+    }
+
+    #[tokio::test]
+    async fn test_mock_user_repository_update_user() {
+        let mut mock_repo = MockUserRepository::new();
+        let user_id = Uuid::new_v4();
+        let update_input = sample_update_user(user_id);
+        let expected_user = User {
+            id: user_id,
+            username: "jdoe".to_string(),
+            first_name: "Updated".to_string(),
+            last_name: "Name".to_string(),
+            email: "updated@example.com".to_string(),
+            is_admin: true,
+            enabled: false,
+            ..sample_user()
+        };
+        
+        mock_repo
+            .expect_update_user()
+            .withf(move |input| input.id == user_id)
+            .times(1)
+            .returning(move |_| Ok(expected_user.clone()));
+        
+        let result = mock_repo.update_user(update_input).await;
+        assert!(result.is_ok());
+        let updated_user = result.unwrap();
+        assert_eq!(updated_user.first_name, "Updated");
+        assert_eq!(updated_user.last_name, "Name");
+        assert!(updated_user.is_admin);
+        assert!(!updated_user.enabled);
+    }
+
+    #[tokio::test]
+    async fn test_mock_user_repository_update_last_login() {
+        let mut mock_repo = MockUserRepository::new();
+        let user_id = Uuid::new_v4();
+        let login_time = Utc::now();
+        
+        mock_repo
+            .expect_update_last_login()
+            .with(mockall::predicate::eq(user_id), mockall::predicate::always())
+            .times(1)
+            .returning(|_, _| Ok(()));
+        
+        let result = mock_repo.update_last_login(user_id, login_time).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_mock_user_repository_update_password() {
+        let mut mock_repo = MockUserRepository::new();
+        let user_id = Uuid::new_v4();
+        let new_password_hash = "new_hashed_password".to_string();
+        
+        mock_repo
+            .expect_update_password()
+            .with(
+                mockall::predicate::eq(user_id),
+                mockall::predicate::eq(new_password_hash.clone()),
+                mockall::predicate::eq(false)
+            )
+            .times(1)
+            .returning(|_, _, _| Ok(()));
+        
+        let result = mock_repo.update_password(user_id, new_password_hash, false).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_mock_user_repository_set_user_teams() {
+        let mut mock_repo = MockUserRepository::new();
+        let user_id = Uuid::new_v4();
+        let team_ids = vec![Uuid::new_v4(), Uuid::new_v4()];
+        
+        mock_repo
+            .expect_set_user_teams()
+            .with(
+                mockall::predicate::eq(user_id),
+                mockall::predicate::eq(team_ids.clone())
+            )
+            .times(1)
+            .returning(|_, _| Ok(()));
+        
+        let result = mock_repo.set_user_teams(user_id, team_ids).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_mock_user_repository_search_users() {
+        let mut mock_repo = MockUserRepository::new();
+        let team_id = Some(Uuid::new_v4());
+        let name_filter = Some("John".to_string());
+        let users = vec![sample_user()];
+        let total_count = 1i64;
+        
+        mock_repo
+            .expect_search_users()
+            .with(
+                mockall::predicate::eq(team_id),
+                mockall::predicate::eq(name_filter.clone()),
+                mockall::predicate::eq(1), // page_number
+                mockall::predicate::eq(10), // page_size
+            )
+            .times(1)
+            .returning(move |_, _, _, _| Ok((users.clone(), total_count)));
+        
+        let result = mock_repo.search_users(team_id, name_filter, 1, 10).await;
+        assert!(result.is_ok());
+        let (returned_users, count) = result.unwrap();
+        assert_eq!(returned_users.len(), 1);
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_mock_user_repository_get_user_teams() {
+        let mut mock_repo = MockUserRepository::new();
+        let user_id = Uuid::new_v4();
+        let teams = vec![Team {
+            id: Uuid::new_v4(),
+            name: "Test Team".to_string(),
+            description: "Test team description".to_string(),
+        }];
+        
+        mock_repo
+            .expect_get_user_teams()
+            .with(mockall::predicate::eq(user_id))
+            .times(1)
+            .returning(move |_| Ok(teams.clone()));
+        
+        let result = mock_repo.get_user_teams(user_id).await;
+        assert!(result.is_ok());
+        let user_teams = result.unwrap();
+        assert_eq!(user_teams.len(), 1);
+        assert_eq!(user_teams[0].name, "Test Team");
+    }
+
+    #[tokio::test]
+    async fn test_mock_user_repository_admin_exists() {
+        let mut mock_repo = MockUserRepository::new();
+        
+        mock_repo
+            .expect_admin_exists()
+            .times(1)
+            .returning(|| Ok(true));
+        
+        mock_repo
+            .expect_admin_exists()
+            .times(1)
+            .returning(|| Ok(false));
+        
+        let admin_exists = mock_repo.admin_exists().await.unwrap();
+        assert!(admin_exists);
+        
+        let no_admin_exists = mock_repo.admin_exists().await.unwrap();
+        assert!(!no_admin_exists);
+    }
+
+    #[tokio::test]
+    async fn test_mock_user_repository_error_scenarios() {
+        let mut mock_repo = MockUserRepository::new();
+        let user_id = Uuid::new_v4();
+        
+        // Test not found error
+        mock_repo
+            .expect_get_user_by_id()
+            .with(mockall::predicate::eq(user_id))
+            .times(1)
+            .returning(move |id| Err(Error::NotFound(id)));
+        
+        let result = mock_repo.get_user_by_id(user_id).await;
+        assert!(result.is_err());
+        match result.err().unwrap() {
+            Error::NotFound(id) => assert_eq!(id, user_id),
+            _ => panic!("Expected NotFound error"),
+        }
+    }
+}
