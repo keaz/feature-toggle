@@ -1,5 +1,5 @@
 use crate::database::entity::{Feature, FeatureDependency, FeaturePipelineStage, FeatureType};
-use crate::database::{Error, handle_error};
+use crate::database::{handle_error, Error};
 use chrono::{DateTime, Utc};
 use mockall::automock;
 use serde::{Deserialize, Serialize};
@@ -436,20 +436,14 @@ impl FeatureRepositoryImpl {
                        parent_stage_id = $3,
                        position = $4,
                        bucketing_key = $5,
-                       status = $6,
-                       enabled = $7
-                   WHERE id = $8"#,
+                       enabled = $6
+                   WHERE id = $7"#,
             )
             .bind(stage.environment_id)
             .bind(stage.order_index)
             .bind(parent_stage_id)
             .bind(&stage.position)
             .bind(stage.bucketing_key.clone())
-            .bind(if stage.enabled {
-                "DEPLOYED"
-            } else {
-                "NOT_DEPLOYED"
-            })
             .bind(stage.enabled)
             .bind(stage.id)
             .execute(&mut *tx)

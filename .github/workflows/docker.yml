@@ -1,8 +1,11 @@
+
 name: Docker Publish
 
 on:
   push:
     branches: ["main"]
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 jobs:
@@ -37,6 +40,16 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+
+      - name: Extract tag name
+        id: extract_tag
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "TAG_NAME=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          else
+            echo "TAG_NAME=latest" >> $GITHUB_OUTPUT
+          fi
+
       - name: Build and push ${{ matrix.image }} (${{ matrix.platform }})
         uses: docker/build-push-action@v6
         with:
@@ -47,8 +60,7 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.crate }}-${{ matrix.platform }}
           cache-to: type=gha,mode=max,scope=${{ matrix.crate }}-${{ matrix.platform }}
           tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.image }}:latest-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.image }}:${{ github.sha }}-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.image }}:${{ steps.extract_tag.outputs.TAG_NAME }}-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
 
   create-manifest:
     runs-on: ubuntu-latest

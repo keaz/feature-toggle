@@ -1,8 +1,3 @@
-use crate::graphql::mutation::MutationRoot;
-use crate::graphql::query::Query as GqlQuery;
-use crate::logic::role::MockRoleLogic;
-use async_graphql::{EmptySubscription, Request, Schema, ID};
-use uuid::Uuid;
 
 #[tokio::test]
 async fn test_assign_user_roles_mutation() {

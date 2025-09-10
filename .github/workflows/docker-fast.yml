@@ -1,8 +1,11 @@
+
 name: Docker Publish (Fast - AMD64 Only)
 
 on:
   push:
-    branches: ["main", "develop"]
+    branches: ["main"]
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 jobs:
@@ -29,6 +32,16 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+
+      - name: Extract tag name
+        id: extract_tag
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "TAG_NAME=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          else
+            echo "TAG_NAME=latest-dev" >> $GITHUB_OUTPUT
+          fi
+
       - name: Build and push ${{ matrix.image }} (AMD64 only)
         uses: docker/build-push-action@v6
         with:
@@ -39,5 +52,4 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.crate }}-amd64
           cache-to: type=gha,mode=max,scope=${{ matrix.crate }}-amd64
           tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.image }}:latest-dev
-            ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.image }}:${{ github.sha }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.image }}:${{ steps.extract_tag.outputs.TAG_NAME }}

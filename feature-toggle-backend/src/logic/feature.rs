@@ -206,9 +206,10 @@ impl FeatureLogicImpl {
 #[async_trait::async_trait]
 impl FeatureLogic for FeatureLogicImpl {
     async fn get_feature_by_id(&self, id: ID) -> Result<Feature, Error> {
+        let id = Uuid::try_from(id).map_err(|_| Error::InvalidInput("Invalid ID".to_string()))?;
         let feature = self
             .repository
-            .get_feature_by_id(Uuid::try_from(id).unwrap())
+            .get_feature_by_id(id)
             .await?;
         // Build stage vectors: one for borrowing (environment map) and another for ownership (relationships)
         let db_stages_for_env: Vec<Box<dyn DBStage>> = feature
