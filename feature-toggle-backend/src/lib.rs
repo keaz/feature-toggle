@@ -225,6 +225,6 @@ async fn index_ws(
 }
 
 fn setup_logger() -> Result<(), Box<dyn std::error::Error>> {
-    log4rs::init_file("log4rs.yaml", Default::default())?;
+    // log4rs::init_file("log4rs.yaml", Default::default())?;
     Ok(())
 }

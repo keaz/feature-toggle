@@ -3,7 +3,6 @@ name: Docker Publish (Fast - AMD64 Only)
 
 on:
   push:
-    branches: ["main"]
     tags:
       - 'v*'
   workflow_dispatch:
