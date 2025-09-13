@@ -1,3 +1,4 @@
+use crate::Error;
 use crate::database::entity::{DBStage, FeatureType as EntityFeatureType};
 use crate::database::feature::{
     CreateFeature, CreateFeatureStage, FeatureRepository, UpdateFeature,
@@ -8,7 +9,6 @@ use crate::graphql::schema::{
 };
 use crate::logic::environment::EnvironmentLogic;
 use crate::logic::{create_relationships, get_environment_map, map_stages};
-use crate::Error;
 use async_graphql::ID;
 use uuid::Uuid;
 
@@ -62,7 +62,12 @@ pub trait FeatureLogic: Send + Sync {
     ) -> Result<Vec<crate::graphql::schema::StageCriterion>, Error>;
 
     // Deployment workflow
-    async fn request_stage_change(&self, stage_id: ID, request: StageChangeRequestType, user_id: Uuid) -> Result<Feature, Error>;
+    async fn request_stage_change(
+        &self,
+        stage_id: ID,
+        request: StageChangeRequestType,
+        user_id: Uuid,
+    ) -> Result<Feature, Error>;
 
     // Helper for GraphQL broadcasting: get owning feature id by stage id
     async fn get_feature_id_by_stage_id(&self, stage_id: ID) -> Result<Option<Uuid>, Error>;
@@ -180,7 +185,11 @@ impl FeatureLogicImpl {
             description: input.description,
             feature_type,
             stages,
-            dependencies: vec![],
+            dependencies: input
+                .dependencies
+                .into_iter()
+                .map(|id| Uuid::try_from(id).unwrap())
+                .collect(),
         }
     }
 
@@ -207,10 +216,7 @@ impl FeatureLogicImpl {
 impl FeatureLogic for FeatureLogicImpl {
     async fn get_feature_by_id(&self, id: ID) -> Result<Feature, Error> {
         let id = Uuid::try_from(id).map_err(|_| Error::InvalidInput("Invalid ID".to_string()))?;
-        let feature = self
-            .repository
-            .get_feature_by_id(id)
-            .await?;
+        let feature = self.repository.get_feature_by_id(id).await?;
         // Build stage vectors: one for borrowing (environment map) and another for ownership (relationships)
         let db_stages_for_env: Vec<Box<dyn DBStage>> = feature
             .stages
@@ -218,7 +224,8 @@ impl FeatureLogic for FeatureLogicImpl {
             .map(|stage| Box::new(stage.clone()) as Box<dyn DBStage>)
             .collect();
 
-        let environment_map = get_environment_map(&*self.environment_logic, &db_stages_for_env, true).await?;
+        let environment_map =
+            get_environment_map(&*self.environment_logic, &db_stages_for_env, true).await?;
 
         // Separate owned vector for relationships (create_relationships consumes the vector)
         let db_stages_for_rels: Vec<Box<dyn DBStage>> = feature
@@ -353,7 +360,12 @@ impl FeatureLogic for FeatureLogicImpl {
         Ok(list.into_iter().map(map_db_criterion_to_gql).collect())
     }
 
-    async fn request_stage_change(&self, stage_id: ID, request: StageChangeRequestType, user_id: Uuid) -> Result<Feature, Error> {
+    async fn request_stage_change(
+        &self,
+        stage_id: ID,
+        request: StageChangeRequestType,
+        user_id: Uuid,
+    ) -> Result<Feature, Error> {
         let stage_uuid = Uuid::try_from(stage_id.clone()).unwrap();
         let next_status = match request {
             StageChangeRequestType::DeploymentRequested => "DEPLOYMENT_REQUESTED",
@@ -364,11 +376,18 @@ impl FeatureLogic for FeatureLogicImpl {
             StageChangeRequestType::Rollbacked => "ROLLBACKED",
         };
         // Validate transition based on current status
-        if let Some(fid) = self.repository.get_feature_id_by_stage_id(stage_uuid).await? {
+        if let Some(fid) = self
+            .repository
+            .get_feature_id_by_stage_id(stage_uuid)
+            .await?
+        {
             let db_feature = self.repository.get_feature_by_id(fid).await?;
             if let Some(stage) = db_feature.stages.iter().find(|s| s.id == stage_uuid) {
                 // Use the GraphQL validator to validate transition
-                if let Err(e) = crate::graphql::validator::feature::validate_stage_transition(&stage.status, next_status) {
+                if let Err(e) = crate::graphql::validator::feature::validate_stage_transition(
+                    &stage.status,
+                    next_status,
+                ) {
                     return Err(Error::InvalidInput(format!("{:?}", e)));
                 }
             } else {
@@ -379,19 +398,31 @@ impl FeatureLogic for FeatureLogicImpl {
         }
 
         let ok = match request {
-            StageChangeRequestType::DeploymentRequested | StageChangeRequestType::RollbackRequested => {
+            StageChangeRequestType::DeploymentRequested
+            | StageChangeRequestType::RollbackRequested => {
                 let now = chrono::Utc::now();
-                self.repository.request_stage_change(stage_uuid, next_status, user_id, now).await?
+                self.repository
+                    .request_stage_change(stage_uuid, next_status, user_id, now)
+                    .await?
             }
-            StageChangeRequestType::DeploymentRejected | StageChangeRequestType::Deployed | StageChangeRequestType::RollbackRejected | StageChangeRequestType::Rollbacked => {
-                self.repository.approve_or_reject_stage_change(stage_uuid, next_status, user_id).await?
+            StageChangeRequestType::DeploymentRejected
+            | StageChangeRequestType::Deployed
+            | StageChangeRequestType::RollbackRejected
+            | StageChangeRequestType::Rollbacked => {
+                self.repository
+                    .approve_or_reject_stage_change(stage_uuid, next_status, user_id)
+                    .await?
             }
         };
         if !ok {
             return Err(Error::NotFound(Uuid::try_from(stage_id).unwrap()));
         }
         // Load the owning feature of this stage and return it, mapped to GraphQL Feature
-        if let Some(fid) = self.repository.get_feature_id_by_stage_id(stage_uuid).await? {
+        if let Some(fid) = self
+            .repository
+            .get_feature_id_by_stage_id(stage_uuid)
+            .await?
+        {
             let db_feature = self.repository.get_feature_by_id(fid).await?;
             return Ok(FeatureLogicImpl::map_entity_to_graphql_feature(db_feature));
         }

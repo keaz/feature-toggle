@@ -205,7 +205,7 @@ async fn fetch_feature_via_grpc(
     feature_key: &str,
     client_id: &str,
     client_secret: &str,
-) -> actix_web::Result<pb::FeatureFull> {
+) -> Option<pb::FeatureFull> {
     let mut client = app.grpc.lock().await;
     let request = pb::GetFeatureByKeyRequest {
         feature_key: feature_key.to_string(),
@@ -216,16 +216,10 @@ async fn fetch_feature_via_grpc(
         .get_feature_by_key(tonic::Request::new(request))
         .await
     {
-        Ok(resp) => {
-            let feature = resp
-                .into_inner()
-                .feature
-                .expect("server returned no feature");
-            Ok(feature)
-        }
+        Ok(resp) => resp.into_inner().feature,
         Err(e) => {
             error!("gRPC GetFeatureByKey error: {}", e);
-            Err(actix_web::error::ErrorBadGateway("backend unavailable"))
+            None
         }
     }
 }
@@ -235,13 +229,13 @@ async fn get_or_fetch_feature(
     feature_key: &str,
     client_id: &str,
     client_secret: &str,
-) -> actix_web::Result<pb::FeatureFull> {
+) -> Option<pb::FeatureFull> {
     if let Some(f) = app.cache.get_by_key(feature_key).await {
-        return Ok(f);
+        return Some(f);
     }
     let feature = fetch_feature_via_grpc(app, feature_key, client_id, client_secret).await?;
     app.cache.upsert(feature.clone()).await;
-    Ok(feature)
+    Some(feature)
 }
 
 #[utoipa::path(
@@ -264,7 +258,13 @@ async fn evaluate_handler(
 
     let (client_id, client_secret) = resolve_credentials(&app, &req);
     // Get feature from cache or backend
-    let feature = get_or_fetch_feature(&app, &feature_key, &client_id, &client_secret).await?;
+    let feature = match get_or_fetch_feature(&app, &feature_key, &client_id, &client_secret).await {
+        Some(f) => f,
+        None => {
+            // Feature doesn't exist, return false
+            return Ok(web::Json(EvaluateHttpResponse { enabled: false }));
+        }
+    };
 
     let stage = feature
         .stages
@@ -969,7 +969,7 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn test_evaluate_handler_cache_miss_backend_error() {
+    async fn test_evaluate_handler_cache_miss_feature_not_found() {
         let state = test_state_empty_cache();
         let app_data = web::Data::new(state);
         let req = EvaluateHttpRequest {
@@ -982,11 +982,18 @@ mod tests {
             client_id: Some("cid".into()),
             client_secret: Some("sec".into()),
         };
-        let err = evaluate_handler(app_data, web::Json(req))
+        let resp = evaluate_handler(app_data, web::Json(req))
             .await
-            .err()
-            .expect("expected error");
-        assert_eq!(err.as_response_error().status_code().as_u16(), 502);
+            .expect("should not return error");
+        assert!(!resp.into_inner().enabled); // Should return false when feature not found
+    }
+
+    #[actix_web::test]
+    async fn test_fetch_feature_via_grpc_returns_none_on_error() {
+        // Test that fetch_feature_via_grpc returns None when gRPC call fails
+        let state = test_state_empty_cache();
+        let result = fetch_feature_via_grpc(&state, "nonexistent", "client", "secret").await;
+        assert!(result.is_none()); // Should return None when feature doesn't exist or gRPC fails
     }
 
     #[actix_web::test]

@@ -357,22 +357,25 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
             .await
             .map_err(|e| Status::internal(format!("db error: {}", e)))?;
 
-        let db_feature = features.pop().ok_or_else(|| {
-            Status::not_found("feature with given key not found for client's team")
-        })?;
+        let response = if let Some(db_feature) = features.pop() {
+            let feature_msg = self.map_db_feature_to_full(db_feature).await?;
 
-        let feature_msg = self.map_db_feature_to_full(db_feature).await?;
+            // Track that this client requested this feature key for future update filtering
+            {
+                let mut map = self.requested_keys.write().await;
+                let entry = map.entry(client_id).or_default();
+                entry.insert(req.feature_key.clone());
+            }
 
-        // Track that this client requested this feature key for future update filtering
-        {
-            let mut map = self.requested_keys.write().await;
-            let entry = map.entry(client_id).or_default();
-            entry.insert(req.feature_key.clone());
-        }
+            pb::GetFeatureByKeyResponse {
+                feature: Some(feature_msg),
+            }
+        } else {
+            // Feature not found - return None instead of error
+            pb::GetFeatureByKeyResponse { feature: None }
+        };
 
-        Ok(Response::new(pb::GetFeatureByKeyResponse {
-            feature: Some(feature_msg),
-        }))
+        Ok(Response::new(response))
     }
     async fn push_user_assignments(
         &self,

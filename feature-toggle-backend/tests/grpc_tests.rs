@@ -459,16 +459,20 @@ async fn get_feature_by_key_and_stream_branches() {
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::Unauthenticated);
 
-    // feature not found
-    let err = client
+    // feature not found - should return None, not error
+    let resp = client
         .get_feature_by_key(GetFeatureByKeyRequest {
             feature_key: "NoSuchKey".into(),
             client_id: cid.clone(),
             client_secret: sec.clone(),
         })
         .await
-        .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::NotFound);
+        .unwrap()
+        .into_inner();
+    assert!(
+        resp.feature.is_none(),
+        "Expected None when feature not found"
+    );
 
     // success and track requested_keys
     let resp = client
