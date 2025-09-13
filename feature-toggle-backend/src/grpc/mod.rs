@@ -377,6 +377,57 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
 
         Ok(Response::new(response))
     }
+
+    async fn get_client_info(
+        &self,
+        request: Request<pb::GetClientInfoRequest>,
+    ) -> Result<Response<pb::GetClientInfoResponse>, Status> {
+        let req = request.into_inner();
+
+        if req.client_id.is_empty() {
+            return Err(Status::invalid_argument("client_id is required"));
+        }
+        if req.client_secret.is_empty() {
+            return Err(Status::invalid_argument("client_secret is required"));
+        }
+
+        let client_id = Uuid::parse_str(&req.client_id)
+            .map_err(|_| Status::invalid_argument("client_id must be a UUID"))?;
+
+        // Fetch and authenticate client
+        let client_repo = &self.client_repo;
+        let client = client_repo
+            .get_client_by_id(client_id)
+            .await
+            .map_err(|e| Status::not_found(format!("client not found: {}", e)))?;
+
+        // Validate client secret and status
+        if !client.enabled {
+            return Err(Status::permission_denied("client is disabled"));
+        }
+        if client.api_key != req.client_secret {
+            return Err(Status::unauthenticated("invalid client_secret"));
+        }
+
+        // Map client type to string
+        let client_type_str = match client.client_type {
+            crate::database::entity::ClientType::Web => "Web",
+            crate::database::entity::ClientType::Backend => "Backend",
+        };
+
+        let response = pb::GetClientInfoResponse {
+            id: client.id.to_string(),
+            team_id: client.team_id.to_string(),
+            name: client.name,
+            description: client.description.unwrap_or_default(),
+            enabled: client.enabled,
+            client_type: client_type_str.to_string(),
+            web_origins: client.web_origins.unwrap_or_default(),
+        };
+
+        Ok(Response::new(response))
+    }
+
     async fn push_user_assignments(
         &self,
         request: Request<tonic::Streaming<pb::UserFlagAssignment>>,

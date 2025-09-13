@@ -224,6 +224,61 @@ async fn fetch_feature_via_grpc(
     }
 }
 
+async fn fetch_client_info_via_grpc(
+    app: &AppState,
+    client_id: &str,
+    client_secret: &str,
+) -> Option<pb::GetClientInfoResponse> {
+    let mut client = app.grpc.lock().await;
+    let request = pb::GetClientInfoRequest {
+        client_id: client_id.to_string(),
+        client_secret: client_secret.to_string(),
+    };
+    match client.get_client_info(tonic::Request::new(request)).await {
+        Ok(resp) => Some(resp.into_inner()),
+        Err(e) => {
+            error!("gRPC GetClientInfo error: {}", e);
+            None
+        }
+    }
+}
+
+fn validate_web_origin(
+    http_req: &actix_web::HttpRequest,
+    client_info: &pb::GetClientInfoResponse,
+) -> bool {
+    // Only validate origins for Web clients
+    if client_info.client_type != "Web" {
+        return true; // Backend clients don't need origin validation
+    }
+
+    // Get the Origin header from the request
+    let origin = match http_req.headers().get("origin") {
+        Some(origin_header) => match origin_header.to_str() {
+            Ok(origin_str) => origin_str,
+            Err(_) => {
+                error!("Invalid Origin header format");
+                return false;
+            }
+        },
+        None => {
+            // For web clients, Origin header is required
+            error!("Missing Origin header for web client request");
+            return false;
+        }
+    };
+
+    // Check if the origin is in the allowed list
+    let allowed = client_info.web_origins.contains(&origin.to_string());
+    if !allowed {
+        error!(
+            "Origin '{}' not allowed for client '{}'. Allowed origins: {:?}",
+            origin, client_info.name, client_info.web_origins
+        );
+    }
+    allowed
+}
+
 async fn get_or_fetch_feature(
     app: &AppState,
     feature_key: &str,
@@ -250,6 +305,7 @@ async fn get_or_fetch_feature(
     tag = "edge"
 )]
 async fn evaluate_handler(
+    http_req: actix_web::HttpRequest,
     app: web::Data<AppState>,
     req: web::Json<EvaluateHttpRequest>,
 ) -> actix_web::Result<web::Json<EvaluateHttpResponse>> {
@@ -257,6 +313,20 @@ async fn evaluate_handler(
     let feature_key = req.feature_key.clone();
 
     let (client_id, client_secret) = resolve_credentials(&app, &req);
+
+    // Fetch client information for origin validation
+    let client_info = fetch_client_info_via_grpc(&app, &client_id, &client_secret).await;
+
+    // Validate web origin for web clients (if client info is available)
+    if let Some(ref client_info) = client_info
+        && !validate_web_origin(&http_req, client_info)
+    {
+        eprintln!("Origin validation failed for client: {}", client_info.name);
+        return Err(actix_web::error::ErrorUnauthorized(
+            "Invalid origin for web client",
+        ));
+    }
+
     // Get feature from cache or backend
     let feature = match get_or_fetch_feature(&app, &feature_key, &client_id, &client_secret).await {
         Some(f) => f,
@@ -893,6 +963,22 @@ mod tests {
         assert!(cache.get_by_key("k3").await.is_some());
     }
 
+    fn create_test_http_request() -> actix_web::HttpRequest {
+        use actix_web::test;
+        test::TestRequest::default()
+            .insert_header(("origin", "https://example.com"))
+            .to_http_request()
+    }
+
+    // Test helper wrapper that doesn't require HttpRequest
+    async fn evaluate_handler_test(
+        app: web::Data<AppState>,
+        req: web::Json<EvaluateHttpRequest>,
+    ) -> actix_web::Result<web::Json<EvaluateHttpResponse>> {
+        let http_req = create_test_http_request();
+        evaluate_handler(http_req, app, req).await
+    }
+
     #[actix_web::test]
     async fn test_evaluate_handler_cache_hit_true() {
         let feature = make_feature("featA", "env1", true, "country", &["US"], 100);
@@ -914,7 +1000,9 @@ mod tests {
             client_id: None,
             client_secret: None,
         };
-        let resp = evaluate_handler(app_data, web::Json(req)).await.unwrap();
+        let resp = evaluate_handler_test(app_data, web::Json(req))
+            .await
+            .unwrap();
         assert!(resp.into_inner().enabled);
     }
 
@@ -939,7 +1027,9 @@ mod tests {
             client_id: Some("override_id".into()),
             client_secret: Some("override_secret".into()),
         };
-        let resp = evaluate_handler(app_data, web::Json(req)).await.unwrap();
+        let resp = evaluate_handler_test(app_data, web::Json(req))
+            .await
+            .unwrap();
         assert!(resp.into_inner().enabled);
     }
 
@@ -964,7 +1054,9 @@ mod tests {
             client_id: None,
             client_secret: None,
         };
-        let resp = evaluate_handler(app_data, web::Json(req)).await.unwrap();
+        let resp = evaluate_handler_test(app_data, web::Json(req))
+            .await
+            .unwrap();
         assert!(!resp.into_inner().enabled);
     }
 
@@ -982,7 +1074,7 @@ mod tests {
             client_id: Some("cid".into()),
             client_secret: Some("sec".into()),
         };
-        let resp = evaluate_handler(app_data, web::Json(req))
+        let resp = evaluate_handler_test(app_data, web::Json(req))
             .await
             .expect("should not return error");
         assert!(!resp.into_inner().enabled); // Should return false when feature not found
@@ -1118,7 +1210,9 @@ mod tests {
             client_secret: None,
         };
 
-        let resp = evaluate_handler(app_data, web::Json(req)).await.unwrap();
+        let resp = evaluate_handler_test(app_data, web::Json(req))
+            .await
+            .unwrap();
         assert!(resp.into_inner().enabled); // Should be true due to cached assignment
 
         // Verify evaluation event was recorded with prior_assignment=true
@@ -1162,7 +1256,9 @@ mod tests {
             client_secret: None,
         };
 
-        let resp = evaluate_handler(app_data, web::Json(req)).await.unwrap();
+        let resp = evaluate_handler_test(app_data, web::Json(req))
+            .await
+            .unwrap();
         assert!(resp.into_inner().enabled); // Should be true due to matching criteria
 
         // Verify evaluation event was recorded with prior_assignment=false
@@ -1211,7 +1307,9 @@ mod tests {
             client_secret: None,
         };
 
-        let resp = evaluate_handler(app_data, web::Json(req)).await.unwrap();
+        let resp = evaluate_handler_test(app_data, web::Json(req))
+            .await
+            .unwrap();
         assert!(!resp.into_inner().enabled); // Should be false due to criteria mismatch
 
         // Verify evaluation event was recorded with prior_assignment=false
@@ -1252,7 +1350,9 @@ mod tests {
             client_secret: None,
         };
 
-        let resp = evaluate_handler(app_data, web::Json(req)).await.unwrap();
+        let resp = evaluate_handler_test(app_data, web::Json(req))
+            .await
+            .unwrap();
         let result = resp.into_inner().enabled;
 
         // Verify evaluation event
@@ -1299,7 +1399,9 @@ mod tests {
             client_secret: None,
         };
 
-        let resp = evaluate_handler(app_data, web::Json(req)).await.unwrap();
+        let resp = evaluate_handler_test(app_data, web::Json(req))
+            .await
+            .unwrap();
         assert!(!resp.into_inner().enabled); // Should be false due to disabled stage
 
         // Verify no evaluation event was recorded (early return due to disabled stage)
@@ -1343,7 +1445,9 @@ mod tests {
             client_secret: None,
         };
 
-        let resp = evaluate_handler(app_data, web::Json(req)).await.unwrap();
+        let resp = evaluate_handler_test(app_data, web::Json(req))
+            .await
+            .unwrap();
         assert!(!resp.into_inner().enabled); // Should be false due to 0% rollout
 
         // Verify evaluation event was recorded
@@ -1386,7 +1490,7 @@ mod tests {
             client_secret: None,
         };
 
-        let resp1 = evaluate_handler(app_data.clone(), web::Json(req1))
+        let resp1 = evaluate_handler_test(app_data.clone(), web::Json(req1))
             .await
             .unwrap();
         assert!(resp1.into_inner().enabled);
@@ -1409,7 +1513,9 @@ mod tests {
             client_secret: None,
         };
 
-        let resp2 = evaluate_handler(app_data, web::Json(req2)).await.unwrap();
+        let resp2 = evaluate_handler_test(app_data, web::Json(req2))
+            .await
+            .unwrap();
         assert!(resp2.into_inner().enabled);
 
         // Verify both evaluation events were recorded
@@ -1456,7 +1562,7 @@ mod tests {
             client_secret: None,
         };
 
-        let resp1 = evaluate_handler(app_data.clone(), web::Json(req1))
+        let resp1 = evaluate_handler_test(app_data.clone(), web::Json(req1))
             .await
             .unwrap();
         assert!(resp1.into_inner().enabled);
@@ -1479,7 +1585,9 @@ mod tests {
             client_secret: None,
         };
 
-        let resp2 = evaluate_handler(app_data, web::Json(req2)).await.unwrap();
+        let resp2 = evaluate_handler_test(app_data, web::Json(req2))
+            .await
+            .unwrap();
         assert!(resp2.into_inner().enabled);
 
         // Verify evaluation events
@@ -1556,7 +1664,7 @@ mod tests {
             client_secret: None,
         };
 
-        let _resp = evaluate_handler(app_data, web::Json(req.clone()))
+        let _resp = evaluate_handler_test(app_data, web::Json(req.clone()))
             .await
             .unwrap();
 
@@ -1572,5 +1680,64 @@ mod tests {
         assert!(!event.prior_assignment);
         // evaluated_at should be set to a recent timestamp
         assert!(event.evaluated_at.elapsed().unwrap().as_secs() < 1);
+    }
+
+    #[actix_web::test]
+    async fn test_origin_validation_unauthorized_response() {
+        use actix_web::test;
+
+        // Test that when we have client info but invalid origin, validation fails
+        let feature = make_feature("featAuth", "env1", true, "country", &["US"], 100);
+        let _state = test_state_with_cache(feature).await;
+
+        // Create a test HTTP request with an origin that won't be in allowed list
+        let http_req = test::TestRequest::default()
+            .insert_header(("origin", "https://malicious.com"))
+            .to_http_request();
+
+        // Mock client info that represents a Web client with specific allowed origins
+        let mock_client_info = pb::GetClientInfoResponse {
+            id: "test_client".to_string(),
+            team_id: "team1".to_string(),
+            name: "Test Web Client".to_string(),
+            description: "Test".to_string(),
+            enabled: true,
+            client_type: "Web".to_string(),
+            web_origins: vec![
+                "https://allowed.com".to_string(),
+                "https://example.com".to_string(),
+            ],
+        };
+
+        // Test the validation function directly
+        let validation_result = validate_web_origin(&http_req, &mock_client_info);
+        assert!(
+            !validation_result,
+            "Origin validation should fail for malicious.com"
+        );
+
+        // Test with an allowed origin
+        let http_req_allowed = test::TestRequest::default()
+            .insert_header(("origin", "https://example.com"))
+            .to_http_request();
+
+        let validation_result_allowed = validate_web_origin(&http_req_allowed, &mock_client_info);
+        assert!(
+            validation_result_allowed,
+            "Origin validation should pass for example.com"
+        );
+
+        // Test with Backend client type (should always pass)
+        let mut backend_client_info = mock_client_info.clone();
+        backend_client_info.client_type = "Backend".to_string();
+
+        let validation_result_backend = validate_web_origin(&http_req, &backend_client_info);
+        assert!(
+            validation_result_backend,
+            "Backend clients should always pass origin validation"
+        );
+
+        // Note: Testing the full handler with unauthorized response would require
+        // mocking the gRPC client, which is complex. The validation logic is tested above.
     }
 }

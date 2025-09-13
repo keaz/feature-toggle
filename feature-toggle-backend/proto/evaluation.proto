@@ -151,9 +151,26 @@ message PushEvaluationEventsResponse {
   int32 processed_count = 2;
 }
 
+// Get client information by client credentials
+message GetClientInfoRequest {
+  string client_id = 1;
+  string client_secret = 2;
+}
+
+message GetClientInfoResponse {
+  string id = 1;
+  string team_id = 2;
+  string name = 3;
+  string description = 4;
+  bool enabled = 5;
+  string client_type = 6; // "Web" or "Backend"
+  repeated string web_origins = 7; // Only populated for Web clients
+}
+
 service FeatureEvaluation {
   rpc Evaluate(EvaluateRequest) returns (EvaluateResponse);
   rpc GetFeatureByKey(GetFeatureByKeyRequest) returns (GetFeatureByKeyResponse);
+  rpc GetClientInfo(GetClientInfoRequest) returns (GetClientInfoResponse);
   rpc StreamUpdates(stream StreamRequest) returns (stream FeatureUpdate);
   // Edge pushes sticky user assignments via client-streaming
   rpc PushUserAssignments(stream UserFlagAssignment) returns (Ack);
