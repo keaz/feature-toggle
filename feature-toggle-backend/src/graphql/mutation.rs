@@ -18,7 +18,7 @@ use crate::logic::role::RoleLogic;
 use crate::logic::team::TeamLogic;
 use crate::logic::user::{RegisterUserInput, UpdateGqlUserInput, UserLogic};
 use crate::middleware::admin_guard::AdminState;
-use async_graphql::{Context, Object, Result as GqlResult, ID};
+use async_graphql::{Context, ID, Object, Result as GqlResult};
 use log::info;
 
 #[cfg(test)]
@@ -264,27 +264,27 @@ impl MutationRoot {
         let result = logic.set_stage_criteria(stage_id.clone(), criteria).await?;
 
         // After updating criterias for a stage, broadcast an UPSERT for the owning feature
-        if let (Ok(pool), Ok(updates_tx),
-            Ok(feature_logic)) = (
+        if let (Ok(pool), Ok(updates_tx), Ok(feature_logic)) = (
             ctx.data::<sqlx::PgPool>(),
             ctx.data::<tokio::sync::broadcast::Sender<crate::grpc::pb::FeatureUpdate>>(),
             ctx.data::<Box<dyn FeatureLogic>>(),
         ) && let Ok(Some(feature_id)) = feature_logic
             .get_feature_id_by_stage_id(stage_id.clone())
-            .await {
+            .await
+        {
             let repo = crate::database::feature::feature_repository(pool.clone());
-                if let Ok(db_feature) = repo.get_feature_by_id(feature_id).await
-                    && let Ok(full) =
-                        map_db_feature_to_full_for_broadcast(pool.clone(), db_feature).await
-                {
-                    let _ = updates_tx.send(crate::grpc::pb::FeatureUpdate {
-                        message_id: uuid::Uuid::new_v4().to_string(),
-                        action: crate::grpc::pb::feature_update::Action::Upsert as i32,
-                        feature: Some(full),
-                        feature_key: String::new(),
-                        error: String::new(),
-                    });
-                }
+            if let Ok(db_feature) = repo.get_feature_by_id(feature_id).await
+                && let Ok(full) =
+                    map_db_feature_to_full_for_broadcast(pool.clone(), db_feature).await
+            {
+                let _ = updates_tx.send(crate::grpc::pb::FeatureUpdate {
+                    message_id: uuid::Uuid::new_v4().to_string(),
+                    action: crate::grpc::pb::feature_update::Action::Upsert as i32,
+                    feature: Some(full),
+                    feature_key: String::new(),
+                    error: String::new(),
+                });
+            }
         }
 
         Ok(result)
@@ -342,6 +342,32 @@ impl MutationRoot {
             .request_stage_change(stage_id.clone(), req, user.id)
             .await
             .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+
+        // After successful stage change, publish to gRPC streaming subscribers
+        if let (Ok(pool), Ok(updates_tx)) = (
+            ctx.data::<sqlx::PgPool>(),
+            ctx.data::<tokio::sync::broadcast::Sender<crate::grpc::pb::FeatureUpdate>>(),
+        ) {
+            // Get the feature ID from the returned feature
+            if let Ok(fid) = uuid::Uuid::try_from(feature.id.clone()) {
+                let repo = crate::database::feature::feature_repository(pool.clone());
+                if let Ok(db_feature) = repo.get_feature_by_id(fid).await {
+                    // Map db_feature -> pb::FeatureFull
+                    if let Ok(full) =
+                        map_db_feature_to_full_for_broadcast(pool.clone(), db_feature).await
+                    {
+                        let _ = updates_tx.send(crate::grpc::pb::FeatureUpdate {
+                            message_id: uuid::Uuid::new_v4().to_string(),
+                            action: crate::grpc::pb::feature_update::Action::Upsert as i32,
+                            feature: Some(full),
+                            feature_key: String::new(),
+                            error: String::new(),
+                        });
+                    }
+                }
+            }
+        }
+
         Ok(feature)
     }
 
@@ -386,7 +412,7 @@ impl MutationRoot {
                 first_name: input.first_name,
                 last_name: input.last_name,
                 email: input.email,
-                is_admin: true, // Force admin to true
+                is_admin: true,               // Force admin to true
                 is_temporary_password: false, // Default to temporary password
             })
             .await?;
