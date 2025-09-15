@@ -1706,4 +1706,497 @@ mod more_mutation_tests {
         }];
         feature
     }
+
+    #[tokio::test]
+    async fn test_create_environment_mutation() {
+        use crate::logic::environment::MockEnvironmentLogic;
+
+        let mut mock = MockEnvironmentLogic::new();
+        let team_id = Uuid::new_v4();
+        let env_id = Uuid::new_v4();
+
+        let input = crate::graphql::schema::CreateEnvironmentInput {
+            name: "staging".to_string(),
+            active: true,
+        };
+
+        let expected = crate::graphql::schema::Environment {
+            id: ID::from(env_id),
+            name: "staging".to_string(),
+            team_id: ID::from(team_id),
+            active: true,
+        };
+
+        let team_id_clone = team_id;
+        mock.expect_create_environment()
+            .times(1)
+            .withf(move |tid, inp| {
+                Uuid::try_from(tid.clone()).unwrap() == team_id_clone
+                    && inp.name == "staging"
+                    && inp.active == true
+            })
+            .returning(move |_, _| Ok(expected.clone()));
+
+        let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
+            .data::<Box<dyn crate::logic::environment::EnvironmentLogic>>(Box::new(mock))
+            .finish();
+
+        let gql = r#"
+            mutation($teamId: ID!, $name: String!, $active: Boolean!) {
+                createEnvironment(teamId: $teamId, input: { name: $name, active: $active }) {
+                    id
+                    name
+                    active
+                    teamId
+                }
+            }
+        "#;
+        let mut req = Request::new(gql);
+        req = req.variables(async_graphql::Variables::from_json(serde_json::json!({
+            "teamId": team_id.to_string(),
+            "name": "staging",
+            "active": true
+        })));
+
+        let resp = schema.execute(req).await;
+        assert!(
+            resp.errors.is_empty(),
+            "Expected no errors, but got: {:?}",
+            resp.errors
+        );
+        let data = resp.data.into_json().unwrap();
+        assert_eq!(data["createEnvironment"]["name"], "staging");
+        assert_eq!(data["createEnvironment"]["active"], true);
+    }
+
+    #[tokio::test]
+    async fn test_update_environment_mutation() {
+        use crate::logic::environment::MockEnvironmentLogic;
+
+        let mut mock = MockEnvironmentLogic::new();
+        let env_id = Uuid::new_v4();
+
+        let input = crate::graphql::schema::UpdateEnvironmentInput {
+            name: Some("production".to_string()),
+            active: Some(false),
+        };
+
+        let expected = crate::graphql::schema::Environment {
+            id: ID::from(env_id),
+            name: "production".to_string(),
+            team_id: ID::from(Uuid::new_v4()),
+            active: false,
+        };
+
+        let env_id_clone = env_id;
+        mock.expect_update_environment()
+            .times(1)
+            .withf(move |id, inp| {
+                Uuid::try_from(id.clone()).unwrap() == env_id_clone
+                    && inp.name.as_ref() == Some(&"production".to_string())
+                    && inp.active == Some(false)
+            })
+            .returning(move |_, _| Ok(expected.clone()));
+
+        let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
+            .data::<Box<dyn crate::logic::environment::EnvironmentLogic>>(Box::new(mock))
+            .finish();
+
+        let gql = r#"
+            mutation($id: ID!, $name: String, $active: Boolean) {
+                updateEnvironment(id: $id, input: { name: $name, active: $active }) {
+                    id
+                    name
+                    active
+                }
+            }
+        "#;
+        let mut req = Request::new(gql);
+        req = req.variables(async_graphql::Variables::from_json(serde_json::json!({
+            "id": env_id.to_string(),
+            "name": "production",
+            "active": false
+        })));
+
+        let resp = schema.execute(req).await;
+        assert!(
+            resp.errors.is_empty(),
+            "Expected no errors, but got: {:?}",
+            resp.errors
+        );
+        let data = resp.data.into_json().unwrap();
+        assert_eq!(data["updateEnvironment"]["name"], "production");
+        assert_eq!(data["updateEnvironment"]["active"], false);
+    }
+
+    #[tokio::test]
+    async fn test_delete_environment_mutation() {
+        use crate::logic::environment::MockEnvironmentLogic;
+
+        let mut mock = MockEnvironmentLogic::new();
+        let env_id = Uuid::new_v4();
+
+        let env_id_clone = env_id;
+        mock.expect_delete_environment()
+            .times(1)
+            .withf(move |id| Uuid::try_from(id.clone()).unwrap() == env_id_clone)
+            .returning(move |_| Ok(()));
+
+        let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
+            .data::<Box<dyn crate::logic::environment::EnvironmentLogic>>(Box::new(mock))
+            .finish();
+
+        let gql = r#"
+            mutation($id: ID!) {
+                deleteEnvironment(id: $id)
+            }
+        "#;
+        let mut req = Request::new(gql);
+        req = req.variables(async_graphql::Variables::from_json(serde_json::json!({
+            "id": env_id.to_string()
+        })));
+
+        let resp = schema.execute(req).await;
+        assert!(
+            resp.errors.is_empty(),
+            "Expected no errors, but got: {:?}",
+            resp.errors
+        );
+        let data = resp.data.into_json().unwrap();
+        assert_eq!(data["deleteEnvironment"], true);
+    }
+
+    #[tokio::test]
+    async fn test_create_team_mutation() {
+        use crate::logic::team::MockTeamLogic;
+
+        let mut mock = MockTeamLogic::new();
+        let team_id = Uuid::new_v4();
+
+        let input = crate::graphql::schema::CreateTeamInput {
+            name: "Development Team".to_string(),
+            description: "Team responsible for development".to_string(),
+        };
+
+        let expected = crate::graphql::schema::Team {
+            id: ID::from(team_id),
+            name: "Development Team".to_string(),
+            description: "Team responsible for development".to_string(),
+        };
+
+        mock.expect_create_team()
+            .times(1)
+            .withf(move |inp| {
+                inp.name == "Development Team"
+                    && inp.description == "Team responsible for development"
+            })
+            .returning(move |_| Ok(expected.clone()));
+
+        let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
+            .data::<Box<dyn crate::logic::team::TeamLogic>>(Box::new(mock))
+            .finish();
+
+        let gql = r#"
+            mutation($name: String!, $description: String!) {
+                createTeam(input: { name: $name, description: $description }) {
+                    id
+                    name
+                    description
+                }
+            }
+        "#;
+        let mut req = Request::new(gql);
+        req = req.variables(async_graphql::Variables::from_json(serde_json::json!({
+            "name": "Development Team",
+            "description": "Team responsible for development"
+        })));
+
+        let resp = schema.execute(req).await;
+        assert!(
+            resp.errors.is_empty(),
+            "Expected no errors, but got: {:?}",
+            resp.errors
+        );
+        let data = resp.data.into_json().unwrap();
+        assert_eq!(data["createTeam"]["name"], "Development Team");
+        assert_eq!(
+            data["createTeam"]["description"],
+            "Team responsible for development"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_team_mutation() {
+        use crate::logic::team::MockTeamLogic;
+
+        let mut mock = MockTeamLogic::new();
+        let team_id = Uuid::new_v4();
+
+        let input = crate::graphql::schema::UpdateTeamInput {
+            name: Some("Updated Team".to_string()),
+            description: Some("Updated description".to_string()),
+        };
+
+        let expected = crate::graphql::schema::Team {
+            id: ID::from(team_id),
+            name: "Updated Team".to_string(),
+            description: "Updated description".to_string(),
+        };
+
+        let team_id_clone = team_id;
+        mock.expect_update_team()
+            .times(1)
+            .withf(move |id, inp| {
+                Uuid::try_from(id.clone()).unwrap() == team_id_clone
+                    && inp.name.as_ref() == Some(&"Updated Team".to_string())
+                    && inp.description.as_ref() == Some(&"Updated description".to_string())
+            })
+            .returning(move |_, _| Ok(expected.clone()));
+
+        let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
+            .data::<Box<dyn crate::logic::team::TeamLogic>>(Box::new(mock))
+            .finish();
+
+        let gql = r#"
+            mutation($id: ID!, $name: String, $description: String) {
+                updateTeam(id: $id, input: { name: $name, description: $description }) {
+                    id
+                    name
+                    description
+                }
+            }
+        "#;
+        let mut req = Request::new(gql);
+        req = req.variables(async_graphql::Variables::from_json(serde_json::json!({
+            "id": team_id.to_string(),
+            "name": "Updated Team",
+            "description": "Updated description"
+        })));
+
+        let resp = schema.execute(req).await;
+        assert!(
+            resp.errors.is_empty(),
+            "Expected no errors, but got: {:?}",
+            resp.errors
+        );
+        let data = resp.data.into_json().unwrap();
+        assert_eq!(data["updateTeam"]["name"], "Updated Team");
+        assert_eq!(data["updateTeam"]["description"], "Updated description");
+    }
+
+    #[tokio::test]
+    async fn test_create_pipeline_mutation() {
+        use crate::logic::pipeline::MockPipelineLogic;
+
+        let mut mock = MockPipelineLogic::new();
+        let team_id = Uuid::new_v4();
+        let pipeline_id = Uuid::new_v4();
+        let env_id = Uuid::new_v4();
+
+        let stage_input = crate::graphql::schema::CreateStageInput {
+            environment_id: ID::from(env_id),
+            order_index: 0,
+            position: "dev".to_string(),
+        };
+
+        let _input = crate::graphql::schema::CreatePipelineInput {
+            name: "CI/CD Pipeline".to_string(),
+            stages: vec![stage_input],
+            relationships: vec![],
+        };
+
+        // Mock the validator call to get_pipelines (should return empty for new pipeline)
+        let team_id_clone = team_id;
+        mock.expect_get_pipelines()
+            .times(1)
+            .withf(move |tid, name, active, _fields| {
+                Uuid::try_from(tid.clone()).unwrap() == team_id_clone
+                    && name.as_ref() == Some(&"CI/CD Pipeline".to_string())
+                    && active == &Some(true)
+            })
+            .returning(move |_, _, _, _| Ok(vec![])); // Empty vec means no duplicate
+
+        // Mock the actual create_pipeline call
+        let team_id_clone2 = team_id;
+        mock.expect_create_pipeline()
+            .times(1)
+            .withf(move |tid, inp| {
+                Uuid::try_from(tid.clone()).unwrap() == team_id_clone2
+                    && inp.name == "CI/CD Pipeline"
+                    && inp.stages.len() == 1
+            })
+            .returning(move |_, _| Ok(ID::from(pipeline_id)));
+
+        let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
+            .data::<Box<dyn crate::logic::pipeline::PipelineLogic>>(Box::new(mock))
+            .finish();
+
+        let gql = r#"
+            mutation($teamId: ID!, $name: String!, $environmentId: ID!) {
+                createPipeline(teamId: $teamId, input: { 
+                    name: $name, 
+                    stages: [{ environmentId: $environmentId, orderIndex: 0, position: "dev" }],
+                    relationships: []
+                })
+            }
+        "#;
+        let mut req = Request::new(gql);
+        req = req.variables(async_graphql::Variables::from_json(serde_json::json!({
+            "teamId": team_id.to_string(),
+            "name": "CI/CD Pipeline",
+            "environmentId": env_id.to_string()
+        })));
+
+        let resp = schema.execute(req).await;
+        assert!(
+            resp.errors.is_empty(),
+            "Expected no errors, but got: {:?}",
+            resp.errors
+        );
+        let data = resp.data.into_json().unwrap();
+        assert_eq!(data["createPipeline"], pipeline_id.to_string());
+    }
+
+    #[tokio::test]
+    async fn test_update_pipeline_mutation() {
+        use crate::logic::pipeline::MockPipelineLogic;
+
+        let mut mock = MockPipelineLogic::new();
+        let pipeline_id = Uuid::new_v4();
+        let team_id = Uuid::new_v4();
+        let env_id = Uuid::new_v4();
+
+        let stage_input = crate::graphql::schema::CreateStageInput {
+            environment_id: ID::from(env_id),
+            order_index: 0,
+            position: "prod".to_string(),
+        };
+
+        let _input = crate::graphql::schema::UpdatePipelineInput {
+            name: Some("Updated Pipeline".to_string()),
+            active: Some(false),
+            stages: vec![stage_input],
+            relationships: vec![],
+        };
+
+        let existing_pipeline = crate::graphql::schema::Pipeline {
+            id: ID::from(pipeline_id),
+            name: "Old Pipeline".to_string(),
+            active: true,
+            team_id: ID::from(team_id),
+            stages: vec![],
+            relationships: vec![],
+        };
+
+        let updated_pipeline = crate::graphql::schema::Pipeline {
+            id: ID::from(pipeline_id),
+            name: "Updated Pipeline".to_string(),
+            active: false,
+            team_id: ID::from(team_id),
+            stages: vec![],
+            relationships: vec![],
+        };
+
+        // Mock validator call to get_pipeline_by_id
+        let pipeline_id_clone = pipeline_id;
+        mock.expect_get_pipeline_by_id()
+            .times(1)
+            .withf(move |id| Uuid::try_from(id.clone()).unwrap() == pipeline_id_clone)
+            .returning(move |_| Ok(existing_pipeline.clone()));
+
+        // Mock validator call to get_pipelines (should return empty to allow update)
+        let team_id_clone = team_id;
+        mock.expect_get_pipelines()
+            .times(1)
+            .withf(move |tid, name, active, _fields| {
+                Uuid::try_from(tid.clone()).unwrap() == team_id_clone
+                    && name.as_ref() == Some(&"Updated Pipeline".to_string())
+                    && active == &Some(false)
+            })
+            .returning(move |_, _, _, _| Ok(vec![])); // Empty vec means no duplicate
+
+        // Mock the actual update_pipeline call
+        let pipeline_id_clone2 = pipeline_id;
+        mock.expect_update_pipeline()
+            .times(1)
+            .withf(move |id, inp| {
+                Uuid::try_from(id.clone()).unwrap() == pipeline_id_clone2
+                    && inp.name.as_ref() == Some(&"Updated Pipeline".to_string())
+                    && inp.active == Some(false)
+            })
+            .returning(move |_, _| Ok(updated_pipeline.clone()));
+
+        let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
+            .data::<Box<dyn crate::logic::pipeline::PipelineLogic>>(Box::new(mock))
+            .finish();
+
+        let gql = r#"
+            mutation($id: ID!, $name: String, $active: Boolean, $environmentId: ID!) {
+                updatePipeline(id: $id, input: { 
+                    name: $name, 
+                    active: $active,
+                    stages: [{ environmentId: $environmentId, orderIndex: 0, position: "prod" }],
+                    relationships: []
+                }) {
+                    id
+                    name
+                    active
+                }
+            }
+        "#;
+        let mut req = Request::new(gql);
+        req = req.variables(async_graphql::Variables::from_json(serde_json::json!({
+            "id": pipeline_id.to_string(),
+            "name": "Updated Pipeline",
+            "active": false,
+            "environmentId": env_id.to_string()
+        })));
+
+        let resp = schema.execute(req).await;
+        assert!(
+            resp.errors.is_empty(),
+            "Expected no errors, but got: {:?}",
+            resp.errors
+        );
+        let data = resp.data.into_json().unwrap();
+        assert_eq!(data["updatePipeline"]["name"], "Updated Pipeline");
+        assert_eq!(data["updatePipeline"]["active"], false);
+    }
+
+    #[tokio::test]
+    async fn test_delete_pipeline_mutation() {
+        use crate::logic::pipeline::MockPipelineLogic;
+
+        let mut mock = MockPipelineLogic::new();
+        let pipeline_id = Uuid::new_v4();
+
+        let pipeline_id_clone = pipeline_id;
+        mock.expect_delete_pipeline()
+            .times(1)
+            .withf(move |id| Uuid::try_from(id.clone()).unwrap() == pipeline_id_clone)
+            .returning(move |_| Ok(()));
+
+        let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
+            .data::<Box<dyn crate::logic::pipeline::PipelineLogic>>(Box::new(mock))
+            .finish();
+
+        let gql = r#"
+            mutation($id: ID!) {
+                deletePipeline(id: $id)
+            }
+        "#;
+        let mut req = Request::new(gql);
+        req = req.variables(async_graphql::Variables::from_json(serde_json::json!({
+            "id": pipeline_id.to_string()
+        })));
+
+        let resp = schema.execute(req).await;
+        assert!(
+            resp.errors.is_empty(),
+            "Expected no errors, but got: {:?}",
+            resp.errors
+        );
+        let data = resp.data.into_json().unwrap();
+        assert_eq!(data["deletePipeline"], true);
+    }
 }

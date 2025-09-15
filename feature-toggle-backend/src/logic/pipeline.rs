@@ -10,6 +10,10 @@ use crate::logic::{create_relationships, get_environment_map, map_stages};
 use async_graphql::ID;
 use uuid::Uuid;
 
+#[cfg(test)]
+use mockall::automock;
+
+#[cfg_attr(test, automock)]
 #[async_trait::async_trait]
 pub trait PipelineLogic: Send + Sync {
     async fn get_pipeline_by_id(&self, env_id: ID) -> Result<Pipeline, Error>;

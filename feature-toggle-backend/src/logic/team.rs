@@ -4,6 +4,10 @@ use crate::graphql::schema::{CreateTeamInput, Team, UpdateTeamInput};
 use async_graphql::ID;
 use uuid::Uuid;
 
+#[cfg(test)]
+use mockall::automock;
+
+#[cfg_attr(test, automock)]
 #[async_trait::async_trait]
 pub trait TeamLogic: Send + Sync {
     async fn get_team_by_id(&self, env_id: Uuid) -> Result<Team, Error>;
