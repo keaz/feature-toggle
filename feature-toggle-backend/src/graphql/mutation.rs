@@ -1270,6 +1270,409 @@ mod more_mutation_tests {
         assert!(resp.errors.is_empty(), "Approver operation should succeed");
     }
 
+    #[tokio::test]
+    async fn test_request_stage_change_deployment_requested_updates_status() {
+        use crate::logic::feature::MockFeatureLogic;
+
+        let mut mock = MockFeatureLogic::new();
+        let stage_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+
+        // Mock expects DEPLOYMENT_REQUESTED request
+        mock.expect_request_stage_change()
+            .times(1)
+            .withf(move |sid, req, uid| {
+                Uuid::try_from(sid.clone()).unwrap() == stage_id
+                    && matches!(
+                        req,
+                        crate::logic::feature::StageChangeRequestType::DeploymentRequested
+                    )
+                    && *uid == user_id
+            })
+            .returning(move |_, _, _| {
+                Ok(create_mock_feature_with_stage_status(
+                    "DEPLOYMENT_REQUESTED",
+                ))
+            });
+
+        let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
+            .data::<Box<dyn crate::logic::feature::FeatureLogic>>(Box::new(mock))
+            .data(crate::JwtUser {
+                id: user_id,
+                username: "requester_user".to_string(),
+                is_admin: false,
+                roles: vec!["Requester".to_string()],
+                token_hash: "hash".to_string(),
+            })
+            .finish();
+
+        let gql = r#"
+            mutation($stageId: ID!, $request: StageChangeRequest!) {
+                requestStageChange(stageId: $stageId, request: $request) {
+                    id
+                    key
+                    stages {
+                        status
+                    }
+                }
+            }
+        "#;
+        let mut req = Request::new(gql);
+        req = req.variables(async_graphql::Variables::from_json(serde_json::json!({
+            "stageId": stage_id.to_string(),
+            "request": "DEPLOYMENT_REQUESTED"
+        })));
+
+        let resp = schema.execute(req).await;
+        assert!(
+            resp.errors.is_empty(),
+            "Expected no errors, but got: {}",
+            serde_json::to_string(&resp.errors).unwrap()
+        );
+
+        let data = resp.data.into_json().unwrap();
+        assert_eq!(data["requestStageChange"]["key"], "test_feature");
+    }
+
+    #[tokio::test]
+    async fn test_request_stage_change_deployment_rejected_updates_status() {
+        use crate::logic::feature::MockFeatureLogic;
+
+        let mut mock = MockFeatureLogic::new();
+        let stage_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+
+        mock.expect_request_stage_change()
+            .times(1)
+            .withf(move |sid, req, uid| {
+                Uuid::try_from(sid.clone()).unwrap() == stage_id
+                    && matches!(
+                        req,
+                        crate::logic::feature::StageChangeRequestType::DeploymentRejected
+                    )
+                    && *uid == user_id
+            })
+            .returning(move |_, _, _| {
+                Ok(create_mock_feature_with_stage_status("DEPLOYMENT_REJECTED"))
+            });
+
+        let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
+            .data::<Box<dyn crate::logic::feature::FeatureLogic>>(Box::new(mock))
+            .data(crate::JwtUser {
+                id: user_id,
+                username: "approver_user".to_string(),
+                is_admin: false,
+                roles: vec!["Approver".to_string()],
+                token_hash: "hash".to_string(),
+            })
+            .finish();
+
+        let gql = r#"
+            mutation($stageId: ID!, $request: StageChangeRequest!) {
+                requestStageChange(stageId: $stageId, request: $request) {
+                    id
+                    key
+                }
+            }
+        "#;
+        let mut req = Request::new(gql);
+        req = req.variables(async_graphql::Variables::from_json(serde_json::json!({
+            "stageId": stage_id.to_string(),
+            "request": "DEPLOYMENT_REJECTED"
+        })));
+
+        let resp = schema.execute(req).await;
+        assert!(resp.errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_request_stage_change_deployed_updates_status() {
+        use crate::logic::feature::MockFeatureLogic;
+
+        let mut mock = MockFeatureLogic::new();
+        let stage_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+
+        mock.expect_request_stage_change()
+            .times(1)
+            .withf(move |sid, req, uid| {
+                Uuid::try_from(sid.clone()).unwrap() == stage_id
+                    && matches!(req, crate::logic::feature::StageChangeRequestType::Deployed)
+                    && *uid == user_id
+            })
+            .returning(move |_, _, _| Ok(create_mock_feature_with_stage_status("DEPLOYED")));
+
+        let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
+            .data::<Box<dyn crate::logic::feature::FeatureLogic>>(Box::new(mock))
+            .data(crate::JwtUser {
+                id: user_id,
+                username: "approver_user".to_string(),
+                is_admin: false,
+                roles: vec!["Approver".to_string()],
+                token_hash: "hash".to_string(),
+            })
+            .finish();
+
+        let gql = r#"
+            mutation($stageId: ID!, $request: StageChangeRequest!) {
+                requestStageChange(stageId: $stageId, request: $request) {
+                    id
+                    key
+                }
+            }
+        "#;
+        let mut req = Request::new(gql);
+        req = req.variables(async_graphql::Variables::from_json(serde_json::json!({
+            "stageId": stage_id.to_string(),
+            "request": "DEPLOYED"
+        })));
+
+        let resp = schema.execute(req).await;
+        assert!(resp.errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_request_stage_change_rollback_requested_updates_status() {
+        use crate::logic::feature::MockFeatureLogic;
+
+        let mut mock = MockFeatureLogic::new();
+        let stage_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+
+        mock.expect_request_stage_change()
+            .times(1)
+            .withf(move |sid, req, uid| {
+                Uuid::try_from(sid.clone()).unwrap() == stage_id
+                    && matches!(
+                        req,
+                        crate::logic::feature::StageChangeRequestType::RollbackRequested
+                    )
+                    && *uid == user_id
+            })
+            .returning(move |_, _, _| {
+                Ok(create_mock_feature_with_stage_status("ROLLBACK_REQUESTED"))
+            });
+
+        let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
+            .data::<Box<dyn crate::logic::feature::FeatureLogic>>(Box::new(mock))
+            .data(crate::JwtUser {
+                id: user_id,
+                username: "requester_user".to_string(),
+                is_admin: false,
+                roles: vec!["Requester".to_string()],
+                token_hash: "hash".to_string(),
+            })
+            .finish();
+
+        let gql = r#"
+            mutation($stageId: ID!, $request: StageChangeRequest!) {
+                requestStageChange(stageId: $stageId, request: $request) {
+                    id
+                    key
+                }
+            }
+        "#;
+        let mut req = Request::new(gql);
+        req = req.variables(async_graphql::Variables::from_json(serde_json::json!({
+            "stageId": stage_id.to_string(),
+            "request": "ROLLBACK_REQUESTED"
+        })));
+
+        let resp = schema.execute(req).await;
+        assert!(resp.errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_request_stage_change_rollback_rejected_updates_status() {
+        use crate::logic::feature::MockFeatureLogic;
+
+        let mut mock = MockFeatureLogic::new();
+        let stage_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+
+        mock.expect_request_stage_change()
+            .times(1)
+            .withf(move |sid, req, uid| {
+                Uuid::try_from(sid.clone()).unwrap() == stage_id
+                    && matches!(
+                        req,
+                        crate::logic::feature::StageChangeRequestType::RollbackRejected
+                    )
+                    && *uid == user_id
+            })
+            .returning(move |_, _, _| {
+                Ok(create_mock_feature_with_stage_status("ROLLBACK_REJECTED"))
+            });
+
+        let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
+            .data::<Box<dyn crate::logic::feature::FeatureLogic>>(Box::new(mock))
+            .data(crate::JwtUser {
+                id: user_id,
+                username: "approver_user".to_string(),
+                is_admin: false,
+                roles: vec!["Approver".to_string()],
+                token_hash: "hash".to_string(),
+            })
+            .finish();
+
+        let gql = r#"
+            mutation($stageId: ID!, $request: StageChangeRequest!) {
+                requestStageChange(stageId: $stageId, request: $request) {
+                    id
+                    key
+                }
+            }
+        "#;
+        let mut req = Request::new(gql);
+        req = req.variables(async_graphql::Variables::from_json(serde_json::json!({
+            "stageId": stage_id.to_string(),
+            "request": "ROLLBACK_REJECTED"
+        })));
+
+        let resp = schema.execute(req).await;
+        assert!(resp.errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_request_stage_change_rollbacked_updates_status() {
+        use crate::logic::feature::MockFeatureLogic;
+
+        let mut mock = MockFeatureLogic::new();
+        let stage_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+
+        mock.expect_request_stage_change()
+            .times(1)
+            .withf(move |sid, req, uid| {
+                Uuid::try_from(sid.clone()).unwrap() == stage_id
+                    && matches!(
+                        req,
+                        crate::logic::feature::StageChangeRequestType::Rollbacked
+                    )
+                    && *uid == user_id
+            })
+            .returning(move |_, _, _| Ok(create_mock_feature_with_stage_status("ROLLBACKED")));
+
+        let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
+            .data::<Box<dyn crate::logic::feature::FeatureLogic>>(Box::new(mock))
+            .data(crate::JwtUser {
+                id: user_id,
+                username: "approver_user".to_string(),
+                is_admin: false,
+                roles: vec!["Approver".to_string()],
+                token_hash: "hash".to_string(),
+            })
+            .finish();
+
+        let gql = r#"
+            mutation($stageId: ID!, $request: StageChangeRequest!) {
+                requestStageChange(stageId: $stageId, request: $request) {
+                    id
+                    key
+                }
+            }
+        "#;
+        let mut req = Request::new(gql);
+        req = req.variables(async_graphql::Variables::from_json(serde_json::json!({
+            "stageId": stage_id.to_string(),
+            "request": "ROLLBACKED"
+        })));
+
+        let resp = schema.execute(req).await;
+        assert!(resp.errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_request_stage_change_without_authentication_fails() {
+        use crate::logic::feature::MockFeatureLogic;
+
+        let mock = MockFeatureLogic::new();
+
+        let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
+            .data::<Box<dyn crate::logic::feature::FeatureLogic>>(Box::new(mock))
+            // No JWT user data
+            .finish();
+
+        let gql = r#"
+            mutation($stageId: ID!, $request: StageChangeRequest!) {
+                requestStageChange(stageId: $stageId, request: $request) {
+                    id
+                    key
+                }
+            }
+        "#;
+        let mut req = Request::new(gql);
+        req = req.variables(async_graphql::Variables::from_json(serde_json::json!({
+            "stageId": Uuid::new_v4().to_string(),
+            "request": "DEPLOYMENT_REQUESTED"
+        })));
+
+        let resp = schema.execute(req).await;
+        assert!(!resp.errors.is_empty());
+        assert!(
+            resp.errors[0]
+                .message
+                .contains("User authentication not found")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_request_stage_change_enum_conversion_matches_logic_type() {
+        // This test ensures GraphQL enum variants map correctly to logic enum variants
+        use crate::logic::feature::StageChangeRequestType;
+
+        // Test conversion from GraphQL enum to logic enum
+        let conversions = vec![
+            (
+                StageChangeRequest::DeploymentRequested,
+                StageChangeRequestType::DeploymentRequested,
+            ),
+            (
+                StageChangeRequest::DeploymentRejected,
+                StageChangeRequestType::DeploymentRejected,
+            ),
+            (
+                StageChangeRequest::Deployed,
+                StageChangeRequestType::Deployed,
+            ),
+            (
+                StageChangeRequest::RollbackRequested,
+                StageChangeRequestType::RollbackRequested,
+            ),
+            (
+                StageChangeRequest::RollbackRejected,
+                StageChangeRequestType::RollbackRejected,
+            ),
+            (
+                StageChangeRequest::Rollbacked,
+                StageChangeRequestType::Rollbacked,
+            ),
+        ];
+
+        for (gql_enum, logic_enum) in conversions {
+            let logic_converted = match gql_enum {
+                StageChangeRequest::DeploymentRequested => {
+                    StageChangeRequestType::DeploymentRequested
+                }
+                StageChangeRequest::DeploymentRejected => {
+                    StageChangeRequestType::DeploymentRejected
+                }
+                StageChangeRequest::Deployed => StageChangeRequestType::Deployed,
+                StageChangeRequest::RollbackRequested => StageChangeRequestType::RollbackRequested,
+                StageChangeRequest::RollbackRejected => StageChangeRequestType::RollbackRejected,
+                StageChangeRequest::Rollbacked => StageChangeRequestType::Rollbacked,
+            };
+
+            assert_eq!(
+                std::mem::discriminant(&logic_converted),
+                std::mem::discriminant(&logic_enum),
+                "GraphQL enum {:?} should map to logic enum {:?}",
+                gql_enum,
+                logic_enum
+            );
+        }
+    }
+
     // Helper function to create a mock feature for testing
     fn create_mock_feature() -> crate::graphql::schema::Feature {
         crate::graphql::schema::Feature {
@@ -1283,5 +1686,24 @@ mod more_mutation_tests {
             stages: vec![],
             team_id: async_graphql::ID::from(Uuid::new_v4().to_string()),
         }
+    }
+
+    // Helper function to create a mock feature with a specific stage status
+    fn create_mock_feature_with_stage_status(status: &str) -> crate::graphql::schema::Feature {
+        let mut feature = create_mock_feature();
+        feature.stages = vec![crate::graphql::schema::FeatureStage {
+            id: async_graphql::ID::from(Uuid::new_v4().to_string()),
+            environment: crate::graphql::schema::Environment {
+                id: async_graphql::ID::from(Uuid::new_v4().to_string()),
+                name: "test_env".to_string(),
+                team_id: async_graphql::ID::from(Uuid::new_v4().to_string()),
+                active: true,
+            },
+            order_index: 0,
+            position: "test_position".to_string(),
+            bucketing_key: None,
+            status: status.to_string(),
+        }];
+        feature
     }
 }

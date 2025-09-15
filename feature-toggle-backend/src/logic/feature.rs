@@ -743,4 +743,510 @@ mod test {
         let features = result.unwrap();
         assert_eq!(features.len(), 2);
     }
+
+    #[tokio::test]
+    async fn test_request_stage_change_deployment_requested() {
+        let mut repository = MockFeatureRepository::new();
+        let environment_logic = MockEnvironmentLogic::new();
+
+        let stage_id = Uuid::new_v4();
+        let feature_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+
+        // Mock the feature lookup for stage validation
+        repository
+            .expect_get_feature_id_by_stage_id()
+            .with(mockall::predicate::eq(stage_id))
+            .times(2) // Called twice: once for validation, once after update
+            .returning(move |_| Ok(Some(feature_id)));
+
+        // Mock the feature retrieval for validation
+        repository
+            .expect_get_feature_by_id()
+            .with(mockall::predicate::eq(feature_id))
+            .times(2) // Called once for validation, once after update
+            .returning(move |_| {
+                Ok(create_entity_feature_with_stage_status(
+                    feature_id,
+                    stage_id,
+                    "NOT_DEPLOYED",
+                ))
+            });
+
+        // Mock the stage change request
+        repository
+            .expect_request_stage_change()
+            .with(
+                mockall::predicate::eq(stage_id),
+                mockall::predicate::eq("DEPLOYMENT_REQUESTED"),
+                mockall::predicate::eq(user_id),
+                mockall::predicate::function(|_: &chrono::DateTime<chrono::Utc>| true),
+            )
+            .times(1)
+            .returning(|_, _, _, _| Ok(true));
+
+        let logic = feature_logic(Box::new(repository), Box::new(environment_logic));
+        let result = logic
+            .request_stage_change(
+                ID::from(stage_id),
+                StageChangeRequestType::DeploymentRequested,
+                user_id,
+            )
+            .await;
+
+        assert!(result.is_ok());
+        let feature = result.unwrap();
+        assert_eq!(feature.id, ID::from(feature_id));
+    }
+
+    #[tokio::test]
+    async fn test_request_stage_change_deployment_rejected() {
+        let mut repository = MockFeatureRepository::new();
+        let environment_logic = MockEnvironmentLogic::new();
+
+        let stage_id = Uuid::new_v4();
+        let feature_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+
+        // Mock the feature lookup for stage validation
+        repository
+            .expect_get_feature_id_by_stage_id()
+            .with(mockall::predicate::eq(stage_id))
+            .times(2)
+            .returning(move |_| Ok(Some(feature_id)));
+
+        // Mock the feature retrieval for validation
+        repository
+            .expect_get_feature_by_id()
+            .with(mockall::predicate::eq(feature_id))
+            .times(2)
+            .returning(move |_| {
+                Ok(create_entity_feature_with_stage_status(
+                    feature_id,
+                    stage_id,
+                    "DEPLOYMENT_REQUESTED",
+                ))
+            });
+
+        // Mock the stage change approval/rejection
+        repository
+            .expect_approve_or_reject_stage_change()
+            .with(
+                mockall::predicate::eq(stage_id),
+                mockall::predicate::eq("DEPLOYMENT_REJECTED"),
+                mockall::predicate::eq(user_id),
+            )
+            .times(1)
+            .returning(|_, _, _| Ok(true));
+
+        let logic = feature_logic(Box::new(repository), Box::new(environment_logic));
+        let result = logic
+            .request_stage_change(
+                ID::from(stage_id),
+                StageChangeRequestType::DeploymentRejected,
+                user_id,
+            )
+            .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_request_stage_change_deployed() {
+        let mut repository = MockFeatureRepository::new();
+        let environment_logic = MockEnvironmentLogic::new();
+
+        let stage_id = Uuid::new_v4();
+        let feature_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+
+        repository
+            .expect_get_feature_id_by_stage_id()
+            .with(mockall::predicate::eq(stage_id))
+            .times(2)
+            .returning(move |_| Ok(Some(feature_id)));
+
+        repository
+            .expect_get_feature_by_id()
+            .with(mockall::predicate::eq(feature_id))
+            .times(2)
+            .returning(move |_| {
+                Ok(create_entity_feature_with_stage_status(
+                    feature_id,
+                    stage_id,
+                    "DEPLOYMENT_REQUESTED",
+                ))
+            });
+
+        repository
+            .expect_approve_or_reject_stage_change()
+            .with(
+                mockall::predicate::eq(stage_id),
+                mockall::predicate::eq("DEPLOYED"),
+                mockall::predicate::eq(user_id),
+            )
+            .times(1)
+            .returning(|_, _, _| Ok(true));
+
+        let logic = feature_logic(Box::new(repository), Box::new(environment_logic));
+        let result = logic
+            .request_stage_change(
+                ID::from(stage_id),
+                StageChangeRequestType::Deployed,
+                user_id,
+            )
+            .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_request_stage_change_rollback_requested() {
+        let mut repository = MockFeatureRepository::new();
+        let environment_logic = MockEnvironmentLogic::new();
+
+        let stage_id = Uuid::new_v4();
+        let feature_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+
+        repository
+            .expect_get_feature_id_by_stage_id()
+            .with(mockall::predicate::eq(stage_id))
+            .times(2)
+            .returning(move |_| Ok(Some(feature_id)));
+
+        repository
+            .expect_get_feature_by_id()
+            .with(mockall::predicate::eq(feature_id))
+            .times(2)
+            .returning(move |_| {
+                Ok(create_entity_feature_with_stage_status(
+                    feature_id, stage_id, "DEPLOYED",
+                ))
+            });
+
+        repository
+            .expect_request_stage_change()
+            .with(
+                mockall::predicate::eq(stage_id),
+                mockall::predicate::eq("ROLLBACK_REQUESTED"),
+                mockall::predicate::eq(user_id),
+                mockall::predicate::function(|_: &chrono::DateTime<chrono::Utc>| true),
+            )
+            .times(1)
+            .returning(|_, _, _, _| Ok(true));
+
+        let logic = feature_logic(Box::new(repository), Box::new(environment_logic));
+        let result = logic
+            .request_stage_change(
+                ID::from(stage_id),
+                StageChangeRequestType::RollbackRequested,
+                user_id,
+            )
+            .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_request_stage_change_rollback_rejected() {
+        let mut repository = MockFeatureRepository::new();
+        let environment_logic = MockEnvironmentLogic::new();
+
+        let stage_id = Uuid::new_v4();
+        let feature_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+
+        repository
+            .expect_get_feature_id_by_stage_id()
+            .with(mockall::predicate::eq(stage_id))
+            .times(2)
+            .returning(move |_| Ok(Some(feature_id)));
+
+        repository
+            .expect_get_feature_by_id()
+            .with(mockall::predicate::eq(feature_id))
+            .times(2)
+            .returning(move |_| {
+                Ok(create_entity_feature_with_stage_status(
+                    feature_id,
+                    stage_id,
+                    "ROLLBACK_REQUESTED",
+                ))
+            });
+
+        repository
+            .expect_approve_or_reject_stage_change()
+            .with(
+                mockall::predicate::eq(stage_id),
+                mockall::predicate::eq("ROLLBACK_REJECTED"),
+                mockall::predicate::eq(user_id),
+            )
+            .times(1)
+            .returning(|_, _, _| Ok(true));
+
+        let logic = feature_logic(Box::new(repository), Box::new(environment_logic));
+        let result = logic
+            .request_stage_change(
+                ID::from(stage_id),
+                StageChangeRequestType::RollbackRejected,
+                user_id,
+            )
+            .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_request_stage_change_rollbacked() {
+        let mut repository = MockFeatureRepository::new();
+        let environment_logic = MockEnvironmentLogic::new();
+
+        let stage_id = Uuid::new_v4();
+        let feature_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+
+        repository
+            .expect_get_feature_id_by_stage_id()
+            .with(mockall::predicate::eq(stage_id))
+            .times(2)
+            .returning(move |_| Ok(Some(feature_id)));
+
+        repository
+            .expect_get_feature_by_id()
+            .with(mockall::predicate::eq(feature_id))
+            .times(2)
+            .returning(move |_| {
+                Ok(create_entity_feature_with_stage_status(
+                    feature_id,
+                    stage_id,
+                    "ROLLBACK_REQUESTED",
+                ))
+            });
+
+        repository
+            .expect_approve_or_reject_stage_change()
+            .with(
+                mockall::predicate::eq(stage_id),
+                mockall::predicate::eq("ROLLBACKED"),
+                mockall::predicate::eq(user_id),
+            )
+            .times(1)
+            .returning(|_, _, _| Ok(true));
+
+        let logic = feature_logic(Box::new(repository), Box::new(environment_logic));
+        let result = logic
+            .request_stage_change(
+                ID::from(stage_id),
+                StageChangeRequestType::Rollbacked,
+                user_id,
+            )
+            .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_request_stage_change_invalid_transition() {
+        let mut repository = MockFeatureRepository::new();
+        let environment_logic = MockEnvironmentLogic::new();
+
+        let stage_id = Uuid::new_v4();
+        let feature_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+
+        repository
+            .expect_get_feature_id_by_stage_id()
+            .with(mockall::predicate::eq(stage_id))
+            .times(1)
+            .returning(move |_| Ok(Some(feature_id)));
+
+        repository
+            .expect_get_feature_by_id()
+            .with(mockall::predicate::eq(feature_id))
+            .times(1)
+            .returning(move |_| {
+                // Current status is NOT_DEPLOYED, trying to transition to DEPLOYED (should fail)
+                Ok(create_entity_feature_with_stage_status(
+                    feature_id,
+                    stage_id,
+                    "NOT_DEPLOYED",
+                ))
+            });
+
+        let logic = feature_logic(Box::new(repository), Box::new(environment_logic));
+        let result = logic
+            .request_stage_change(
+                ID::from(stage_id),
+                StageChangeRequestType::Deployed, // Invalid: can't go from NOT_DEPLOYED to DEPLOYED
+                user_id,
+            )
+            .await;
+
+        assert!(result.is_err());
+        match result.err().unwrap() {
+            Error::InvalidInput(msg) => {
+                assert!(msg.contains("Invalid transition"));
+            }
+            _ => panic!("Expected InvalidInput error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_request_stage_change_nonexistent_stage() {
+        let mut repository = MockFeatureRepository::new();
+        let environment_logic = MockEnvironmentLogic::new();
+
+        let stage_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+
+        repository
+            .expect_get_feature_id_by_stage_id()
+            .with(mockall::predicate::eq(stage_id))
+            .times(1)
+            .returning(|_| Ok(None)); // Stage not found
+
+        let logic = feature_logic(Box::new(repository), Box::new(environment_logic));
+        let result = logic
+            .request_stage_change(
+                ID::from(stage_id),
+                StageChangeRequestType::DeploymentRequested,
+                user_id,
+            )
+            .await;
+
+        assert!(result.is_err());
+        match result.err().unwrap() {
+            Error::NotFound(_) => {
+                // Expected error type
+            }
+            _ => panic!("Expected NotFound error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_request_stage_change_repository_failure() {
+        let mut repository = MockFeatureRepository::new();
+        let environment_logic = MockEnvironmentLogic::new();
+
+        let stage_id = Uuid::new_v4();
+        let feature_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+
+        repository
+            .expect_get_feature_id_by_stage_id()
+            .with(mockall::predicate::eq(stage_id))
+            .times(1) // Only called once because the operation fails
+            .returning(move |_| Ok(Some(feature_id)));
+
+        repository
+            .expect_get_feature_by_id()
+            .with(mockall::predicate::eq(feature_id))
+            .times(1)
+            .returning(move |_| {
+                Ok(create_entity_feature_with_stage_status(
+                    feature_id,
+                    stage_id,
+                    "NOT_DEPLOYED",
+                ))
+            });
+
+        repository
+            .expect_request_stage_change()
+            .with(
+                mockall::predicate::eq(stage_id),
+                mockall::predicate::eq("DEPLOYMENT_REQUESTED"),
+                mockall::predicate::eq(user_id),
+                mockall::predicate::function(|_: &chrono::DateTime<chrono::Utc>| true),
+            )
+            .times(1)
+            .returning(|_, _, _, _| Ok(false)); // Repository operation failed
+
+        let logic = feature_logic(Box::new(repository), Box::new(environment_logic));
+        let result = logic
+            .request_stage_change(
+                ID::from(stage_id),
+                StageChangeRequestType::DeploymentRequested,
+                user_id,
+            )
+            .await;
+
+        assert!(result.is_err());
+        match result.err().unwrap() {
+            Error::NotFound(_) => {
+                // Expected error type when repository operation fails
+            }
+            _ => panic!("Expected NotFound error when repository operation fails"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_request_stage_change_enum_to_string_mapping() {
+        // Test that the enum variants map to the correct string values
+        let mappings = vec![
+            (
+                StageChangeRequestType::DeploymentRequested,
+                "DEPLOYMENT_REQUESTED",
+            ),
+            (
+                StageChangeRequestType::DeploymentRejected,
+                "DEPLOYMENT_REJECTED",
+            ),
+            (StageChangeRequestType::Deployed, "DEPLOYED"),
+            (
+                StageChangeRequestType::RollbackRequested,
+                "ROLLBACK_REQUESTED",
+            ),
+            (
+                StageChangeRequestType::RollbackRejected,
+                "ROLLBACK_REJECTED",
+            ),
+            (StageChangeRequestType::Rollbacked, "ROLLBACKED"),
+        ];
+
+        for (enum_val, expected_string) in mappings {
+            let string_val = match enum_val {
+                StageChangeRequestType::DeploymentRequested => "DEPLOYMENT_REQUESTED",
+                StageChangeRequestType::DeploymentRejected => "DEPLOYMENT_REJECTED",
+                StageChangeRequestType::Deployed => "DEPLOYED",
+                StageChangeRequestType::RollbackRequested => "ROLLBACK_REQUESTED",
+                StageChangeRequestType::RollbackRejected => "ROLLBACK_REJECTED",
+                StageChangeRequestType::Rollbacked => "ROLLBACKED",
+            };
+
+            assert_eq!(
+                string_val, expected_string,
+                "Enum {:?} should map to string '{}'",
+                enum_val, expected_string
+            );
+        }
+    }
+
+    // Helper function to create entity feature with stage status for testing
+    fn create_entity_feature_with_stage_status(
+        feature_id: Uuid,
+        stage_id: Uuid,
+        status: &str,
+    ) -> crate::database::entity::Feature {
+        crate::database::entity::Feature {
+            id: feature_id,
+            key: "Test Feature".to_string(),
+            description: Some("Test description".to_string()),
+            feature_type: crate::database::entity::FeatureType::Simple,
+            team_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
+            created_at: chrono::Utc::now(),
+            stages: vec![crate::database::entity::FeaturePipelineStage {
+                id: stage_id,
+                feature_id,
+                environment_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
+                order_index: 0,
+                parent_stage_id: None,
+                position: "{ \"x\": 250, \"y\": 250 }".to_string(),
+                enabled: true,
+                bucketing_key: None,
+                status: status.to_string(),
+            }],
+            dependencies: vec![],
+        }
+    }
 }
