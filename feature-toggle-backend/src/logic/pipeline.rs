@@ -6,6 +6,7 @@ use crate::graphql::schema::{
     PipelineRelationship, PipelineStage, UpdatePipelineInput,
 };
 use crate::logic::environment::EnvironmentLogic;
+use crate::logic::stage_builder::{build_stage_relationships, id_to_uuid};
 use crate::logic::{create_relationships, get_environment_map, map_stages};
 use async_graphql::ID;
 use uuid::Uuid;
@@ -212,12 +213,12 @@ fn get_stages_to_create(
     stages: Vec<CreateStageInput>,
     relationships: Vec<CreateRelationshipInput>,
 ) -> Vec<CreateStage> {
-    let mut stages = stages
+    let stages = stages
         .into_iter()
         .map(|stage| {
             CreateStage::new(
                 Uuid::new_v4(),
-                Uuid::try_from(stage.environment_id.clone()).unwrap(),
+                id_to_uuid(stage.environment_id).unwrap(),
                 stage.order_index,
                 None,
                 stage.position,
@@ -225,29 +226,8 @@ fn get_stages_to_create(
         })
         .collect::<Vec<CreateStage>>();
 
-    //#FIXME: This code is duplicated and should be refactored
-    let cloned_stages = stages.clone();
-    let relationships_map = relationships
-        .iter()
-        .map(|relationship| {
-            let stage = cloned_stages
-                .iter()
-                .find(|stage| stage.order_index == relationship.source_id);
-            (
-                relationship.source_id,
-                relationship.target_id,
-                stage.unwrap(),
-            ) // Stage should always be present
-        })
-        .collect::<Vec<(i32, i32, &CreateStage)>>();
-
-    for (_, target_id, stage) in relationships_map {
-        if let Some(target_stage) = stages.iter_mut().find(|s| s.order_index == target_id) {
-            target_stage.parent_stage = Some(Box::new(stage.clone()));
-        }
-    }
-
-    stages
+    // Use shared relationship building logic
+    build_stage_relationships(stages, relationships)
 }
 
 #[cfg(test)]

@@ -56,6 +56,16 @@ impl CreateFeatureStage {
     }
 }
 
+impl crate::logic::stage_builder::StageWithRelationship for CreateFeatureStage {
+    fn order_index(&self) -> i32 {
+        self.order_index
+    }
+
+    fn set_parent_stage(&mut self, parent: Box<Self>) {
+        self.parent_stage = Some(parent);
+    }
+}
+
 pub struct UpdateFeature {
     pub id: Uuid,
     pub key: Option<String>,

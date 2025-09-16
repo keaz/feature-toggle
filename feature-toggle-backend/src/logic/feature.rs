@@ -8,8 +8,10 @@ use crate::graphql::schema::{
     FeatureRelationship, FeatureStage, FeatureType as GraphQLFeatureType, UpdateFeatureInput,
 };
 use crate::logic::environment::EnvironmentLogic;
+use crate::logic::stage_builder::{build_stage_relationships, id_to_uuid};
 use crate::logic::{create_relationships, get_environment_map, map_stages};
 use async_graphql::ID;
+use feature_toggle_shared::constants::StageStatus;
 use uuid::Uuid;
 
 use mockall::automock;
@@ -26,7 +28,9 @@ pub enum StageChangeRequestType {
 
 #[automock]
 #[async_trait::async_trait]
-pub trait FeatureLogic: Send + Sync {
+/// Core CRUD operations for features
+#[async_trait::async_trait]
+pub trait FeatureCrudLogic: Send + Sync {
     async fn get_feature_by_id(&self, id: ID) -> Result<Feature, Error>;
     async fn get_features(
         &self,
@@ -34,11 +38,15 @@ pub trait FeatureLogic: Send + Sync {
         name: Option<String>,
         feature_type: Option<GraphQLFeatureType>,
     ) -> Result<Vec<Feature>, Error>;
-
     async fn create_feature(&self, team_id: ID, input: CreateFeatureInput) -> Result<ID, Error>;
     async fn update_feature(&self, id: ID, input: UpdateFeatureInput) -> Result<Feature, Error>;
     async fn delete_feature(&self, id: ID) -> Result<(), Error>;
+}
 
+/// Stage context and criteria management operations
+#[automock]
+#[async_trait::async_trait]
+pub trait StageLogic: Send + Sync {
     // Stage-contexts
     async fn get_stage_contexts(
         &self,
@@ -60,8 +68,12 @@ pub trait FeatureLogic: Send + Sync {
         stage_id: ID,
         criteria: Vec<crate::graphql::schema::CreateStageCriterionInput>,
     ) -> Result<Vec<crate::graphql::schema::StageCriterion>, Error>;
+}
 
-    // Deployment workflow
+/// Deployment workflow and stage change operations
+#[automock]
+#[async_trait::async_trait]
+pub trait DeploymentLogic: Send + Sync {
     async fn request_stage_change(
         &self,
         stage_id: ID,
@@ -71,8 +83,67 @@ pub trait FeatureLogic: Send + Sync {
 
     // Helper for GraphQL broadcasting: get owning feature id by stage id
     async fn get_feature_id_by_stage_id(&self, stage_id: ID) -> Result<Option<Uuid>, Error>;
+}
 
+/// Combined interface for backward compatibility and convenience
+pub trait FeatureLogic: FeatureCrudLogic + StageLogic + DeploymentLogic + Send + Sync {
     fn clone_box(&self) -> Box<dyn FeatureLogic>;
+}
+
+#[cfg(test)]
+mockall::mock! {
+    pub FeatureLogic {}
+
+    #[async_trait::async_trait]
+    impl FeatureCrudLogic for FeatureLogic {
+        async fn get_feature_by_id(&self, id: ID) -> Result<Feature, Error>;
+        async fn get_features(
+            &self,
+            team_id: ID,
+            name: Option<String>,
+            feature_type: Option<GraphQLFeatureType>,
+        ) -> Result<Vec<Feature>, Error>;
+        async fn create_feature(&self, team_id: ID, input: CreateFeatureInput) -> Result<ID, Error>;
+        async fn update_feature(&self, id: ID, input: UpdateFeatureInput) -> Result<Feature, Error>;
+        async fn delete_feature(&self, id: ID) -> Result<(), Error>;
+    }
+
+    #[async_trait::async_trait]
+    impl StageLogic for FeatureLogic {
+        async fn get_stage_contexts(
+            &self,
+            stage_id: ID,
+        ) -> Result<Vec<crate::graphql::schema::Context>, Error>;
+        async fn set_stage_contexts(
+            &self,
+            stage_id: ID,
+            context_ids: Vec<ID>,
+        ) -> Result<Vec<crate::graphql::schema::Context>, Error>;
+        async fn get_stage_criteria(
+            &self,
+            stage_id: ID,
+        ) -> Result<Vec<crate::graphql::schema::StageCriterion>, Error>;
+        async fn set_stage_criteria(
+            &self,
+            stage_id: ID,
+            criteria: Vec<crate::graphql::schema::CreateStageCriterionInput>,
+        ) -> Result<Vec<crate::graphql::schema::StageCriterion>, Error>;
+    }
+
+    #[async_trait::async_trait]
+    impl DeploymentLogic for FeatureLogic {
+        async fn request_stage_change(
+            &self,
+            stage_id: ID,
+            request: StageChangeRequestType,
+            user_id: Uuid,
+        ) -> Result<Feature, Error>;
+        async fn get_feature_id_by_stage_id(&self, stage_id: ID) -> Result<Option<Uuid>, Error>;
+    }
+
+    impl crate::logic::feature::FeatureLogic for FeatureLogic {
+        fn clone_box(&self) -> Box<dyn crate::logic::feature::FeatureLogic>;
+    }
 }
 
 impl Clone for Box<dyn FeatureLogic> {
@@ -112,85 +183,74 @@ impl FeatureLogicImpl {
         }
     }
 
-    fn map_to_create_feature(team_id: Uuid, input: CreateFeatureInput) -> CreateFeature {
+    fn map_to_create_feature(
+        team_id: Uuid,
+        input: CreateFeatureInput,
+    ) -> Result<CreateFeature, Error> {
         let feature_type = Self::map_graphql_to_entity_feature_type(input.feature_type);
-        let stages = Self::get_create_stages_to_create(input.stages, input.relationships);
+        let stages = Self::get_create_stages_to_create(input.stages, input.relationships)?;
 
-        CreateFeature {
+        let dependencies = input
+            .dependencies
+            .into_iter()
+            .map(|id| id_to_uuid(id))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(CreateFeature {
             team_id,
             key: input.key,
             description: input.description,
             feature_type,
             stages,
-            dependencies: input
-                .dependencies
-                .into_iter()
-                .map(|id| Uuid::try_from(id).unwrap())
-                .collect(),
-        }
+            dependencies,
+        })
     }
 
     fn get_create_stages_to_create(
         stages: Vec<CreateFeatureStageInput>,
         relationships: Vec<CreateRelationshipInput>,
-    ) -> Vec<CreateFeatureStage> {
-        let mut stages = stages
+    ) -> Result<Vec<CreateFeatureStage>, Error> {
+        let stages = stages
             .into_iter()
-            .map(|stage| CreateFeatureStage {
-                id: stage
-                    .id
-                    .map_or_else(Uuid::new_v4, |id| Uuid::try_from(id).unwrap()),
-                environment_id: Uuid::try_from(stage.environment_id.clone()).unwrap(),
-                order_index: stage.order_index,
-                position: stage.position,
-                enabled: false,
-                bucketing_key: stage.bucketing_key.clone(),
-                parent_stage: None,
+            .map(|stage| -> Result<CreateFeatureStage, Error> {
+                Ok(CreateFeatureStage {
+                    id: match stage.id {
+                        Some(id) => id_to_uuid(id)?,
+                        None => Uuid::new_v4(),
+                    },
+                    environment_id: id_to_uuid(stage.environment_id)?,
+                    order_index: stage.order_index,
+                    position: stage.position,
+                    enabled: false,
+                    bucketing_key: stage.bucketing_key.clone(),
+                    parent_stage: None,
+                })
             })
-            .collect::<Vec<CreateFeatureStage>>();
+            .collect::<Result<Vec<CreateFeatureStage>, Error>>()?;
 
-        //#FIXME: this duplicate logic should be refactored, this is in both pipeline.rs and feature.rs
-        let cloned_stages = stages.clone();
-        let relationships_map = relationships
-            .iter()
-            .map(|relationship| {
-                let stage = cloned_stages
-                    .iter()
-                    .find(|stage| stage.order_index == relationship.source_id);
-                (
-                    relationship.source_id,
-                    relationship.target_id,
-                    stage.unwrap(),
-                ) // Stage should always be present
-            })
-            .collect::<Vec<(i32, i32, &CreateFeatureStage)>>();
-
-        for (_, target_id, stage) in relationships_map {
-            if let Some(target_stage) = stages.iter_mut().find(|s| s.order_index == target_id) {
-                target_stage.parent_stage = Some(Box::new(stage.clone()));
-            }
-        }
-
-        stages
+        // Use shared relationship building logic
+        Ok(build_stage_relationships(stages, relationships))
     }
 
-    fn map_to_update_feature(id: ID, input: UpdateFeatureInput) -> UpdateFeature {
-        let id = Uuid::try_from(id).unwrap();
+    fn map_to_update_feature(id: ID, input: UpdateFeatureInput) -> Result<UpdateFeature, Error> {
+        let id = id_to_uuid(id)?;
         let feature_type = Some(Self::map_graphql_to_entity_feature_type(input.feature_type));
 
-        let stages = Self::get_create_stages_to_create(input.stages, input.relationships);
-        UpdateFeature {
+        let stages = Self::get_create_stages_to_create(input.stages, input.relationships)?;
+        let dependencies = input
+            .dependencies
+            .into_iter()
+            .map(|id| id_to_uuid(id))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(UpdateFeature {
             id,
             key: Some(input.key),
             description: input.description,
             feature_type,
             stages,
-            dependencies: input
-                .dependencies
-                .into_iter()
-                .map(|id| Uuid::try_from(id).unwrap())
-                .collect(),
-        }
+            dependencies,
+        })
     }
 
     fn map_entity_to_graphql_feature(feature: crate::database::entity::Feature) -> Feature {
@@ -213,7 +273,7 @@ impl FeatureLogicImpl {
 }
 
 #[async_trait::async_trait]
-impl FeatureLogic for FeatureLogicImpl {
+impl FeatureCrudLogic for FeatureLogicImpl {
     async fn get_feature_by_id(&self, id: ID) -> Result<Feature, Error> {
         let id = Uuid::try_from(id).map_err(|_| Error::InvalidInput("Invalid ID".to_string()))?;
         let feature = self.repository.get_feature_by_id(id).await?;
@@ -288,30 +348,31 @@ impl FeatureLogic for FeatureLogicImpl {
     }
 
     async fn create_feature(&self, team_id: ID, input: CreateFeatureInput) -> Result<ID, Error> {
-        let team_id = Uuid::try_from(team_id).unwrap();
-        let input = Self::map_to_create_feature(team_id, input);
+        let team_id = id_to_uuid(team_id)?;
+        let input = Self::map_to_create_feature(team_id, input)?;
         let feature_id = self.repository.create_feature(input).await?;
         Ok(ID::from(feature_id.to_string()))
     }
 
     async fn update_feature(&self, id: ID, input: UpdateFeatureInput) -> Result<Feature, Error> {
-        let input = Self::map_to_update_feature(id, input);
+        let input = Self::map_to_update_feature(id, input)?;
         let feature = self.repository.update_feature(input).await?;
         Ok(Self::map_entity_to_graphql_feature(feature))
     }
 
     async fn delete_feature(&self, id: ID) -> Result<(), Error> {
-        self.repository
-            .delete_feature(Uuid::try_from(id).unwrap())
-            .await?;
+        self.repository.delete_feature(id_to_uuid(id)?).await?;
         Ok(())
     }
+}
 
+#[async_trait::async_trait]
+impl StageLogic for FeatureLogicImpl {
     async fn get_stage_contexts(
         &self,
         stage_id: ID,
     ) -> Result<Vec<crate::graphql::schema::Context>, Error> {
-        let stage_id = Uuid::try_from(stage_id).unwrap();
+        let stage_id = id_to_uuid(stage_id)?;
         let list = self.repository.get_stage_contexts(stage_id).await?;
         Ok(list.into_iter().map(map_db_ctx_to_gql).collect())
     }
@@ -321,11 +382,11 @@ impl FeatureLogic for FeatureLogicImpl {
         stage_id: ID,
         context_ids: Vec<ID>,
     ) -> Result<Vec<crate::graphql::schema::Context>, Error> {
-        let stage_id = Uuid::try_from(stage_id).unwrap();
+        let stage_id = id_to_uuid(stage_id)?;
         let context_ids: Vec<Uuid> = context_ids
             .into_iter()
-            .map(|id| Uuid::try_from(id).unwrap())
-            .collect();
+            .map(|id| id_to_uuid(id))
+            .collect::<Result<Vec<_>, _>>()?;
         let list = self
             .repository
             .set_stage_contexts(stage_id, context_ids)
@@ -337,7 +398,7 @@ impl FeatureLogic for FeatureLogicImpl {
         &self,
         stage_id: ID,
     ) -> Result<Vec<crate::graphql::schema::StageCriterion>, Error> {
-        let stage_id = Uuid::try_from(stage_id).unwrap();
+        let stage_id = id_to_uuid(stage_id)?;
         let list = self.repository.get_stage_criteria(stage_id).await?;
         Ok(list.into_iter().map(map_db_criterion_to_gql).collect())
     }
@@ -347,33 +408,45 @@ impl FeatureLogic for FeatureLogicImpl {
         stage_id: ID,
         criteria: Vec<crate::graphql::schema::CreateStageCriterionInput>,
     ) -> Result<Vec<crate::graphql::schema::StageCriterion>, Error> {
-        let stage_id = Uuid::try_from(stage_id).unwrap();
-        let create: Vec<crate::database::feature::CreateStageCriterion> = criteria
+        let stage_id = id_to_uuid(stage_id)?;
+        let create: Result<Vec<crate::database::feature::CreateStageCriterion>, Error> = criteria
             .into_iter()
-            .map(|c| crate::database::feature::CreateStageCriterion {
-                context_key: c.context_key,
-                context_id: Uuid::try_from(c.context_id).unwrap(),
-                rollout_percentage: c.rollout_percentage,
-            })
+            .map(
+                |c| -> Result<crate::database::feature::CreateStageCriterion, Error> {
+                    Ok(crate::database::feature::CreateStageCriterion {
+                        context_key: c.context_key,
+                        context_id: id_to_uuid(c.context_id)?,
+                        rollout_percentage: c.rollout_percentage,
+                    })
+                },
+            )
             .collect();
-        let list = self.repository.set_stage_criteria(stage_id, create).await?;
+        let list = self
+            .repository
+            .set_stage_criteria(stage_id, create?)
+            .await?;
         Ok(list.into_iter().map(map_db_criterion_to_gql).collect())
     }
+}
 
+#[async_trait::async_trait]
+impl DeploymentLogic for FeatureLogicImpl {
     async fn request_stage_change(
         &self,
         stage_id: ID,
         request: StageChangeRequestType,
         user_id: Uuid,
     ) -> Result<Feature, Error> {
-        let stage_uuid = Uuid::try_from(stage_id.clone()).unwrap();
+        let stage_uuid = id_to_uuid(stage_id.clone())?;
         let next_status = match request {
-            StageChangeRequestType::DeploymentRequested => "DEPLOYMENT_REQUESTED",
-            StageChangeRequestType::DeploymentRejected => "DEPLOYMENT_REJECTED",
-            StageChangeRequestType::Deployed => "DEPLOYED",
-            StageChangeRequestType::RollbackRequested => "ROLLBACK_REQUESTED",
-            StageChangeRequestType::RollbackRejected => "ROLLBACK_REJECTED",
-            StageChangeRequestType::Rollbacked => "ROLLBACKED",
+            StageChangeRequestType::DeploymentRequested => {
+                StageStatus::DeploymentRequested.as_str()
+            }
+            StageChangeRequestType::DeploymentRejected => StageStatus::DeploymentRejected.as_str(),
+            StageChangeRequestType::Deployed => StageStatus::Deployed.as_str(),
+            StageChangeRequestType::RollbackRequested => StageStatus::RollbackRequested.as_str(),
+            StageChangeRequestType::RollbackRejected => StageStatus::RollbackRejected.as_str(),
+            StageChangeRequestType::Rollbacked => StageStatus::Rollbacked.as_str(),
         };
         // Validate transition based on current status
         if let Some(fid) = self
@@ -415,7 +488,7 @@ impl FeatureLogic for FeatureLogicImpl {
             }
         };
         if !ok {
-            return Err(Error::NotFound(Uuid::try_from(stage_id).unwrap()));
+            return Err(Error::NotFound(stage_uuid));
         }
         // Load the owning feature of this stage and return it, mapped to GraphQL Feature
         if let Some(fid) = self
@@ -430,10 +503,12 @@ impl FeatureLogic for FeatureLogicImpl {
     }
 
     async fn get_feature_id_by_stage_id(&self, stage_id: ID) -> Result<Option<Uuid>, Error> {
-        let stage_uuid = Uuid::try_from(stage_id).unwrap();
+        let stage_uuid = id_to_uuid(stage_id)?;
         self.repository.get_feature_id_by_stage_id(stage_uuid).await
     }
+}
 
+impl FeatureLogic for FeatureLogicImpl {
     fn clone_box(&self) -> Box<dyn FeatureLogic> {
         Box::new(self.clone())
     }
@@ -503,7 +578,7 @@ mod test {
 
         let relationships = vec![];
 
-        let result = FeatureLogicImpl::get_create_stages_to_create(stages, relationships);
+        let result = FeatureLogicImpl::get_create_stages_to_create(stages, relationships).unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].order_index, 0);
         assert_eq!(result[1].order_index, 1);
@@ -518,7 +593,7 @@ mod test {
             target_id: 1,
         }];
 
-        let result = FeatureLogicImpl::get_create_stages_to_create(stages, relationships);
+        let result = FeatureLogicImpl::get_create_stages_to_create(stages, relationships).unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].order_index, 0);
         assert_eq!(result[1].order_index, 1);

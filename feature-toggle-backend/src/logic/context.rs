@@ -6,6 +6,7 @@ use crate::database::feature::FeatureRepository;
 use crate::graphql::schema::{
     Context as GqlContext, ContextEntry as GqlContextEntry, CreateContextInput, UpdateContextInput,
 };
+use crate::logic::stage_builder::id_to_uuid;
 use crate::Error;
 use async_graphql::ID;
 use mockall::automock;
@@ -110,7 +111,7 @@ async fn map_db_feature_to_full_for_broadcast(
 #[async_trait::async_trait]
 impl ContextLogic for ContextLogicImpl {
     async fn get_context_by_id(&self, id: ID) -> Result<GqlContext, Error> {
-        let id = Uuid::try_from(id).unwrap();
+        let id = id_to_uuid(id)?;
         let ctx = self.repository.get_context_by_id(id).await?;
         Ok(map_db_to_gql(ctx))
     }
@@ -120,7 +121,7 @@ impl ContextLogic for ContextLogicImpl {
         team_id: ID,
         key: Option<String>,
     ) -> Result<Vec<GqlContext>, Error> {
-        let team_id = Uuid::try_from(team_id).unwrap();
+        let team_id = id_to_uuid(team_id)?;
         let list = self.repository.get_contexts(team_id, key).await?;
         Ok(list.into_iter().map(map_db_to_gql).collect())
     }
@@ -142,7 +143,7 @@ impl ContextLogic for ContextLogicImpl {
                 return Err(Error::InvalidInput("Duplicate context entry".to_string()));
             }
         }
-        let team_id = Uuid::try_from(team_id).unwrap();
+        let team_id = id_to_uuid(team_id)?;
         let created = self
             .repository
             .create_context(

@@ -16,6 +16,7 @@ pub mod jwt_secret;
 pub mod jwt_token;
 pub mod pipeline;
 pub mod role;
+pub mod stage_builder;
 pub mod team;
 pub mod user;
 pub mod user_flag;

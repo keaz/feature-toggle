@@ -1092,6 +1092,7 @@ dependencies = [
  "base64",
  "chrono",
  "evaluation-engine",
+ "feature-toggle-shared",
  "futures-util",
  "jsonwebtoken",
  "log",
