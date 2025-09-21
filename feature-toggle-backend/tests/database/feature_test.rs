@@ -562,3 +562,294 @@ async fn test_update_feature_with_stages() {
     assert_eq!(new_stage3.position, "{ x: 300, y: 300 }");
     assert!(new_stage3.enabled);
 }
+
+// Kill Switch Integration Tests
+#[tokio::test]
+async fn test_emergency_disable_feature_integration() {
+    let pool = init_pg_pool().await;
+    let repository = feature::feature_repository(pool);
+
+    // Use existing test feature
+    let feature_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+
+    // Get initial state
+    let initial_feature = repository.get_feature_by_id(feature_id).await.unwrap();
+    assert!(
+        initial_feature.kill_switch_enabled,
+        "Feature should initially be enabled"
+    );
+
+    // Emergency disable without rollback
+    let disabled_feature = repository.emergency_disable_feature(feature_id, None).await;
+    assert!(disabled_feature.is_ok(), "Emergency disable should succeed");
+
+    let disabled_feature = disabled_feature.unwrap();
+    assert!(
+        !disabled_feature.kill_switch_enabled,
+        "Feature should be disabled"
+    );
+    assert!(
+        disabled_feature.kill_switch_activated_at.is_some(),
+        "Should have activation timestamp"
+    );
+    assert!(
+        disabled_feature.rollback_scheduled_at.is_none(),
+        "Should not have rollback scheduled"
+    );
+
+    // Verify state persists by re-fetching
+    let persisted_feature = repository.get_feature_by_id(feature_id).await.unwrap();
+    assert!(
+        !persisted_feature.kill_switch_enabled,
+        "Disabled state should persist"
+    );
+
+    // Re-enable for cleanup
+    repository
+        .emergency_enable_feature(feature_id)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_emergency_disable_with_rollback_integration() {
+    let pool = init_pg_pool().await;
+    let repository = feature::feature_repository(pool);
+
+    let feature_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+    let rollback_minutes = 30;
+    let before_disable = chrono::Utc::now();
+
+    // Emergency disable with rollback
+    let result = repository
+        .emergency_disable_feature(feature_id, Some(rollback_minutes))
+        .await;
+    assert!(
+        result.is_ok(),
+        "Emergency disable with rollback should succeed"
+    );
+
+    let disabled_feature = result.unwrap();
+    assert!(
+        !disabled_feature.kill_switch_enabled,
+        "Feature should be disabled"
+    );
+    assert!(
+        disabled_feature.kill_switch_activated_at.is_some(),
+        "Should have activation timestamp"
+    );
+    assert!(
+        disabled_feature.rollback_scheduled_at.is_some(),
+        "Should have rollback scheduled"
+    );
+
+    // Verify rollback time is approximately correct (within 2 minutes tolerance for CI)
+    let expected_rollback = before_disable + chrono::Duration::minutes(rollback_minutes as i64);
+    let actual_rollback = disabled_feature.rollback_scheduled_at.unwrap();
+    let time_diff = (actual_rollback - expected_rollback).num_seconds().abs();
+    assert!(
+        time_diff <= 120,
+        "Rollback time should be within 2 minutes of expected"
+    );
+
+    // Cleanup
+    repository
+        .emergency_enable_feature(feature_id)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_emergency_enable_feature_integration() {
+    let pool = init_pg_pool().await;
+    let repository = feature::feature_repository(pool);
+
+    let feature_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+
+    // First disable the feature
+    repository
+        .emergency_disable_feature(feature_id, Some(60))
+        .await
+        .unwrap();
+
+    // Verify it's disabled
+    let disabled_feature = repository.get_feature_by_id(feature_id).await.unwrap();
+    assert!(
+        !disabled_feature.kill_switch_enabled,
+        "Feature should be disabled"
+    );
+
+    // Now enable it
+    let result = repository.emergency_enable_feature(feature_id).await;
+    assert!(result.is_ok(), "Emergency enable should succeed");
+
+    let enabled_feature = result.unwrap();
+    assert!(
+        enabled_feature.kill_switch_enabled,
+        "Feature should be enabled"
+    );
+    assert!(
+        enabled_feature.kill_switch_activated_at.is_none(),
+        "Activation timestamp should be cleared"
+    );
+    assert!(
+        enabled_feature.rollback_scheduled_at.is_none(),
+        "Rollback schedule should be cleared"
+    );
+
+    // Verify state persists
+    let persisted_feature = repository.get_feature_by_id(feature_id).await.unwrap();
+    assert!(
+        persisted_feature.kill_switch_enabled,
+        "Enabled state should persist"
+    );
+}
+
+#[tokio::test]
+async fn test_get_features_pending_rollback_integration() {
+    let pool = init_pg_pool().await;
+    let repository = feature::feature_repository(pool);
+
+    // Create a test feature that needs rollback
+    let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+    let create_feature = CreateFeature {
+        key: "test_rollback_feature".to_string(),
+        description: Some("Test feature for rollback".to_string()),
+        feature_type: FeatureType::Simple,
+        team_id,
+        dependencies: vec![],
+        stages: vec![],
+    };
+    let feature_id = repository.create_feature(create_feature).await.unwrap();
+
+    // Disable with past rollback time (simulate expired rollback)
+    let past_time = chrono::Utc::now() - chrono::Duration::minutes(10);
+
+    // Manually set rollback time to past for testing
+    let pool_direct = init_pg_pool().await;
+    sqlx::query!(
+        r#"UPDATE features 
+           SET kill_switch_enabled = false, 
+               kill_switch_activated_at = $1,
+               rollback_scheduled_at = $2
+           WHERE id = $3"#,
+        past_time,
+        past_time,
+        feature_id
+    )
+    .execute(&pool_direct)
+    .await
+    .unwrap();
+
+    // Get features pending rollback
+    let result = repository.get_features_pending_rollback().await;
+    assert!(result.is_ok(), "Get pending rollback should succeed");
+
+    let pending_features = result.unwrap();
+
+    // Should find our test feature
+    let found_feature = pending_features.iter().find(|f| f.id == feature_id);
+    assert!(
+        found_feature.is_some(),
+        "Should find the test feature pending rollback"
+    );
+
+    let found_feature = found_feature.unwrap();
+    assert!(
+        !found_feature.kill_switch_enabled,
+        "Found feature should be disabled"
+    );
+    assert!(
+        found_feature.rollback_scheduled_at.is_some(),
+        "Found feature should have rollback scheduled"
+    );
+
+    // Cleanup - delete the test feature
+    sqlx::query!("DELETE FROM features WHERE id = $1", feature_id)
+        .execute(&pool_direct)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_kill_switch_error_handling_integration() {
+    let pool = init_pg_pool().await;
+    let repository = feature::feature_repository(pool);
+
+    let nonexistent_id = Uuid::new_v4();
+
+    // Test emergency disable on nonexistent feature
+    let disable_result = repository
+        .emergency_disable_feature(nonexistent_id, None)
+        .await;
+    assert!(
+        disable_result.is_err(),
+        "Should fail for nonexistent feature"
+    );
+
+    match disable_result {
+        Err(feature_toggle_backend::Error::NotFound(id)) => {
+            assert_eq!(id, nonexistent_id, "Should return the correct ID");
+        }
+        _ => panic!("Expected NotFound error"),
+    }
+
+    // Test emergency enable on nonexistent feature
+    let enable_result = repository.emergency_enable_feature(nonexistent_id).await;
+    assert!(
+        enable_result.is_err(),
+        "Should fail for nonexistent feature"
+    );
+
+    match enable_result {
+        Err(feature_toggle_backend::Error::NotFound(id)) => {
+            assert_eq!(id, nonexistent_id, "Should return the correct ID");
+        }
+        _ => panic!("Expected NotFound error"),
+    }
+}
+
+#[tokio::test]
+async fn test_kill_switch_multiple_operations_integration() {
+    let pool = init_pg_pool().await;
+    let repository = feature::feature_repository(pool);
+
+    let feature_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+
+    // Test multiple disable/enable cycles
+    for cycle in 1..=3 {
+        // Disable
+        let disabled = repository
+            .emergency_disable_feature(feature_id, Some(cycle * 10))
+            .await
+            .unwrap();
+        assert!(
+            !disabled.kill_switch_enabled,
+            "Cycle {}: should be disabled",
+            cycle
+        );
+
+        // Enable
+        let enabled = repository
+            .emergency_enable_feature(feature_id)
+            .await
+            .unwrap();
+        assert!(
+            enabled.kill_switch_enabled,
+            "Cycle {}: should be enabled",
+            cycle
+        );
+        assert!(
+            enabled.kill_switch_activated_at.is_none(),
+            "Cycle {}: timestamps should be cleared",
+            cycle
+        );
+    }
+
+    // Final verification
+    let final_feature = repository.get_feature_by_id(feature_id).await.unwrap();
+    assert!(
+        final_feature.kill_switch_enabled,
+        "Final state should be enabled"
+    );
+}

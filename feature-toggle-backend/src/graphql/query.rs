@@ -1,7 +1,7 @@
 use crate::graphql::create_user;
 use crate::graphql::schema::{
-    ApplicationStatus, Client, ClientType, Environment, Feature, FeatureType, Pipeline, Role, Team,
-    User, UsersPage,
+    ApplicationStatus, Client, ClientType, Environment, Feature, FeatureType, JwtSecretResponse,
+    Pipeline, Role, Team, User, UsersPage,
 };
 use crate::logic::client::ClientLogic;
 use crate::logic::context::ContextLogic;
@@ -250,6 +250,41 @@ impl Query {
         let logic = ctx.data::<Box<dyn UserLogic>>()?;
         let admin_configured = logic.admin_exists().await?;
         Ok(ApplicationStatus { admin_configured })
+    }
+
+    /// Check JWT secret status (admin only)
+    async fn jwt_secret_status(&self, ctx: &Context<'_>) -> GqlResult<Vec<JwtSecretResponse>> {
+        debug!("Checking JWT secret status");
+
+        // Get user info from JWT context
+        let jwt_user = ctx.data::<crate::JwtUser>()?;
+
+        // Check if user is admin
+        if !jwt_user.is_admin {
+            return Err(async_graphql::Error::new(
+                "Unauthorized: Admin access required",
+            ));
+        }
+
+        let logic = ctx.data::<Box<dyn crate::logic::jwt_secret::JwtSecretLogic>>()?;
+        let secrets = logic.get_all_secrets().await?;
+
+        Ok(secrets
+            .into_iter()
+            .map(|secret| JwtSecretResponse {
+                id: secret.id.into(),
+                is_active: secret.is_active,
+                created_at: secret.created_at,
+                created_by: secret.created_by.map(|id| id.into()),
+                expires_at: secret.expires_at,
+                // Don't return the actual secret for security
+                secret_preview: format!(
+                    "{}...{}",
+                    &secret.secret[..8],
+                    &secret.secret[secret.secret.len() - 4..]
+                ),
+            })
+            .collect())
     }
 }
 
@@ -880,6 +915,126 @@ mod more_query_tests {
         let data = resp.data.into_json().unwrap();
         assert_eq!(data["teams"].as_array().unwrap().len(), 1);
         assert_eq!(data["teams"][0]["name"], "User Team");
+    }
+
+    #[tokio::test]
+    async fn test_jwt_secret_status_query_admin_user() {
+        use crate::database::entity::JwtSecret;
+        use crate::logic::jwt_secret::MockJwtSecretLogic;
+        use chrono::Utc;
+
+        let mut mock = MockJwtSecretLogic::new();
+        let expected_secrets = vec![
+            JwtSecret {
+                id: uuid::Uuid::new_v4(),
+                secret: "test_secret_123456789012345678901234567890".to_string(),
+                is_active: true,
+                created_at: Utc::now(),
+                created_by: Some(uuid::Uuid::new_v4()),
+                expires_at: None,
+            },
+            JwtSecret {
+                id: uuid::Uuid::new_v4(),
+                secret: "old_secret_abcdefghijklmnopqrstuvwxyz1234".to_string(),
+                is_active: false,
+                created_at: Utc::now(),
+                created_by: Some(uuid::Uuid::new_v4()),
+                expires_at: None,
+            },
+        ];
+
+        mock.expect_get_all_secrets()
+            .times(1)
+            .return_once(move || Ok(expected_secrets));
+
+        let jwt_user = crate::JwtUser {
+            id: uuid::Uuid::new_v4(),
+            username: "admin".to_string(),
+            is_admin: true,
+            roles: vec!["Admin".to_string()],
+            token_hash: "hash123".to_string(),
+        };
+
+        let schema = Schema::build(
+            super::Query,
+            crate::graphql::mutation::MutationRoot,
+            EmptySubscription,
+        )
+        .data::<Box<dyn crate::logic::jwt_secret::JwtSecretLogic>>(Box::new(mock))
+        .data(jwt_user)
+        .finish();
+
+        let gql = r#"
+            query {
+                jwtSecretStatus {
+                    id
+                    is_active
+                    created_at
+                    created_by
+                    expires_at
+                    secret_preview
+                }
+            }
+        "#;
+        let resp = schema.execute(Request::new(gql)).await;
+        assert!(
+            resp.errors.is_empty(),
+            "{}",
+            serde_json::to_string(&resp.errors).unwrap()
+        );
+        let data = resp.data.into_json().unwrap();
+        let secrets = data["jwtSecretStatus"].as_array().unwrap();
+        assert_eq!(secrets.len(), 2);
+        assert_eq!(secrets[0]["is_active"], true);
+        assert_eq!(secrets[1]["is_active"], false);
+        // Check that secret previews are truncated
+        assert!(
+            secrets[0]["secret_preview"]
+                .as_str()
+                .unwrap()
+                .contains("test_sec...7890")
+        );
+        assert!(
+            secrets[1]["secret_preview"]
+                .as_str()
+                .unwrap()
+                .contains("old_secr...1234")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_jwt_secret_status_query_non_admin_user() {
+        let jwt_user = crate::JwtUser {
+            id: uuid::Uuid::new_v4(),
+            username: "regular_user".to_string(),
+            is_admin: false,
+            roles: vec!["User".to_string()],
+            token_hash: "hash123".to_string(),
+        };
+
+        let schema = Schema::build(
+            super::Query,
+            crate::graphql::mutation::MutationRoot,
+            EmptySubscription,
+        )
+        .data(jwt_user)
+        .finish();
+
+        let gql = r#"
+            query {
+                jwtSecretStatus {
+                    id
+                    is_active
+                }
+            }
+        "#;
+        let resp = schema.execute(Request::new(gql)).await;
+        assert!(!resp.errors.is_empty());
+        assert!(
+            resp.errors[0]
+                .message
+                .contains("Unauthorized: Admin access required")
+        );
     }
 
     #[tokio::test]

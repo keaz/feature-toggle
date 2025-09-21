@@ -236,6 +236,9 @@ impl FeatureEvaluationSvc {
             feature_type: format!("{:?}", f.feature_type),
             team_id: f.team_id.to_string(),
             created_at: f.created_at.to_rfc3339(),
+            kill_switch_enabled: f.kill_switch_enabled,
+            kill_switch_activated_at: f.kill_switch_activated_at.map(|dt| dt.to_rfc3339()).unwrap_or_default(),
+            rollback_scheduled_at: f.rollback_scheduled_at.map(|dt| dt.to_rfc3339()).unwrap_or_default(),
             stages: stage_msgs,
             dependencies: deps,
         };
@@ -293,6 +296,11 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
         let db_feature = features.pop().ok_or_else(|| {
             Status::not_found("feature with given key not found for client's team")
         })?;
+
+        // Check kill switch first - if disabled, return false regardless of other criteria
+        if !db_feature.kill_switch_enabled {
+            return Ok(Response::new(EvaluateResponse { enabled: false }));
+        }
 
         let eng_feature = self.map_db_feature_to_engine(db_feature.clone()).await?;
 

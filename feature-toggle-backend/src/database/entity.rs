@@ -40,6 +40,9 @@ pub struct Feature {
     pub feature_type: FeatureType,
     pub team_id: Uuid,
     pub created_at: DateTime<Utc>,
+    pub kill_switch_enabled: bool,
+    pub kill_switch_activated_at: Option<DateTime<Utc>>,
+    pub rollback_scheduled_at: Option<DateTime<Utc>>,
     pub stages: Vec<FeaturePipelineStage>,
     pub dependencies: Vec<FeatureDependency>,
 }

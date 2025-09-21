@@ -4,6 +4,7 @@ pub mod graphql;
 pub mod grpc;
 pub mod logic;
 mod middleware;
+pub mod scheduler;
 
 use crate::database::init_pg_pool;
 use crate::graphql::mutation::MutationRoot;
@@ -98,6 +99,13 @@ pub async fn run() -> std::io::Result<()> {
         if let Err(e) = crate::grpc::serve(grpc_pool, grpc_addr, grpc_updates_tx).await {
             error!("gRPC server error: {e}");
         }
+    });
+
+    // Start kill switch rollback scheduler
+    let scheduler_feature_logic = feature_logic.clone();
+    tokio::spawn(async move {
+        let scheduler = scheduler::KillSwitchRollbackScheduler::new(scheduler_feature_logic);
+        scheduler.start_scheduler().await;
     });
 
     // Clone values for use in the HttpServer closure

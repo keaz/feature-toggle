@@ -345,6 +345,11 @@ async fn evaluate_handler(
         return Ok(web::Json(EvaluateHttpResponse { enabled: false }));
     }
 
+    // Check kill switch - if enabled, immediately return false regardless of other logic
+    if feature.kill_switch_enabled {
+        return Ok(web::Json(EvaluateHttpResponse { enabled: false }));
+    }
+
     let stage = stage.unwrap();
     let bucketing_key = stage.bucketing_key.clone();
 
@@ -853,6 +858,9 @@ mod tests {
             feature_type: String::new(),
             team_id: String::new(),
             created_at: String::new(),
+            kill_switch_enabled: false,
+            kill_switch_activated_at: String::new(),
+            rollback_scheduled_at: String::new(),
             stages: vec![pb::FeatureStageFull {
                 id: "stage1".into(),
                 environment_id: env.into(),
@@ -1147,6 +1155,9 @@ mod tests {
             feature_type: String::new(),
             team_id: String::new(),
             created_at: String::new(),
+            kill_switch_enabled: false,
+            kill_switch_activated_at: String::new(),
+            rollback_scheduled_at: String::new(),
             stages: vec![pb::FeatureStageFull {
                 id: "stage1".into(),
                 environment_id: env.into(),
@@ -1739,5 +1750,87 @@ mod tests {
 
         // Note: Testing the full handler with unauthorized response would require
         // mocking the gRPC client, which is complex. The validation logic is tested above.
+    }
+
+    #[actix_web::test]
+    async fn test_evaluate_handler_kill_switch_enabled() {
+        // Test that features with kill switch enabled always return false
+        let mut feature = make_feature("killSwitchFeature", "env1", true, "country", &["US"], 100);
+
+        // Enable kill switch on the feature
+        feature.kill_switch_enabled = true;
+        feature.kill_switch_activated_at = "2024-01-01T00:00:00Z".to_string();
+
+        let state = test_state_with_cache(feature).await;
+        let app_data = web::Data::new(state);
+
+        let req = EvaluateHttpRequest {
+            feature_key: "killSwitchFeature".into(),
+            environment_id: "env1".into(),
+            context: vec![
+                HttpContext {
+                    key: "user.id".into(),
+                    value: "user123".into(),
+                },
+                HttpContext {
+                    key: "country".into(),
+                    value: "US".into(),
+                },
+            ],
+            client_id: None,
+            client_secret: None,
+        };
+
+        let resp = evaluate_handler_test(app_data, web::Json(req))
+            .await
+            .unwrap();
+
+        let result = resp.into_inner();
+        // Should be false due to kill switch, regardless of feature configuration
+        assert!(
+            !result.enabled,
+            "Feature with kill switch should always return false"
+        );
+    }
+
+    #[actix_web::test]
+    async fn test_evaluate_handler_kill_switch_disabled() {
+        // Test that features with kill switch disabled work normally
+        let mut feature = make_feature("normalFeature", "env1", true, "country", &["US"], 100);
+
+        // Ensure kill switch is disabled (default)
+        feature.kill_switch_enabled = false;
+        feature.kill_switch_activated_at = String::new();
+
+        let state = test_state_with_cache(feature).await;
+        let app_data = web::Data::new(state);
+
+        let req = EvaluateHttpRequest {
+            feature_key: "normalFeature".into(),
+            environment_id: "env1".into(),
+            context: vec![
+                HttpContext {
+                    key: "user.id".into(),
+                    value: "user123".into(),
+                },
+                HttpContext {
+                    key: "country".into(),
+                    value: "US".into(),
+                },
+            ],
+            client_id: None,
+            client_secret: None,
+        };
+
+        let resp = evaluate_handler_test(app_data, web::Json(req))
+            .await
+            .unwrap();
+
+        let result = resp.into_inner();
+        // Should work normally when kill switch is disabled
+        assert!(
+            result.enabled,
+            "Feature without kill switch should evaluate normally"
+        );
     }
 }

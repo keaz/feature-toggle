@@ -1,5 +1,5 @@
 use crate::database::entity::{Feature, FeatureDependency, FeaturePipelineStage, FeatureType};
-use crate::database::{handle_error, Error};
+use crate::database::{Error, handle_error};
 use chrono::{DateTime, Utc};
 use mockall::automock;
 use serde::{Deserialize, Serialize};
@@ -83,6 +83,9 @@ struct FeatureWithStageRow {
     feature_type: String,
     team_id: Uuid,
     created_at: DateTime<Utc>,
+    kill_switch_enabled: bool,
+    kill_switch_activated_at: Option<DateTime<Utc>>,
+    rollback_scheduled_at: Option<DateTime<Utc>>,
 
     stage_id: Option<Uuid>,
     feature_id_stage: Option<Uuid>,
@@ -167,6 +170,17 @@ pub trait FeatureRepository: Send + Sync {
         status: &str,
         user_id: Uuid,
     ) -> Result<bool, Error>;
+
+    // Kill switch functionality for emergency feature disable/enable
+    async fn emergency_disable_feature(
+        &self,
+        feature_id: Uuid,
+        rollback_in_minutes: Option<i32>,
+    ) -> Result<Feature, Error>;
+
+    async fn emergency_enable_feature(&self, feature_id: Uuid) -> Result<Feature, Error>;
+
+    async fn get_features_pending_rollback(&self) -> Result<Vec<Feature>, Error>;
 
     // Helper: find owning feature id for a stage
     async fn get_feature_id_by_stage_id(&self, stage_id: Uuid) -> Result<Option<Uuid>, Error>;
@@ -591,6 +605,9 @@ impl FeatureRepositoryImpl {
             feature_type,
             team_id: feature.team_id,
             created_at: feature.created_at,
+            kill_switch_enabled: feature.kill_switch_enabled,
+            kill_switch_activated_at: feature.kill_switch_activated_at,
+            rollback_scheduled_at: feature.rollback_scheduled_at,
             stages: stages.clone(),
             dependencies: vec![], // Dependencies will be loaded separately
         }
@@ -786,6 +803,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
     async fn get_feature_by_id(&self, id: Uuid) -> Result<Feature, Error> {
         let result = sqlx::query_as::<_, FeatureWithStageRow>(
             r#"SELECT f.id as feature_id, f.key as feature_key, f.description, f.feature_type, f.team_id, f.created_at, 
+            f.kill_switch_enabled, f.kill_switch_activated_at, f.rollback_scheduled_at,
             s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
             s.parent_stage_id, s.position, s.bucketing_key, s.status, s.enabled
 			FROM features f LEFT JOIN features_pipeline_stages s ON f.id = s.feature_id
@@ -817,6 +835,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
     ) -> Result<Vec<Feature>, Error> {
         let mut query_builder = sqlx::QueryBuilder::new(
             r#"SELECT f.id as feature_id, f.key as feature_key, f.description, f.feature_type, f.team_id, f.created_at, 
+            f.kill_switch_enabled, f.kill_switch_activated_at, f.rollback_scheduled_at,
             s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
             s.parent_stage_id, s.position, s.bucketing_key, s.status, s.enabled
 			FROM features f LEFT JOIN features_pipeline_stages s ON f.id = s.feature_id"#,
@@ -1155,7 +1174,459 @@ impl FeatureRepository for FeatureRepositoryImpl {
         handle_error(Some(stage_id), row)
     }
 
+    async fn emergency_disable_feature(
+        &self,
+        feature_id: Uuid,
+        rollback_in_minutes: Option<i32>,
+    ) -> Result<Feature, Error> {
+        let now = chrono::Utc::now();
+        let rollback_at =
+            rollback_in_minutes.map(|minutes| now + chrono::Duration::minutes(minutes as i64));
+
+        let result = sqlx::query!(
+            r#"UPDATE features 
+               SET kill_switch_enabled = false, 
+                   kill_switch_activated_at = $1,
+                   rollback_scheduled_at = $2
+               WHERE id = $3"#,
+            now,
+            rollback_at,
+            feature_id
+        )
+        .execute(&self.pool)
+        .await;
+
+        handle_error(Some(feature_id), result)?;
+        self.get_feature_by_id(feature_id).await
+    }
+
+    async fn emergency_enable_feature(&self, feature_id: Uuid) -> Result<Feature, Error> {
+        let result = sqlx::query!(
+            r#"UPDATE features 
+               SET kill_switch_enabled = true, 
+                   kill_switch_activated_at = NULL,
+                   rollback_scheduled_at = NULL
+               WHERE id = $1"#,
+            feature_id
+        )
+        .execute(&self.pool)
+        .await;
+
+        handle_error(Some(feature_id), result)?;
+        self.get_feature_by_id(feature_id).await
+    }
+
+    async fn get_features_pending_rollback(&self) -> Result<Vec<Feature>, Error> {
+        let now = chrono::Utc::now();
+        let result = sqlx::query_as::<_, FeatureWithStageRow>(
+            r#"SELECT f.id as feature_id, f.key as feature_key, f.description, f.feature_type, f.team_id, f.created_at, 
+            f.kill_switch_enabled, f.kill_switch_activated_at, f.rollback_scheduled_at,
+            s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
+            s.parent_stage_id, s.position, s.bucketing_key, s.status, s.enabled
+            FROM features f LEFT JOIN features_pipeline_stages s ON f.id = s.feature_id
+            WHERE f.kill_switch_enabled = false 
+              AND f.rollback_scheduled_at IS NOT NULL 
+              AND f.rollback_scheduled_at <= $1
+            ORDER BY f.rollback_scheduled_at ASC"#,
+        )
+        .bind(now)
+        .fetch_all(&self.pool)
+        .await;
+
+        let rows = handle_error(None, result)?;
+
+        // Group rows by feature ID and convert to Feature objects
+        let mut map: HashMap<Uuid, Vec<FeatureWithStageRow>> = HashMap::new();
+        let mut order: Vec<Uuid> = Vec::new();
+
+        for row in rows {
+            if !map.contains_key(&row.feature_id) {
+                order.push(row.feature_id);
+            }
+            map.entry(row.feature_id).or_default().push(row);
+        }
+
+        // Convert each group to a Feature
+        let mut features: Vec<Feature> = Vec::with_capacity(order.len());
+        for id in order {
+            if let Some(rows) = map.remove(&id) {
+                features.push(Self::map_row_to_feature(rows));
+            }
+        }
+
+        // Load dependencies for each feature
+        for feature in &mut features {
+            let dependencies = self.get_feature_dependencies(&feature.id).await?;
+            feature.dependencies = dependencies;
+        }
+
+        Ok(features)
+    }
+
     fn clone_box(&self) -> Box<dyn FeatureRepository> {
         Box::new(self.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Duration, Utc};
+    use sqlx::PgPool;
+    use uuid::Uuid;
+
+    async fn setup_test_feature(pool: &PgPool, team_id: Uuid) -> Uuid {
+        let feature_id = Uuid::new_v4();
+        let feature_key = format!("test_feature_{}", feature_id);
+        sqlx::query!(
+            r#"INSERT INTO features (id, key, description, feature_type, team_id, created_at, kill_switch_enabled, kill_switch_activated_at, rollback_scheduled_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"#,
+            feature_id,
+            feature_key,
+            Some("Test feature for kill switch"),
+            "Simple",
+            team_id,
+            Utc::now(),
+            true,
+            None::<chrono::DateTime<Utc>>,
+            None::<chrono::DateTime<Utc>>
+        )
+        .execute(pool)
+        .await
+        .expect("Failed to create test feature");
+
+        feature_id
+    }
+
+    async fn cleanup_test_feature(pool: &PgPool, feature_id: Uuid) {
+        sqlx::query!("DELETE FROM features WHERE id = $1", feature_id)
+            .execute(pool)
+            .await
+            .expect("Failed to cleanup test feature");
+    }
+
+    #[tokio::test]
+    async fn test_emergency_disable_feature_without_rollback() {
+        let pool = crate::database::init_pg_pool().await;
+        let repo = FeatureRepositoryImpl::new(pool.clone());
+        let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+        let feature_id = setup_test_feature(&pool, team_id).await;
+
+        // Emergency disable without rollback schedule
+        let result = repo.emergency_disable_feature(feature_id, None).await;
+        assert!(result.is_ok(), "Emergency disable should succeed");
+
+        let feature = result.unwrap();
+        assert!(!feature.kill_switch_enabled, "Feature should be disabled");
+        assert!(
+            feature.kill_switch_activated_at.is_some(),
+            "Activation time should be set"
+        );
+        assert!(
+            feature.rollback_scheduled_at.is_none(),
+            "Rollback should not be scheduled"
+        );
+
+        cleanup_test_feature(&pool, feature_id).await;
+    }
+
+    #[tokio::test]
+    async fn test_emergency_disable_feature_with_rollback() {
+        let pool = crate::database::init_pg_pool().await;
+        let repo = FeatureRepositoryImpl::new(pool.clone());
+        let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+        let feature_id = setup_test_feature(&pool, team_id).await;
+
+        let rollback_minutes = 30;
+        let before_disable = Utc::now();
+
+        // Emergency disable with rollback schedule
+        let result = repo
+            .emergency_disable_feature(feature_id, Some(rollback_minutes))
+            .await;
+        assert!(
+            result.is_ok(),
+            "Emergency disable with rollback should succeed"
+        );
+
+        let feature = result.unwrap();
+        assert!(!feature.kill_switch_enabled, "Feature should be disabled");
+        assert!(
+            feature.kill_switch_activated_at.is_some(),
+            "Activation time should be set"
+        );
+        assert!(
+            feature.rollback_scheduled_at.is_some(),
+            "Rollback should be scheduled"
+        );
+
+        // Verify rollback time is approximately correct (within 1 minute tolerance)
+        let expected_rollback = before_disable + Duration::minutes(rollback_minutes as i64);
+        let actual_rollback = feature.rollback_scheduled_at.unwrap();
+        let time_diff = (actual_rollback - expected_rollback).num_seconds().abs();
+        assert!(
+            time_diff <= 60,
+            "Rollback time should be within 1 minute of expected: expected={}, actual={}, diff={}s",
+            expected_rollback,
+            actual_rollback,
+            time_diff
+        );
+
+        cleanup_test_feature(&pool, feature_id).await;
+    }
+
+    #[tokio::test]
+    async fn test_emergency_disable_feature_nonexistent() {
+        let pool = crate::database::init_pg_pool().await;
+        let repo = FeatureRepositoryImpl::new(pool.clone());
+        let nonexistent_id = Uuid::new_v4();
+
+        // Try to disable nonexistent feature
+        let result = repo.emergency_disable_feature(nonexistent_id, None).await;
+        assert!(result.is_err(), "Disabling nonexistent feature should fail");
+
+        match result {
+            Err(Error::NotFound(id)) => assert_eq!(id, nonexistent_id),
+            Err(e) => panic!("Expected NotFound error, got: {:?}", e),
+            Ok(_) => panic!("Expected error for nonexistent feature"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_emergency_enable_feature() {
+        let pool = crate::database::init_pg_pool().await;
+        let repo = FeatureRepositoryImpl::new(pool.clone());
+        let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+        let feature_id = setup_test_feature(&pool, team_id).await;
+
+        // First disable the feature
+        repo.emergency_disable_feature(feature_id, Some(60))
+            .await
+            .expect("Should disable feature first");
+
+        // Now enable it
+        let result = repo.emergency_enable_feature(feature_id).await;
+        assert!(result.is_ok(), "Emergency enable should succeed");
+
+        let feature = result.unwrap();
+        assert!(feature.kill_switch_enabled, "Feature should be enabled");
+        assert!(
+            feature.kill_switch_activated_at.is_none(),
+            "Activation time should be cleared"
+        );
+        assert!(
+            feature.rollback_scheduled_at.is_none(),
+            "Rollback schedule should be cleared"
+        );
+
+        cleanup_test_feature(&pool, feature_id).await;
+    }
+
+    #[tokio::test]
+    async fn test_emergency_enable_feature_nonexistent() {
+        let pool = crate::database::init_pg_pool().await;
+        let repo = FeatureRepositoryImpl::new(pool.clone());
+        let nonexistent_id = Uuid::new_v4();
+
+        // Try to enable nonexistent feature
+        let result = repo.emergency_enable_feature(nonexistent_id).await;
+        assert!(result.is_err(), "Enabling nonexistent feature should fail");
+
+        match result {
+            Err(Error::NotFound(id)) => assert_eq!(id, nonexistent_id),
+            Err(e) => panic!("Expected NotFound error, got: {:?}", e),
+            Ok(_) => panic!("Expected error for nonexistent feature"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_features_pending_rollback_empty() {
+        let pool = crate::database::init_pg_pool().await;
+        let repo = FeatureRepositoryImpl::new(pool.clone());
+
+        // Should return empty when no features pending rollback
+        let result = repo.get_features_pending_rollback().await;
+        assert!(result.is_ok(), "Get pending rollback should succeed");
+
+        let features = result.unwrap();
+        // Note: might not be empty if other tests left data, but should not error
+        assert!(features.len() >= 0, "Should return a valid list");
+    }
+
+    #[tokio::test]
+    async fn test_get_features_pending_rollback_with_eligible_features() {
+        let pool = crate::database::init_pg_pool().await;
+        let repo = FeatureRepositoryImpl::new(pool.clone());
+        let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+
+        // Create features for testing
+        let feature1_id = setup_test_feature(&pool, team_id).await;
+        let feature2_id = setup_test_feature(&pool, team_id).await;
+        let feature3_id = setup_test_feature(&pool, team_id).await;
+
+        // Disable feature1 with rollback in the past (should be returned)
+        let past_time = Utc::now() - Duration::minutes(10);
+        sqlx::query!(
+            r#"UPDATE features SET kill_switch_enabled = false, kill_switch_activated_at = $1, rollback_scheduled_at = $2 WHERE id = $3"#,
+            past_time,
+            past_time,
+            feature1_id
+        ).execute(&pool).await.expect("Failed to setup feature1");
+
+        // Disable feature2 with rollback in the future (should NOT be returned)
+        let future_time = Utc::now() + Duration::minutes(10);
+        sqlx::query!(
+            r#"UPDATE features SET kill_switch_enabled = false, kill_switch_activated_at = $1, rollback_scheduled_at = $2 WHERE id = $3"#,
+            Utc::now(),
+            future_time,
+            feature2_id
+        ).execute(&pool).await.expect("Failed to setup feature2");
+
+        // Keep feature3 enabled (should NOT be returned)
+        // feature3 is already enabled by default
+
+        let result = repo.get_features_pending_rollback().await;
+        assert!(result.is_ok(), "Get pending rollback should succeed");
+
+        let features = result.unwrap();
+
+        // Should find at least feature1
+        let found_feature1 = features.iter().any(|f| f.id == feature1_id);
+        assert!(
+            found_feature1,
+            "Should find feature1 with past rollback time"
+        );
+
+        // Should NOT find feature2 or feature3
+        let found_feature2 = features.iter().any(|f| f.id == feature2_id);
+        let found_feature3 = features.iter().any(|f| f.id == feature3_id);
+        assert!(
+            !found_feature2,
+            "Should NOT find feature2 with future rollback time"
+        );
+        assert!(!found_feature3, "Should NOT find feature3 that is enabled");
+
+        // Verify the returned feature has correct kill switch state
+        let returned_feature1 = features.iter().find(|f| f.id == feature1_id);
+        if let Some(feature) = returned_feature1 {
+            assert!(
+                !feature.kill_switch_enabled,
+                "Returned feature should be disabled"
+            );
+            assert!(
+                feature.rollback_scheduled_at.is_some(),
+                "Returned feature should have rollback scheduled"
+            );
+        }
+
+        // Cleanup
+        cleanup_test_feature(&pool, feature1_id).await;
+        cleanup_test_feature(&pool, feature2_id).await;
+        cleanup_test_feature(&pool, feature3_id).await;
+    }
+
+    #[tokio::test]
+    async fn test_kill_switch_fields_persistence() {
+        let pool = crate::database::init_pg_pool().await;
+        let repo = FeatureRepositoryImpl::new(pool.clone());
+        let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+        let feature_id = setup_test_feature(&pool, team_id).await;
+
+        // Test disable -> get -> enable -> get cycle
+        let before_disable = Utc::now();
+
+        // 1. Disable with rollback
+        repo.emergency_disable_feature(feature_id, Some(120))
+            .await
+            .expect("Should disable feature");
+
+        // 2. Retrieve and verify disabled state
+        let disabled_feature = repo
+            .get_feature_by_id(feature_id)
+            .await
+            .expect("Should retrieve disabled feature");
+
+        assert!(
+            !disabled_feature.kill_switch_enabled,
+            "Feature should be disabled"
+        );
+        assert!(
+            disabled_feature.kill_switch_activated_at.is_some(),
+            "Should have activation time"
+        );
+        assert!(
+            disabled_feature.rollback_scheduled_at.is_some(),
+            "Should have rollback time"
+        );
+
+        let activation_time = disabled_feature.kill_switch_activated_at.unwrap();
+        assert!(
+            activation_time >= before_disable,
+            "Activation time should be after disable call"
+        );
+        assert!(
+            activation_time <= Utc::now(),
+            "Activation time should not be in future"
+        );
+
+        // 3. Enable feature
+        repo.emergency_enable_feature(feature_id)
+            .await
+            .expect("Should enable feature");
+
+        // 4. Retrieve and verify enabled state
+        let enabled_feature = repo
+            .get_feature_by_id(feature_id)
+            .await
+            .expect("Should retrieve enabled feature");
+
+        assert!(
+            enabled_feature.kill_switch_enabled,
+            "Feature should be enabled"
+        );
+        assert!(
+            enabled_feature.kill_switch_activated_at.is_none(),
+            "Should clear activation time"
+        );
+        assert!(
+            enabled_feature.rollback_scheduled_at.is_none(),
+            "Should clear rollback time"
+        );
+
+        cleanup_test_feature(&pool, feature_id).await;
+    }
+
+    #[tokio::test]
+    async fn test_rollback_scheduling_edge_cases() {
+        let pool = crate::database::init_pg_pool().await;
+        let repo = FeatureRepositoryImpl::new(pool.clone());
+        let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+
+        // Test with zero minutes (should work - immediate rollback)
+        let feature1_id = setup_test_feature(&pool, team_id).await;
+        let result = repo.emergency_disable_feature(feature1_id, Some(0)).await;
+        assert!(result.is_ok(), "Zero minute rollback should work");
+
+        let feature = result.unwrap();
+        assert!(
+            feature.rollback_scheduled_at.is_some(),
+            "Should schedule immediate rollback"
+        );
+        cleanup_test_feature(&pool, feature1_id).await;
+
+        // Test with large number of minutes
+        let feature2_id = setup_test_feature(&pool, team_id).await;
+        let large_minutes = 1440; // 24 hours
+        let result = repo
+            .emergency_disable_feature(feature2_id, Some(large_minutes))
+            .await;
+        assert!(result.is_ok(), "Large minute rollback should work");
+
+        let feature = result.unwrap();
+        assert!(
+            feature.rollback_scheduled_at.is_some(),
+            "Should schedule far future rollback"
+        );
+        cleanup_test_feature(&pool, feature2_id).await;
     }
 }

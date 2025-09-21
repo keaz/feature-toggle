@@ -102,6 +102,9 @@ async fn map_db_feature_to_full_for_broadcast(
         feature_type: format!("{:?}", f.feature_type),
         team_id: f.team_id.to_string(),
         created_at: f.created_at.to_rfc3339(),
+        kill_switch_enabled: f.kill_switch_enabled,
+        kill_switch_activated_at: f.kill_switch_activated_at.map(|dt| dt.to_rfc3339()).unwrap_or_default(),
+        rollback_scheduled_at: f.rollback_scheduled_at.map(|dt| dt.to_rfc3339()).unwrap_or_default(),
         stages: stage_msgs,
         dependencies: deps,
     };

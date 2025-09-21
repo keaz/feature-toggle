@@ -214,3 +214,99 @@ VALUES ('e1111111-1111-4111-8111-111111111111', 'test-feature-create', 'env-123'
        ('e4444444-4444-4444-8444-444444444444', 'bulk-feature-2', 'env-123', 'a1b2c3d4-0000-4000-8000-000000000002',
         now(), false, NULL, 'userB', true, now())
 ON CONFLICT (id) DO NOTHING;
+
+-- Kill Switch Test Data
+-- Add kill switch specific test features for comprehensive testing
+INSERT INTO public.features(id, key, description, feature_type, team_id, created_at, kill_switch_enabled,
+                            kill_switch_activated_at, rollback_scheduled_at)
+VALUES
+    -- Feature with kill switch disabled (for testing emergency disable)
+    ('a0000000-0000-4000-8000-000000000001', 'normal-feature', 'Normal feature that can be disabled', 'Simple',
+     '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', now(), true, NULL, NULL),
+
+    -- Feature already disabled via kill switch (for testing emergency enable)
+    ('a0000000-0000-4000-8000-000000000002', 'disabled-feature', 'Feature that is currently disabled', 'Simple',
+     '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', now(), false, now() - interval '1 hour', NULL),
+
+    -- Feature with rollback scheduled for past (should be picked up by rollback job)
+    ('a0000000-0000-4000-8000-000000000003', 'past-rollback-feature', 'Feature with expired rollback time', 'Simple',
+     '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', now(), false, now() - interval '2 hours', now() - interval '30 minutes'),
+
+    -- Feature with rollback scheduled for future (should not be picked up yet)
+    ('a0000000-0000-4000-8000-000000000004', 'future-rollback-feature', 'Feature with future rollback scheduled',
+     'Simple', '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', now(), false, now() - interval '10 minutes',
+     now() + interval '1 hour'),
+
+    -- Feature disabled without rollback scheduled (manual disable)
+    ('a0000000-0000-4000-8000-000000000005', 'manual-disabled-feature', 'Feature disabled manually without rollback',
+     'Simple', '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', now(), false, now() - interval '6 hours', NULL),
+
+    -- Complex contextual feature for kill switch testing
+    ('a0000000-0000-4000-8000-000000000006', 'contextual-kill-switch-feature',
+     'Contextual feature for kill switch testing', 'Contextual', '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', now(), true,
+     NULL, NULL)
+ON CONFLICT (id) DO NOTHING;
+
+-- Add pipeline stages for kill switch test features
+INSERT INTO public.features_pipeline_stages(id, feature_id, environment_id, parent_stage_id, order_index, position,
+                                            status, enabled)
+VALUES ('a1111111-1111-4111-8111-111111111111', 'a0000000-0000-4000-8000-000000000001',
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', NULL, 0, '{ "x": 100, "y": 100 }', 'DEPLOYED', true),
+       ('a1111111-1111-4111-8111-111111111112', 'a0000000-0000-4000-8000-000000000002',
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', NULL, 0, '{ "x": 100, "y": 150 }', 'DEPLOYED', true),
+       ('a1111111-1111-4111-8111-111111111113', 'a0000000-0000-4000-8000-000000000003',
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', NULL, 0, '{ "x": 100, "y": 200 }', 'DEPLOYED', true),
+       ('a1111111-1111-4111-8111-111111111114', 'a0000000-0000-4000-8000-000000000004',
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', NULL, 0, '{ "x": 100, "y": 250 }', 'DEPLOYED', true),
+       ('a1111111-1111-4111-8111-111111111115', 'a0000000-0000-4000-8000-000000000005',
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', NULL, 0, '{ "x": 100, "y": 300 }', 'DEPLOYED', true),
+       ('a1111111-1111-4111-8111-111111111116', 'a0000000-0000-4000-8000-000000000006',
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', NULL, 0, '{ "x": 100, "y": 350 }', 'DEPLOYED', true)
+ON CONFLICT (id) DO NOTHING;
+
+-- Add feature stage criteria for contextual kill switch feature
+INSERT INTO public.feature_stage_criteria(id, stage_id, context_key, context_id, rollout_percentage)
+VALUES ('a2222222-2222-4222-8222-222222222221',
+        'a1111111-1111-4111-8111-111111111116',
+        'filter',
+        'cb461425-373b-49d9-9634-9a248612d7b7',
+        75)
+ON CONFLICT (id) DO NOTHING;
+
+-- Add evaluation records for kill switch features to test impact
+INSERT INTO public.feature_evaluations (id, feature_key, environment_id, client_id, evaluated_at, evaluation_result,
+                                        evaluation_context, user_context, prior_assignment, created_at)
+VALUES
+    -- Evaluations for normal feature (before kill switch)
+    ('a4df5bc3-48b5-43cf-925d-ca1d3f07593a', 'normal-feature', '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+     'a1b2c3d4-0000-4000-8000-000000000001', now() - interval '2 hours', true, '{
+      "user": "user1"
+    }', 'user1', false, now() - interval '2 hours'),
+    ('7009be03-2b51-4da6-83e3-4a6b805c0af4', 'normal-feature', '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+     'a1b2c3d4-0000-4000-8000-000000000002', now() - interval '1 hour', true, '{
+      "user": "user2"
+    }', 'user2', false, now() - interval '1 hour'),
+
+    -- Evaluations for disabled feature (should show impact of kill switch)
+    ('f0015567-aa85-49b5-afd6-b8a78071723c', 'disabled-feature', '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+     'a1b2c3d4-0000-4000-8000-000000000001', now() - interval '30 minutes', false, '{
+      "user": "user3"
+    }', 'user3', true, now() - interval '30 minutes'),
+
+    -- Evaluations for past rollback feature
+    ('414daddc-7bdf-4e92-83ec-a47a2b6d8f95', 'past-rollback-feature', '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+     'a1b2c3d4-0000-4000-8000-000000000002', now() - interval '3 hours', true, '{
+      "user": "user4"
+    }', 'user4', false, now() - interval '3 hours'),
+    ('95512a8a-19d5-410c-966b-97a5a3307851', 'past-rollback-feature', '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+     'a1b2c3d4-0000-4000-8000-000000000001', now() - interval '15 minutes', false, '{
+      "user": "user5"
+    }', 'user5', true, now() - interval '15 minutes'),
+
+    -- Evaluations for contextual kill switch feature
+    ('8ee439d0-281d-48ee-8a70-26f33d97d097', 'contextual-kill-switch-feature', '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+     'a1b2c3d4-0000-4000-8000-000000000001', now() - interval '45 minutes', true, '{
+      "user": "user6",
+      "filter": "X"
+    }', 'user6', false, now() - interval '45 minutes')
+ON CONFLICT (id) DO NOTHING;

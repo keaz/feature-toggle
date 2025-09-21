@@ -18,7 +18,7 @@ use crate::logic::role::RoleLogic;
 use crate::logic::team::TeamLogic;
 use crate::logic::user::{RegisterUserInput, UpdateGqlUserInput, UserLogic};
 use crate::middleware::admin_guard::AdminState;
-use async_graphql::{Context, ID, Object, Result as GqlResult};
+use async_graphql::{Context, Object, Result as GqlResult, ID};
 use log::info;
 
 #[cfg(test)]
@@ -178,6 +178,82 @@ impl MutationRoot {
         let logic = ctx.data::<Box<dyn FeatureLogic>>()?;
         logic.delete_feature(id).await?;
         Ok(true)
+    }
+
+    // Kill switch functionality for emergency feature disable/enable
+    async fn emergency_disable_feature(
+        &self,
+        ctx: &Context<'_>,
+        id: ID,
+        rollback_in_minutes: Option<i32>,
+    ) -> GqlResult<Feature> {
+        info!("Emergency disabling feature with id: {id:?}, rollback_in_minutes: {rollback_in_minutes:?}");
+        let logic = ctx.data::<Box<dyn FeatureLogic>>()?;
+        let feature = logic.emergency_disable_feature(id.clone(), rollback_in_minutes).await?;
+
+        // Broadcast feature update for gRPC clients
+        if let (Ok(pool), Ok(updates_tx)) = (
+            ctx.data::<sqlx::PgPool>(),
+            ctx.data::<tokio::sync::broadcast::Sender<crate::grpc::pb::FeatureUpdate>>(),
+        ) {
+            // Try to load the updated feature from DB and broadcast an UPSERT
+            let repo = crate::database::feature::feature_repository(pool.clone());
+            if let Ok(fid) = uuid::Uuid::try_from(id.clone())
+                && let Ok(db_feature) = repo.get_feature_by_id(fid).await
+            {
+                // Map db_feature -> pb::FeatureFull
+                if let Ok(full) =
+                    map_db_feature_to_full_for_broadcast(pool.clone(), db_feature).await
+                {
+                    let _ = updates_tx.send(crate::grpc::pb::FeatureUpdate {
+                        message_id: uuid::Uuid::new_v4().to_string(),
+                        action: crate::grpc::pb::feature_update::Action::Upsert as i32,
+                        feature: Some(full),
+                        feature_key: String::new(),
+                        error: String::new(),
+                    });
+                }
+            }
+        }
+
+        Ok(feature)
+    }
+
+    async fn emergency_enable_feature(
+        &self,
+        ctx: &Context<'_>,
+        id: ID,
+    ) -> GqlResult<Feature> {
+        info!("Emergency enabling feature with id: {id:?}");
+        let logic = ctx.data::<Box<dyn FeatureLogic>>()?;
+        let feature = logic.emergency_enable_feature(id.clone()).await?;
+
+        // Broadcast feature update for gRPC clients
+        if let (Ok(pool), Ok(updates_tx)) = (
+            ctx.data::<sqlx::PgPool>(),
+            ctx.data::<tokio::sync::broadcast::Sender<crate::grpc::pb::FeatureUpdate>>(),
+        ) {
+            // Try to load the updated feature from DB and broadcast an UPSERT
+            let repo = crate::database::feature::feature_repository(pool.clone());
+            if let Ok(fid) = uuid::Uuid::try_from(id.clone())
+                && let Ok(db_feature) = repo.get_feature_by_id(fid).await
+            {
+                // Map db_feature -> pb::FeatureFull
+                if let Ok(full) =
+                    map_db_feature_to_full_for_broadcast(pool.clone(), db_feature).await
+                {
+                    let _ = updates_tx.send(crate::grpc::pb::FeatureUpdate {
+                        message_id: uuid::Uuid::new_v4().to_string(),
+                        action: crate::grpc::pb::feature_update::Action::Upsert as i32,
+                        feature: Some(full),
+                        feature_key: String::new(),
+                        error: String::new(),
+                    });
+                }
+            }
+        }
+
+        Ok(feature)
     }
 
     async fn create_client(
@@ -739,6 +815,9 @@ async fn map_db_feature_to_full_for_broadcast(
         feature_type: format!("{:?}", f.feature_type),
         team_id: f.team_id.to_string(),
         created_at: f.created_at.to_rfc3339(),
+        kill_switch_enabled: f.kill_switch_enabled,
+        kill_switch_activated_at: f.kill_switch_activated_at.map(|dt| dt.to_rfc3339()).unwrap_or_default(),
+        rollback_scheduled_at: f.rollback_scheduled_at.map(|dt| dt.to_rfc3339()).unwrap_or_default(),
         stages: stage_msgs,
         dependencies: deps,
     };
@@ -1681,6 +1760,9 @@ mod more_mutation_tests {
             description: Some("Test description".to_string()),
             feature_type: crate::graphql::schema::FeatureType::Simple,
             enabled: Some(true),
+            kill_switch_enabled: true,
+            kill_switch_activated_at: None,
+            rollback_scheduled_at: None,
             dependencies: vec![],
             relationships: vec![],
             stages: vec![],

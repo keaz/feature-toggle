@@ -41,6 +41,15 @@ pub trait FeatureCrudLogic: Send + Sync {
     async fn create_feature(&self, team_id: ID, input: CreateFeatureInput) -> Result<ID, Error>;
     async fn update_feature(&self, id: ID, input: UpdateFeatureInput) -> Result<Feature, Error>;
     async fn delete_feature(&self, id: ID) -> Result<(), Error>;
+
+    // Kill switch functionality
+    async fn emergency_disable_feature(
+        &self,
+        id: ID,
+        rollback_in_minutes: Option<i32>,
+    ) -> Result<Feature, Error>;
+    async fn emergency_enable_feature(&self, id: ID) -> Result<Feature, Error>;
+    async fn get_features_pending_rollback(&self) -> Result<Vec<Feature>, Error>;
 }
 
 /// Stage context and criteria management operations
@@ -106,6 +115,13 @@ mockall::mock! {
         async fn create_feature(&self, team_id: ID, input: CreateFeatureInput) -> Result<ID, Error>;
         async fn update_feature(&self, id: ID, input: UpdateFeatureInput) -> Result<Feature, Error>;
         async fn delete_feature(&self, id: ID) -> Result<(), Error>;
+        async fn emergency_disable_feature(
+            &self,
+            id: ID,
+            rollback_in_minutes: Option<i32>,
+        ) -> Result<Feature, Error>;
+        async fn emergency_enable_feature(&self, id: ID) -> Result<Feature, Error>;
+        async fn get_features_pending_rollback(&self) -> Result<Vec<Feature>, Error>;
     }
 
     #[async_trait::async_trait]
@@ -260,6 +276,9 @@ impl FeatureLogicImpl {
             description: feature.description,
             feature_type: Self::map_entity_to_graphql_feature_type(feature.feature_type),
             enabled: None, // This would need to be determined based on the feature's stages
+            kill_switch_enabled: feature.kill_switch_enabled,
+            kill_switch_activated_at: feature.kill_switch_activated_at,
+            rollback_scheduled_at: feature.rollback_scheduled_at,
             team_id: feature.team_id.into(),
             dependencies: feature
                 .dependencies
@@ -363,6 +382,33 @@ impl FeatureCrudLogic for FeatureLogicImpl {
     async fn delete_feature(&self, id: ID) -> Result<(), Error> {
         self.repository.delete_feature(id_to_uuid(id)?).await?;
         Ok(())
+    }
+
+    async fn emergency_disable_feature(
+        &self,
+        id: ID,
+        rollback_in_minutes: Option<i32>,
+    ) -> Result<Feature, Error> {
+        let feature_id = id_to_uuid(id)?;
+        let feature = self
+            .repository
+            .emergency_disable_feature(feature_id, rollback_in_minutes)
+            .await?;
+        Ok(Self::map_entity_to_graphql_feature(feature))
+    }
+
+    async fn emergency_enable_feature(&self, id: ID) -> Result<Feature, Error> {
+        let feature_id = id_to_uuid(id)?;
+        let feature = self.repository.emergency_enable_feature(feature_id).await?;
+        Ok(Self::map_entity_to_graphql_feature(feature))
+    }
+
+    async fn get_features_pending_rollback(&self) -> Result<Vec<Feature>, Error> {
+        let features = self.repository.get_features_pending_rollback().await?;
+        Ok(features
+            .into_iter()
+            .map(Self::map_entity_to_graphql_feature)
+            .collect())
     }
 }
 
@@ -638,6 +684,9 @@ mod test {
                     feature_type: EntityFeatureType::Simple,
                     team_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
                     created_at: chrono::Utc::now(),
+                    kill_switch_enabled: true,
+                    kill_switch_activated_at: None,
+                    rollback_scheduled_at: None,
                     stages: vec![],
                     dependencies: vec![],
                 })
@@ -739,6 +788,9 @@ mod test {
                     feature_type: EntityFeatureType::Contextual,
                     team_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
                     created_at: chrono::Utc::now(),
+                    kill_switch_enabled: true,
+                    kill_switch_activated_at: None,
+                    rollback_scheduled_at: None,
                     stages: vec![],
                     dependencies: vec![],
                 })
@@ -793,6 +845,9 @@ mod test {
                         feature_type: EntityFeatureType::Simple,
                         team_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
                         created_at: chrono::Utc::now(),
+                        kill_switch_enabled: true,
+                        kill_switch_activated_at: None,
+                        rollback_scheduled_at: None,
                         stages: vec![],
                         dependencies: vec![],
                     },
@@ -803,6 +858,9 @@ mod test {
                         feature_type: EntityFeatureType::Contextual,
                         team_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
                         created_at: chrono::Utc::now(),
+                        kill_switch_enabled: true,
+                        kill_switch_activated_at: None,
+                        rollback_scheduled_at: None,
                         stages: vec![],
                         dependencies: vec![],
                     },
@@ -1310,6 +1368,9 @@ mod test {
             feature_type: crate::database::entity::FeatureType::Simple,
             team_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
             created_at: chrono::Utc::now(),
+            kill_switch_enabled: true,
+            kill_switch_activated_at: None,
+            rollback_scheduled_at: None,
             stages: vec![crate::database::entity::FeaturePipelineStage {
                 id: stage_id,
                 feature_id,

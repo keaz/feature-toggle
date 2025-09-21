@@ -4,7 +4,7 @@ CREATE TABLE jwt_secrets (
     secret TEXT NOT NULL,
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    created_by UUID REFERENCES users(id),
+    created_by UUID REFERENCES users(id) ON DELETE CASCADE,
     expires_at TIMESTAMPTZ NULL -- Optional expiry for secret rotation
 );
 

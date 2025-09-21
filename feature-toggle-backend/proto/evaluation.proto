@@ -67,8 +67,11 @@ message FeatureFull {
   string feature_type = 4;
   string team_id = 5;
   string created_at = 6;
-  repeated FeatureStageFull stages = 7;
-  repeated FeatureDependencyFull dependencies = 8;
+  bool kill_switch_enabled = 7;
+  string kill_switch_activated_at = 8; // ISO 8601 timestamp or empty
+  string rollback_scheduled_at = 9; // ISO 8601 timestamp or empty
+  repeated FeatureStageFull stages = 10;
+  repeated FeatureDependencyFull dependencies = 11;
 }
 
 message GetFeatureByKeyResponse {
