@@ -1476,7 +1476,7 @@ mod tests {
         // Disable feature1 with rollback in the past (should be returned)
         let past_time = Utc::now() - Duration::minutes(10);
         sqlx::query!(
-            r#"UPDATE features SET kill_switch_enabled = false, kill_switch_activated_at = $1, rollback_scheduled_at = $2 WHERE id = $3"#,
+            r#"UPDATE features SET kill_switch_enabled = true, kill_switch_activated_at = $1, rollback_scheduled_at = $2 WHERE id = $3"#,
             past_time,
             past_time,
             feature1_id
@@ -1485,7 +1485,7 @@ mod tests {
         // Disable feature2 with rollback in the future (should NOT be returned)
         let future_time = Utc::now() + Duration::minutes(10);
         sqlx::query!(
-            r#"UPDATE features SET kill_switch_enabled = false, kill_switch_activated_at = $1, rollback_scheduled_at = $2 WHERE id = $3"#,
+            r#"UPDATE features SET kill_switch_enabled = true, kill_switch_activated_at = $1, rollback_scheduled_at = $2 WHERE id = $3"#,
             Utc::now(),
             future_time,
             feature2_id
@@ -1519,7 +1519,7 @@ mod tests {
         let returned_feature1 = features.iter().find(|f| f.id == feature1_id);
         if let Some(feature) = returned_feature1 {
             assert!(
-                !feature.kill_switch_enabled,
+                feature.kill_switch_enabled,
                 "Returned feature should be disabled"
             );
             assert!(

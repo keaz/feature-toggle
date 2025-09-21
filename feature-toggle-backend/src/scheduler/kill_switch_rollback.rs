@@ -1,8 +1,8 @@
+use crate::database::feature::FeatureRepository;
+use crate::logic::feature::FeatureLogic;
+use log::{error, info, warn};
 use std::time::Duration;
 use tokio::time::interval;
-use log::{info, warn, error};
-use crate::logic::feature::FeatureLogic;
-use crate::database::feature::FeatureRepository;
 
 pub struct KillSwitchRollbackScheduler {
     feature_logic: Box<dyn FeatureLogic>,
@@ -28,18 +28,18 @@ impl KillSwitchRollbackScheduler {
 
     pub async fn start_scheduler(&self) {
         info!("Starting Kill Switch rollback scheduler");
-        
+
         let mut interval = interval(Duration::from_secs(60)); // Check every minute
-        
+
         loop {
             interval.tick().await;
-            
+
             match self.check_and_process_rollbacks().await {
                 Ok(count) => {
                     if count > 0 {
                         info!("Processed {} feature rollbacks", count);
                     }
-                },
+                }
                 Err(e) => {
                     error!("Error processing rollbacks: {}", e);
                 }
@@ -47,21 +47,37 @@ impl KillSwitchRollbackScheduler {
         }
     }
 
-    async fn check_and_process_rollbacks(&self) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    async fn check_and_process_rollbacks(
+        &self,
+    ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
         let features_to_rollback = self.feature_logic.get_features_pending_rollback().await?;
         let mut processed_count = 0;
 
         for feature in features_to_rollback {
-            match self.feature_logic.emergency_enable_feature(feature.id.clone()).await {
+            match self
+                .feature_logic
+                .emergency_enable_feature(feature.id.clone())
+                .await
+            {
                 Ok(_) => {
-                    info!("Auto-rolled back feature: {} ({:?})", feature.key, feature.id);
+                    info!(
+                        "Auto-rolled back feature: {} ({:?})",
+                        feature.key, feature.id
+                    );
                     processed_count += 1;
 
                     // Broadcast feature update for gRPC clients (edge servers)
                     if let Ok(feature_uuid) = uuid::Uuid::try_from(feature.id.clone())
-                        && let Ok(db_feature) = self.feature_repo.get_feature_by_id(feature_uuid).await {
+                        && let Ok(db_feature) =
+                            self.feature_repo.get_feature_by_id(feature_uuid).await
+                    {
                         // Map db_feature -> pb::FeatureFull and broadcast
-                        if let Ok(full) = Self::map_db_feature_to_full_for_broadcast(self.pool.clone(), db_feature).await {
+                        if let Ok(full) = Self::map_db_feature_to_full_for_broadcast(
+                            self.pool.clone(),
+                            db_feature,
+                        )
+                        .await
+                        {
                             let _ = self.updates_tx.send(crate::grpc::pb::FeatureUpdate {
                                 message_id: uuid::Uuid::new_v4().to_string(),
                                 action: crate::grpc::pb::feature_update::Action::Upsert as i32,
@@ -69,16 +85,28 @@ impl KillSwitchRollbackScheduler {
                                 feature_key: String::new(),
                                 error: String::new(),
                             });
-                            info!("Broadcast feature update for auto-rollback: {} ({:?})", feature.key, feature.id);
+                            info!(
+                                "Broadcast feature update for auto-rollback: {} ({:?})",
+                                feature.key, feature.id
+                            );
                         } else {
-                            warn!("Failed to map feature for broadcast: {} ({:?})", feature.key, feature.id);
+                            warn!(
+                                "Failed to map feature for broadcast: {} ({:?})",
+                                feature.key, feature.id
+                            );
                         }
                     } else {
-                        warn!("Failed to reload feature from database for broadcast: {} ({:?})", feature.key, feature.id);
+                        warn!(
+                            "Failed to reload feature from database for broadcast: {} ({:?})",
+                            feature.key, feature.id
+                        );
                     }
-                },
+                }
                 Err(e) => {
-                    warn!("Failed to auto-rollback feature {} ({:?}): {}", feature.key, feature.id, e);
+                    warn!(
+                        "Failed to auto-rollback feature {} ({:?}): {}",
+                        feature.key, feature.id, e
+                    );
                 }
             }
         }
@@ -139,8 +167,14 @@ impl KillSwitchRollbackScheduler {
             team_id: f.team_id.to_string(),
             created_at: f.created_at.to_rfc3339(),
             kill_switch_enabled: f.kill_switch_enabled,
-            kill_switch_activated_at: f.kill_switch_activated_at.map(|dt| dt.to_rfc3339()).unwrap_or_default(),
-            rollback_scheduled_at: f.rollback_scheduled_at.map(|dt| dt.to_rfc3339()).unwrap_or_default(),
+            kill_switch_activated_at: f
+                .kill_switch_activated_at
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_default(),
+            rollback_scheduled_at: f
+                .rollback_scheduled_at
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_default(),
             stages: stage_msgs,
             dependencies: deps,
         })
