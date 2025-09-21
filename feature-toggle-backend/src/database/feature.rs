@@ -1185,7 +1185,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
 
         let result = sqlx::query!(
             r#"UPDATE features 
-               SET kill_switch_enabled = false, 
+               SET kill_switch_enabled = true, 
                    kill_switch_activated_at = $1,
                    rollback_scheduled_at = $2
                WHERE id = $3"#,
@@ -1203,7 +1203,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
     async fn emergency_enable_feature(&self, feature_id: Uuid) -> Result<Feature, Error> {
         let result = sqlx::query!(
             r#"UPDATE features 
-               SET kill_switch_enabled = true, 
+               SET kill_switch_enabled = false, 
                    kill_switch_activated_at = NULL,
                    rollback_scheduled_at = NULL
                WHERE id = $1"#,
@@ -1317,7 +1317,10 @@ mod tests {
         assert!(result.is_ok(), "Emergency disable should succeed");
 
         let feature = result.unwrap();
-        assert!(!feature.kill_switch_enabled, "Feature should be disabled");
+        assert!(
+            feature.kill_switch_enabled,
+            "Kill switch should be enabled (feature disabled)"
+        );
         assert!(
             feature.kill_switch_activated_at.is_some(),
             "Activation time should be set"
@@ -1350,7 +1353,10 @@ mod tests {
         );
 
         let feature = result.unwrap();
-        assert!(!feature.kill_switch_enabled, "Feature should be disabled");
+        assert!(
+            feature.kill_switch_enabled,
+            "Kill switch should be enabled (feature disabled)"
+        );
         assert!(
             feature.kill_switch_activated_at.is_some(),
             "Activation time should be set"
@@ -1409,7 +1415,10 @@ mod tests {
         assert!(result.is_ok(), "Emergency enable should succeed");
 
         let feature = result.unwrap();
-        assert!(feature.kill_switch_enabled, "Feature should be enabled");
+        assert!(
+            !feature.kill_switch_enabled,
+            "Kill switch should be disabled (feature enabled)"
+        );
         assert!(
             feature.kill_switch_activated_at.is_none(),
             "Activation time should be cleared"
@@ -1547,7 +1556,7 @@ mod tests {
             .expect("Should retrieve disabled feature");
 
         assert!(
-            !disabled_feature.kill_switch_enabled,
+            disabled_feature.kill_switch_enabled,
             "Feature should be disabled"
         );
         assert!(
@@ -1581,7 +1590,7 @@ mod tests {
             .expect("Should retrieve enabled feature");
 
         assert!(
-            enabled_feature.kill_switch_enabled,
+            !enabled_feature.kill_switch_enabled,
             "Feature should be enabled"
         );
         assert!(

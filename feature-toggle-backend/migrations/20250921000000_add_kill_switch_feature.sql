@@ -2,7 +2,7 @@
 -- This allows emergency disable/enable of features globally
 
 ALTER TABLE features
-ADD COLUMN kill_switch_enabled BOOLEAN NOT NULL DEFAULT true;
+ADD COLUMN kill_switch_enabled BOOLEAN NOT NULL DEFAULT false;
 
 -- Add timestamps for tracking kill switch activation and automatic rollback
 ALTER TABLE features 

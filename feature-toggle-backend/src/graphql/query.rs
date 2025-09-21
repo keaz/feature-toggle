@@ -968,11 +968,11 @@ mod more_query_tests {
             query {
                 jwtSecretStatus {
                     id
-                    is_active
-                    created_at
-                    created_by
-                    expires_at
-                    secret_preview
+                    isActive
+                    createdAt
+                    createdBy
+                    expiresAt
+                    secretPreview
                 }
             }
         "#;
@@ -985,17 +985,17 @@ mod more_query_tests {
         let data = resp.data.into_json().unwrap();
         let secrets = data["jwtSecretStatus"].as_array().unwrap();
         assert_eq!(secrets.len(), 2);
-        assert_eq!(secrets[0]["is_active"], true);
-        assert_eq!(secrets[1]["is_active"], false);
+        assert_eq!(secrets[0]["isActive"], true);
+        assert_eq!(secrets[1]["isActive"], false);
         // Check that secret previews are truncated
         assert!(
-            secrets[0]["secret_preview"]
+            secrets[0]["secretPreview"]
                 .as_str()
                 .unwrap()
                 .contains("test_sec...7890")
         );
         assert!(
-            secrets[1]["secret_preview"]
+            secrets[1]["secretPreview"]
                 .as_str()
                 .unwrap()
                 .contains("old_secr...1234")
@@ -1024,7 +1024,7 @@ mod more_query_tests {
             query {
                 jwtSecretStatus {
                     id
-                    is_active
+                    isActive
                 }
             }
         "#;
