@@ -1,4 +1,3 @@
-use crate::Error;
 use crate::database::entity::{DBStage, FeatureType as EntityFeatureType};
 use crate::database::feature::{
     CreateFeature, CreateFeatureStage, FeatureRepository, UpdateFeature,
@@ -10,6 +9,7 @@ use crate::graphql::schema::{
 use crate::logic::environment::EnvironmentLogic;
 use crate::logic::stage_builder::{build_stage_relationships, id_to_uuid};
 use crate::logic::{create_relationships, get_environment_map, map_stages};
+use crate::Error;
 use async_graphql::ID;
 use feature_toggle_shared::constants::StageStatus;
 use uuid::Uuid;

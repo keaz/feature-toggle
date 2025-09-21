@@ -103,8 +103,16 @@ pub async fn run() -> std::io::Result<()> {
 
     // Start kill switch rollback scheduler
     let scheduler_feature_logic = feature_logic.clone();
+    let scheduler_feature_repo = database::feature::feature_repository(db_pool.clone());
+    let scheduler_pool = db_pool.clone();
+    let scheduler_updates_tx = updates_tx.clone();
     tokio::spawn(async move {
-        let scheduler = scheduler::KillSwitchRollbackScheduler::new(scheduler_feature_logic);
+        let scheduler = scheduler::KillSwitchRollbackScheduler::new(
+            scheduler_feature_logic,
+            scheduler_feature_repo,
+            scheduler_pool,
+            scheduler_updates_tx,
+        );
         scheduler.start_scheduler().await;
     });
 

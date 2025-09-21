@@ -1,5 +1,5 @@
 use crate::database::entity::{Feature, FeatureDependency, FeaturePipelineStage, FeatureType};
-use crate::database::{Error, handle_error};
+use crate::database::{handle_error, Error};
 use chrono::{DateTime, Utc};
 use mockall::automock;
 use serde::{Deserialize, Serialize};
@@ -1224,7 +1224,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
             s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
             s.parent_stage_id, s.position, s.bucketing_key, s.status, s.enabled
             FROM features f LEFT JOIN features_pipeline_stages s ON f.id = s.feature_id
-            WHERE f.kill_switch_enabled = false 
+            WHERE f.kill_switch_enabled = true 
               AND f.rollback_scheduled_at IS NOT NULL 
               AND f.rollback_scheduled_at <= $1
             ORDER BY f.rollback_scheduled_at ASC"#,
