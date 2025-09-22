@@ -616,7 +616,7 @@ async fn test_emergency_disable_with_rollback_integration() {
     let pool = init_pg_pool().await;
     let repository = feature::feature_repository(pool);
 
-    let feature_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+    let feature_id = Uuid::parse_str("dd663d53-0bcd-44ab-b9e2-5ac27312805e").unwrap();
     let rollback_minutes = 30;
     let before_disable = chrono::Utc::now();
 
@@ -664,7 +664,7 @@ async fn test_emergency_enable_feature_integration() {
     let pool = init_pg_pool().await;
     let repository = feature::feature_repository(pool);
 
-    let feature_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+    let feature_id = Uuid::parse_str("00e862c2-29b4-4fd0-9dcb-4d3f274cc5c2").unwrap();
 
     // First disable the feature
     repository
@@ -729,7 +729,7 @@ async fn test_get_features_pending_rollback_integration() {
     let pool_direct = init_pg_pool().await;
     sqlx::query!(
         r#"UPDATE features 
-           SET kill_switch_enabled = false, 
+           SET kill_switch_enabled = true,
                kill_switch_activated_at = $1,
                rollback_scheduled_at = $2
            WHERE id = $3"#,

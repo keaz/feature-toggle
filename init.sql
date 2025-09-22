@@ -244,7 +244,13 @@ VALUES
     -- Complex contextual feature for kill switch testing
     ('a0000000-0000-4000-8000-000000000006', 'contextual-kill-switch-feature',
      'Contextual feature for kill switch testing', 'Contextual', '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', now(), true,
-     NULL, NULL)
+     NULL, NULL),
+
+    ('dd663d53-0bcd-44ab-b9e2-5ac27312805e', 'feature-to-kill', 'Feature that get killed by the test', 'Simple',
+     '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', now(), true, NULL, NULL),
+    ('00e862c2-29b4-4fd0-9dcb-4d3f274cc5c2', 'feature-to-kill-and-enabled',
+     'Feature that get killed and enabled by the test', 'Simple',
+     '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', now(), true, NULL, NULL)
 ON CONFLICT (id) DO NOTHING;
 
 -- Add pipeline stages for kill switch test features
