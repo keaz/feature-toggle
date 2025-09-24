@@ -66,7 +66,7 @@ pub struct FeatureDependency {
     pub depends_on_id: Uuid,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub enum FeatureType {
     Simple,
     Contextual,
@@ -120,7 +120,7 @@ pub struct StageCriterion {
     pub rollout_percentage: i32,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub enum ClientType {
     Web,
     Backend,

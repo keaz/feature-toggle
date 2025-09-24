@@ -853,3 +853,162 @@ async fn test_kill_switch_multiple_operations_integration() {
         "Final state should have kill switch disabled (feature enabled)"
     );
 }
+
+// Pagination Integration Tests
+#[tokio::test]
+async fn test_get_features_paginated_with_real_data() {
+    let pool = init_pg_pool().await;
+    let repo = feature::feature_repository(pool);
+    let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+
+    // Test pagination with page size 1
+    let (features_page1, total) = repo
+        .get_features_paginated(team_id, None, None, 1, 1)
+        .await
+        .expect("get_features_paginated ok");
+
+    if total > 0 {
+        assert_eq!(features_page1.len(), 1);
+
+        // Test getting second page if there are enough features
+        if total > 1 {
+            let (features_page2, total2) = repo
+                .get_features_paginated(team_id, None, None, 2, 1)
+                .await
+                .expect("get_features_paginated page 2 ok");
+
+            assert_eq!(features_page2.len(), 1);
+            assert_eq!(total2, total, "Total should be consistent across pages");
+
+            // Ensure pages contain different features
+            assert_ne!(
+                features_page1[0].id, features_page2[0].id,
+                "Different pages should contain different features"
+            );
+        }
+
+        // Test larger page size
+        let (features_large_page, total3) = repo
+            .get_features_paginated(team_id, None, None, 1, 10)
+            .await
+            .expect("get_features_paginated large page ok");
+
+        assert!(features_large_page.len() >= 1);
+        assert_eq!(total3, total, "Total should be consistent");
+    }
+}
+
+#[tokio::test]
+async fn test_get_features_paginated_with_filters() {
+    let pool = init_pg_pool().await;
+    let repo = feature::feature_repository(pool);
+    let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+
+    // Test with feature type filter
+    let (simple_features, simple_total) = repo
+        .get_features_paginated(team_id, None, Some(FeatureType::Simple), 1, 10)
+        .await
+        .expect("get simple features ok");
+
+    for feature in &simple_features {
+        assert!(matches!(feature.feature_type, FeatureType::Simple));
+    }
+
+    // Test with key filter
+    if simple_total > 0 {
+        let feature_key = &simple_features[0].key;
+        let (filtered_features, filtered_total) = repo
+            .get_features_paginated(team_id, Some(feature_key.clone()), None, 1, 10)
+            .await
+            .expect("get filtered features ok");
+
+        assert!(filtered_total > 0, "Should find features matching the key");
+        for feature in &filtered_features {
+            assert!(feature.key.contains(feature_key), "Key should match filter");
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_get_features_paginated_edge_cases() {
+    let pool = init_pg_pool().await;
+    let repo = feature::feature_repository(pool);
+    let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+
+    // Test with page number beyond available data
+    let (empty_features, total) = repo
+        .get_features_paginated(team_id, None, None, 999, 10)
+        .await
+        .expect("get_features_paginated beyond data ok");
+
+    assert_eq!(empty_features.len(), 0);
+
+    // Test with very large page size
+    let (all_features, total2) = repo
+        .get_features_paginated(team_id, None, None, 1, 1000)
+        .await
+        .expect("get_features_paginated large page size ok");
+
+    assert_eq!(all_features.len() as i64, total2, "Should return all available features");
+    assert_eq!(total2, total, "Total should be consistent");
+}
+
+#[tokio::test]
+async fn test_create_and_delete_feature_pagination() {
+    let pool = init_pg_pool().await;
+    let repo = feature::feature_repository(pool);
+    let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+
+    // Get initial count
+    let (_, initial_total) = repo
+        .get_features_paginated(team_id, None, None, 1, 1000)
+        .await
+        .expect("get initial features ok");
+
+    // Create a test feature
+    let feature_key = format!("test-feature-pagination-{}", Uuid::new_v4());
+    let create_feature = CreateFeature {
+        key: feature_key.clone(),
+        description: Some("Test feature for pagination".to_string()),
+        feature_type: FeatureType::Simple,
+        team_id,
+        stages: vec![],
+        dependencies: vec![],
+    };
+
+    let created_id = repo
+        .create_feature(create_feature)
+        .await
+        .expect("create feature ok");
+
+    // Verify count increased
+    let (_, new_total) = repo
+        .get_features_paginated(team_id, None, None, 1, 1000)
+        .await
+        .expect("get features after create ok");
+
+    assert_eq!(new_total, initial_total + 1, "Feature count should increase by 1");
+
+    // Verify we can find the new feature with pagination
+    let (filtered_features, filtered_total) = repo
+        .get_features_paginated(team_id, Some(feature_key), None, 1, 10)
+        .await
+        .expect("get filtered features ok");
+
+    assert_eq!(filtered_total, 1, "Should find exactly one feature with that key");
+    assert_eq!(filtered_features.len(), 1);
+    assert_eq!(filtered_features[0].id, created_id);
+
+    // Clean up
+    repo.delete_feature(created_id)
+        .await
+        .expect("delete feature ok");
+
+    // Verify count returned to original
+    let (_, final_total) = repo
+        .get_features_paginated(team_id, None, None, 1, 1000)
+        .await
+        .expect("get features after delete ok");
+
+    assert_eq!(final_total, initial_total, "Feature count should return to original");
+}

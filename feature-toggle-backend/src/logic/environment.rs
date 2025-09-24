@@ -17,6 +17,15 @@ pub trait EnvironmentLogic: Send + Sync {
         active: Option<bool>,
     ) -> Result<Vec<Environment>, Error>;
 
+    async fn get_environments_paginated(
+        &self,
+        team_id: ID,
+        name: Option<String>,
+        active: Option<bool>,
+        page_number: i32,
+        page_size: i32,
+    ) -> Result<(Vec<Environment>, i64), Error>;
+
     async fn create_environment(
         &self,
         team_id: ID,
@@ -83,6 +92,32 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
                 team_id: ID::from(env.team_id),
             })
             .collect())
+    }
+
+    async fn get_environments_paginated(
+        &self,
+        team_id: ID,
+        name: Option<String>,
+        active: Option<bool>,
+        page_number: i32,
+        page_size: i32,
+    ) -> Result<(Vec<Environment>, i64), Error> {
+        let team_id = Uuid::try_from(team_id)
+            .map_err(|e| Error::InvalidInput(e.to_string()))?;
+        let (environments, total) = self
+            .repository
+            .get_environments_paginated(team_id, name, active, page_number, page_size)
+            .await?;
+        let mapped_environments = environments
+            .into_iter()
+            .map(|env| Environment {
+                id: ID::from(env.id),
+                name: env.name,
+                active: env.active,
+                team_id: ID::from(env.team_id),
+            })
+            .collect();
+        Ok((mapped_environments, total))
     }
 
     async fn create_environment(
@@ -365,5 +400,110 @@ mod tests {
         assert_eq!(environments.len(), 2);
         assert_eq!(environments[0].id, ID::from(expected_id));
         assert_eq!(environments[0].name, "Test Environment");
+    }
+
+    #[tokio::test]
+    async fn test_get_environments_paginated_success() {
+        let mut mock_repository = MockEnvironmentRepository::new();
+        let team_id = Uuid::new_v4();
+        let env1_id = Uuid::new_v4();
+        let env2_id = Uuid::new_v4();
+        
+        let expected_environments = vec![
+            crate::database::entity::Environment {
+                id: env1_id,
+                name: "Production".to_string(),
+                active: true,
+                team_id,
+            },
+            crate::database::entity::Environment {
+                id: env2_id,
+                name: "Development".to_string(),
+                active: false,
+                team_id,
+            },
+        ];
+
+        mock_repository
+            .expect_get_environments_paginated()
+            .with(
+                mockall::predicate::eq(team_id),
+                mockall::predicate::eq(None::<String>),
+                mockall::predicate::eq(None::<bool>),
+                mockall::predicate::eq(1),
+                mockall::predicate::eq(10),
+            )
+            .times(1)
+            .returning(move |_, _, _, _, _| Ok((expected_environments.clone(), 20)));
+
+        let logic = environment_logic(Box::new(mock_repository));
+        let (environments, total) = logic
+            .get_environments_paginated(
+                ID::from(team_id),
+                None,
+                None,
+                1,
+                10,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(environments.len(), 2);
+        assert_eq!(total, 20);
+        assert_eq!(environments[0].name, "Production");
+        assert_eq!(environments[0].active, true);
+        assert_eq!(environments[1].name, "Development");
+        assert_eq!(environments[1].active, false);
+    }
+
+    #[tokio::test]
+    async fn test_get_environments_paginated_with_filters() {
+        let mut mock_repository = MockEnvironmentRepository::new();
+        let team_id = Uuid::new_v4();
+
+        mock_repository
+            .expect_get_environments_paginated()
+            .with(
+                mockall::predicate::eq(team_id),
+                mockall::predicate::eq(Some("prod".to_string())),
+                mockall::predicate::eq(Some(true)),
+                mockall::predicate::eq(2),
+                mockall::predicate::eq(5),
+            )
+            .times(1)
+            .returning(|_, _, _, _, _| Ok((vec![], 0)));
+
+        let logic = environment_logic(Box::new(mock_repository));
+        let (environments, total) = logic
+            .get_environments_paginated(
+                ID::from(team_id),
+                Some("prod".to_string()),
+                Some(true),
+                2,
+                5,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(environments.len(), 0);
+        assert_eq!(total, 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_environments_paginated_invalid_team_id() {
+        let mock_repository = MockEnvironmentRepository::new();
+        let logic = environment_logic(Box::new(mock_repository));
+        
+        let result = logic
+            .get_environments_paginated(
+                ID::from("invalid-uuid"),
+                None,
+                None,
+                1,
+                10,
+            )
+            .await;
+
+        assert!(matches!(result, Err(Error::InvalidInput(_))));
     }
 }

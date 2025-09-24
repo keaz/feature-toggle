@@ -26,6 +26,16 @@ pub trait PipelineLogic: Send + Sync {
         fields: Vec<String>,
     ) -> Result<Vec<Pipeline>, Error>;
 
+    async fn get_pipelines_paginated(
+        &self,
+        team_id: ID,
+        name: Option<String>,
+        active: Option<bool>,
+        fields: Vec<String>,
+        page_number: i32,
+        page_size: i32,
+    ) -> Result<(Vec<Pipeline>, i64), Error>;
+
     async fn create_pipeline(&self, team_id: ID, input: CreatePipelineInput) -> Result<ID, Error>;
     async fn update_pipeline(&self, id: ID, input: UpdatePipelineInput) -> Result<Pipeline, Error>;
     async fn delete_pipeline(&self, id: ID) -> Result<(), Error>;
@@ -142,6 +152,53 @@ impl PipelineLogic for PipelineLogicImpl {
                 }
             })
             .collect())
+    }
+
+    async fn get_pipelines_paginated(
+        &self,
+        team_id: ID,
+        name: Option<String>,
+        active: Option<bool>,
+        fields: Vec<String>,
+        page_number: i32,
+        page_size: i32,
+    ) -> Result<(Vec<Pipeline>, i64), Error> {
+        let team_id = Uuid::try_from(team_id)
+            .map_err(|e| Error::InvalidInput(e.to_string()))?;
+        let (pipelines, total) = self.repository.get_pipelines_paginated(team_id, name, active, page_number, page_size).await?;
+        let has_stage = fields.contains(&"stages".to_string());
+
+        let stages = pipelines
+            .iter()
+            .flat_map(|feature| &feature.stages)
+            .map(|stage| Box::new(stage.clone()) as Box<dyn DBStage>)
+            .collect::<Vec<Box<dyn DBStage>>>();
+
+        let environment_map = get_environment_map(&*self.environment_logic, &stages, true).await?;
+
+        let mapped_pipelines = pipelines
+            .into_iter()
+            .map(|pipeline| {
+                let db_stages = pipeline
+                    .stages
+                    .iter()
+                    .map(|stage| Box::new(stage.clone()) as Box<dyn DBStage>)
+                    .collect();
+                let stages = map_stages(has_stage, &environment_map, &db_stages, stage_factory);
+                let relationships =
+                    create_relationships(has_stage, db_stages, relationship_factory);
+                Pipeline {
+                    id: pipeline.id.into(),
+                    name: pipeline.name,
+                    active: pipeline.active,
+                    stages,
+                    relationships,
+                    team_id: pipeline.team_id.into(),
+                }
+            })
+            .collect();
+
+        Ok((mapped_pipelines, total))
     }
 
     async fn create_pipeline(&self, team_id: ID, input: CreatePipelineInput) -> Result<ID, Error> {
@@ -582,5 +639,118 @@ mod test {
             )
             .await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_get_pipelines_paginated_success() {
+        let mut repository = MockPipelineRepository::new();
+        let environment_repo = MockEnvironmentLogic::new();
+        let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+        let pipeline1_id = Uuid::new_v4();
+        let pipeline2_id = Uuid::new_v4();
+        
+        let expected_pipelines = vec![
+            crate::database::entity::Pipeline {
+                id: pipeline1_id,
+                name: "Production Pipeline".to_string(),
+                active: true,
+                team_id,
+                stages: vec![],
+            },
+            crate::database::entity::Pipeline {
+                id: pipeline2_id,
+                name: "Development Pipeline".to_string(),
+                active: false,
+                team_id,
+                stages: vec![],
+            },
+        ];
+
+        repository
+            .expect_get_pipelines_paginated()
+            .with(
+                mockall::predicate::eq(team_id),
+                mockall::predicate::eq(None::<String>),
+                mockall::predicate::eq(None::<bool>),
+                mockall::predicate::eq(1),
+                mockall::predicate::eq(10),
+            )
+            .times(1)
+            .returning(move |_, _, _, _, _| Ok((expected_pipelines.clone(), 15)));
+
+        let logic = pipeline_logic(Box::new(repository), Box::new(environment_repo));
+        let (pipelines, total) = logic
+            .get_pipelines_paginated(
+                ID::from(team_id),
+                None,
+                None,
+                vec![],
+                1,
+                10,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(pipelines.len(), 2);
+        assert_eq!(total, 15);
+        assert_eq!(pipelines[0].name, "Production Pipeline");
+        assert_eq!(pipelines[0].active, true);
+        assert_eq!(pipelines[1].name, "Development Pipeline");
+        assert_eq!(pipelines[1].active, false);
+    }
+
+    #[tokio::test]
+    async fn test_get_pipelines_paginated_with_filters() {
+        let mut repository = MockPipelineRepository::new();
+        let environment_repo = MockEnvironmentLogic::new();
+        let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+
+        repository
+            .expect_get_pipelines_paginated()
+            .with(
+                mockall::predicate::eq(team_id),
+                mockall::predicate::eq(Some("prod".to_string())),
+                mockall::predicate::eq(Some(true)),
+                mockall::predicate::eq(2),
+                mockall::predicate::eq(5),
+            )
+            .times(1)
+            .returning(|_, _, _, _, _| Ok((vec![], 0)));
+
+        let logic = pipeline_logic(Box::new(repository), Box::new(environment_repo));
+        let (pipelines, total) = logic
+            .get_pipelines_paginated(
+                ID::from(team_id),
+                Some("prod".to_string()),
+                Some(true),
+                vec![],
+                2,
+                5,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(pipelines.len(), 0);
+        assert_eq!(total, 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_pipelines_paginated_invalid_team_id() {
+        let repository = MockPipelineRepository::new();
+        let environment_repo = MockEnvironmentLogic::new();
+        
+        let logic = pipeline_logic(Box::new(repository), Box::new(environment_repo));
+        let result = logic
+            .get_pipelines_paginated(
+                ID::from("invalid-uuid"),
+                None,
+                None,
+                vec![],
+                1,
+                10,
+            )
+            .await;
+
+        assert!(matches!(result, Err(Error::InvalidInput(_))));
     }
 }

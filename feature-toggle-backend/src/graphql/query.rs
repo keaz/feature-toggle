@@ -1,7 +1,8 @@
 use crate::graphql::create_user;
 use crate::graphql::schema::{
-    ApplicationStatus, Client, ClientType, Environment, Feature, FeatureType, JwtSecretResponse,
-    Pipeline, Role, Team, User, UsersPage,
+    ApplicationStatus, Client, ClientType, ClientsPage, ContextsPage, Environment,
+    EnvironmentsPage, Feature, FeatureType, FeaturesPage, JwtSecretResponse, Pipeline,
+    PipelinesPage, Role, Team, User, UsersPage,
 };
 use crate::logic::client::ClientLogic;
 use crate::logic::context::ContextLogic;
@@ -34,10 +35,34 @@ impl Query {
         #[graphql(desc = "Id of the team")] team_id: ID,
         #[graphql(desc = "Name of the environment")] name: Option<String>,
         #[graphql(desc = "Active status of the environment")] active: Option<bool>,
-    ) -> GqlResult<Vec<Environment>> {
+        #[graphql(desc = "Page number (1-based)")] page_number: Option<i32>,
+        #[graphql(desc = "Page size")] page_size: Option<i32>,
+    ) -> GqlResult<EnvironmentsPage> {
         debug!("Fetching environments with name: {name:?} and active: {active:?}");
         let repository = ctx.data::<Box<dyn EnvironmentLogic>>()?;
-        Ok(repository.get_environments(team_id, name, active).await?)
+
+        // If pagination parameters are provided, use paginated version
+        if let (Some(page_num), Some(page_sz)) = (page_number, page_size) {
+            let (items, total) = repository
+                .get_environments_paginated(team_id, name, active, page_num, page_sz)
+                .await?;
+            Ok(EnvironmentsPage {
+                items,
+                page_number: page_num,
+                page_size: page_sz,
+                total,
+            })
+        } else {
+            // Fallback to non-paginated for backward compatibility
+            let items = repository.get_environments(team_id, name, active).await?;
+            let total = items.len() as i64;
+            Ok(EnvironmentsPage {
+                items,
+                page_number: 1,
+                page_size: total as i32,
+                total,
+            })
+        }
     }
 
     async fn teams(&self, ctx: &Context<'_>) -> GqlResult<Vec<Team>> {
@@ -63,16 +88,40 @@ impl Query {
         #[graphql(desc = "Id of the team")] team_id: ID,
         #[graphql(desc = "Name of the environment")] name: Option<String>,
         #[graphql(desc = "Active status of the environment")] active: Option<bool>,
-    ) -> GqlResult<Vec<Pipeline>> {
+        #[graphql(desc = "Page number (1-based)")] page_number: Option<i32>,
+        #[graphql(desc = "Page size")] page_size: Option<i32>,
+    ) -> GqlResult<PipelinesPage> {
         debug!("Fetching pipelines for team with id: {team_id:?}");
 
         let mut fields = vec![];
-        if ctx.look_ahead().field("stages").exists() {
+        if ctx.look_ahead().field("items").field("stages").exists() {
             fields.push("stages".to_string());
         }
 
         let logic = ctx.data::<Box<dyn PipelineLogic>>()?;
-        Ok(logic.get_pipelines(team_id, name, active, fields).await?)
+
+        // If pagination parameters are provided, use paginated version
+        if let (Some(page_num), Some(page_sz)) = (page_number, page_size) {
+            let (items, total) = logic
+                .get_pipelines_paginated(team_id, name, active, fields, page_num, page_sz)
+                .await?;
+            Ok(PipelinesPage {
+                items,
+                page_number: page_num,
+                page_size: page_sz,
+                total,
+            })
+        } else {
+            // Fallback to non-paginated for backward compatibility
+            let items = logic.get_pipelines(team_id, name, active, fields).await?;
+            let total = items.len() as i64;
+            Ok(PipelinesPage {
+                items,
+                page_number: 1,
+                page_size: total as i32,
+                total,
+            })
+        }
     }
 
     async fn pipeline(
@@ -101,10 +150,34 @@ impl Query {
         #[graphql(desc = "Id of the team")] team_id: ID,
         #[graphql(desc = "Name of the feature")] name: Option<String>,
         #[graphql(desc = "Type of the feature")] feature_type: Option<FeatureType>,
-    ) -> GqlResult<Vec<Feature>> {
+        #[graphql(desc = "Page number (1-based)")] page_number: Option<i32>,
+        #[graphql(desc = "Page size")] page_size: Option<i32>,
+    ) -> GqlResult<FeaturesPage> {
         debug!("Fetching features for team with id: {team_id:?}");
         let logic = ctx.data::<Box<dyn FeatureLogic>>()?;
-        Ok(logic.get_features(team_id, name, feature_type).await?)
+
+        // If pagination parameters are provided, use paginated version
+        if let (Some(page_num), Some(page_sz)) = (page_number, page_size) {
+            let (items, total) = logic
+                .get_features_paginated(team_id, name, feature_type, page_num, page_sz)
+                .await?;
+            Ok(FeaturesPage {
+                items,
+                page_number: page_num,
+                page_size: page_sz,
+                total,
+            })
+        } else {
+            // Fallback to non-paginated for backward compatibility
+            let items = logic.get_features(team_id, name, feature_type).await?;
+            let total = items.len() as i64;
+            Ok(FeaturesPage {
+                items,
+                page_number: 1,
+                page_size: total as i32,
+                total,
+            })
+        }
     }
 
     async fn client(
@@ -124,12 +197,36 @@ impl Query {
         #[graphql(desc = "Name of the client")] name: Option<String>,
         #[graphql(desc = "Enabled status of the client")] enabled: Option<bool>,
         #[graphql(desc = "Type of the client")] client_type: Option<ClientType>,
-    ) -> GqlResult<Vec<Client>> {
+        #[graphql(desc = "Page number (1-based)")] page_number: Option<i32>,
+        #[graphql(desc = "Page size")] page_size: Option<i32>,
+    ) -> GqlResult<ClientsPage> {
         debug!("Fetching clients for team with id: {team_id:?}");
         let logic = ctx.data::<Box<dyn ClientLogic>>()?;
-        Ok(logic
-            .get_clients(team_id, name, enabled, client_type)
-            .await?)
+
+        // If pagination parameters are provided, use paginated version
+        if let (Some(page_num), Some(page_sz)) = (page_number, page_size) {
+            let (items, total) = logic
+                .get_clients_paginated(team_id, name, enabled, client_type, page_num, page_sz)
+                .await?;
+            Ok(ClientsPage {
+                items,
+                page_number: page_num,
+                page_size: page_sz,
+                total,
+            })
+        } else {
+            // Fallback to non-paginated for backward compatibility
+            let items = logic
+                .get_clients(team_id, name, enabled, client_type)
+                .await?;
+            let total = items.len() as i64;
+            Ok(ClientsPage {
+                items,
+                page_number: 1,
+                page_size: total as i32,
+                total,
+            })
+        }
     }
 
     async fn context(
@@ -147,10 +244,34 @@ impl Query {
         ctx: &Context<'_>,
         #[graphql(desc = "Id of the team")] team_id: ID,
         #[graphql(desc = "Filter by key (ILIKE)")] key: Option<String>,
-    ) -> GqlResult<Vec<crate::graphql::schema::Context>> {
+        #[graphql(desc = "Page number (1-based)")] page_number: Option<i32>,
+        #[graphql(desc = "Page size")] page_size: Option<i32>,
+    ) -> GqlResult<ContextsPage> {
         debug!("Fetching contexts for team with id: {team_id:?} key={key:?}");
         let logic = ctx.data::<Box<dyn ContextLogic>>().unwrap();
-        Ok(logic.get_contexts(team_id, key).await?)
+
+        // If pagination parameters are provided, use paginated version
+        if let (Some(page_num), Some(page_sz)) = (page_number, page_size) {
+            let (items, total) = logic
+                .get_contexts_paginated(team_id, key, page_num, page_sz)
+                .await?;
+            Ok(ContextsPage {
+                items,
+                page_number: page_num,
+                page_size: page_sz,
+                total,
+            })
+        } else {
+            // Fallback to non-paginated for backward compatibility
+            let items = logic.get_contexts(team_id, key).await?;
+            let total = items.len() as i64;
+            Ok(ContextsPage {
+                items,
+                page_number: 1,
+                page_size: total as i32,
+                total,
+            })
+        }
     }
 
     async fn stage_contexts(
@@ -322,7 +443,7 @@ mod tests {
 
         let gql = r#"
             query($team: ID!) {
-                contexts(teamId: $team) { key entries { value } }
+                contexts(teamId: $team) { items { key entries { value } } }
             }
         "#;
         let mut req = Request::new(gql);
@@ -330,10 +451,14 @@ mod tests {
             "team": team_id.to_string()
         })));
         let resp = schema.execute(req).await;
-        assert!(resp.errors.is_empty());
+        assert!(
+            resp.errors.is_empty(),
+            "{}",
+            serde_json::to_string(&resp.errors).unwrap()
+        );
         let data = resp.data.into_json().unwrap();
-        assert_eq!(data["contexts"].as_array().unwrap().len(), 1);
-        assert_eq!(data["contexts"][0]["key"], "country");
+        assert_eq!(data["contexts"]["items"].as_array().unwrap().len(), 1);
+        assert_eq!(data["contexts"]["items"][0]["key"], "country");
     }
 
     #[tokio::test]
@@ -408,6 +533,17 @@ mod more_query_tests {
         ) -> Result<Vec<Pipeline>, crate::Error> {
             *self.captured_fields.lock().unwrap() = Some(fields);
             Ok(Vec::new())
+        }
+        async fn get_pipelines_paginated(
+            &self,
+            _team_id: ID,
+            _name: Option<String>,
+            _active: Option<bool>,
+            _fields: Vec<String>,
+            _page_number: i32,
+            _page_size: i32,
+        ) -> Result<(Vec<Pipeline>, i64), crate::Error> {
+            Ok((Vec::new(), 0))
         }
         async fn get_pipeline_by_id(&self, _id: ID) -> Result<Pipeline, crate::Error> {
             unreachable!()
@@ -535,7 +671,7 @@ mod more_query_tests {
         .data::<Box<dyn crate::logic::pipeline::PipelineLogic>>(Box::new(stub))
         .finish();
 
-        let q = r#"query($tid: ID!){ pipelines(teamId: $tid){ id stages { id } } }"#;
+        let q = r#"query($tid: ID!){ pipelines(teamId: $tid){ items { id stages { id } } } }"#;
         let mut req = Request::new(q);
         req = req.variables(async_graphql::Variables::from_json(
             serde_json::json!({"tid": team_id.to_string()}),

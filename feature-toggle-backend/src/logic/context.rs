@@ -21,6 +21,13 @@ pub trait ContextLogic: Send + Sync {
         team_id: ID,
         key: Option<String>,
     ) -> Result<Vec<GqlContext>, Error>;
+    async fn get_contexts_paginated(
+        &self,
+        team_id: ID,
+        key: Option<String>,
+        page_number: i32,
+        page_size: i32,
+    ) -> Result<(Vec<GqlContext>, i64), Error>;
     async fn create_context(
         &self,
         team_id: ID,
@@ -127,6 +134,19 @@ impl ContextLogic for ContextLogicImpl {
         let team_id = id_to_uuid(team_id)?;
         let list = self.repository.get_contexts(team_id, key).await?;
         Ok(list.into_iter().map(map_db_to_gql).collect())
+    }
+
+    async fn get_contexts_paginated(
+        &self,
+        team_id: ID,
+        key: Option<String>,
+        page_number: i32,
+        page_size: i32,
+    ) -> Result<(Vec<GqlContext>, i64), Error> {
+        let team_id = id_to_uuid(team_id)?;
+        let (list, total) = self.repository.get_contexts_paginated(team_id, key, page_number, page_size).await?;
+        let contexts = list.into_iter().map(map_db_to_gql).collect();
+        Ok((contexts, total))
     }
 
     async fn create_context(
@@ -411,5 +431,137 @@ mod tests {
             tx,
         );
         logic.delete_context(ID::from(id)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_get_contexts_paginated_success() {
+        let mut repo = MockContextRepository::new();
+        let team_id = Uuid::new_v4();
+        let context1_id = Uuid::new_v4();
+        let context2_id = Uuid::new_v4();
+        
+        let expected_contexts = vec![
+            DbContext {
+                id: context1_id,
+                team_id,
+                key: "country".into(),
+                entries: vec![
+                    DbContextEntry {
+                        id: Uuid::new_v4(),
+                        value: "US".into(),
+                    },
+                ],
+            },
+            DbContext {
+                id: context2_id,
+                team_id,
+                key: "language".into(),
+                entries: vec![
+                    DbContextEntry {
+                        id: Uuid::new_v4(),
+                        value: "en".into(),
+                    },
+                    DbContextEntry {
+                        id: Uuid::new_v4(),
+                        value: "es".into(),
+                    },
+                ],
+            },
+        ];
+        
+        repo.expect_get_contexts_paginated()
+            .with(
+                mockall::predicate::eq(team_id),
+                mockall::predicate::eq(None::<String>),
+                mockall::predicate::eq(1),
+                mockall::predicate::eq(10),
+            )
+            .times(1)
+            .returning(move |_, _, _, _| Ok((expected_contexts.clone(), 25)));
+
+        let (tx, rx) = tokio::sync::broadcast::channel::<crate::grpc::pb::FeatureUpdate>(8);
+        drop(rx);
+        let logic = super::context_logic(
+            Box::new(repo),
+            Box::new(MockFeatureRepository::new()),
+            tx,
+        );
+        
+        let (contexts, total) = logic
+            .get_contexts_paginated(
+                ID::from(team_id),
+                None,
+                1,
+                10,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(contexts.len(), 2);
+        assert_eq!(total, 25);
+        assert_eq!(contexts[0].key, "country");
+        assert_eq!(contexts[0].entries.len(), 1);
+        assert_eq!(contexts[1].key, "language");
+        assert_eq!(contexts[1].entries.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_get_contexts_paginated_with_key_filter() {
+        let mut repo = MockContextRepository::new();
+        let team_id = Uuid::new_v4();
+        
+        repo.expect_get_contexts_paginated()
+            .with(
+                mockall::predicate::eq(team_id),
+                mockall::predicate::eq(Some("country".to_string())),
+                mockall::predicate::eq(2),
+                mockall::predicate::eq(5),
+            )
+            .times(1)
+            .returning(|_, _, _, _| Ok((vec![], 0)));
+
+        let (tx, rx) = tokio::sync::broadcast::channel::<crate::grpc::pb::FeatureUpdate>(8);
+        drop(rx);
+        let logic = super::context_logic(
+            Box::new(repo),
+            Box::new(MockFeatureRepository::new()),
+            tx,
+        );
+        
+        let (contexts, total) = logic
+            .get_contexts_paginated(
+                ID::from(team_id),
+                Some("country".to_string()),
+                2,
+                5,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(contexts.len(), 0);
+        assert_eq!(total, 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_contexts_paginated_invalid_team_id() {
+        let repo = MockContextRepository::new();
+        let (tx, rx) = tokio::sync::broadcast::channel::<crate::grpc::pb::FeatureUpdate>(8);
+        drop(rx);
+        let logic = super::context_logic(
+            Box::new(repo),
+            Box::new(MockFeatureRepository::new()),
+            tx,
+        );
+        
+        let result = logic
+            .get_contexts_paginated(
+                ID::from("invalid-uuid"),
+                None,
+                1,
+                10,
+            )
+            .await;
+
+        assert!(matches!(result, Err(Error::InvalidInput(_))));
     }
 }

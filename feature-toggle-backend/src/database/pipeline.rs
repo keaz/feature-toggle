@@ -82,6 +82,14 @@ pub trait PipelineRepository: Send + Sync {
         name: Option<String>,
         active: Option<bool>,
     ) -> Result<Vec<Pipeline>, Error>;
+    async fn get_pipelines_paginated(
+        &self,
+        team_id: Uuid,
+        name: Option<String>,
+        active: Option<bool>,
+        page_number: i32,
+        page_size: i32,
+    ) -> Result<(Vec<Pipeline>, i64), Error>;
     async fn create_pipeline(&self, input: CreatePipeline) -> Result<Uuid, Error>;
     async fn update_pipeline(&self, input: UpdatePipeline) -> Result<Pipeline, Error>;
     async fn delete_pipeline(&self, id: Uuid) -> Result<(), Error>;
@@ -303,6 +311,92 @@ impl PipelineRepository for PipelineRepositoryImpl {
         let mut pipelines = map.into_values().collect::<Vec<Pipeline>>();
         pipelines.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(pipelines)
+    }
+
+    async fn get_pipelines_paginated(
+        &self,
+        team_id: Uuid,
+        name: Option<String>,
+        active: Option<bool>,
+        page_number: i32,
+        page_size: i32,
+    ) -> Result<(Vec<Pipeline>, i64), Error> {
+        // First, get the total count
+        let mut count_query = sqlx::QueryBuilder::new(
+            "SELECT COUNT(DISTINCT p.id) FROM pipelines p"
+        );
+        count_query.push(" WHERE p.team_id = ").push_bind(team_id);
+
+        if let Some(name) = &name {
+            count_query.push(" AND p.name ILIKE ");
+            count_query.push_bind(format!("%{name}%"));
+        }
+        if let Some(active_value) = active {
+            count_query
+                .push(" AND p.active = ")
+                .push_bind(active_value);
+        }
+
+        let total_count: i64 = count_query
+            .build_query_scalar()
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| Error::DatabaseError(e))?;
+
+        // Now get the paginated results
+        let offset = (page_number - 1) * page_size;
+        let mut query_builder = sqlx::QueryBuilder::new(
+            r#"SELECT p.id as pipeline_id, p.name as pipeline_name, p.active, p.team_id, 
+            s.id as stage_id, s.pipeline_id as pipeline_id_stage, s.environment_id, s.order_index,
+            s.parent_stage_id, s.position FROM pipelines p LEFT JOIN pipeline_stages s ON s.pipeline_id = p.id"#,
+        );
+        query_builder.push(" WHERE p.team_id = ").push_bind(team_id);
+
+        if let Some(name) = name {
+            query_builder.push(" AND p.name ILIKE ");
+            query_builder.push_bind(format!("%{name}%"));
+        }
+        if let Some(active_value) = active {
+            query_builder
+                .push(" AND p.active = ")
+                .push_bind(active_value);
+        }
+        query_builder.push(" ORDER BY p.name");
+        query_builder.push(" LIMIT ").push_bind(page_size);
+        query_builder.push(" OFFSET ").push_bind(offset);
+
+        let result = query_builder
+            .build_query_as::<PipelineWithStageRow>()
+            .fetch_all(&self.pool)
+            .await;
+
+        let pipelines = handle_error(None, result)?;
+        let mut map: HashMap<Uuid, Pipeline> = HashMap::new();
+
+        for row in pipelines {
+            let pipeline_entry = map.entry(row.pipeline_id).or_insert(Pipeline {
+                id: row.pipeline_id,
+                name: row.pipeline_name.clone(),
+                active: row.active,
+                team_id: row.team_id,
+                stages: vec![],
+            });
+
+            if let Some(stage_id) = row.stage_id {
+                pipeline_entry.stages.push(PipelineStage {
+                    id: stage_id,
+                    pipeline_id: row.pipeline_id_stage.unwrap(),
+                    environment_id: row.environment_id.unwrap(),
+                    order_index: row.order_index.unwrap(),
+                    parent_stage_id: row.parent_stage_id,
+                    position: row.position,
+                });
+            }
+        }
+
+        let mut pipelines = map.into_values().collect::<Vec<Pipeline>>();
+        pipelines.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok((pipelines, total_count))
     }
 
     async fn create_pipeline(&self, input: CreatePipeline) -> Result<Uuid, Error> {

@@ -419,6 +419,46 @@ pub struct UsersPage {
     pub total: i64,
 }
 
+#[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
+pub struct FeaturesPage {
+    pub items: Vec<Feature>,
+    pub page_number: i32,
+    pub page_size: i32,
+    pub total: i64,
+}
+
+#[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
+pub struct ClientsPage {
+    pub items: Vec<Client>,
+    pub page_number: i32,
+    pub page_size: i32,
+    pub total: i64,
+}
+
+#[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
+pub struct EnvironmentsPage {
+    pub items: Vec<Environment>,
+    pub page_number: i32,
+    pub page_size: i32,
+    pub total: i64,
+}
+
+#[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
+pub struct PipelinesPage {
+    pub items: Vec<Pipeline>,
+    pub page_number: i32,
+    pub page_size: i32,
+    pub total: i64,
+}
+
+#[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
+pub struct ContextsPage {
+    pub items: Vec<Context>,
+    pub page_number: i32,
+    pub page_size: i32,
+    pub total: i64,
+}
+
 #[derive(InputObject, Debug)]
 pub struct RegisterUserInput {
     pub username: String,

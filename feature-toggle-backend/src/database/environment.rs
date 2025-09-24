@@ -24,6 +24,14 @@ pub trait EnvironmentRepository: Send + Sync {
         name: Option<String>,
         active: Option<bool>,
     ) -> Result<Vec<Environment>, Error>;
+    async fn get_environments_paginated(
+        &self,
+        team_id: Uuid,
+        name: Option<String>,
+        active: Option<bool>,
+        page_number: i32,
+        page_size: i32,
+    ) -> Result<(Vec<Environment>, i64), Error>;
     async fn create_environment(
         &self,
         team_id: Uuid,
@@ -99,6 +107,60 @@ impl EnvironmentRepository for EnvironmentRepositoryImpl {
 
         let environments = handle_error(None, result)?;
         Ok(environments)
+    }
+
+    async fn get_environments_paginated(
+        &self,
+        team_id: Uuid,
+        name: Option<String>,
+        active: Option<bool>,
+        page_number: i32,
+        page_size: i32,
+    ) -> Result<(Vec<Environment>, i64), Error> {
+        // First, get the total count
+        let mut count_qb = QueryBuilder::<Postgres>::new(
+            "SELECT COUNT(*) FROM environments WHERE team_id = ",
+        );
+        count_qb.push_bind(team_id);
+
+        if let Some(filter_name) = &name {
+            let pattern = format!("%{filter_name}%");
+            count_qb.push(" AND name ILIKE ").push_bind(pattern);
+        }
+
+        if let Some(active_value) = active {
+            count_qb.push(" AND active = ").push_bind(active_value);
+        }
+
+        let total_count: i64 = count_qb.build_query_scalar()
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| Error::DatabaseError(e))?;
+
+        // Now get the paginated results
+        let offset = (page_number - 1) * page_size;
+        let mut qb = QueryBuilder::<Postgres>::new(
+            "SELECT id, name, active, team_id FROM environments WHERE team_id = ",
+        );
+        qb.push_bind(team_id);
+
+        if let Some(filter_name) = name {
+            let pattern = format!("%{filter_name}%");
+            qb.push(" AND name ILIKE ").push_bind(pattern);
+        }
+
+        if let Some(active_value) = active {
+            qb.push(" AND active = ").push_bind(active_value);
+        }
+        qb.push(" ORDER BY name");
+        qb.push(" LIMIT ").push_bind(page_size);
+        qb.push(" OFFSET ").push_bind(offset);
+
+        let query = qb.build_query_as::<Environment>();
+        let result = query.fetch_all(&self.pool).await;
+
+        let environments = handle_error(None, result)?;
+        Ok((environments, total_count))
     }
 
     async fn create_environment(

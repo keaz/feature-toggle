@@ -127,6 +127,14 @@ pub trait FeatureRepository: Send + Sync {
         key: Option<String>,
         feature_type: Option<FeatureType>,
     ) -> Result<Vec<Feature>, Error>;
+    async fn get_features_paginated(
+        &self,
+        team_id: Uuid,
+        key: Option<String>,
+        feature_type: Option<FeatureType>,
+        page_number: i32,
+        page_size: i32,
+    ) -> Result<(Vec<Feature>, i64), Error>;
     async fn create_feature(&self, input: CreateFeature) -> Result<Uuid, Error>;
     async fn update_feature(&self, input: UpdateFeature) -> Result<Feature, Error>;
     async fn delete_feature(&self, id: Uuid) -> Result<(), Error>;
@@ -887,6 +895,100 @@ impl FeatureRepository for FeatureRepositoryImpl {
         }
 
         Ok(features)
+    }
+
+    async fn get_features_paginated(
+        &self,
+        team_id: Uuid,
+        key: Option<String>,
+        feature_type: Option<FeatureType>,
+        page_number: i32,
+        page_size: i32,
+    ) -> Result<(Vec<Feature>, i64), Error> {
+        // First, get the total count
+        let mut count_query = sqlx::QueryBuilder::new(
+            "SELECT COUNT(DISTINCT f.id) FROM features f"
+        );
+        count_query.push(" WHERE f.team_id = ").push_bind(team_id);
+
+        if let Some(key) = &key {
+            count_query.push(" AND f.key ILIKE ");
+            count_query.push_bind(format!("%{key}%"));
+        }
+        if let Some(feature_type_value) = &feature_type {
+            let feature_type_str = match feature_type_value {
+                FeatureType::Simple => "Simple",
+                FeatureType::Contextual => "Contextual",
+            };
+            count_query
+                .push(" AND f.feature_type = ")
+                .push_bind(feature_type_str);
+        }
+
+        let total_count: i64 = count_query
+            .build_query_scalar()
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| Error::DatabaseError(e))?;
+
+        // Now get the paginated results
+        let offset = (page_number - 1) * page_size;
+        let mut query_builder = sqlx::QueryBuilder::new(
+            r#"SELECT f.id as feature_id, f.key as feature_key, f.description, f.feature_type, f.team_id, f.created_at, 
+            f.kill_switch_enabled, f.kill_switch_activated_at, f.rollback_scheduled_at,
+            s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
+            s.parent_stage_id, s.position, s.bucketing_key, s.status, s.enabled
+			FROM features f LEFT JOIN features_pipeline_stages s ON f.id = s.feature_id"#,
+        );
+        query_builder.push(" WHERE f.team_id = ").push_bind(team_id);
+
+        if let Some(key) = key {
+            query_builder.push(" AND f.key ILIKE ");
+            query_builder.push_bind(format!("%{key}%"));
+        }
+        if let Some(feature_type_value) = feature_type {
+            let feature_type_str = match feature_type_value {
+                FeatureType::Simple => "Simple",
+                FeatureType::Contextual => "Contextual",
+            };
+            query_builder
+                .push(" AND f.feature_type = ")
+                .push_bind(feature_type_str);
+        }
+        query_builder.push(" ORDER BY f.key");
+        query_builder.push(" LIMIT ").push_bind(page_size);
+        query_builder.push(" OFFSET ").push_bind(offset);
+
+        let result = query_builder
+            .build_query_as::<FeatureWithStageRow>()
+            .fetch_all(&self.pool)
+            .await;
+
+        let features_rows = handle_error(None, result)?;
+        let mut map: HashMap<Uuid, Vec<FeatureWithStageRow>> = HashMap::new();
+        // Preserve ordering by feature name as returned from SQL by tracking first-seen order
+        let mut order: Vec<Uuid> = Vec::new();
+
+        for row in features_rows {
+            if !map.contains_key(&row.feature_id) {
+                order.push(row.feature_id);
+            }
+            map.entry(row.feature_id).or_default().push(row);
+        }
+
+        // Load dependencies for each feature while preserving order by name
+        let mut features: Vec<Feature> = Vec::with_capacity(order.len());
+        for id in order {
+            if let Some(rows) = map.remove(&id) {
+                features.push(Self::map_row_to_feature(rows));
+            }
+        }
+        for feature in &mut features {
+            let dependencies = self.get_feature_dependencies(&feature.id).await?;
+            feature.dependencies = dependencies;
+        }
+
+        Ok((features, total_count))
     }
 
     async fn create_feature(&self, input: CreateFeature) -> Result<Uuid, Error> {

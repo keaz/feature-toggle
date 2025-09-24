@@ -1,7 +1,7 @@
 use crate::database::entity::{Client, ClientType};
-use crate::database::{Error, handle_error};
+use crate::database::{handle_error, Error};
 use mockall::automock;
-use rand::{Rng, distr::Alphanumeric};
+use rand::{distr::Alphanumeric, Rng};
 use sqlx::{PgPool, Postgres, QueryBuilder, Row};
 use uuid::Uuid;
 
@@ -32,6 +32,15 @@ pub trait ClientRepository: Send + Sync {
         enabled: Option<bool>,
         client_type: Option<ClientType>,
     ) -> Result<Vec<Client>, Error>;
+    async fn get_clients_paginated(
+        &self,
+        team_id: Uuid,
+        name: Option<String>,
+        enabled: Option<bool>,
+        client_type: Option<ClientType>,
+        page_number: i32,
+        page_size: i32,
+    ) -> Result<(Vec<Client>, i64), Error>;
     async fn create_client(&self, team_id: Uuid, input: CreateClient) -> Result<Client, Error>;
     async fn update_client(&self, id: Uuid, input: UpdateClient) -> Result<Client, Error>;
     async fn delete_client(&self, id: Uuid) -> Result<(), Error>;
@@ -201,6 +210,96 @@ impl ClientRepository for ClientRepositoryImpl {
             });
         }
         Ok(clients)
+    }
+
+    async fn get_clients_paginated(
+        &self,
+        team_id: Uuid,
+        name: Option<String>,
+        enabled: Option<bool>,
+        client_type: Option<ClientType>,
+        page_number: i32,
+        page_size: i32,
+    ) -> Result<(Vec<Client>, i64), Error> {
+        // First, get the total count
+        let mut count_qb = QueryBuilder::<Postgres>::new(
+            "SELECT COUNT(*) FROM clients WHERE team_id = ",
+        );
+        count_qb.push_bind(team_id);
+
+        if let Some(filter_name) = &name {
+            count_qb.push(" AND name ILIKE ")
+                .push_bind(format!("%{}%", filter_name));
+        }
+        if let Some(enabled_value) = enabled {
+            count_qb.push(" AND enabled = ").push_bind(enabled_value);
+        }
+        if let Some(ct) = &client_type {
+            count_qb.push(" AND client_type = ")
+                .push_bind(Self::to_type_str(&ct));
+        }
+
+        let total_count: i64 = count_qb.build_query_scalar()
+            .fetch_one(&self.pool)
+            .await
+            .map_err(Error::DatabaseError)?;
+
+        // Now get the paginated results
+        let page = if page_number < 1 { 1 } else { page_number } as i64;
+        let size = if page_size < 1 { 10 } else { page_size } as i64;
+        let offset = (page - 1) * size;
+        let mut qb = QueryBuilder::<Postgres>::new(
+            "SELECT id, team_id, name, description, enabled, client_type, api_key FROM clients WHERE team_id = ",
+        );
+        qb.push_bind(team_id);
+
+        if let Some(filter_name) = name {
+            qb.push(" AND name ILIKE ")
+                .push_bind(format!("%{}%", filter_name));
+        }
+        if let Some(enabled_value) = enabled {
+            qb.push(" AND enabled = ").push_bind(enabled_value);
+        }
+        if let Some(ct) = client_type {
+            qb.push(" AND client_type = ")
+                .push_bind(Self::to_type_str(&ct));
+        }
+        qb.push(" ORDER BY name");
+        qb.push(" LIMIT ").push_bind(size);
+        qb.push(" OFFSET ").push_bind(offset);
+
+        let rows = qb.build().fetch_all(&self.pool).await;
+        let rows = handle_error(None, rows)?;
+
+        // Map and fetch origins for web clients in a second pass
+        let mut clients: Vec<Client> = Vec::with_capacity(rows.len());
+        for row in rows {
+            // row is PgRow; extract columns
+            let id: Uuid = row.get("id");
+            let team_id: Uuid = row.get("team_id");
+            let name: String = row.get("name");
+            let description: Option<String> = row.get("description");
+            let enabled: bool = row.get::<bool, _>("enabled");
+            let client_type_str: String = row.get("client_type");
+            let api_key: String = row.get("api_key");
+            let client_type = Self::from_type_str(&client_type_str);
+            let web_origins = if matches!(client_type, ClientType::Web) {
+                Some(self.load_web_origins(id).await?)
+            } else {
+                None
+            };
+            clients.push(Client {
+                id,
+                team_id,
+                name,
+                description,
+                enabled,
+                client_type,
+                api_key,
+                web_origins,
+            });
+        }
+        Ok((clients, total_count))
     }
 
     async fn create_client(&self, team_id: Uuid, input: CreateClient) -> Result<Client, Error> {

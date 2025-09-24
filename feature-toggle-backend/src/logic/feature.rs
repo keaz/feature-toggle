@@ -1,3 +1,4 @@
+use crate::Error;
 use crate::database::entity::{DBStage, FeatureType as EntityFeatureType};
 use crate::database::feature::{
     CreateFeature, CreateFeatureStage, FeatureRepository, UpdateFeature,
@@ -9,7 +10,6 @@ use crate::graphql::schema::{
 use crate::logic::environment::EnvironmentLogic;
 use crate::logic::stage_builder::{build_stage_relationships, id_to_uuid};
 use crate::logic::{create_relationships, get_environment_map, map_stages};
-use crate::Error;
 use async_graphql::ID;
 use feature_toggle_shared::constants::StageStatus;
 use uuid::Uuid;
@@ -38,6 +38,14 @@ pub trait FeatureCrudLogic: Send + Sync {
         name: Option<String>,
         feature_type: Option<GraphQLFeatureType>,
     ) -> Result<Vec<Feature>, Error>;
+    async fn get_features_paginated(
+        &self,
+        team_id: ID,
+        name: Option<String>,
+        feature_type: Option<GraphQLFeatureType>,
+        page_number: i32,
+        page_size: i32,
+    ) -> Result<(Vec<Feature>, i64), Error>;
     async fn create_feature(&self, team_id: ID, input: CreateFeatureInput) -> Result<ID, Error>;
     async fn update_feature(&self, id: ID, input: UpdateFeatureInput) -> Result<Feature, Error>;
     async fn delete_feature(&self, id: ID) -> Result<(), Error>;
@@ -112,6 +120,14 @@ mockall::mock! {
             name: Option<String>,
             feature_type: Option<GraphQLFeatureType>,
         ) -> Result<Vec<Feature>, Error>;
+        async fn get_features_paginated(
+            &self,
+            team_id: ID,
+            name: Option<String>,
+            feature_type: Option<GraphQLFeatureType>,
+            page_number: i32,
+            page_size: i32,
+        ) -> Result<(Vec<Feature>, i64), Error>;
         async fn create_feature(&self, team_id: ID, input: CreateFeatureInput) -> Result<ID, Error>;
         async fn update_feature(&self, id: ID, input: UpdateFeatureInput) -> Result<Feature, Error>;
         async fn delete_feature(&self, id: ID) -> Result<(), Error>;
@@ -366,6 +382,29 @@ impl FeatureCrudLogic for FeatureLogicImpl {
             .collect())
     }
 
+    async fn get_features_paginated(
+        &self,
+        team_id: ID,
+        name: Option<String>,
+        feature_type: Option<GraphQLFeatureType>,
+        page_number: i32,
+        page_size: i32,
+    ) -> Result<(Vec<Feature>, i64), Error> {
+        let team_id = Uuid::try_from(team_id).map_err(|e| Error::InvalidInput(e.to_string()))?;
+        let entity_feature_type = feature_type.map(Self::map_graphql_to_entity_feature_type);
+        let (features, total) = self
+            .repository
+            .get_features_paginated(team_id, name, entity_feature_type, page_number, page_size)
+            .await?;
+
+        let mapped_features = features
+            .into_iter()
+            .map(Self::map_entity_to_graphql_feature)
+            .collect();
+
+        Ok((mapped_features, total))
+    }
+
     async fn create_feature(&self, team_id: ID, input: CreateFeatureInput) -> Result<ID, Error> {
         let team_id = id_to_uuid(team_id)?;
         let input = Self::map_to_create_feature(team_id, input)?;
@@ -616,6 +655,7 @@ mod test {
     use super::*;
     use crate::database::entity::Feature as EntityFeature;
     use crate::database::feature::MockFeatureRepository;
+    use crate::graphql::schema::FeatureType;
     use crate::logic::environment::MockEnvironmentLogic;
 
     #[test]
@@ -1384,5 +1424,251 @@ mod test {
             }],
             dependencies: vec![],
         }
+    }
+
+    #[tokio::test]
+    async fn test_get_features_paginated_success() {
+        let mut repository = MockFeatureRepository::new();
+        let environment_logic = MockEnvironmentLogic::new();
+        let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+        let feature1_id = Uuid::new_v4();
+        let feature2_id = Uuid::new_v4();
+
+        let expected_features = vec![
+            crate::database::entity::Feature {
+                id: feature1_id,
+                key: "feature-1".to_string(),
+                description: Some("First feature".to_string()),
+                feature_type: crate::database::entity::FeatureType::Simple,
+                team_id,
+                created_at: chrono::Utc::now(),
+                kill_switch_enabled: false,
+                kill_switch_activated_at: None,
+                rollback_scheduled_at: None,
+                stages: vec![],
+                dependencies: vec![],
+            },
+            crate::database::entity::Feature {
+                id: feature2_id,
+                key: "feature-2".to_string(),
+                description: Some("Second feature".to_string()),
+                feature_type: crate::database::entity::FeatureType::Contextual,
+                team_id,
+                created_at: chrono::Utc::now(),
+                kill_switch_enabled: true,
+                kill_switch_activated_at: None,
+                rollback_scheduled_at: None,
+                stages: vec![],
+                dependencies: vec![],
+            },
+        ];
+
+        repository
+            .expect_get_features_paginated()
+            .with(
+                mockall::predicate::eq(team_id),
+                mockall::predicate::eq(None::<String>),
+                mockall::predicate::eq(None::<crate::database::entity::FeatureType>),
+                mockall::predicate::eq(1),
+                mockall::predicate::eq(10),
+            )
+            .times(1)
+            .returning(move |_, _, _, _, _| Ok((expected_features.clone(), 50)));
+
+        let logic = feature_logic(Box::new(repository), Box::new(environment_logic));
+        let (features, total) = logic
+            .get_features_paginated(ID::from(team_id), None, None, 1, 10)
+            .await
+            .unwrap();
+
+        assert_eq!(features.len(), 2);
+        assert_eq!(total, 50);
+        assert_eq!(features[0].key, "feature-1");
+        assert_eq!(features[0].feature_type, FeatureType::Simple);
+        assert_eq!(features[1].key, "feature-2");
+        assert_eq!(features[1].feature_type, FeatureType::Contextual);
+    }
+
+    #[tokio::test]
+    async fn test_get_features_paginated_with_filters() {
+        let mut repository = MockFeatureRepository::new();
+        let environment_logic = MockEnvironmentLogic::new();
+        let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+
+        repository
+            .expect_get_features_paginated()
+            .with(
+                mockall::predicate::eq(team_id),
+                mockall::predicate::eq(Some("test".to_string())),
+                mockall::predicate::eq(Some(crate::database::entity::FeatureType::Simple)),
+                mockall::predicate::eq(2),
+                mockall::predicate::eq(5),
+            )
+            .times(1)
+            .returning(|_, _, _, _, _| Ok((vec![], 0)));
+
+        let logic = feature_logic(Box::new(repository), Box::new(environment_logic));
+        let (features, total) = logic
+            .get_features_paginated(
+                ID::from(team_id),
+                Some("test".to_string()),
+                Some(crate::graphql::schema::FeatureType::Simple),
+                2,
+                5,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(features.len(), 0);
+        assert_eq!(total, 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_features_paginated_edge_cases() {
+        let mut repo = MockFeatureRepository::new();
+        let mut env_logic = MockEnvironmentLogic::new();
+        let environment_id = Uuid::new_v4();
+
+        // Test with page_number = 0 (passed through as-is)
+        repo.expect_get_features_paginated()
+            .with(
+                mockall::predicate::eq(environment_id),
+                mockall::predicate::eq(None::<String>),
+                mockall::predicate::eq(None::<crate::database::entity::FeatureType>),
+                mockall::predicate::eq(0), // Passed through as-is
+                mockall::predicate::eq(10),
+            )
+            .times(1)
+            .returning(|_, _, _, _, _| Ok((vec![], 0)));
+
+        let logic = super::feature_logic(Box::new(repo), Box::new(env_logic));
+        let (features, total) = logic
+            .get_features_paginated(
+                ID::from(environment_id),
+                None,
+                None,
+                0, // Edge case: page 0
+                10,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(features.len(), 0);
+        assert_eq!(total, 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_features_paginated_negative_page() {
+        let mut repo = MockFeatureRepository::new();
+        let mut env_logic = MockEnvironmentLogic::new();
+        let environment_id = Uuid::new_v4();
+
+        // Test with negative page_number (passed through as-is)
+        repo.expect_get_features_paginated()
+            .with(
+                mockall::predicate::eq(environment_id),
+                mockall::predicate::eq(None::<String>),
+                mockall::predicate::eq(None::<crate::database::entity::FeatureType>),
+                mockall::predicate::eq(-5), // Passed through as-is
+                mockall::predicate::eq(10),
+            )
+            .times(1)
+            .returning(|_, _, _, _, _| Ok((vec![], 0)));
+
+        let logic = super::feature_logic(Box::new(repo), Box::new(env_logic));
+        let (features, total) = logic
+            .get_features_paginated(
+                ID::from(environment_id),
+                None,
+                None,
+                -5, // Edge case: negative page
+                10,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(features.len(), 0);
+        assert_eq!(total, 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_features_paginated_zero_page_size() {
+        let mut repo = MockFeatureRepository::new();
+        let mut env_logic = MockEnvironmentLogic::new();
+        let environment_id = Uuid::new_v4();
+
+        // Test with zero page_size
+        repo.expect_get_features_paginated()
+            .with(
+                mockall::predicate::eq(environment_id),
+                mockall::predicate::eq(None::<String>),
+                mockall::predicate::eq(None::<crate::database::entity::FeatureType>),
+                mockall::predicate::eq(1),
+                mockall::predicate::eq(0), // Zero page size
+            )
+            .times(1)
+            .returning(|_, _, _, _, _| Ok((vec![], 0)));
+
+        let logic = super::feature_logic(Box::new(repo), Box::new(env_logic));
+        let (features, total) = logic
+            .get_features_paginated(
+                ID::from(environment_id),
+                None,
+                None,
+                1,
+                0, // Edge case: zero page size
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(features.len(), 0);
+        assert_eq!(total, 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_features_paginated_extreme_values() {
+        let mut repo = MockFeatureRepository::new();
+        let mut env_logic = MockEnvironmentLogic::new();
+        let environment_id = Uuid::new_v4();
+
+        // Test with extreme values
+        repo.expect_get_features_paginated()
+            .with(
+                mockall::predicate::eq(environment_id),
+                mockall::predicate::eq(None::<String>),
+                mockall::predicate::eq(None::<crate::database::entity::FeatureType>),
+                mockall::predicate::eq(999999),
+                mockall::predicate::eq(1),
+            )
+            .times(1)
+            .returning(|_, _, _, _, _| Ok((vec![], 50))); // Has data but not on this page
+
+        let logic = super::feature_logic(Box::new(repo), Box::new(env_logic));
+        let (features, total) = logic
+            .get_features_paginated(
+                ID::from(environment_id),
+                None,
+                None,
+                999999, // Very large page number
+                1,      // Very small page size
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(features.len(), 0);
+        assert_eq!(total, 50);
+    }
+
+    #[tokio::test]
+    async fn test_get_features_paginated_invalid_team_id() {
+        let repository = MockFeatureRepository::new();
+        let environment_logic = MockEnvironmentLogic::new();
+
+        let logic = feature_logic(Box::new(repository), Box::new(environment_logic));
+        let result = logic
+            .get_features_paginated(ID::from("invalid-uuid"), None, None, 1, 10)
+            .await;
+
+        assert!(matches!(result, Err(Error::InvalidInput(_))));
     }
 }
