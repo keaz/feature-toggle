@@ -1,0 +1,36 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO teams (id, name, description) VALUES ($1, $2, $3) RETURNING id, name, description",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "description",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Varchar",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "a97db42dea38827beff90bdaf1043740b43246c5f477538bde7028953b61187a"
+}

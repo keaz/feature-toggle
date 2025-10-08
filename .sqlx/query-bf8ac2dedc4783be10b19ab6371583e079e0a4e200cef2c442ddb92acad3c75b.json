@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM feature_stage_contexts WHERE stage_id=$1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bf8ac2dedc4783be10b19ab6371583e079e0a4e200cef2c442ddb92acad3c75b"
+}

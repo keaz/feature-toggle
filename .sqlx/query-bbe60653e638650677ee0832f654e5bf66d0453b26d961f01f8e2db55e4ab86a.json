@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT COUNT(*) as count \n            FROM jwt_tokens \n            WHERE token_hash = $1 \n            AND is_revoked = FALSE \n            AND expires_at > CURRENT_TIMESTAMP\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "bbe60653e638650677ee0832f654e5bf66d0453b26d961f01f8e2db55e4ab86a"
+}

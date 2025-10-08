@@ -1,0 +1,62 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE clients SET name = $1, description = $2, enabled = $3, client_type = $4 WHERE id = $5\n               RETURNING id, team_id, name, description, enabled, client_type, api_key",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "team_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "description",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "enabled",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 5,
+        "name": "client_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "api_key",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Text",
+        "Bool",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "4af66ac2e947b1bae2d9c771e9333f70d90cb348ffc31455c361dacb1f6d066a"
+}

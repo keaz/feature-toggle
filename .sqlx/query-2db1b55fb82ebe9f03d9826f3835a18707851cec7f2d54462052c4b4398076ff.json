@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO feature_stage_contexts(stage_id, context_id)\n                   SELECT unnest($1::uuid[]), unnest($2::uuid[])",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2db1b55fb82ebe9f03d9826f3835a18707851cec7f2d54462052c4b4398076ff"
+}

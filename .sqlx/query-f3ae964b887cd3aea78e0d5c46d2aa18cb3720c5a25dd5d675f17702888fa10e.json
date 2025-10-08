@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM features_pipeline_stages WHERE id = ANY($1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f3ae964b887cd3aea78e0d5c46d2aa18cb3720c5a25dd5d675f17702888fa10e"
+}

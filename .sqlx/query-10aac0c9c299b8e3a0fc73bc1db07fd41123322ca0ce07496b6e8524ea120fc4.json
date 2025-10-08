@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE contexts SET key = $1 WHERE id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "10aac0c9c299b8e3a0fc73bc1db07fd41123322ca0ce07496b6e8524ea120fc4"
+}

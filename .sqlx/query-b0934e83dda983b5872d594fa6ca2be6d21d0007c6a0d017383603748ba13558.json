@@ -1,0 +1,93 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE users\n               SET first_name = $1, last_name = $2, email = $3, is_admin = $4, enabled = $5, updated_at = now()\n               WHERE id = $6\n               RETURNING id, username, password_hash, first_name, last_name, email, is_admin, enabled, created_at, updated_at, last_login, is_temporary_password",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "username",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "password_hash",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "first_name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "last_name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "email",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "is_admin",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 7,
+        "name": "enabled",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 8,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 9,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 10,
+        "name": "last_login",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 11,
+        "name": "is_temporary_password",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Bool",
+        "Bool",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "b0934e83dda983b5872d594fa6ca2be6d21d0007c6a0d017383603748ba13558"
+}

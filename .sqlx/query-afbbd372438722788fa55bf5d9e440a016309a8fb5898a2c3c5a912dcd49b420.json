@@ -1,0 +1,95 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO users (id, username, password_hash, first_name, last_name, email, is_admin, is_temporary_password)\n               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)\n               RETURNING id, username, password_hash, first_name, last_name, email, is_admin, enabled, created_at, updated_at, last_login, is_temporary_password",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "username",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "password_hash",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "first_name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "last_name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "email",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "is_admin",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 7,
+        "name": "enabled",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 8,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 9,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 10,
+        "name": "last_login",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 11,
+        "name": "is_temporary_password",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Varchar",
+        "Text",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Bool",
+        "Bool"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "afbbd372438722788fa55bf5d9e440a016309a8fb5898a2c3c5a912dcd49b420"
+}

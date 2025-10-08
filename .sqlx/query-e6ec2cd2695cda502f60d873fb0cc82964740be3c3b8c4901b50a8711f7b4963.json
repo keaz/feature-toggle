@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            DELETE FROM jwt_tokens \n            WHERE expires_at < CURRENT_TIMESTAMP \n            OR (is_revoked = TRUE AND revoked_at < CURRENT_TIMESTAMP - INTERVAL '7 days')\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "e6ec2cd2695cda502f60d873fb0cc82964740be3c3b8c4901b50a8711f7b4963"
+}

@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE features SET key = $1, description = $2, feature_type = $3 WHERE id = $4",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Text",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4923c32e8b8ea3bf499eb8be771c683fb9040d613348ca7d07c31931b9c9e051"
+}
