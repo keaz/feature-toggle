@@ -1,7 +1,7 @@
 use crate::database::entity::{Client, ClientType};
-use crate::database::{handle_error, Error};
+use crate::database::{Error, handle_error};
 use mockall::automock;
-use rand::{distr::Alphanumeric, Rng};
+use rand::{Rng, distr::Alphanumeric};
 use sqlx::{PgPool, Postgres, QueryBuilder, Row};
 use uuid::Uuid;
 
@@ -222,31 +222,38 @@ impl ClientRepository for ClientRepositoryImpl {
         page_size: i32,
     ) -> Result<(Vec<Client>, i64), Error> {
         // First, get the total count
-        let mut count_qb = QueryBuilder::<Postgres>::new(
-            "SELECT COUNT(*) FROM clients WHERE team_id = ",
-        );
+        let mut count_qb =
+            QueryBuilder::<Postgres>::new("SELECT COUNT(*) FROM clients WHERE team_id = ");
         count_qb.push_bind(team_id);
 
         if let Some(filter_name) = &name {
-            count_qb.push(" AND name ILIKE ")
+            count_qb
+                .push(" AND name ILIKE ")
                 .push_bind(format!("%{}%", filter_name));
         }
         if let Some(enabled_value) = enabled {
             count_qb.push(" AND enabled = ").push_bind(enabled_value);
         }
         if let Some(ct) = &client_type {
-            count_qb.push(" AND client_type = ")
+            count_qb
+                .push(" AND client_type = ")
                 .push_bind(Self::to_type_str(&ct));
         }
 
-        let total_count: i64 = count_qb.build_query_scalar()
+        let total_count: i64 = count_qb
+            .build_query_scalar()
             .fetch_one(&self.pool)
             .await
             .map_err(Error::DatabaseError)?;
 
+        // Handle invalid page_size (0 or negative) by returning empty results
+        if page_size <= 0 {
+            return Ok((Vec::new(), total_count));
+        }
+
         // Now get the paginated results
         let page = if page_number < 1 { 1 } else { page_number } as i64;
-        let size = if page_size < 1 { 10 } else { page_size } as i64;
+        let size = page_size as i64;
         let offset = (page - 1) * size;
         let mut qb = QueryBuilder::<Postgres>::new(
             "SELECT id, team_id, name, description, enabled, client_type, api_key FROM clients WHERE team_id = ",

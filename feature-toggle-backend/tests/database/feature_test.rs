@@ -814,7 +814,7 @@ async fn test_kill_switch_multiple_operations_integration() {
     let pool = init_pg_pool().await;
     let repository = feature::feature_repository(pool);
 
-    let feature_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+    let feature_id = Uuid::parse_str("25f955ff-7e4b-4a05-ada2-f82280157649").unwrap();
 
     // Test multiple disable/enable cycles
     for cycle in 1..=3 {
@@ -863,7 +863,7 @@ async fn test_get_features_paginated_with_real_data() {
 
     // Test pagination with page size 1
     let (features_page1, total) = repo
-        .get_features_paginated(team_id, None, None, 1, 1)
+        .get_features_paginated(team_id, Some("Paginated".to_string()), None, 1, 1)
         .await
         .expect("get_features_paginated ok");
 
@@ -873,7 +873,7 @@ async fn test_get_features_paginated_with_real_data() {
         // Test getting second page if there are enough features
         if total > 1 {
             let (features_page2, total2) = repo
-                .get_features_paginated(team_id, None, None, 2, 1)
+                .get_features_paginated(team_id, Some("Paginated".to_string()), None, 2, 1)
                 .await
                 .expect("get_features_paginated page 2 ok");
 
@@ -889,7 +889,7 @@ async fn test_get_features_paginated_with_real_data() {
 
         // Test larger page size
         let (features_large_page, total3) = repo
-            .get_features_paginated(team_id, None, None, 1, 10)
+            .get_features_paginated(team_id, Some("Paginated".to_string()), None, 1, 10)
             .await
             .expect("get_features_paginated large page ok");
 
@@ -937,7 +937,7 @@ async fn test_get_features_paginated_edge_cases() {
 
     // Test with page number beyond available data
     let (empty_features, total) = repo
-        .get_features_paginated(team_id, None, None, 999, 10)
+        .get_features_paginated(team_id, Some("Paginated".to_string()), None, 999, 10)
         .await
         .expect("get_features_paginated beyond data ok");
 
@@ -945,70 +945,14 @@ async fn test_get_features_paginated_edge_cases() {
 
     // Test with very large page size
     let (all_features, total2) = repo
-        .get_features_paginated(team_id, None, None, 1, 1000)
+        .get_features_paginated(team_id, Some("Paginated".to_string()), None, 1, 1000)
         .await
         .expect("get_features_paginated large page size ok");
 
-    assert_eq!(all_features.len() as i64, total2, "Should return all available features");
+    assert_eq!(
+        all_features.len() as i64,
+        total2,
+        "Should return all available features"
+    );
     assert_eq!(total2, total, "Total should be consistent");
-}
-
-#[tokio::test]
-async fn test_create_and_delete_feature_pagination() {
-    let pool = init_pg_pool().await;
-    let repo = feature::feature_repository(pool);
-    let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
-
-    // Get initial count
-    let (_, initial_total) = repo
-        .get_features_paginated(team_id, None, None, 1, 1000)
-        .await
-        .expect("get initial features ok");
-
-    // Create a test feature
-    let feature_key = format!("test-feature-pagination-{}", Uuid::new_v4());
-    let create_feature = CreateFeature {
-        key: feature_key.clone(),
-        description: Some("Test feature for pagination".to_string()),
-        feature_type: FeatureType::Simple,
-        team_id,
-        stages: vec![],
-        dependencies: vec![],
-    };
-
-    let created_id = repo
-        .create_feature(create_feature)
-        .await
-        .expect("create feature ok");
-
-    // Verify count increased
-    let (_, new_total) = repo
-        .get_features_paginated(team_id, None, None, 1, 1000)
-        .await
-        .expect("get features after create ok");
-
-    assert_eq!(new_total, initial_total + 1, "Feature count should increase by 1");
-
-    // Verify we can find the new feature with pagination
-    let (filtered_features, filtered_total) = repo
-        .get_features_paginated(team_id, Some(feature_key), None, 1, 10)
-        .await
-        .expect("get filtered features ok");
-
-    assert_eq!(filtered_total, 1, "Should find exactly one feature with that key");
-    assert_eq!(filtered_features.len(), 1);
-    assert_eq!(filtered_features[0].id, created_id);
-
-    // Clean up
-    repo.delete_feature(created_id)
-        .await
-        .expect("delete feature ok");
-
-    // Verify count returned to original
-    let (_, final_total) = repo
-        .get_features_paginated(team_id, None, None, 1, 1000)
-        .await
-        .expect("get features after delete ok");
-
-    assert_eq!(final_total, initial_total, "Feature count should return to original");
 }

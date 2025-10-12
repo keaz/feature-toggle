@@ -118,7 +118,18 @@ VALUES ('51ecc366-f1cd-4d3d-ab73-fa60bad98f27', 'Test Feature', 'This is a test 
        ('6eef17bc-9e06-411d-b5f4-7a786e68bb91', 'Dependency Feature', 'This is a dependency feature', 'Simple',
         '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', now()),
        ('6eef17bc-9e06-411d-b5f4-7a786e68bb81', 'Another feature', 'This is a dependency feature', 'Simple',
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', now()),
+        ('edbdab01-35ea-4fa1-ba2f-6d3a09276654', 'Paginated 1', 'This is a Paginated feature', 'Simple',
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', now()),
+        ('1edc438b-d52b-41e2-b127-827bfed126fc', 'Paginated 2', 'This is a Paginated feature', 'Simple',
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', now()),
+       ('40ebdf65-2fa1-480c-bb01-3c253574ccf8', 'Paginated 3', 'This is a Paginated feature', 'Simple',
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', now()),
+       ('2f661f39-6df4-4e7c-befe-dd80c19041c8', 'Paginated 4', 'This is a Paginated feature', 'Simple',
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', now()),
+        ('25f955ff-7e4b-4a05-ada2-f82280157649', 'Kill switch', 'This is a Kill switch feature', 'Simple',
         '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', now())
+
 ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO public.features_pipeline_stages(id, feature_id, environment_id, parent_stage_id, order_index, position)
@@ -142,7 +153,13 @@ INSERT INTO public.clients(id, team_id, name, description, enabled, client_type,
 VALUES ('a1b2c3d4-0000-4000-8000-000000000001', '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', 'Web Client 1',
         'Seed web client', true, 'Web', 'TEST_WEB_KEY_1'),
        ('a1b2c3d4-0000-4000-8000-000000000002', '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', 'Backend Client 1',
-        'Seed backend client', true, 'Backend', 'TEST_BACKEND_KEY_1')
+        'Seed backend client', true, 'Backend', 'TEST_BACKEND_KEY_2'),
+       ('a1b2c3d4-0000-4000-8000-000000000003', '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', 'Paginated 1',
+        'Seed web client', true, 'Web', 'TEST_WEB_KEY_3'),
+       ('a1b2c3d4-0000-4000-8000-000000000004', '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', 'Paginated 2',
+        'Seed backend client', true, 'Backend', 'TEST_BACKEND_KEY_4'),
+       ('a1b2c3d4-0000-4000-8000-000000000005', '51ecc366-f1cd-4d3d-ab73-fa60bad98f27', 'Paginated 3',
+        'Seed backend client', true, 'Backend', 'TEST_BACKEND_KEY_5')
 ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO public.client_web_origins(id, client_id, origin)

@@ -1,4 +1,4 @@
-use feature_toggle_backend::database::client::{client_repository, CreateClient};
+use feature_toggle_backend::database::client::{CreateClient, client_repository};
 use feature_toggle_backend::database::entity::ClientType;
 use feature_toggle_backend::database::init_pg_pool;
 use sqlx::PgPool;
@@ -36,7 +36,7 @@ async fn test_get_clients_paginated_with_real_data() {
 
     // Test pagination with page size 1
     let (clients_page1, total) = repo
-        .get_clients_paginated(team_id, None, None, None, 1, 1)
+        .get_clients_paginated(team_id, Some("Paginated".to_string()), None, None, 1, 1)
         .await
         .expect("get_clients_paginated ok");
 
@@ -45,7 +45,7 @@ async fn test_get_clients_paginated_with_real_data() {
 
     // Test getting second page
     let (clients_page2, total2) = repo
-        .get_clients_paginated(team_id, None, None, None, 2, 1)
+        .get_clients_paginated(team_id, Some("Paginated".to_string()), None, None, 2, 1)
         .await
         .expect("get_clients_paginated page 2 ok");
 
@@ -60,7 +60,7 @@ async fn test_get_clients_paginated_with_real_data() {
 
     // Test larger page size
     let (clients_large_page, total3) = repo
-        .get_clients_paginated(team_id, None, None, None, 1, 10)
+        .get_clients_paginated(team_id, Some("Paginated".to_string()), None, None, 1, 10)
         .await
         .expect("get_clients_paginated large page ok");
 
@@ -105,20 +105,27 @@ async fn test_get_clients_paginated_edge_cases() {
 
     // Test with page number beyond available data
     let (empty_clients, total) = repo
-        .get_clients_paginated(team_id, None, None, None, 999, 10)
+        .get_clients_paginated(team_id, Some("Paginated".to_string()), None, None, 999, 10)
         .await
         .expect("get_clients_paginated beyond data ok");
 
     assert_eq!(empty_clients.len(), 0);
-    assert!(total > 0, "Total should still be correct even for empty pages");
+    assert!(
+        total > 0,
+        "Total should still be correct even for empty pages"
+    );
 
     // Test with very large page size
     let (all_clients, total2) = repo
-        .get_clients_paginated(team_id, None, None, None, 1, 1000)
+        .get_clients_paginated(team_id, Some("Paginated".to_string()), None, None, 1, 1000)
         .await
         .expect("get_clients_paginated large page size ok");
 
-    assert_eq!(all_clients.len() as i64, total2, "Should return all available clients");
+    assert_eq!(
+        all_clients.len() as i64,
+        total2,
+        "Should return all available clients"
+    );
 }
 
 #[tokio::test]
@@ -162,12 +169,12 @@ async fn test_pagination_edge_cases_and_boundary_conditions() {
 
     // Test page_number = 0 (should be treated as page 1)
     let (clients_page0, total) = repo
-        .get_clients_paginated(team_id, None, None, None, 0, 10)
+        .get_clients_paginated(team_id, Some("Paginated".to_string()), None, None, 0, 10)
         .await
         .expect("page 0 should work");
 
     let (clients_page1, total1) = repo
-        .get_clients_paginated(team_id, None, None, None, 1, 10)
+        .get_clients_paginated(team_id, Some("Paginated".to_string()), None, None, 1, 10)
         .await
         .expect("page 1 should work");
 
@@ -180,7 +187,7 @@ async fn test_pagination_edge_cases_and_boundary_conditions() {
 
     // Test negative page_number (should be treated as page 1)
     let (clients_negative, total_neg) = repo
-        .get_clients_paginated(team_id, None, None, None, -5, 10)
+        .get_clients_paginated(team_id, Some("Paginated".to_string()), None, None, -5, 10)
         .await
         .expect("negative page should work");
 
@@ -189,25 +196,32 @@ async fn test_pagination_edge_cases_and_boundary_conditions() {
 
     // Test page_size = 0 (should return empty results)
     let (clients_zero_size, total_zero) = repo
-        .get_clients_paginated(team_id, None, None, None, 1, 0)
+        .get_clients_paginated(team_id, Some("Paginated".to_string()), None, None, 1, 0)
         .await
         .expect("zero page size should work");
 
-    assert_eq!(clients_zero_size.len(), 2);
+    assert_eq!(clients_zero_size.len(), 0);
     assert_eq!(total_zero, total); // Total should still be correct
 
     // Test negative page_size (should return empty results)
     let (clients_neg_size, total_neg_size) = repo
-        .get_clients_paginated(team_id, None, None, None, 1, -5)
+        .get_clients_paginated(team_id, Some("Paginated".to_string()), None, None, 1, -5)
         .await
         .expect("negative page size should work");
 
-    assert_eq!(clients_neg_size.len(), 2);
+    assert_eq!(clients_neg_size.len(), 0);
     assert_eq!(total_neg_size, total);
 
     // Test very large page_size (should return all available results)
     let (clients_large_size, total_large) = repo
-        .get_clients_paginated(team_id, None, None, None, 1, i32::MAX)
+        .get_clients_paginated(
+            team_id,
+            Some("Paginated".to_string()),
+            None,
+            None,
+            1,
+            i32::MAX,
+        )
         .await
         .expect("very large page size should work");
 
@@ -216,7 +230,14 @@ async fn test_pagination_edge_cases_and_boundary_conditions() {
 
     // Test page number far beyond available data
     let (clients_far_page, total_far) = repo
-        .get_clients_paginated(team_id, None, None, None, 999999, 10)
+        .get_clients_paginated(
+            team_id,
+            Some("Paginated".to_string()),
+            None,
+            None,
+            999999,
+            10,
+        )
         .await
         .expect("far page should work");
 
@@ -226,7 +247,14 @@ async fn test_pagination_edge_cases_and_boundary_conditions() {
     // Test with non-existent team (should return empty results)
     let nonexistent_team = Uuid::new_v4();
     let (clients_no_team, total_no_team) = repo
-        .get_clients_paginated(nonexistent_team, None, None, None, 1, 10)
+        .get_clients_paginated(
+            nonexistent_team,
+            Some("Paginated".to_string()),
+            None,
+            None,
+            1,
+            10,
+        )
         .await
         .expect("non-existent team should work");
 
@@ -234,25 +262,56 @@ async fn test_pagination_edge_cases_and_boundary_conditions() {
     assert_eq!(total_no_team, 0);
 
     // Test boundary: page_size = 1, iterate through all pages
-    if total > 0 {
-        let mut all_client_ids = std::collections::HashSet::new();
-        let total_pages = (total + 1 - 1) / 1; // ceil(total / 1)
+    // Get total count without filters for this test
+    let (_, total_all_clients) = repo
+        .get_clients_paginated(team_id, Some("Paginated".to_string()), None, None, 1, 1)
+        .await
+        .expect("get total should work");
 
-        for page in 1..=std::cmp::min(total_pages, 5) { // Test first 5 pages max
+    if total_all_clients > 0 {
+        let mut all_client_ids = std::collections::HashSet::new();
+        let total_pages = (total_all_clients + 1 - 1) / 1; // ceil(total / 1)
+
+        for page in 1..=std::cmp::min(total_pages, 5) {
+            // Test first 5 pages max
             let (page_clients, page_total) = repo
-                .get_clients_paginated(team_id, None, None, None, page as i32, 1)
+                .get_clients_paginated(
+                    team_id,
+                    Some("Paginated".to_string()),
+                    None,
+                    None,
+                    page as i32,
+                    1,
+                )
                 .await
                 .expect(&format!("page {} should work", page));
 
-            assert_eq!(page_total, total, "Total should be consistent on page {}", page);
+            assert_eq!(
+                page_total, total_all_clients,
+                "Total should be consistent on page {}",
+                page
+            );
 
-            if page <= total {
-                assert_eq!(page_clients.len(), 1, "Should have exactly 1 client on page {}", page);
+            if page <= total_all_clients {
+                assert_eq!(
+                    page_clients.len(),
+                    1,
+                    "Should have exactly 1 client on page {}",
+                    page
+                );
                 let client_id = page_clients[0].id.clone();
-                assert!(!all_client_ids.contains(&client_id), "Client ID should be unique on page {}", page);
+                assert!(
+                    !all_client_ids.contains(&client_id),
+                    "Client ID should be unique on page {}",
+                    page
+                );
                 all_client_ids.insert(client_id);
             } else {
-                assert_eq!(page_clients.len(), 0, "Should have no clients beyond total pages");
+                assert_eq!(
+                    page_clients.len(),
+                    0,
+                    "Should have no clients beyond total pages"
+                );
             }
         }
     }
