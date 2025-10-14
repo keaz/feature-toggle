@@ -5,6 +5,7 @@ pub mod grpc;
 pub mod logic;
 mod middleware;
 pub mod scheduler;
+pub mod utils;
 
 use crate::database::init_pg_pool;
 use crate::graphql::mutation::MutationRoot;
@@ -40,30 +41,50 @@ pub async fn run() -> std::io::Result<()> {
     let cfg = crate::config::Config::load();
 
     let db_pool = init_pg_pool().await;
+
+    // Initialize activity log repository (shared across all logic layers)
+    let activity_log_repository = database::activity_log::activity_log_repository(db_pool.clone());
+
     let environment_repository = database::environment::environment_repository(db_pool.clone());
-    let environment_logic = logic::environment::environment_logic(environment_repository.clone());
-    let team_logic = logic::team::team_logic(database::team::team_repository(db_pool.clone()));
+    let environment_logic = logic::environment::environment_logic(
+        environment_repository.clone(),
+        activity_log_repository.clone_box(),
+    );
+    let team_logic = logic::team::team_logic(
+        database::team::team_repository(db_pool.clone()),
+        activity_log_repository.clone_box(),
+    );
     let pipeline_logic = logic::pipeline::pipeline_logic(
         database::pipeline::pipeline_repository(db_pool.clone()),
         environment_logic.clone(),
+        activity_log_repository.clone_box(),
     );
     let feature_logic = logic::feature::feature_logic(
         database::feature::feature_repository(db_pool.clone()),
         environment_logic.clone(),
+        activity_log_repository.clone_box(),
     );
     // Create a broadcast channel for feature updates shared between GraphQL mutations and gRPC streaming
     let (updates_tx, _updates_rx) =
         tokio::sync::broadcast::channel::<crate::grpc::pb::FeatureUpdate>(128);
 
-    let client_logic =
-        logic::client::client_logic(database::client::client_repository(db_pool.clone()));
+    let client_logic = logic::client::client_logic(
+        database::client::client_repository(db_pool.clone()),
+        activity_log_repository.clone_box(),
+    );
     let context_logic = logic::context::context_logic(
         database::context::context_repository(db_pool.clone()),
         database::feature::feature_repository(db_pool.clone()),
         updates_tx.clone(),
     );
-    let user_logic = logic::user::user_logic(database::user::user_repository(db_pool.clone()));
-    let role_logic = logic::role::role_logic(database::role::role_repository(db_pool.clone()));
+    let user_logic = logic::user::user_logic(
+        database::user::user_repository(db_pool.clone()),
+        activity_log_repository.clone_box(),
+    );
+    let role_logic = logic::role::role_logic(
+        database::role::role_repository(db_pool.clone()),
+        activity_log_repository.clone_box(),
+    );
     let jwt_secret_logic = logic::jwt_secret::jwt_secret_logic(db_pool.clone());
     let jwt_token_logic = logic::jwt_token::jwt_token_logic(
         database::jwt_token::jwt_token_repository(db_pool.clone()),

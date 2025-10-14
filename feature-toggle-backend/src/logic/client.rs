@@ -36,6 +36,10 @@ pub trait ClientLogic: Send + Sync {
     ) -> Result<GqlClient, Error>;
     async fn update_client(&self, id: ID, input: UpdateClientInput) -> Result<GqlClient, Error>;
     async fn delete_client(&self, id: ID) -> Result<(), Error>;
+
+    // Count clients
+    async fn count_clients(&self, team_id: Option<ID>, enabled: Option<bool>)
+    -> Result<i64, Error>;
 }
 
 impl Clone for Box<dyn ClientLogic> {
@@ -44,13 +48,28 @@ impl Clone for Box<dyn ClientLogic> {
     }
 }
 
-pub fn client_logic(repository: Box<dyn ClientRepository>) -> Box<dyn ClientLogic> {
-    Box::new(ClientLogicImpl { repository })
+pub fn client_logic(
+    repository: Box<dyn ClientRepository>,
+    activity_log_repository: Box<dyn crate::database::activity_log::ActivityLogRepository>,
+) -> Box<dyn ClientLogic> {
+    Box::new(ClientLogicImpl {
+        repository,
+        activity_log_repository,
+    })
 }
 
-#[derive(Clone)]
 struct ClientLogicImpl {
     repository: Box<dyn ClientRepository>,
+    activity_log_repository: Box<dyn crate::database::activity_log::ActivityLogRepository>,
+}
+
+impl Clone for ClientLogicImpl {
+    fn clone(&self) -> Self {
+        Self {
+            repository: self.repository.clone_box(),
+            activity_log_repository: self.activity_log_repository.clone_box(),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -183,13 +202,31 @@ impl ClientLogic for ClientLogicImpl {
         }
 
         let create = CreateClient {
-            name: input.name,
+            name: input.name.clone(),
             description: input.description,
             enabled: input.enabled.unwrap_or(true),
             client_type: self.map_graphql_to_entity_type(input.client_type),
             web_origins: input.web_origins,
         };
         let c = self.repository.create_client(team_id, create).await?;
+
+        // Log activity (ignore errors to not fail the operation)
+        let _ = crate::utils::activity_logger::log_client_activity(
+            &self.activity_log_repository,
+            crate::utils::activity_logger::activity_types::CLIENT_CREATED,
+            &c.id.to_string(),
+            None,
+            None,
+            format!("Created client '{}'", c.name),
+            Some(serde_json::json!({
+                "client_id": c.id.to_string(),
+                "client_name": c.name.clone(),
+                "team_id": c.team_id.to_string(),
+                "enabled": c.enabled,
+            })),
+        )
+        .await;
+
         Ok(GqlClient {
             id: ID::from(c.id.to_string()),
             team_id: ID::from(c.team_id.to_string()),
@@ -239,6 +276,33 @@ impl ClientLogic for ClientLogicImpl {
             web_origins: input.web_origins,
         };
         let c = self.repository.update_client(id, update).await?;
+
+        // Log activity (ignore errors to not fail the operation)
+        let activity_type = if let Some(enabled) = input.enabled {
+            if enabled {
+                crate::utils::activity_logger::activity_types::CLIENT_ENABLED
+            } else {
+                crate::utils::activity_logger::activity_types::CLIENT_DISABLED
+            }
+        } else {
+            crate::utils::activity_logger::activity_types::CLIENT_UPDATED
+        };
+
+        let _ = crate::utils::activity_logger::log_client_activity(
+            &self.activity_log_repository,
+            activity_type,
+            &c.id.to_string(),
+            None,
+            None,
+            format!("Updated client '{}'", c.name),
+            Some(serde_json::json!({
+                "client_id": c.id.to_string(),
+                "client_name": c.name.clone(),
+                "enabled": c.enabled,
+            })),
+        )
+        .await;
+
         Ok(GqlClient {
             id: ID::from(c.id.to_string()),
             team_id: ID::from(c.team_id.to_string()),
@@ -254,21 +318,79 @@ impl ClientLogic for ClientLogicImpl {
     async fn delete_client(&self, id: ID) -> Result<(), Error> {
         let id =
             Uuid::parse_str(&id.to_string()).map_err(|e| Error::InvalidInput(e.to_string()))?;
-        self.repository.delete_client(id).await
+
+        // Get client name before deletion for activity log
+        let client = self.repository.get_client_by_id(id).await?;
+
+        self.repository.delete_client(id).await?;
+
+        // Log activity (ignore errors to not fail the operation)
+        let _ = crate::utils::activity_logger::log_client_activity(
+            &self.activity_log_repository,
+            crate::utils::activity_logger::activity_types::CLIENT_DELETED,
+            &id.to_string(),
+            None,
+            None,
+            format!("Deleted client '{}'", client.name),
+            Some(serde_json::json!({
+                "client_id": id.to_string(),
+                "client_name": client.name,
+            })),
+        )
+        .await;
+
+        Ok(())
+    }
+
+    async fn count_clients(
+        &self,
+        team_id: Option<ID>,
+        enabled: Option<bool>,
+    ) -> Result<i64, Error> {
+        let team_uuid = team_id
+            .map(|id| {
+                Uuid::parse_str(&id.to_string()).map_err(|e| Error::InvalidInput(e.to_string()))
+            })
+            .transpose()?;
+        self.repository.count_clients(team_uuid, enabled).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::activity_log::{ActivityLogRepository, MockActivityLogRepository};
     use crate::database::client::MockClientRepository;
     use crate::database::entity::Client as EntityClient;
+
+    fn create_mock_activity_log() -> Box<dyn ActivityLogRepository> {
+        let mut mock = MockActivityLogRepository::new();
+        mock.expect_create_activity().returning(|_| {
+            Ok(crate::database::activity_log::ActivityLogRow {
+                id: uuid::Uuid::new_v4(),
+                activity_type: "TEST".to_string(),
+                entity_type: "test".to_string(),
+                entity_id: "test".to_string(),
+                actor_id: None,
+                actor_name: None,
+                description: "test".to_string(),
+                metadata: None,
+                created_at: chrono::Utc::now(),
+            })
+        });
+        mock.expect_clone_box()
+            .returning(|| create_mock_activity_log());
+        Box::new(mock)
+    }
 
     #[test]
     fn test_type_mapping() {
         let (web_e, be_e) = (EntityClientType::Web, EntityClientType::Backend);
         let (web_g, be_g) = (GqlClientType::Web, GqlClientType::Backend);
-        let logic = super::client_logic(Box::new(MockClientRepository::new()));
+        let logic = super::client_logic(
+            Box::new(MockClientRepository::new()),
+            create_mock_activity_log(),
+        );
         assert!(matches!(
             logic.map_entity_to_graphql_type(web_e),
             GqlClientType::Web
@@ -289,7 +411,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_client_web_requires_origins() {
-        let logic = super::client_logic(Box::new(MockClientRepository::new()));
+        let logic = super::client_logic(
+            Box::new(MockClientRepository::new()),
+            create_mock_activity_log(),
+        );
         let input = CreateClientInput {
             name: "WebC".into(),
             description: None,
@@ -303,7 +428,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_client_backend_cannot_have_origins() {
-        let logic = super::client_logic(Box::new(MockClientRepository::new()));
+        let logic = super::client_logic(
+            Box::new(MockClientRepository::new()),
+            create_mock_activity_log(),
+        );
         let input = CreateClientInput {
             name: "BackendC".into(),
             description: None,
@@ -319,7 +447,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_client_backend_with_origins_fails() {
-        let logic = super::client_logic(Box::new(MockClientRepository::new()));
+        let logic = super::client_logic(
+            Box::new(MockClientRepository::new()),
+            create_mock_activity_log(),
+        );
         let input = UpdateClientInput {
             name: None,
             description: None,
@@ -355,7 +486,7 @@ mod tests {
                     web_origins: Some(vec!["https://a".into()]),
                 })
             });
-        let logic = super::client_logic(Box::new(repo));
+        let logic = super::client_logic(Box::new(repo), create_mock_activity_log());
         let input = CreateClientInput {
             name: "n".into(),
             description: None,
@@ -410,7 +541,7 @@ mod tests {
             .times(1)
             .returning(move |_, _, _, _, _, _| Ok((expected_clients.clone(), 25)));
 
-        let logic = super::client_logic(Box::new(repo));
+        let logic = super::client_logic(Box::new(repo), create_mock_activity_log());
         let (clients, total) = logic
             .get_clients_paginated(ID::from(team_id), None, None, None, 1, 10)
             .await
@@ -443,7 +574,7 @@ mod tests {
             .times(1)
             .returning(|_, _, _, _, _, _| Ok((vec![], 0)));
 
-        let logic = super::client_logic(Box::new(repo));
+        let logic = super::client_logic(Box::new(repo), create_mock_activity_log());
         let (clients, total) = logic
             .get_clients_paginated(
                 ID::from(team_id),
@@ -463,7 +594,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_clients_paginated_invalid_team_id() {
         let repo = MockClientRepository::new();
-        let logic = super::client_logic(Box::new(repo));
+        let logic = super::client_logic(Box::new(repo), create_mock_activity_log());
 
         let result = logic
             .get_clients_paginated(ID::from("invalid-uuid"), None, None, None, 1, 10)
@@ -490,7 +621,7 @@ mod tests {
             .times(1)
             .returning(|_, _, _, _, _, _| Ok((vec![], 0)));
 
-        let logic = super::client_logic(Box::new(repo));
+        let logic = super::client_logic(Box::new(repo), create_mock_activity_log());
         let (clients, total) = logic
             .get_clients_paginated(
                 ID::from(team_id),
@@ -524,7 +655,7 @@ mod tests {
             .times(1)
             .returning(|_, _, _, _, _, _| Ok((vec![], 0)));
 
-        let logic = super::client_logic(Box::new(repo));
+        let logic = super::client_logic(Box::new(repo), create_mock_activity_log());
         let (clients, total) = logic
             .get_clients_paginated(
                 ID::from(team_id),
@@ -558,7 +689,7 @@ mod tests {
             .times(1)
             .returning(|_, _, _, _, _, _| Ok((vec![], 0)));
 
-        let logic = super::client_logic(Box::new(repo));
+        let logic = super::client_logic(Box::new(repo), create_mock_activity_log());
         let (clients, total) = logic
             .get_clients_paginated(
                 ID::from(team_id),
@@ -593,7 +724,7 @@ mod tests {
             .times(1)
             .returning(|_, _, _, _, _, _| Ok((vec![], 100))); // Total is 100, but page 999 has no results
 
-        let logic = super::client_logic(Box::new(repo));
+        let logic = super::client_logic(Box::new(repo), create_mock_activity_log());
         let (clients, total) = logic
             .get_clients_paginated(
                 ID::from(team_id),

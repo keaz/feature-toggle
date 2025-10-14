@@ -27,13 +27,28 @@ impl Clone for Box<dyn TeamLogic> {
     }
 }
 
-pub fn team_logic(repository: Box<dyn TeamRepository>) -> Box<dyn TeamLogic> {
-    Box::new(TeamLogicImpl { repository })
+pub fn team_logic(
+    repository: Box<dyn TeamRepository>,
+    activity_log_repository: Box<dyn crate::database::activity_log::ActivityLogRepository>,
+) -> Box<dyn TeamLogic> {
+    Box::new(TeamLogicImpl {
+        repository,
+        activity_log_repository,
+    })
 }
 
-#[derive(Clone)]
 struct TeamLogicImpl {
     repository: Box<dyn TeamRepository>,
+    activity_log_repository: Box<dyn crate::database::activity_log::ActivityLogRepository>,
+}
+
+impl Clone for TeamLogicImpl {
+    fn clone(&self) -> Self {
+        Self {
+            repository: self.repository.clone_box(),
+            activity_log_repository: self.activity_log_repository.clone_box(),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -62,7 +77,7 @@ impl TeamLogic for TeamLogicImpl {
 
     async fn create_team(&self, input: CreateTeamInput) -> Result<Team, Error> {
         let input = crate::database::team::CreateTeam {
-            name: input.name,
+            name: input.name.clone(),
             description: input.description,
         };
 
@@ -72,6 +87,22 @@ impl TeamLogic for TeamLogicImpl {
 
         let team = self.repository.create_team(input).await?;
         let id = ID::from(team.id);
+
+        // Log activity (ignore errors to not fail the operation)
+        let _ = crate::utils::activity_logger::log_team_activity(
+            &self.activity_log_repository,
+            crate::utils::activity_logger::activity_types::TEAM_CREATED,
+            &team.id.to_string(),
+            None,
+            None,
+            format!("Created team '{}'", team.name),
+            Some(serde_json::json!({
+                "team_id": team.id.to_string(),
+                "team_name": team.name.clone(),
+            })),
+        )
+        .await;
+
         Ok(Team {
             id,
             name: team.name,
@@ -88,6 +119,22 @@ impl TeamLogic for TeamLogicImpl {
 
         let team = self.repository.update_team(input).await?;
         let id = ID::from(team.id);
+
+        // Log activity (ignore errors to not fail the operation)
+        let _ = crate::utils::activity_logger::log_team_activity(
+            &self.activity_log_repository,
+            crate::utils::activity_logger::activity_types::TEAM_UPDATED,
+            &team.id.to_string(),
+            None,
+            None,
+            format!("Updated team '{}'", team.name),
+            Some(serde_json::json!({
+                "team_id": team.id.to_string(),
+                "team_name": team.name.clone(),
+            })),
+        )
+        .await;
+
         Ok(Team {
             id,
             name: team.name,
@@ -107,7 +154,28 @@ impl TeamLogic for TeamLogicImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::activity_log::MockActivityLogRepository;
     use crate::database::team::MockTeamRepository;
+
+    fn create_mock_activity_log() -> Box<dyn crate::database::activity_log::ActivityLogRepository> {
+        let mut mock = MockActivityLogRepository::new();
+        mock.expect_create_activity().returning(|_| {
+            Ok(crate::database::activity_log::ActivityLogRow {
+                id: uuid::Uuid::new_v4(),
+                activity_type: "test".to_string(),
+                entity_type: "test".to_string(),
+                entity_id: "test".to_string(),
+                actor_id: None,
+                actor_name: None,
+                description: "test".to_string(),
+                metadata: None,
+                created_at: chrono::Utc::now(),
+            })
+        });
+        mock.expect_clone_box()
+            .returning(|| create_mock_activity_log());
+        Box::new(mock)
+    }
 
     #[tokio::test]
     async fn test_ok_get_team_by_id() {
@@ -126,7 +194,7 @@ mod tests {
                 })
             });
 
-        let logic = team_logic(Box::new(mock_repository));
+        let logic = team_logic(Box::new(mock_repository), create_mock_activity_log());
         let result = logic.get_team_by_id(id).await;
 
         assert!(result.is_ok());
@@ -146,7 +214,7 @@ mod tests {
             .times(1)
             .returning(move |_| Err(Error::NotFound(id)));
 
-        let logic = team_logic(Box::new(mock_repository));
+        let logic = team_logic(Box::new(mock_repository), create_mock_activity_log());
         let result = logic.get_team_by_id(id).await;
 
         assert!(result.is_err());
@@ -177,7 +245,7 @@ mod tests {
                 })
             });
 
-        let logic = team_logic(Box::new(mock_repository));
+        let logic = team_logic(Box::new(mock_repository), create_mock_activity_log());
         let result = logic.create_team(input).await;
 
         assert!(result.is_ok());
@@ -207,7 +275,7 @@ mod tests {
                 })
             });
 
-        let logic = team_logic(Box::new(mock_repository));
+        let logic = team_logic(Box::new(mock_repository), create_mock_activity_log());
         let result = logic.update_team(ID::from(ID), input).await;
 
         assert!(result.is_ok());
@@ -231,7 +299,7 @@ mod tests {
             .times(1)
             .returning(move |_| Err(Error::NotFound(expected_id)));
 
-        let logic = team_logic(Box::new(mock_repository));
+        let logic = team_logic(Box::new(mock_repository), create_mock_activity_log());
         let result = logic.update_team(ID::from(ENV_ID), input).await;
 
         assert!(result.is_err());
@@ -253,7 +321,7 @@ mod tests {
             .times(1)
             .returning(move |_| Ok(()));
 
-        let logic = team_logic(Box::new(mock_repository));
+        let logic = team_logic(Box::new(mock_repository), create_mock_activity_log());
         let result = logic.delete_team(id).await;
 
         assert!(result.is_ok());
@@ -270,7 +338,7 @@ mod tests {
             .times(1)
             .returning(move |_| Err(Error::NotFound(id)));
 
-        let logic = team_logic(Box::new(mock_repository));
+        let logic = team_logic(Box::new(mock_repository), create_mock_activity_log());
         let result = logic.delete_team(id).await;
 
         assert!(result.is_err());
@@ -304,7 +372,7 @@ mod tests {
                 ])
             });
 
-        let logic = team_logic(Box::new(mock_repository));
+        let logic = team_logic(Box::new(mock_repository), create_mock_activity_log());
         let result = logic.get_teams(None).await;
 
         assert!(result.is_ok());

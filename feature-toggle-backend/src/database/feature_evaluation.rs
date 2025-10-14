@@ -87,6 +87,18 @@ pub trait FeatureEvaluationRepository: Send + Sync {
         to_time: chrono::DateTime<chrono::Utc>,
     ) -> Result<EvaluationSummary, sqlx::Error>;
 
+    /// Get aggregated evaluation data grouped by feature key
+    /// Returns evaluation statistics for the most evaluated features
+    async fn get_evaluations_by_feature(
+        &self,
+        from_time: chrono::DateTime<chrono::Utc>,
+        to_time: chrono::DateTime<chrono::Utc>,
+        environment_id: Option<String>,
+        client_id: Option<uuid::Uuid>,
+        limit: Option<i32>,
+        offset: Option<i32>,
+    ) -> Result<Vec<EvaluationByFeature>, sqlx::Error>;
+
     fn clone_box(&self) -> Box<dyn FeatureEvaluationRepository>;
 }
 
@@ -131,6 +143,23 @@ pub struct EvaluationSummary {
     pub success_rate: f64,
     /// Cache hit rate as percentage (0-100)  
     pub cache_hit_rate: f64,
+}
+
+/// Aggregated evaluation data grouped by feature key
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct EvaluationByFeature {
+    /// Feature key
+    pub feature_key: String,
+    /// Total number of evaluations for this feature
+    pub total_evaluations: i64,
+    /// Number of evaluations that resulted in true
+    pub successful_evaluations: i64,
+    /// Number of evaluations from prior assignments (cached)
+    pub cached_evaluations: i64,
+    /// Number of unique users who had evaluations for this feature
+    pub unique_users: i64,
+    /// Timestamp of the last evaluation for this feature
+    pub last_evaluated_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Clone)]
@@ -558,6 +587,77 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
         };
 
         Ok(summary)
+    }
+
+    /// Get aggregated evaluation data grouped by feature key
+    /// Provides evaluation statistics for each feature in descending order by total evaluations
+    async fn get_evaluations_by_feature(
+        &self,
+        from_time: chrono::DateTime<chrono::Utc>,
+        to_time: chrono::DateTime<chrono::Utc>,
+        environment_id: Option<String>,
+        client_id: Option<uuid::Uuid>,
+        limit: Option<i32>,
+        offset: Option<i32>,
+    ) -> Result<Vec<EvaluationByFeature>, sqlx::Error> {
+        let mut query = String::from(
+            r#"
+            SELECT 
+                feature_key,
+                COUNT(*) as total_evaluations,
+                COUNT(*) FILTER (WHERE evaluation_result = true) as successful_evaluations,
+                COUNT(*) FILTER (WHERE prior_assignment = true) as cached_evaluations,
+                COUNT(DISTINCT user_context) FILTER (WHERE user_context IS NOT NULL) as unique_users,
+                MAX(evaluated_at) as last_evaluated_at
+            FROM feature_evaluations 
+            WHERE evaluated_at >= $1 AND evaluated_at <= $2
+            "#,
+        );
+
+        let mut param_count = 2;
+
+        // Add optional filters
+        if environment_id.is_some() {
+            param_count += 1;
+            query.push_str(&format!(" AND environment_id = ${}", param_count));
+        }
+        if client_id.is_some() {
+            param_count += 1;
+            query.push_str(&format!(" AND client_id = ${}", param_count));
+        }
+
+        query.push_str(" GROUP BY feature_key ORDER BY total_evaluations DESC");
+
+        // Add pagination
+        if limit.is_some() {
+            param_count += 1;
+            query.push_str(&format!(" LIMIT ${}", param_count));
+        }
+        if offset.is_some() {
+            param_count += 1;
+            query.push_str(&format!(" OFFSET ${}", param_count));
+        }
+
+        let mut sql_query = sqlx::query_as::<_, EvaluationByFeature>(&query)
+            .bind(from_time)
+            .bind(to_time);
+
+        // Bind optional parameters
+        if let Some(env_id) = environment_id {
+            sql_query = sql_query.bind(env_id);
+        }
+        if let Some(c_id) = client_id {
+            sql_query = sql_query.bind(c_id);
+        }
+        if let Some(lim) = limit {
+            sql_query = sql_query.bind(lim);
+        }
+        if let Some(off) = offset {
+            sql_query = sql_query.bind(off);
+        }
+
+        let results = sql_query.fetch_all(&self.pool).await?;
+        Ok(results)
     }
 
     fn clone_box(&self) -> Box<dyn FeatureEvaluationRepository> {

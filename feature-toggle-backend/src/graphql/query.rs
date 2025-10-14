@@ -1,8 +1,10 @@
 use crate::graphql::create_user;
 use crate::graphql::schema::{
-    ApplicationStatus, Client, ClientType, ClientsPage, ContextsPage, Environment,
-    EnvironmentsPage, Feature, FeatureType, FeaturesPage, JwtSecretResponse, Pipeline,
-    PipelinesPage, Role, Team, User, UsersPage,
+    ActivityLog, ActivityLogPage, ApplicationStatus, Client, ClientType, ClientsPage, ContextsPage,
+    Environment, EnvironmentsPage, EvaluationByFeature, EvaluationCountFilter,
+    EvaluationSummaryOutput, EvaluationSummaryQueryInput, Feature, FeatureGrowthPoint, FeatureType,
+    FeaturesPage, JwtSecretResponse, Pipeline, PipelinesPage, Role, RolloutMetrics, Team, User,
+    UsersPage,
 };
 use crate::logic::client::ClientLogic;
 use crate::logic::context::ContextLogic;
@@ -13,6 +15,7 @@ use crate::logic::role::RoleLogic;
 use crate::logic::team::TeamLogic;
 use crate::logic::user::UserLogic;
 use async_graphql::{Context, ID, Object, Result as GqlResult};
+use chrono::{DateTime, Utc};
 use log::debug;
 
 pub struct Query;
@@ -180,6 +183,69 @@ impl Query {
         }
     }
 
+    /// Count features - useful for dashboard metrics
+    async fn features_count(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Optional team ID to filter by")] team_id: Option<ID>,
+    ) -> GqlResult<i64> {
+        debug!("Counting features with team_id: {team_id:?}");
+        let logic = ctx.data::<Box<dyn FeatureLogic>>()?;
+        Ok(logic.count_features(team_id).await?)
+    }
+
+    /// Get features with pending approvals (DEPLOYMENT_REQUESTED or ROLLBACK_REQUESTED status)
+    async fn pending_approvals(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Optional team ID to filter by")] team_id: Option<ID>,
+        #[graphql(desc = "Page number (1-based)")] page_number: Option<i32>,
+        #[graphql(desc = "Page size")] page_size: Option<i32>,
+    ) -> GqlResult<FeaturesPage> {
+        debug!("Fetching features with pending approvals, team_id: {team_id:?}");
+        let logic = ctx.data::<Box<dyn FeatureLogic>>()?;
+
+        let (items, total) = logic
+            .get_features_with_pending_approvals(team_id, page_number, page_size)
+            .await?;
+
+        let page_num = page_number.unwrap_or(1);
+        let page_sz = page_size.unwrap_or(items.len() as i32);
+
+        Ok(FeaturesPage {
+            items,
+            page_number: page_num,
+            page_size: page_sz,
+            total,
+        })
+    }
+
+    /// Get features with active kill switches
+    async fn active_kill_switches(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Optional team ID to filter by")] team_id: Option<ID>,
+        #[graphql(desc = "Page number (1-based)")] page_number: Option<i32>,
+        #[graphql(desc = "Page size")] page_size: Option<i32>,
+    ) -> GqlResult<FeaturesPage> {
+        debug!("Fetching features with active kill switches, team_id: {team_id:?}");
+        let logic = ctx.data::<Box<dyn FeatureLogic>>()?;
+
+        let (items, total) = logic
+            .get_features_with_kill_switches(team_id, page_number, page_size)
+            .await?;
+
+        let page_num = page_number.unwrap_or(1);
+        let page_sz = page_size.unwrap_or(items.len() as i32);
+
+        Ok(FeaturesPage {
+            items,
+            page_number: page_num,
+            page_size: page_sz,
+            total,
+        })
+    }
+
     async fn client(
         &self,
         ctx: &Context<'_>,
@@ -227,6 +293,18 @@ impl Query {
                 total,
             })
         }
+    }
+
+    /// Count clients - useful for dashboard metrics
+    async fn clients_count(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Optional team ID to filter by")] team_id: Option<ID>,
+        #[graphql(desc = "Filter by enabled status")] enabled: Option<bool>,
+    ) -> GqlResult<i64> {
+        debug!("Counting clients with team_id: {team_id:?}, enabled: {enabled:?}");
+        let logic = ctx.data::<Box<dyn ClientLogic>>()?;
+        Ok(logic.count_clients(team_id, enabled).await?)
     }
 
     async fn context(
@@ -371,6 +449,323 @@ impl Query {
         let logic = ctx.data::<Box<dyn UserLogic>>()?;
         let admin_configured = logic.admin_exists().await?;
         Ok(ApplicationStatus { admin_configured })
+    }
+
+    /// Get aggregated evaluation data grouped by feature key for dashboard analytics
+    /// Returns top features by evaluation count with comprehensive metrics
+    async fn evaluations_by_feature(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Start time for evaluation data")] from_time: DateTime<Utc>,
+        #[graphql(desc = "End time for evaluation data")] to_time: DateTime<Utc>,
+        #[graphql(desc = "Filter by environment ID")] environment_id: Option<String>,
+        #[graphql(desc = "Filter by client ID")] client_id: Option<ID>,
+        #[graphql(desc = "Maximum number of results to return")] limit: Option<i32>,
+        #[graphql(desc = "Number of results to skip (for pagination)")] offset: Option<i32>,
+    ) -> GqlResult<Vec<EvaluationByFeature>> {
+        debug!(
+            "Fetching evaluations by feature from {:?} to {:?} with environment: {:?}, client: {:?}",
+            from_time, to_time, environment_id, client_id
+        );
+
+        // Get the feature evaluation repository
+        let repo = ctx
+            .data::<Box<dyn crate::database::feature_evaluation::FeatureEvaluationRepository>>()?;
+
+        // Convert client_id from GraphQL ID to UUID if provided
+        let client_uuid = if let Some(id) = client_id {
+            Some(uuid::Uuid::parse_str(&id.to_string()).map_err(|e| {
+                async_graphql::Error::new(format!("Invalid client ID format: {}", e))
+            })?)
+        } else {
+            None
+        };
+
+        // Call the repository method
+        let results = repo
+            .get_evaluations_by_feature(
+                from_time,
+                to_time,
+                environment_id,
+                client_uuid,
+                limit,
+                offset,
+            )
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("Database error: {}", e)))?;
+
+        // Convert database results to GraphQL types
+        Ok(results
+            .into_iter()
+            .map(|r| EvaluationByFeature {
+                feature_key: r.feature_key,
+                total_evaluations: r.total_evaluations,
+                successful_evaluations: r.successful_evaluations,
+                cached_evaluations: r.cached_evaluations,
+                unique_users: r.unique_users,
+                last_evaluated_at: r.last_evaluated_at,
+            })
+            .collect())
+    }
+
+    /// Get recent activity logs with optional filtering and pagination
+    /// Returns a paginated list of user activities and system events
+    async fn recent_activities(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Filter by activity type (e.g., 'feature_created')")]
+        activity_type: Option<String>,
+        #[graphql(desc = "Filter by entity type (e.g., 'feature', 'user')")] entity_type: Option<
+            String,
+        >,
+        #[graphql(desc = "Filter by entity ID")] entity_id: Option<String>,
+        #[graphql(desc = "Filter by actor (user) ID")] actor_id: Option<ID>,
+        #[graphql(desc = "Filter activities from this date")] from_date: Option<DateTime<Utc>>,
+        #[graphql(desc = "Filter activities until this date")] to_date: Option<DateTime<Utc>>,
+        #[graphql(desc = "Page number (1-based)")] page_number: Option<i32>,
+        #[graphql(desc = "Page size (default 20)")] page_size: Option<i32>,
+    ) -> GqlResult<ActivityLogPage> {
+        debug!(
+            "Fetching recent activities with filters - type: {:?}, entity: {:?}",
+            activity_type, entity_type
+        );
+
+        // Get the activity log repository
+        let repo = ctx.data::<Box<dyn crate::database::activity_log::ActivityLogRepository>>()?;
+
+        // Convert actor_id from GraphQL ID to UUID if provided
+        let actor_uuid = if let Some(id) = actor_id {
+            Some(uuid::Uuid::parse_str(&id.to_string()).map_err(|e| {
+                async_graphql::Error::new(format!("Invalid actor ID format: {}", e))
+            })?)
+        } else {
+            None
+        };
+
+        // Set default pagination values
+        let page_num = page_number.unwrap_or(1);
+        let page_sz = page_size.unwrap_or(20);
+
+        // Calculate offset
+        let offset = (page_num - 1) * page_sz;
+
+        // Build filter
+        let filter = crate::database::activity_log::ActivityLogFilter {
+            activity_type,
+            entity_type,
+            entity_id,
+            actor_id: actor_uuid,
+            from_date,
+            to_date,
+            limit: Some(page_sz),
+            offset: Some(offset),
+        };
+
+        // Call the repository method
+        let (activities, total) = repo
+            .get_activities_paginated(filter)
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("Database error: {}", e)))?;
+
+        // Convert database results to GraphQL types
+        let items = activities
+            .into_iter()
+            .map(|a| ActivityLog {
+                id: a.id.into(),
+                activity_type: a.activity_type,
+                entity_type: a.entity_type,
+                entity_id: a.entity_id,
+                actor_id: a.actor_id.map(|id| id.into()),
+                actor_name: a.actor_name,
+                description: a.description,
+                metadata: a.metadata,
+                created_at: a.created_at,
+            })
+            .collect();
+
+        Ok(ActivityLogPage {
+            items,
+            page_number: page_num,
+            page_size: page_sz,
+            total,
+        })
+    }
+
+    /// Get feature growth over time for dashboard analytics
+    /// Returns time-series data showing feature creation trends with optional team breakdown
+    async fn feature_growth(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Start time for feature growth data")] from_time: DateTime<Utc>,
+        #[graphql(desc = "End time for feature growth data")] to_time: DateTime<Utc>,
+        #[graphql(desc = "Time interval: 'day', 'week', or 'month'")] interval: String,
+        #[graphql(desc = "Filter by team ID (optional)")] team_id: Option<ID>,
+    ) -> GqlResult<Vec<FeatureGrowthPoint>> {
+        debug!(
+            "Fetching feature growth from {:?} to {:?} with interval: {} and team: {:?}",
+            from_time, to_time, interval, team_id
+        );
+
+        // Validate interval
+        let valid_intervals = ["day", "week", "month"];
+        if !valid_intervals.contains(&interval.as_str()) {
+            return Err(async_graphql::Error::new(
+                "Invalid interval. Must be 'day', 'week', or 'month'",
+            ));
+        }
+
+        // Get the feature repository
+        let repo = ctx.data::<Box<dyn crate::database::feature::FeatureRepository>>()?;
+
+        // Convert team_id from GraphQL ID to UUID if provided
+        let team_uuid =
+            if let Some(id) = team_id {
+                Some(uuid::Uuid::parse_str(&id.to_string()).map_err(|e| {
+                    async_graphql::Error::new(format!("Invalid team ID format: {}", e))
+                })?)
+            } else {
+                None
+            };
+
+        // Call the repository method
+        let results = repo
+            .get_feature_growth(from_time, to_time, interval, team_uuid)
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("Database error: {}", e)))?;
+
+        // Convert database results to GraphQL types
+        Ok(results
+            .into_iter()
+            .map(|r| FeatureGrowthPoint {
+                time_bucket: r.time_bucket,
+                team_id: r.team_id.map(|id| id.into()),
+                team_name: r.team_name,
+                feature_count: r.feature_count,
+                cumulative_count: r.cumulative_count,
+            })
+            .collect())
+    }
+
+    /// Count feature evaluations with filtering - useful for dashboard metrics
+    async fn evaluation_count(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Filter options for counting evaluations")] filter: EvaluationCountFilter,
+    ) -> GqlResult<i64> {
+        debug!(
+            "Counting evaluations from {:?} to {:?} with filters: env={:?}, client={:?}, feature={:?}",
+            filter.from_date,
+            filter.to_date,
+            filter.environment_id,
+            filter.client_id,
+            filter.feature_key
+        );
+
+        let logic =
+            ctx.data::<Box<dyn crate::logic::feature_evaluation::FeatureEvaluationLogic>>()?;
+
+        // Convert client_id from GraphQL ID to UUID if provided
+        let client_uuid = if let Some(id) = filter.client_id {
+            Some(uuid::Uuid::parse_str(&id.to_string()).map_err(|e| {
+                async_graphql::Error::new(format!("Invalid client ID format: {}", e))
+            })?)
+        } else {
+            None
+        };
+
+        let count = logic
+            .count_evaluations(
+                filter.from_date,
+                filter.to_date,
+                filter.environment_id,
+                client_uuid,
+                filter.feature_key,
+            )
+            .await
+            .map_err(|e| {
+                async_graphql::Error::new(format!("Failed to count evaluations: {}", e))
+            })?;
+
+        Ok(count)
+    }
+
+    /// Get evaluation summary statistics - provides aggregated metrics for dashboard
+    async fn evaluation_summary(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Filter options for evaluation summary")]
+        input: EvaluationSummaryQueryInput,
+    ) -> GqlResult<EvaluationSummaryOutput> {
+        debug!(
+            "Fetching evaluation summary from {:?} to {:?} with filters: env={:?}, client={:?}, feature={:?}",
+            input.from_time,
+            input.to_time,
+            input.environment_id,
+            input.client_id,
+            input.feature_key
+        );
+
+        let logic =
+            ctx.data::<Box<dyn crate::logic::feature_evaluation::FeatureEvaluationLogic>>()?;
+
+        // Convert client_id from GraphQL ID to UUID if provided
+        let client_uuid = if let Some(id) = input.client_id {
+            Some(uuid::Uuid::parse_str(&id.to_string()).map_err(|e| {
+                async_graphql::Error::new(format!("Invalid client ID format: {}", e))
+            })?)
+        } else {
+            None
+        };
+
+        let summary = logic
+            .get_evaluation_summary(
+                input.feature_key,
+                input.environment_id,
+                client_uuid,
+                input.from_time,
+                input.to_time,
+            )
+            .await
+            .map_err(|e| {
+                async_graphql::Error::new(format!("Failed to get evaluation summary: {}", e))
+            })?;
+
+        Ok(EvaluationSummaryOutput {
+            total_evaluations: summary.total_evaluations,
+            successful_evaluations: summary.successful_evaluations,
+            cached_evaluations: summary.cached_evaluations,
+            unique_users: summary.unique_users,
+            top_feature_key: summary.top_feature_key,
+            success_rate: summary.success_rate,
+            cache_hit_rate: summary.cache_hit_rate,
+        })
+    }
+
+    /// Get rollout metrics for dashboard - provides insights into pipeline performance
+    async fn rollout_metrics(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Optional team ID to filter metrics by team")] team_id: Option<ID>,
+    ) -> GqlResult<RolloutMetrics> {
+        debug!("Fetching rollout metrics for team_id={:?}", team_id);
+
+        let logic = ctx.data::<Box<dyn crate::logic::feature::FeatureLogic>>()?;
+
+        let metrics = logic.get_rollout_metrics(team_id).await.map_err(|e| {
+            async_graphql::Error::new(format!("Failed to fetch rollout metrics: {}", e))
+        })?;
+
+        // Convert from logic layer RolloutMetrics to GraphQL RolloutMetrics
+        Ok(RolloutMetrics {
+            average_time_in_pipeline: metrics.average_time_in_pipeline,
+            approval_rate: metrics.approval_rate,
+            features_deployed_this_week: metrics.features_deployed_this_week,
+            features_deployed_last_week: metrics.features_deployed_last_week,
+            deployment_change: metrics.deployment_change,
+            bottleneck_stage: metrics.bottleneck_stage,
+            bottleneck_duration: metrics.bottleneck_duration,
+            total_pending_approvals: metrics.total_pending_approvals,
+        })
     }
 
     /// Check JWT secret status (admin only)

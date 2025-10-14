@@ -459,6 +459,70 @@ pub struct ContextsPage {
     pub total: i64,
 }
 
+/// Aggregated evaluation data grouped by feature key for dashboard analytics
+#[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
+pub struct EvaluationByFeature {
+    /// Feature key
+    pub feature_key: String,
+    /// Total number of evaluations for this feature
+    pub total_evaluations: i64,
+    /// Number of evaluations that resulted in true
+    pub successful_evaluations: i64,
+    /// Number of evaluations from prior assignments (cached)
+    pub cached_evaluations: i64,
+    /// Number of unique users who had evaluations for this feature
+    pub unique_users: i64,
+    /// Timestamp of the last evaluation for this feature
+    pub last_evaluated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Feature growth data point for dashboard analytics showing cumulative feature creation over time
+#[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
+pub struct FeatureGrowthPoint {
+    /// Time bucket for this data point (day, week, or month)
+    pub time_bucket: chrono::DateTime<chrono::Utc>,
+    /// Team ID (null if aggregated across all teams)
+    pub team_id: Option<ID>,
+    /// Team name for display purposes
+    pub team_name: Option<String>,
+    /// Number of features created in this time bucket
+    pub feature_count: i64,
+    /// Cumulative count of features up to and including this time bucket
+    pub cumulative_count: i64,
+}
+
+/// Activity log entry for tracking user actions and system events
+#[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
+pub struct ActivityLog {
+    /// Unique identifier
+    pub id: ID,
+    /// Type of activity (e.g., 'feature_created', 'feature_deployed', 'user_added')
+    pub activity_type: String,
+    /// Type of entity affected (e.g., 'feature', 'user', 'client', 'team')
+    pub entity_type: String,
+    /// ID of the affected entity
+    pub entity_id: String,
+    /// User who performed the action (nullable for system events)
+    pub actor_id: Option<ID>,
+    /// Name of the actor for display purposes
+    pub actor_name: Option<String>,
+    /// Human-readable description of the activity
+    pub description: String,
+    /// Additional context/details about the activity
+    pub metadata: Option<serde_json::Value>,
+    /// Timestamp when the activity occurred
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Paginated response for activity logs
+#[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
+pub struct ActivityLogPage {
+    pub items: Vec<ActivityLog>,
+    pub page_number: i32,
+    pub page_size: i32,
+    pub total: i64,
+}
+
 #[derive(InputObject, Debug)]
 pub struct RegisterUserInput {
     pub username: String,
@@ -533,4 +597,77 @@ pub struct JwtSecretResponse {
 #[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
 pub struct ApplicationStatus {
     pub admin_configured: bool,
+}
+
+// Input type for evaluation count filtering
+#[derive(InputObject, Debug, Clone)]
+pub struct EvaluationCountFilter {
+    pub from_date: chrono::DateTime<chrono::Utc>,
+    pub to_date: chrono::DateTime<chrono::Utc>,
+    pub environment_id: Option<String>,
+    pub client_id: Option<ID>,
+    pub feature_key: Option<String>,
+}
+
+// Input type for evaluation summary query
+#[derive(InputObject, Debug, Clone)]
+pub struct EvaluationSummaryQueryInput {
+    pub from_time: chrono::DateTime<chrono::Utc>,
+    pub to_time: chrono::DateTime<chrono::Utc>,
+    pub environment_id: Option<String>,
+    pub client_id: Option<ID>,
+    pub feature_key: Option<String>,
+}
+
+// Output type for evaluation summary
+#[derive(SimpleObject, Debug, Clone)]
+pub struct EvaluationSummaryOutput {
+    /// Total number of evaluations
+    pub total_evaluations: i64,
+
+    /// Number of evaluations that resulted in true
+    pub successful_evaluations: i64,
+
+    /// Number of evaluations from prior assignments (cached)
+    pub cached_evaluations: i64,
+
+    /// Number of unique users who had evaluations
+    pub unique_users: i64,
+
+    /// Most frequently evaluated feature key
+    pub top_feature_key: Option<String>,
+
+    /// Success rate as percentage (0-100)
+    pub success_rate: f64,
+
+    /// Cache hit rate as percentage (0-100)
+    pub cache_hit_rate: f64,
+}
+
+// Rollout metrics for dashboard
+#[derive(SimpleObject, Debug, Clone)]
+pub struct RolloutMetrics {
+    /// Average time features spend in the pipeline (hours)
+    pub average_time_in_pipeline: f64,
+
+    /// Approval rate as a percentage (0-100)
+    pub approval_rate: f64,
+
+    /// Number of features deployed this week
+    pub features_deployed_this_week: i32,
+
+    /// Number of features deployed last week
+    pub features_deployed_last_week: i32,
+
+    /// Week-over-week deployment change percentage
+    pub deployment_change: f64,
+
+    /// Name of the stage causing the biggest bottleneck
+    pub bottleneck_stage: String,
+
+    /// Average wait time at the bottleneck stage (hours)
+    pub bottleneck_duration: f64,
+
+    /// Total number of features waiting for approval
+    pub total_pending_approvals: i32,
 }

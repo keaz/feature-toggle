@@ -1,6 +1,6 @@
+use crate::Error;
 use crate::database::entity::Role;
 use crate::database::role::RoleRepository;
-use crate::Error;
 use async_graphql::ID;
 use mockall::automock;
 use uuid::Uuid;
@@ -38,7 +38,12 @@ pub trait RoleLogic: Send + Sync {
     async fn get_all_roles(&self) -> Result<Vec<GqlRole>, Error>;
     async fn get_role_by_id(&self, id: ID) -> Result<GqlRole, Error>;
     async fn get_user_roles(&self, user_id: ID) -> Result<Vec<GqlRole>, Error>;
-    async fn assign_user_roles(&self, user_id: ID, role_ids: Vec<ID>, assigned_by: Option<ID>) -> Result<Vec<GqlRole>, Error>;
+    async fn assign_user_roles(
+        &self,
+        user_id: ID,
+        role_ids: Vec<ID>,
+        assigned_by: Option<ID>,
+    ) -> Result<Vec<GqlRole>, Error>;
     async fn user_has_role(&self, user_id: ID, role_name: &str) -> Result<bool, Error>;
     fn clone_box(&self) -> Box<dyn RoleLogic>;
 }
@@ -49,13 +54,28 @@ impl Clone for Box<dyn RoleLogic> {
     }
 }
 
-pub fn role_logic(repository: Box<dyn RoleRepository>) -> Box<dyn RoleLogic> {
-    Box::new(RoleLogicImpl { repository })
+pub fn role_logic(
+    repository: Box<dyn RoleRepository>,
+    activity_log_repository: Box<dyn crate::database::activity_log::ActivityLogRepository>,
+) -> Box<dyn RoleLogic> {
+    Box::new(RoleLogicImpl {
+        repository,
+        activity_log_repository,
+    })
 }
 
-#[derive(Clone)]
 struct RoleLogicImpl {
     repository: Box<dyn RoleRepository>,
+    activity_log_repository: Box<dyn crate::database::activity_log::ActivityLogRepository>,
+}
+
+impl Clone for RoleLogicImpl {
+    fn clone(&self) -> Self {
+        Self {
+            repository: self.repository.clone_box(),
+            activity_log_repository: self.activity_log_repository.clone_box(),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -77,19 +97,57 @@ impl RoleLogic for RoleLogicImpl {
         Ok(roles.into_iter().map(GqlRole::from).collect())
     }
 
-    async fn assign_user_roles(&self, user_id: ID, role_ids: Vec<ID>, assigned_by: Option<ID>) -> Result<Vec<GqlRole>, Error> {
-        let user_uuid = Uuid::try_from(user_id.clone()).map_err(|e| Error::InvalidInput(e.to_string()))?;
-        let role_uuids: Result<Vec<Uuid>, _> = role_ids.iter().map(|id| Uuid::try_from(id.clone())).collect();
+    async fn assign_user_roles(
+        &self,
+        user_id: ID,
+        role_ids: Vec<ID>,
+        assigned_by: Option<ID>,
+    ) -> Result<Vec<GqlRole>, Error> {
+        let user_uuid =
+            Uuid::try_from(user_id.clone()).map_err(|e| Error::InvalidInput(e.to_string()))?;
+        let role_uuids: Result<Vec<Uuid>, _> = role_ids
+            .iter()
+            .map(|id| Uuid::try_from(id.clone()))
+            .collect();
         let role_uuids = role_uuids.map_err(|e| Error::InvalidInput(e.to_string()))?;
-        
-        let assigned_by_uuid = if let Some(id) = assigned_by {
+
+        let assigned_by_uuid = if let Some(id) = assigned_by.clone() {
             Some(Uuid::try_from(id).map_err(|e| Error::InvalidInput(e.to_string()))?)
         } else {
             None
         };
 
-        self.repository.assign_user_roles(user_uuid, role_uuids, assigned_by_uuid).await?;
-        
+        self.repository
+            .assign_user_roles(user_uuid, role_uuids.clone(), assigned_by_uuid)
+            .await?;
+
+        // Log activity for each role assignment (ignore errors to not fail the operation)
+        for role_uuid in role_uuids {
+            // Get role name for better logging
+            if let Ok(role) = self.repository.get_role_by_id(role_uuid).await {
+                let actor_uuid = if let Some(ref id) = assigned_by {
+                    Uuid::try_from(id.clone()).ok()
+                } else {
+                    None
+                };
+
+                let _ = crate::utils::activity_logger::log_role_activity(
+                    &self.activity_log_repository,
+                    crate::utils::activity_logger::activity_types::ROLE_ASSIGNED,
+                    &user_uuid.to_string(),
+                    actor_uuid,
+                    None,
+                    format!("Assigned role '{}' to user", role.name),
+                    Some(serde_json::json!({
+                        "user_id": user_uuid.to_string(),
+                        "role_id": role_uuid.to_string(),
+                        "role_name": role.name,
+                    })),
+                )
+                .await;
+            }
+        }
+
         // Return the updated roles for the user
         self.get_user_roles(user_id).await
     }
@@ -107,29 +165,49 @@ impl RoleLogic for RoleLogicImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::activity_log::{ActivityLogRepository, MockActivityLogRepository};
     use crate::database::role::MockRoleRepository;
     use uuid::Uuid;
+
+    fn create_mock_activity_log() -> Box<dyn ActivityLogRepository> {
+        let mut mock = MockActivityLogRepository::new();
+        mock.expect_create_activity().returning(|_| {
+            Ok(crate::database::activity_log::ActivityLogRow {
+                id: uuid::Uuid::new_v4(),
+                activity_type: "TEST".to_string(),
+                entity_type: "test".to_string(),
+                entity_id: "test".to_string(),
+                actor_id: None,
+                actor_name: None,
+                description: "test".to_string(),
+                metadata: None,
+                created_at: chrono::Utc::now(),
+            })
+        });
+        mock.expect_clone_box()
+            .returning(|| create_mock_activity_log());
+        Box::new(mock)
+    }
 
     #[tokio::test]
     async fn test_get_all_roles() {
         let mut mock_repo = MockRoleRepository::new();
-        let expected_roles = vec![
-            Role {
-                id: Uuid::new_v4(),
-                name: "Approver".to_string(),
-                description: "Can approve deployment requests".to_string(),
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            },
-        ];
+        let expected_roles = vec![Role {
+            id: Uuid::new_v4(),
+            name: "Approver".to_string(),
+            description: "Can approve deployment requests".to_string(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }];
 
-        mock_repo.expect_get_all_roles()
+        mock_repo
+            .expect_get_all_roles()
             .times(1)
             .return_once(move || Ok(expected_roles));
 
-        let logic = role_logic(Box::new(mock_repo));
+        let logic = role_logic(Box::new(mock_repo), create_mock_activity_log());
         let result = logic.get_all_roles().await.unwrap();
-        
+
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].name, "Approver");
     }
@@ -140,12 +218,13 @@ mod tests {
         let user_id = ID::from(Uuid::new_v4());
         let role_id = ID::from(Uuid::new_v4());
         let role_ids = vec![role_id.clone()];
-        
+
         // Mock the assign operation
-        mock_repo.expect_assign_user_roles()
+        mock_repo
+            .expect_assign_user_roles()
             .times(1)
             .return_once(|_, _, _| Ok(()));
-            
+
         // Mock the get_user_roles call that happens after assignment
         let expected_role = Role {
             id: Uuid::try_from(role_id.clone()).unwrap(),
@@ -154,14 +233,18 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
-        
-        mock_repo.expect_get_user_roles()
+
+        mock_repo
+            .expect_get_user_roles()
             .times(1)
             .return_once(move |_| Ok(vec![expected_role]));
 
-        let logic = role_logic(Box::new(mock_repo));
-        let result = logic.assign_user_roles(user_id, role_ids, None).await.unwrap();
-        
+        let logic = role_logic(Box::new(mock_repo), create_mock_activity_log());
+        let result = logic
+            .assign_user_roles(user_id, role_ids, None)
+            .await
+            .unwrap();
+
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].name, "Approver");
     }

@@ -44,6 +44,14 @@ pub trait ClientRepository: Send + Sync {
     async fn create_client(&self, team_id: Uuid, input: CreateClient) -> Result<Client, Error>;
     async fn update_client(&self, id: Uuid, input: UpdateClient) -> Result<Client, Error>;
     async fn delete_client(&self, id: Uuid) -> Result<(), Error>;
+
+    // Count clients (for dashboard metrics)
+    async fn count_clients(
+        &self,
+        team_id: Option<Uuid>,
+        enabled: Option<bool>,
+    ) -> Result<i64, Error>;
+
     fn clone_box(&self) -> Box<dyn ClientRepository>;
 }
 
@@ -446,6 +454,61 @@ impl ClientRepository for ClientRepositoryImpl {
             .await;
         let _ = handle_error(Some(id), result)?;
         Ok(())
+    }
+
+    async fn count_clients(
+        &self,
+        team_id: Option<Uuid>,
+        enabled: Option<bool>,
+    ) -> Result<i64, Error> {
+        // Build query dynamically based on filters
+        let count = match (team_id, enabled) {
+            (Some(team_id), Some(enabled)) => sqlx::query_scalar!(
+                r#"
+                    SELECT COUNT(*) as "count!"
+                    FROM clients
+                    WHERE team_id = $1 AND enabled = $2
+                    "#,
+                team_id,
+                enabled
+            )
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| Error::DatabaseError(e))?,
+            (Some(team_id), None) => sqlx::query_scalar!(
+                r#"
+                    SELECT COUNT(*) as "count!"
+                    FROM clients
+                    WHERE team_id = $1
+                    "#,
+                team_id
+            )
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| Error::DatabaseError(e))?,
+            (None, Some(enabled)) => sqlx::query_scalar!(
+                r#"
+                    SELECT COUNT(*) as "count!"
+                    FROM clients
+                    WHERE enabled = $1
+                    "#,
+                enabled
+            )
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| Error::DatabaseError(e))?,
+            (None, None) => sqlx::query_scalar!(
+                r#"
+                    SELECT COUNT(*) as "count!"
+                    FROM clients
+                    "#
+            )
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| Error::DatabaseError(e))?,
+        };
+
+        Ok(count)
     }
 
     fn clone_box(&self) -> Box<dyn ClientRepository> {

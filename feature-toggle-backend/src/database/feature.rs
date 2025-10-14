@@ -1,5 +1,5 @@
 use crate::database::entity::{Feature, FeatureDependency, FeaturePipelineStage, FeatureType};
-use crate::database::{handle_error, Error};
+use crate::database::{Error, handle_error};
 use chrono::{DateTime, Utc};
 use mockall::automock;
 use serde::{Deserialize, Serialize};
@@ -13,6 +13,28 @@ pub struct CreateStageCriterion {
     pub context_key: String,
     pub context_id: Uuid,
     pub rollout_percentage: i32,
+}
+
+/// Represents feature growth data at a specific time bucket
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct FeatureGrowthPoint {
+    pub time_bucket: DateTime<Utc>,
+    pub team_id: Option<Uuid>,
+    pub team_name: Option<String>,
+    pub feature_count: i64,
+    pub cumulative_count: i64,
+}
+
+/// Represents raw rollout metrics data from the database
+#[derive(Debug, Clone)]
+pub struct RolloutMetricsData {
+    pub total_deployed: i64,
+    pub total_rejected: i64,
+    pub deployed_this_week: i64,
+    pub deployed_last_week: i64,
+    pub pending_approvals: i64,
+    pub bottleneck_stage: Option<String>,
+    pub bottleneck_avg_wait_hours: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -192,6 +214,40 @@ pub trait FeatureRepository: Send + Sync {
 
     // Helper: find owning feature id for a stage
     async fn get_feature_id_by_stage_id(&self, stage_id: Uuid) -> Result<Option<Uuid>, Error>;
+
+    // Feature growth analytics
+    async fn get_feature_growth(
+        &self,
+        from_time: DateTime<Utc>,
+        to_time: DateTime<Utc>,
+        interval: String,
+        team_id: Option<Uuid>,
+    ) -> Result<Vec<FeatureGrowthPoint>, Error>;
+
+    // Count features (for dashboard metrics)
+    async fn count_features(&self, team_id: Option<Uuid>) -> Result<i64, Error>;
+
+    // Rollout metrics (for dashboard)
+    async fn get_rollout_metrics_data(
+        &self,
+        team_id: Option<Uuid>,
+    ) -> Result<RolloutMetricsData, Error>;
+
+    // Get features with pending approvals (DEPLOYMENT_REQUESTED or ROLLBACK_REQUESTED)
+    async fn get_features_with_pending_approvals(
+        &self,
+        team_id: Option<Uuid>,
+        page_number: Option<i32>,
+        page_size: Option<i32>,
+    ) -> Result<(Vec<Feature>, i64), Error>;
+
+    // Get features with active kill switches
+    async fn get_features_with_kill_switches(
+        &self,
+        team_id: Option<Uuid>,
+        page_number: Option<i32>,
+        page_size: Option<i32>,
+    ) -> Result<(Vec<Feature>, i64), Error>;
 
     fn clone_box(&self) -> Box<dyn FeatureRepository>;
 }
@@ -906,9 +962,8 @@ impl FeatureRepository for FeatureRepositoryImpl {
         page_size: i32,
     ) -> Result<(Vec<Feature>, i64), Error> {
         // First, get the total count
-        let mut count_query = sqlx::QueryBuilder::new(
-            "SELECT COUNT(DISTINCT f.id) FROM features f"
-        );
+        let mut count_query =
+            sqlx::QueryBuilder::new("SELECT COUNT(DISTINCT f.id) FROM features f");
         count_query.push(" WHERE f.team_id = ").push_bind(team_id);
 
         if let Some(key) = &key {
@@ -1363,6 +1418,481 @@ impl FeatureRepository for FeatureRepositoryImpl {
         }
 
         Ok(features)
+    }
+
+    async fn get_feature_growth(
+        &self,
+        from_time: DateTime<Utc>,
+        to_time: DateTime<Utc>,
+        interval: String,
+        team_id: Option<Uuid>,
+    ) -> Result<Vec<FeatureGrowthPoint>, Error> {
+        // Validate interval (must be 'day', 'week', or 'month')
+        let valid_intervals = ["day", "week", "month"];
+        if !valid_intervals.contains(&interval.as_str()) {
+            return Err(Error::DatabaseError(sqlx::Error::Protocol(
+                "Invalid interval. Must be 'day', 'week', or 'month'".to_string(),
+            )));
+        }
+
+        let query = if let Some(_team_id) = team_id {
+            // Query for specific team
+            format!(
+                r#"
+                WITH time_series AS (
+                    SELECT 
+                        date_trunc('{}', created_at) as time_bucket,
+                        team_id,
+                        COUNT(*) as feature_count
+                    FROM features
+                    WHERE created_at >= $1 
+                        AND created_at <= $2
+                        AND team_id = $3
+                    GROUP BY time_bucket, team_id
+                    ORDER BY time_bucket
+                ),
+                cumulative AS (
+                    SELECT 
+                        time_bucket,
+                        team_id,
+                        feature_count,
+                        SUM(feature_count) OVER (PARTITION BY team_id ORDER BY time_bucket) as cumulative_count
+                    FROM time_series
+                )
+                SELECT 
+                    c.time_bucket,
+                    c.team_id,
+                    t.name as team_name,
+                    c.feature_count,
+                    c.cumulative_count
+                FROM cumulative c
+                LEFT JOIN teams t ON c.team_id = t.id
+                ORDER BY c.time_bucket
+                "#,
+                interval
+            )
+        } else {
+            // Query for all teams
+            format!(
+                r#"
+                WITH time_series AS (
+                    SELECT 
+                        date_trunc('{}', created_at) as time_bucket,
+                        team_id,
+                        COUNT(*) as feature_count
+                    FROM features
+                    WHERE created_at >= $1 
+                        AND created_at <= $2
+                    GROUP BY time_bucket, team_id
+                    ORDER BY time_bucket, team_id
+                ),
+                cumulative AS (
+                    SELECT 
+                        time_bucket,
+                        team_id,
+                        feature_count,
+                        SUM(feature_count) OVER (PARTITION BY team_id ORDER BY time_bucket) as cumulative_count
+                    FROM time_series
+                )
+                SELECT 
+                    c.time_bucket,
+                    c.team_id,
+                    t.name as team_name,
+                    c.feature_count,
+                    c.cumulative_count
+                FROM cumulative c
+                LEFT JOIN teams t ON c.team_id = t.id
+                ORDER BY c.time_bucket, c.team_id
+                "#,
+                interval
+            )
+        };
+
+        let result = if let Some(tid) = team_id {
+            sqlx::query_as::<_, FeatureGrowthPoint>(&query)
+                .bind(from_time)
+                .bind(to_time)
+                .bind(tid)
+                .fetch_all(&self.pool)
+                .await
+        } else {
+            sqlx::query_as::<_, FeatureGrowthPoint>(&query)
+                .bind(from_time)
+                .bind(to_time)
+                .fetch_all(&self.pool)
+                .await
+        };
+
+        result.map_err(|e| Error::DatabaseError(e))
+    }
+
+    async fn count_features(&self, team_id: Option<Uuid>) -> Result<i64, Error> {
+        let count = if let Some(team_id) = team_id {
+            sqlx::query_scalar!(
+                r#"
+                SELECT COUNT(*) as "count!"
+                FROM features
+                WHERE team_id = $1
+                "#,
+                team_id
+            )
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| Error::DatabaseError(e))?
+        } else {
+            sqlx::query_scalar!(
+                r#"
+                SELECT COUNT(*) as "count!"
+                FROM features
+                "#
+            )
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| Error::DatabaseError(e))?
+        };
+
+        Ok(count)
+    }
+
+    async fn get_rollout_metrics_data(
+        &self,
+        team_id: Option<Uuid>,
+    ) -> Result<RolloutMetricsData, Error> {
+        // Build the base WHERE clause for team filtering
+        let team_filter = if team_id.is_some() {
+            "AND f.team_id = $1"
+        } else {
+            ""
+        };
+
+        // 1. Get counts of deployed and rejected features
+        let status_counts: (i64, i64) = if let Some(team_id) = team_id {
+            sqlx::query_as::<_, (i64, i64)>(&format!(
+                r#"
+                SELECT 
+                    COUNT(*) FILTER (WHERE fps.status = 'DEPLOYED') as deployed,
+                    COUNT(*) FILTER (WHERE fps.status IN ('DEPLOYMENT_REJECTED', 'ROLLBACK_REJECTED')) as rejected
+                FROM features_pipeline_stages fps
+                JOIN features f ON f.id = fps.feature_id
+                WHERE f.team_id = $1
+                "#
+            ))
+            .bind(team_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| Error::DatabaseError(e))?
+        } else {
+            sqlx::query_as::<_, (i64, i64)>(
+                r#"
+                SELECT 
+                    COUNT(*) FILTER (WHERE fps.status = 'DEPLOYED') as deployed,
+                    COUNT(*) FILTER (WHERE fps.status IN ('DEPLOYMENT_REJECTED', 'ROLLBACK_REJECTED')) as rejected
+                FROM features_pipeline_stages fps
+                JOIN features f ON f.id = fps.feature_id
+                "#
+            )
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| Error::DatabaseError(e))?
+        };
+
+        // 2. Get deployed features this week and last week
+        let (deployed_this_week, deployed_last_week): (i64, i64) = if let Some(team_id) = team_id {
+            sqlx::query_as::<_, (i64, i64)>(&format!(
+                r#"
+                SELECT 
+                    COUNT(DISTINCT fps.feature_id) FILTER (
+                        WHERE fps.status = 'DEPLOYED' 
+                        AND fps.approved_time >= date_trunc('week', CURRENT_TIMESTAMP)
+                        AND fps.approved_time < date_trunc('week', CURRENT_TIMESTAMP) + interval '1 week'
+                    ) as this_week,
+                    COUNT(DISTINCT fps.feature_id) FILTER (
+                        WHERE fps.status = 'DEPLOYED'
+                        AND fps.approved_time >= date_trunc('week', CURRENT_TIMESTAMP) - interval '1 week'
+                        AND fps.approved_time < date_trunc('week', CURRENT_TIMESTAMP)
+                    ) as last_week
+                FROM features_pipeline_stages fps
+                JOIN features f ON f.id = fps.feature_id
+                WHERE f.team_id = $1
+                "#
+            ))
+            .bind(team_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| Error::DatabaseError(e))?
+        } else {
+            sqlx::query_as::<_, (i64, i64)>(
+                r#"
+                SELECT 
+                    COUNT(DISTINCT fps.feature_id) FILTER (
+                        WHERE fps.status = 'DEPLOYED' 
+                        AND fps.approved_time >= date_trunc('week', CURRENT_TIMESTAMP)
+                        AND fps.approved_time < date_trunc('week', CURRENT_TIMESTAMP) + interval '1 week'
+                    ) as this_week,
+                    COUNT(DISTINCT fps.feature_id) FILTER (
+                        WHERE fps.status = 'DEPLOYED'
+                        AND fps.approved_time >= date_trunc('week', CURRENT_TIMESTAMP) - interval '1 week'
+                        AND fps.approved_time < date_trunc('week', CURRENT_TIMESTAMP)
+                    ) as last_week
+                FROM features_pipeline_stages fps
+                JOIN features f ON f.id = fps.feature_id
+                "#
+            )
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| Error::DatabaseError(e))?
+        };
+
+        // 3. Get pending approvals count
+        let pending_approvals: i64 = if let Some(team_id) = team_id {
+            sqlx::query_scalar!(
+                r#"
+                SELECT COUNT(*) as "count!"
+                FROM features_pipeline_stages fps
+                JOIN features f ON f.id = fps.feature_id
+                WHERE fps.status = 'DEPLOYMENT_REQUESTED'
+                AND f.team_id = $1
+                "#,
+                team_id
+            )
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| Error::DatabaseError(e))?
+        } else {
+            sqlx::query_scalar!(
+                r#"
+                SELECT COUNT(*) as "count!"
+                FROM features_pipeline_stages fps
+                JOIN features f ON f.id = fps.feature_id
+                WHERE fps.status = 'DEPLOYMENT_REQUESTED'
+                "#
+            )
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| Error::DatabaseError(e))?
+        };
+
+        // 4. Get bottleneck stage (environment with longest average wait time)
+        let bottleneck: Option<(String, f64)> = if let Some(team_id) = team_id {
+            sqlx::query_as::<_, (String, f64)>(
+                r#"
+                SELECT 
+                    e.name as environment_name,
+                    AVG(EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - fps.requested_time)) / 3600) as avg_wait_hours
+                FROM features_pipeline_stages fps
+                JOIN environments e ON e.id = fps.environment_id
+                JOIN features f ON f.id = fps.feature_id
+                WHERE fps.status = 'DEPLOYMENT_REQUESTED'
+                AND fps.requested_time IS NOT NULL
+                AND f.team_id = $1
+                GROUP BY e.name
+                ORDER BY avg_wait_hours DESC
+                LIMIT 1
+                "#
+            )
+            .bind(team_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| Error::DatabaseError(e))?
+        } else {
+            sqlx::query_as::<_, (String, f64)>(
+                r#"
+                SELECT 
+                    e.name as environment_name,
+                    AVG(EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - fps.requested_time)) / 3600) as avg_wait_hours
+                FROM features_pipeline_stages fps
+                JOIN environments e ON e.id = fps.environment_id
+                JOIN features f ON f.id = fps.feature_id
+                WHERE fps.status = 'DEPLOYMENT_REQUESTED'
+                AND fps.requested_time IS NOT NULL
+                GROUP BY e.name
+                ORDER BY avg_wait_hours DESC
+                LIMIT 1
+                "#
+            )
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| Error::DatabaseError(e))?
+        };
+
+        Ok(RolloutMetricsData {
+            total_deployed: status_counts.0,
+            total_rejected: status_counts.1,
+            deployed_this_week,
+            deployed_last_week,
+            pending_approvals,
+            bottleneck_stage: bottleneck.as_ref().map(|(name, _)| name.clone()),
+            bottleneck_avg_wait_hours: bottleneck.map(|(_, hours)| hours),
+        })
+    }
+
+    async fn get_features_with_pending_approvals(
+        &self,
+        team_id: Option<Uuid>,
+        page_number: Option<i32>,
+        page_size: Option<i32>,
+    ) -> Result<(Vec<Feature>, i64), Error> {
+        // Count total features with pending approvals
+        let mut count_query = sqlx::QueryBuilder::new(
+            "SELECT COUNT(DISTINCT f.id) FROM features f \
+             INNER JOIN features_pipeline_stages s ON f.id = s.feature_id \
+             WHERE s.status IN ('DEPLOYMENT_REQUESTED', 'ROLLBACK_REQUESTED')",
+        );
+
+        if let Some(tid) = team_id {
+            count_query.push(" AND f.team_id = ").push_bind(tid);
+        }
+
+        let total: i64 = count_query
+            .build_query_scalar()
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| Error::DatabaseError(e))?;
+
+        // Build query with pagination
+        let (limit, offset) = if let (Some(page_num), Some(page_sz)) = (page_number, page_size) {
+            let offset = (page_num - 1) * page_sz;
+            (page_sz, offset)
+        } else {
+            (total as i32, 0)
+        };
+
+        // Query features with pending approvals (with stages joined)
+        let mut query_builder = sqlx::QueryBuilder::new(
+            r#"SELECT DISTINCT ON (f.id) f.id as feature_id, f.key as feature_key, f.description, 
+               f.feature_type, f.team_id, f.created_at, f.kill_switch_enabled, 
+               f.kill_switch_activated_at, f.rollback_scheduled_at,
+               s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
+               s.parent_stage_id, s.position, s.bucketing_key, s.status, s.enabled
+               FROM features f
+               INNER JOIN features_pipeline_stages s ON f.id = s.feature_id
+               WHERE s.status IN ('DEPLOYMENT_REQUESTED', 'ROLLBACK_REQUESTED')"#,
+        );
+
+        if let Some(tid) = team_id {
+            query_builder.push(" AND f.team_id = ").push_bind(tid);
+        }
+
+        query_builder.push(" ORDER BY f.id, f.created_at DESC");
+        query_builder.push(" LIMIT ").push_bind(limit);
+        query_builder.push(" OFFSET ").push_bind(offset);
+
+        let result = query_builder
+            .build_query_as::<FeatureWithStageRow>()
+            .fetch_all(&self.pool)
+            .await;
+
+        let features_rows = handle_error(None, result)?;
+        let mut map: HashMap<Uuid, Vec<FeatureWithStageRow>> = HashMap::new();
+        let mut order: Vec<Uuid> = Vec::new();
+
+        for row in features_rows {
+            if !map.contains_key(&row.feature_id) {
+                order.push(row.feature_id);
+            }
+            map.entry(row.feature_id).or_default().push(row);
+        }
+
+        // Convert rows to features and load all stages + dependencies
+        let mut features: Vec<Feature> = Vec::with_capacity(order.len());
+        for id in order {
+            if let Some(rows) = map.remove(&id) {
+                let mut feature = Self::map_row_to_feature(rows);
+                // Load all stages for this feature
+                let all_stages = self.get_feature_stages(Some(&id), None).await?;
+                feature.stages = all_stages;
+                // Load dependencies
+                let dependencies = self.get_feature_dependencies(&id).await?;
+                feature.dependencies = dependencies;
+                features.push(feature);
+            }
+        }
+
+        Ok((features, total))
+    }
+
+    async fn get_features_with_kill_switches(
+        &self,
+        team_id: Option<Uuid>,
+        page_number: Option<i32>,
+        page_size: Option<i32>,
+    ) -> Result<(Vec<Feature>, i64), Error> {
+        // Count total features with active kill switches
+        let mut count_query = sqlx::QueryBuilder::new(
+            "SELECT COUNT(DISTINCT f.id) FROM features f \
+             WHERE f.kill_switch_enabled = true",
+        );
+
+        if let Some(tid) = team_id {
+            count_query.push(" AND f.team_id = ").push_bind(tid);
+        }
+
+        let total: i64 = count_query
+            .build_query_scalar()
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| Error::DatabaseError(e))?;
+
+        // Build query with pagination
+        let (limit, offset) = if let (Some(page_num), Some(page_sz)) = (page_number, page_size) {
+            let offset = (page_num - 1) * page_sz;
+            (page_sz, offset)
+        } else {
+            (total as i32, 0)
+        };
+
+        // Query features with kill switches (with stages joined)
+        let mut query_builder = sqlx::QueryBuilder::new(
+            r#"SELECT DISTINCT ON (f.id) f.id as feature_id, f.key as feature_key, f.description, 
+               f.feature_type, f.team_id, f.created_at, f.kill_switch_enabled, 
+               f.kill_switch_activated_at, f.rollback_scheduled_at,
+               s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
+               s.parent_stage_id, s.position, s.bucketing_key, s.status, s.enabled
+               FROM features f
+               LEFT JOIN features_pipeline_stages s ON f.id = s.feature_id
+               WHERE f.kill_switch_enabled = true"#,
+        );
+
+        if let Some(tid) = team_id {
+            query_builder.push(" AND f.team_id = ").push_bind(tid);
+        }
+
+        query_builder.push(" ORDER BY f.id, f.kill_switch_activated_at DESC NULLS LAST");
+        query_builder.push(" LIMIT ").push_bind(limit);
+        query_builder.push(" OFFSET ").push_bind(offset);
+
+        let result = query_builder
+            .build_query_as::<FeatureWithStageRow>()
+            .fetch_all(&self.pool)
+            .await;
+
+        let features_rows = handle_error(None, result)?;
+        let mut map: HashMap<Uuid, Vec<FeatureWithStageRow>> = HashMap::new();
+        let mut order: Vec<Uuid> = Vec::new();
+
+        for row in features_rows {
+            if !map.contains_key(&row.feature_id) {
+                order.push(row.feature_id);
+            }
+            map.entry(row.feature_id).or_default().push(row);
+        }
+
+        // Convert rows to features and load all stages + dependencies
+        let mut features: Vec<Feature> = Vec::with_capacity(order.len());
+        for id in order {
+            if let Some(rows) = map.remove(&id) {
+                let mut feature = Self::map_row_to_feature(rows);
+                // Load all stages for this feature
+                let all_stages = self.get_feature_stages(Some(&id), None).await?;
+                feature.stages = all_stages;
+                // Load dependencies
+                let dependencies = self.get_feature_dependencies(&id).await?;
+                feature.dependencies = dependencies;
+                features.push(feature);
+            }
+        }
+
+        Ok((features, total))
     }
 
     fn clone_box(&self) -> Box<dyn FeatureRepository> {

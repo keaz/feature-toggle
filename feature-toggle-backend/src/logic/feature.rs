@@ -16,6 +16,19 @@ use uuid::Uuid;
 
 use mockall::automock;
 
+/// Rollout metrics for dashboard
+#[derive(Debug, Clone)]
+pub struct RolloutMetrics {
+    pub average_time_in_pipeline: f64,
+    pub approval_rate: f64,
+    pub features_deployed_this_week: i32,
+    pub features_deployed_last_week: i32,
+    pub deployment_change: f64,
+    pub bottleneck_stage: String,
+    pub bottleneck_duration: f64,
+    pub total_pending_approvals: i32,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StageChangeRequestType {
     DeploymentRequested,
@@ -49,6 +62,28 @@ pub trait FeatureCrudLogic: Send + Sync {
     async fn create_feature(&self, team_id: ID, input: CreateFeatureInput) -> Result<ID, Error>;
     async fn update_feature(&self, id: ID, input: UpdateFeatureInput) -> Result<Feature, Error>;
     async fn delete_feature(&self, id: ID) -> Result<(), Error>;
+
+    // Count features
+    async fn count_features(&self, team_id: Option<ID>) -> Result<i64, Error>;
+
+    // Rollout metrics (for dashboard)
+    async fn get_rollout_metrics(&self, team_id: Option<ID>) -> Result<RolloutMetrics, Error>;
+
+    // Get features with pending approvals (DEPLOYMENT_REQUESTED or ROLLBACK_REQUESTED)
+    async fn get_features_with_pending_approvals(
+        &self,
+        team_id: Option<ID>,
+        page_number: Option<i32>,
+        page_size: Option<i32>,
+    ) -> Result<(Vec<Feature>, i64), Error>;
+
+    // Get features with active kill switches
+    async fn get_features_with_kill_switches(
+        &self,
+        team_id: Option<ID>,
+        page_number: Option<i32>,
+        page_size: Option<i32>,
+    ) -> Result<(Vec<Feature>, i64), Error>;
 
     // Kill switch functionality
     async fn emergency_disable_feature(
@@ -131,6 +166,20 @@ mockall::mock! {
         async fn create_feature(&self, team_id: ID, input: CreateFeatureInput) -> Result<ID, Error>;
         async fn update_feature(&self, id: ID, input: UpdateFeatureInput) -> Result<Feature, Error>;
         async fn delete_feature(&self, id: ID) -> Result<(), Error>;
+        async fn count_features(&self, team_id: Option<ID>) -> Result<i64, Error>;
+        async fn get_rollout_metrics(&self, team_id: Option<ID>) -> Result<RolloutMetrics, Error>;
+        async fn get_features_with_pending_approvals(
+            &self,
+            team_id: Option<ID>,
+            page_number: Option<i32>,
+            page_size: Option<i32>,
+        ) -> Result<(Vec<Feature>, i64), Error>;
+        async fn get_features_with_kill_switches(
+            &self,
+            team_id: Option<ID>,
+            page_number: Option<i32>,
+            page_size: Option<i32>,
+        ) -> Result<(Vec<Feature>, i64), Error>;
         async fn emergency_disable_feature(
             &self,
             id: ID,
@@ -187,17 +236,29 @@ impl Clone for Box<dyn FeatureLogic> {
 pub fn feature_logic(
     repository: Box<dyn FeatureRepository>,
     environment_logic: Box<dyn EnvironmentLogic>,
+    activity_log_repository: Box<dyn crate::database::activity_log::ActivityLogRepository>,
 ) -> Box<dyn FeatureLogic> {
     Box::new(FeatureLogicImpl {
         repository,
         environment_logic,
+        activity_log_repository,
     })
 }
 
-#[derive(Clone)]
 struct FeatureLogicImpl {
     repository: Box<dyn FeatureRepository>,
-    environment_logic: Box<dyn EnvironmentLogic>, // Assuming you have an EnvironmentLogic trait
+    environment_logic: Box<dyn EnvironmentLogic>,
+    activity_log_repository: Box<dyn crate::database::activity_log::ActivityLogRepository>,
+}
+
+impl Clone for FeatureLogicImpl {
+    fn clone(&self) -> Self {
+        Self {
+            repository: self.repository.clone_box(),
+            environment_logic: self.environment_logic.clone_box(),
+            activity_log_repository: self.activity_log_repository.clone_box(),
+        }
+    }
 }
 
 impl FeatureLogicImpl {
@@ -407,20 +468,240 @@ impl FeatureCrudLogic for FeatureLogicImpl {
 
     async fn create_feature(&self, team_id: ID, input: CreateFeatureInput) -> Result<ID, Error> {
         let team_id = id_to_uuid(team_id)?;
+        let feature_key = input.key.clone();
         let input = Self::map_to_create_feature(team_id, input)?;
         let feature_id = self.repository.create_feature(input).await?;
+
+        // Log activity (ignore errors to not fail the operation)
+        let _ = crate::utils::activity_logger::log_feature_activity(
+            &self.activity_log_repository,
+            crate::utils::activity_logger::activity_types::FEATURE_CREATED,
+            &feature_id.to_string(),
+            None,
+            None,
+            format!("Created feature '{}'", feature_key),
+            Some(serde_json::json!({
+                "feature_id": feature_id.to_string(),
+                "feature_key": feature_key,
+                "team_id": team_id.to_string(),
+            })),
+        )
+        .await;
+
         Ok(ID::from(feature_id.to_string()))
     }
 
     async fn update_feature(&self, id: ID, input: UpdateFeatureInput) -> Result<Feature, Error> {
-        let input = Self::map_to_update_feature(id, input)?;
+        let input = Self::map_to_update_feature(id.clone(), input)?;
         let feature = self.repository.update_feature(input).await?;
+
+        // Log activity (ignore errors to not fail the operation)
+        let _ = crate::utils::activity_logger::log_feature_activity(
+            &self.activity_log_repository,
+            crate::utils::activity_logger::activity_types::FEATURE_UPDATED,
+            &feature.id.to_string(),
+            None,
+            None,
+            format!("Updated feature '{}'", feature.key),
+            Some(serde_json::json!({
+                "feature_id": feature.id.to_string(),
+                "feature_key": feature.key.clone(),
+            })),
+        )
+        .await;
+
         Ok(Self::map_entity_to_graphql_feature(feature))
     }
 
     async fn delete_feature(&self, id: ID) -> Result<(), Error> {
-        self.repository.delete_feature(id_to_uuid(id)?).await?;
+        let feature_uuid = id_to_uuid(id.clone())?;
+        self.repository.delete_feature(feature_uuid).await?;
+
+        // Log activity (ignore errors to not fail the operation)
+        let _ = crate::utils::activity_logger::log_feature_activity(
+            &self.activity_log_repository,
+            crate::utils::activity_logger::activity_types::FEATURE_DELETED,
+            &id.to_string(),
+            None,
+            None,
+            format!("Deleted feature with ID '{}'", id.to_string()),
+            Some(serde_json::json!({
+                "feature_id": id.to_string(),
+            })),
+        )
+        .await;
+
         Ok(())
+    }
+
+    async fn count_features(&self, team_id: Option<ID>) -> Result<i64, Error> {
+        let team_uuid = team_id.map(|id| id_to_uuid(id)).transpose()?;
+        self.repository.count_features(team_uuid).await
+    }
+
+    async fn get_rollout_metrics(&self, team_id: Option<ID>) -> Result<RolloutMetrics, Error> {
+        let team_uuid = team_id.map(|id| id_to_uuid(id)).transpose()?;
+        let data = self.repository.get_rollout_metrics_data(team_uuid).await?;
+
+        // Calculate approval rate (avoid division by zero)
+        let total_decisions = data.total_deployed + data.total_rejected;
+        let approval_rate = if total_decisions > 0 {
+            (data.total_deployed as f64 / total_decisions as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        // Calculate deployment change percentage
+        let deployment_change = if data.deployed_last_week > 0 {
+            ((data.deployed_this_week - data.deployed_last_week) as f64
+                / data.deployed_last_week as f64)
+                * 100.0
+        } else if data.deployed_this_week > 0 {
+            100.0 // If we had 0 last week but have deployments this week, that's 100% growth
+        } else {
+            0.0
+        };
+
+        // Average time in pipeline - for now returning 0 since we don't have approved_time in all cases
+        // This would need to be calculated from approved_time - created_at when that data is available
+        let average_time_in_pipeline = 0.0;
+
+        Ok(RolloutMetrics {
+            average_time_in_pipeline,
+            approval_rate,
+            features_deployed_this_week: data.deployed_this_week as i32,
+            features_deployed_last_week: data.deployed_last_week as i32,
+            deployment_change,
+            bottleneck_stage: data.bottleneck_stage.unwrap_or_else(|| "None".to_string()),
+            bottleneck_duration: data.bottleneck_avg_wait_hours.unwrap_or(0.0),
+            total_pending_approvals: data.pending_approvals as i32,
+        })
+    }
+
+    async fn get_features_with_pending_approvals(
+        &self,
+        team_id: Option<ID>,
+        page_number: Option<i32>,
+        page_size: Option<i32>,
+    ) -> Result<(Vec<Feature>, i64), Error> {
+        let team_uuid = team_id.map(|id| id_to_uuid(id)).transpose()?;
+        let (features, total) = self
+            .repository
+            .get_features_with_pending_approvals(team_uuid, page_number, page_size)
+            .await?;
+
+        // Map each feature and load its environments
+        let mut mapped_features = Vec::new();
+        for feature in features {
+            // Build stage vectors for environment loading
+            let db_stages_for_env: Vec<Box<dyn DBStage>> = feature
+                .stages
+                .iter()
+                .map(|stage| Box::new(stage.clone()) as Box<dyn DBStage>)
+                .collect();
+
+            let environment_map =
+                get_environment_map(&*self.environment_logic, &db_stages_for_env, true).await?;
+
+            // Map stages with environments
+            let mut stages = map_stages(true, &environment_map, &db_stages_for_env, stage_factory);
+
+            // Populate bucketing_key on stages from the database entity
+            use std::collections::HashMap;
+            let bucketing_map: HashMap<String, Option<String>> = feature
+                .stages
+                .iter()
+                .map(|s| (s.id.to_string(), s.bucketing_key.clone()))
+                .collect();
+            for stage in stages.iter_mut() {
+                if let Some(b) = bucketing_map.get(&stage.id.to_string()) {
+                    stage.bucketing_key = b.clone();
+                }
+            }
+
+            // Populate status on stages from the database entity
+            let status_map: HashMap<String, String> = feature
+                .stages
+                .iter()
+                .map(|s| (s.id.to_string(), s.status.clone()))
+                .collect();
+            for stage in stages.iter_mut() {
+                if let Some(st) = status_map.get(&stage.id.to_string()) {
+                    stage.status = st.clone();
+                }
+            }
+
+            // Create feature with properly mapped stages
+            let mut mapped_feature = Self::map_entity_to_graphql_feature(feature);
+            stages.sort_by(|a, b| a.order_index.cmp(&b.order_index));
+            mapped_feature.stages = stages;
+            mapped_features.push(mapped_feature);
+        }
+
+        Ok((mapped_features, total))
+    }
+
+    async fn get_features_with_kill_switches(
+        &self,
+        team_id: Option<ID>,
+        page_number: Option<i32>,
+        page_size: Option<i32>,
+    ) -> Result<(Vec<Feature>, i64), Error> {
+        let team_uuid = team_id.map(|id| id_to_uuid(id)).transpose()?;
+        let (features, total) = self
+            .repository
+            .get_features_with_kill_switches(team_uuid, page_number, page_size)
+            .await?;
+
+        // Map each feature and load its environments
+        let mut mapped_features = Vec::new();
+        for feature in features {
+            // Build stage vectors for environment loading
+            let db_stages_for_env: Vec<Box<dyn DBStage>> = feature
+                .stages
+                .iter()
+                .map(|stage| Box::new(stage.clone()) as Box<dyn DBStage>)
+                .collect();
+
+            let environment_map =
+                get_environment_map(&*self.environment_logic, &db_stages_for_env, true).await?;
+
+            // Map stages with environments
+            let mut stages = map_stages(true, &environment_map, &db_stages_for_env, stage_factory);
+
+            // Populate bucketing_key on stages from the database entity
+            use std::collections::HashMap;
+            let bucketing_map: HashMap<String, Option<String>> = feature
+                .stages
+                .iter()
+                .map(|s| (s.id.to_string(), s.bucketing_key.clone()))
+                .collect();
+            for stage in stages.iter_mut() {
+                if let Some(b) = bucketing_map.get(&stage.id.to_string()) {
+                    stage.bucketing_key = b.clone();
+                }
+            }
+
+            // Populate status on stages from the database entity
+            let status_map: HashMap<String, String> = feature
+                .stages
+                .iter()
+                .map(|s| (s.id.to_string(), s.status.clone()))
+                .collect();
+            for stage in stages.iter_mut() {
+                if let Some(st) = status_map.get(&stage.id.to_string()) {
+                    stage.status = st.clone();
+                }
+            }
+
+            // Create feature with properly mapped stages
+            let mut mapped_feature = Self::map_entity_to_graphql_feature(feature);
+            stages.sort_by(|a, b| a.order_index.cmp(&b.order_index));
+            mapped_feature.stages = stages;
+            mapped_features.push(mapped_feature);
+        }
+
+        Ok((mapped_features, total))
     }
 
     async fn emergency_disable_feature(
@@ -433,12 +714,45 @@ impl FeatureCrudLogic for FeatureLogicImpl {
             .repository
             .emergency_disable_feature(feature_id, rollback_in_minutes)
             .await?;
+
+        // Log activity (ignore errors to not fail the operation)
+        let _ = crate::utils::activity_logger::log_feature_activity(
+            &self.activity_log_repository,
+            crate::utils::activity_logger::activity_types::KILL_SWITCH_ACTIVATED,
+            &feature.id.to_string(),
+            None,
+            None,
+            format!("Kill switch activated for feature '{}'", feature.key),
+            Some(serde_json::json!({
+                "feature_id": feature.id.to_string(),
+                "feature_key": feature.key.clone(),
+                "rollback_in_minutes": rollback_in_minutes,
+            })),
+        )
+        .await;
+
         Ok(Self::map_entity_to_graphql_feature(feature))
     }
 
     async fn emergency_enable_feature(&self, id: ID) -> Result<Feature, Error> {
         let feature_id = id_to_uuid(id)?;
         let feature = self.repository.emergency_enable_feature(feature_id).await?;
+
+        // Log activity (ignore errors to not fail the operation)
+        let _ = crate::utils::activity_logger::log_feature_activity(
+            &self.activity_log_repository,
+            crate::utils::activity_logger::activity_types::KILL_SWITCH_DEACTIVATED,
+            &feature.id.to_string(),
+            None,
+            None,
+            format!("Kill switch deactivated for feature '{}'", feature.key),
+            Some(serde_json::json!({
+                "feature_id": feature.id.to_string(),
+                "feature_key": feature.key.clone(),
+            })),
+        )
+        .await;
+
         Ok(Self::map_entity_to_graphql_feature(feature))
     }
 
@@ -575,6 +889,7 @@ impl DeploymentLogic for FeatureLogicImpl {
         if !ok {
             return Err(Error::NotFound(stage_uuid));
         }
+
         // Load the owning feature of this stage and return it, mapped to GraphQL Feature
         if let Some(fid) = self
             .repository
@@ -582,6 +897,62 @@ impl DeploymentLogic for FeatureLogicImpl {
             .await?
         {
             let db_feature = self.repository.get_feature_by_id(fid).await?;
+
+            // Log activity based on request type (ignore errors to not fail the operation)
+            let (activity_type, description) = match request {
+                StageChangeRequestType::Deployed => (
+                    crate::utils::activity_logger::activity_types::STAGE_APPROVED,
+                    format!(
+                        "Approved deployment for feature '{}' stage '{}'",
+                        db_feature.key,
+                        stage_id.to_string()
+                    ),
+                ),
+                StageChangeRequestType::DeploymentRejected
+                | StageChangeRequestType::RollbackRejected => (
+                    crate::utils::activity_logger::activity_types::STAGE_REJECTED,
+                    format!(
+                        "Rejected change request for feature '{}' stage '{}'",
+                        db_feature.key,
+                        stage_id.to_string()
+                    ),
+                ),
+                StageChangeRequestType::Rollbacked => (
+                    crate::utils::activity_logger::activity_types::STAGE_APPROVED,
+                    format!(
+                        "Approved rollback for feature '{}' stage '{}'",
+                        db_feature.key,
+                        stage_id.to_string()
+                    ),
+                ),
+                _ => (
+                    "stage_change_requested",
+                    format!(
+                        "Requested {} for feature '{}' stage '{}'",
+                        next_status,
+                        db_feature.key,
+                        stage_id.to_string()
+                    ),
+                ),
+            };
+
+            let _ = crate::utils::activity_logger::log_activity(
+                &self.activity_log_repository,
+                activity_type,
+                crate::utils::activity_logger::entity_types::STAGE,
+                &stage_id.to_string(),
+                Some(user_id),
+                None,
+                description,
+                Some(serde_json::json!({
+                    "feature_id": db_feature.id.to_string(),
+                    "feature_key": db_feature.key.clone(),
+                    "stage_id": stage_id.to_string(),
+                    "status": next_status,
+                })),
+            )
+            .await;
+
             return Ok(FeatureLogicImpl::map_entity_to_graphql_feature(db_feature));
         }
         Err(Error::NotFound(stage_uuid))
@@ -653,10 +1024,32 @@ fn stage_factory(
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::database::activity_log::MockActivityLogRepository;
     use crate::database::entity::Feature as EntityFeature;
     use crate::database::feature::MockFeatureRepository;
     use crate::graphql::schema::FeatureType;
     use crate::logic::environment::MockEnvironmentLogic;
+
+    fn create_mock_activity_log() -> Box<dyn crate::database::activity_log::ActivityLogRepository> {
+        let mut mock = MockActivityLogRepository::new();
+        // Allow any number of activity log calls in tests
+        mock.expect_create_activity().returning(|_| {
+            Ok(crate::database::activity_log::ActivityLogRow {
+                id: uuid::Uuid::new_v4(),
+                activity_type: "test".to_string(),
+                entity_type: "test".to_string(),
+                entity_id: "test".to_string(),
+                actor_id: None,
+                actor_name: None,
+                description: "test".to_string(),
+                metadata: None,
+                created_at: chrono::Utc::now(),
+            })
+        });
+        mock.expect_clone_box()
+            .returning(|| create_mock_activity_log());
+        Box::new(mock)
+    }
 
     #[test]
     fn test_get_create_stages_to_create() {
@@ -732,7 +1125,11 @@ mod test {
                 })
             });
 
-        let logic = feature_logic(Box::new(repository), Box::new(environment_logic));
+        let logic = feature_logic(
+            Box::new(repository),
+            Box::new(environment_logic),
+            create_mock_activity_log(),
+        );
         let result = logic.get_feature_by_id(ID::from(ID)).await;
 
         assert!(result.is_ok());
@@ -755,7 +1152,11 @@ mod test {
             .times(1)
             .returning(move |_| Err(Error::NotFound(Uuid::parse_str(ID).unwrap())));
 
-        let logic = feature_logic(Box::new(repository), Box::new(environment_logic));
+        let logic = feature_logic(
+            Box::new(repository),
+            Box::new(environment_logic),
+            create_mock_activity_log(),
+        );
         let result = logic.get_feature_by_id(ID::from(ID)).await;
 
         assert!(result.is_err());
@@ -786,7 +1187,11 @@ mod test {
             .times(1)
             .returning(move |_| Ok(id));
 
-        let logic = feature_logic(Box::new(repository), Box::new(environment_logic));
+        let logic = feature_logic(
+            Box::new(repository),
+            Box::new(environment_logic),
+            create_mock_activity_log(),
+        );
         let result = logic
             .create_feature(ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"), input)
             .await;
@@ -836,7 +1241,11 @@ mod test {
                 })
             });
 
-        let logic = feature_logic(Box::new(repository), Box::new(environment_logic));
+        let logic = feature_logic(
+            Box::new(repository),
+            Box::new(environment_logic),
+            create_mock_activity_log(),
+        );
         let result = logic.update_feature(ID::from(ID), input).await;
 
         assert!(result.is_ok());
@@ -861,7 +1270,11 @@ mod test {
             .times(1)
             .returning(move |_| Ok(()));
 
-        let logic = feature_logic(Box::new(repository), Box::new(environment_logic));
+        let logic = feature_logic(
+            Box::new(repository),
+            Box::new(environment_logic),
+            create_mock_activity_log(),
+        );
         let result = logic.delete_feature(ID::from(ID)).await;
 
         assert!(result.is_ok());
@@ -907,7 +1320,11 @@ mod test {
                 ])
             });
 
-        let logic = feature_logic(Box::new(repository), Box::new(environment_logic));
+        let logic = feature_logic(
+            Box::new(repository),
+            Box::new(environment_logic),
+            create_mock_activity_log(),
+        );
         let result = logic
             .get_features(ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"), None, None)
             .await;
@@ -958,7 +1375,11 @@ mod test {
             .times(1)
             .returning(|_, _, _, _| Ok(true));
 
-        let logic = feature_logic(Box::new(repository), Box::new(environment_logic));
+        let logic = feature_logic(
+            Box::new(repository),
+            Box::new(environment_logic),
+            create_mock_activity_log(),
+        );
         let result = logic
             .request_stage_change(
                 ID::from(stage_id),
@@ -1012,7 +1433,11 @@ mod test {
             .times(1)
             .returning(|_, _, _| Ok(true));
 
-        let logic = feature_logic(Box::new(repository), Box::new(environment_logic));
+        let logic = feature_logic(
+            Box::new(repository),
+            Box::new(environment_logic),
+            create_mock_activity_log(),
+        );
         let result = logic
             .request_stage_change(
                 ID::from(stage_id),
@@ -1061,7 +1486,11 @@ mod test {
             .times(1)
             .returning(|_, _, _| Ok(true));
 
-        let logic = feature_logic(Box::new(repository), Box::new(environment_logic));
+        let logic = feature_logic(
+            Box::new(repository),
+            Box::new(environment_logic),
+            create_mock_activity_log(),
+        );
         let result = logic
             .request_stage_change(
                 ID::from(stage_id),
@@ -1109,7 +1538,11 @@ mod test {
             .times(1)
             .returning(|_, _, _, _| Ok(true));
 
-        let logic = feature_logic(Box::new(repository), Box::new(environment_logic));
+        let logic = feature_logic(
+            Box::new(repository),
+            Box::new(environment_logic),
+            create_mock_activity_log(),
+        );
         let result = logic
             .request_stage_change(
                 ID::from(stage_id),
@@ -1158,7 +1591,11 @@ mod test {
             .times(1)
             .returning(|_, _, _| Ok(true));
 
-        let logic = feature_logic(Box::new(repository), Box::new(environment_logic));
+        let logic = feature_logic(
+            Box::new(repository),
+            Box::new(environment_logic),
+            create_mock_activity_log(),
+        );
         let result = logic
             .request_stage_change(
                 ID::from(stage_id),
@@ -1207,7 +1644,11 @@ mod test {
             .times(1)
             .returning(|_, _, _| Ok(true));
 
-        let logic = feature_logic(Box::new(repository), Box::new(environment_logic));
+        let logic = feature_logic(
+            Box::new(repository),
+            Box::new(environment_logic),
+            create_mock_activity_log(),
+        );
         let result = logic
             .request_stage_change(
                 ID::from(stage_id),
@@ -1247,7 +1688,11 @@ mod test {
                 ))
             });
 
-        let logic = feature_logic(Box::new(repository), Box::new(environment_logic));
+        let logic = feature_logic(
+            Box::new(repository),
+            Box::new(environment_logic),
+            create_mock_activity_log(),
+        );
         let result = logic
             .request_stage_change(
                 ID::from(stage_id),
@@ -1279,7 +1724,11 @@ mod test {
             .times(1)
             .returning(|_| Ok(None)); // Stage not found
 
-        let logic = feature_logic(Box::new(repository), Box::new(environment_logic));
+        let logic = feature_logic(
+            Box::new(repository),
+            Box::new(environment_logic),
+            create_mock_activity_log(),
+        );
         let result = logic
             .request_stage_change(
                 ID::from(stage_id),
@@ -1335,7 +1784,11 @@ mod test {
             .times(1)
             .returning(|_, _, _, _| Ok(false)); // Repository operation failed
 
-        let logic = feature_logic(Box::new(repository), Box::new(environment_logic));
+        let logic = feature_logic(
+            Box::new(repository),
+            Box::new(environment_logic),
+            create_mock_activity_log(),
+        );
         let result = logic
             .request_stage_change(
                 ID::from(stage_id),
@@ -1475,7 +1928,11 @@ mod test {
             .times(1)
             .returning(move |_, _, _, _, _| Ok((expected_features.clone(), 50)));
 
-        let logic = feature_logic(Box::new(repository), Box::new(environment_logic));
+        let logic = feature_logic(
+            Box::new(repository),
+            Box::new(environment_logic),
+            create_mock_activity_log(),
+        );
         let (features, total) = logic
             .get_features_paginated(ID::from(team_id), None, None, 1, 10)
             .await
@@ -1507,7 +1964,11 @@ mod test {
             .times(1)
             .returning(|_, _, _, _, _| Ok((vec![], 0)));
 
-        let logic = feature_logic(Box::new(repository), Box::new(environment_logic));
+        let logic = feature_logic(
+            Box::new(repository),
+            Box::new(environment_logic),
+            create_mock_activity_log(),
+        );
         let (features, total) = logic
             .get_features_paginated(
                 ID::from(team_id),
@@ -1541,7 +2002,11 @@ mod test {
             .times(1)
             .returning(|_, _, _, _, _| Ok((vec![], 0)));
 
-        let logic = super::feature_logic(Box::new(repo), Box::new(env_logic));
+        let logic = super::feature_logic(
+            Box::new(repo),
+            Box::new(env_logic),
+            create_mock_activity_log(),
+        );
         let (features, total) = logic
             .get_features_paginated(
                 ID::from(environment_id),
@@ -1575,7 +2040,11 @@ mod test {
             .times(1)
             .returning(|_, _, _, _, _| Ok((vec![], 0)));
 
-        let logic = super::feature_logic(Box::new(repo), Box::new(env_logic));
+        let logic = super::feature_logic(
+            Box::new(repo),
+            Box::new(env_logic),
+            create_mock_activity_log(),
+        );
         let (features, total) = logic
             .get_features_paginated(
                 ID::from(environment_id),
@@ -1609,7 +2078,11 @@ mod test {
             .times(1)
             .returning(|_, _, _, _, _| Ok((vec![], 0)));
 
-        let logic = super::feature_logic(Box::new(repo), Box::new(env_logic));
+        let logic = super::feature_logic(
+            Box::new(repo),
+            Box::new(env_logic),
+            create_mock_activity_log(),
+        );
         let (features, total) = logic
             .get_features_paginated(
                 ID::from(environment_id),
@@ -1643,7 +2116,11 @@ mod test {
             .times(1)
             .returning(|_, _, _, _, _| Ok((vec![], 50))); // Has data but not on this page
 
-        let logic = super::feature_logic(Box::new(repo), Box::new(env_logic));
+        let logic = super::feature_logic(
+            Box::new(repo),
+            Box::new(env_logic),
+            create_mock_activity_log(),
+        );
         let (features, total) = logic
             .get_features_paginated(
                 ID::from(environment_id),
@@ -1664,7 +2141,11 @@ mod test {
         let repository = MockFeatureRepository::new();
         let environment_logic = MockEnvironmentLogic::new();
 
-        let logic = feature_logic(Box::new(repository), Box::new(environment_logic));
+        let logic = feature_logic(
+            Box::new(repository),
+            Box::new(environment_logic),
+            create_mock_activity_log(),
+        );
         let result = logic
             .get_features_paginated(ID::from("invalid-uuid"), None, None, 1, 10)
             .await;

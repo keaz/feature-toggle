@@ -47,13 +47,28 @@ impl Clone for Box<dyn EnvironmentLogic> {
     }
 }
 
-pub fn environment_logic(repository: Box<dyn EnvironmentRepository>) -> Box<dyn EnvironmentLogic> {
-    Box::new(EnvironmentLogicImpl { repository })
+pub fn environment_logic(
+    repository: Box<dyn EnvironmentRepository>,
+    activity_log_repository: Box<dyn crate::database::activity_log::ActivityLogRepository>,
+) -> Box<dyn EnvironmentLogic> {
+    Box::new(EnvironmentLogicImpl {
+        repository,
+        activity_log_repository,
+    })
 }
 
-#[derive(Clone)]
 struct EnvironmentLogicImpl {
     repository: Box<dyn EnvironmentRepository>,
+    activity_log_repository: Box<dyn crate::database::activity_log::ActivityLogRepository>,
+}
+
+impl Clone for EnvironmentLogicImpl {
+    fn clone(&self) -> Self {
+        Self {
+            repository: self.repository.clone_box(),
+            activity_log_repository: self.activity_log_repository.clone_box(),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -102,8 +117,7 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
         page_number: i32,
         page_size: i32,
     ) -> Result<(Vec<Environment>, i64), Error> {
-        let team_id = Uuid::try_from(team_id)
-            .map_err(|e| Error::InvalidInput(e.to_string()))?;
+        let team_id = Uuid::try_from(team_id).map_err(|e| Error::InvalidInput(e.to_string()))?;
         let (environments, total) = self
             .repository
             .get_environments_paginated(team_id, name, active, page_number, page_size)
@@ -138,6 +152,24 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
 
         let team_id = Uuid::try_from(team_id).unwrap();
         let environment = self.repository.create_environment(team_id, input).await?;
+
+        // Log activity (ignore errors to not fail the operation)
+        let _ = crate::utils::activity_logger::log_environment_activity(
+            &self.activity_log_repository,
+            crate::utils::activity_logger::activity_types::ENVIRONMENT_CREATED,
+            &environment.id.to_string(),
+            None,
+            None,
+            format!("Created environment '{}'", environment.name),
+            Some(serde_json::json!({
+                "environment_id": environment.id.to_string(),
+                "environment_name": environment.name.clone(),
+                "team_id": environment.team_id.to_string(),
+                "active": environment.active,
+            })),
+        )
+        .await;
+
         let id = ID::from(environment.id);
         Ok(Environment {
             id,
@@ -159,6 +191,23 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
 
         let id = Uuid::try_from(id).unwrap();
         let environment = self.repository.update_environment(id, input).await?;
+
+        // Log activity (ignore errors to not fail the operation)
+        let _ = crate::utils::activity_logger::log_environment_activity(
+            &self.activity_log_repository,
+            crate::utils::activity_logger::activity_types::ENVIRONMENT_UPDATED,
+            &environment.id.to_string(),
+            None,
+            None,
+            format!("Updated environment '{}'", environment.name),
+            Some(serde_json::json!({
+                "environment_id": environment.id.to_string(),
+                "environment_name": environment.name.clone(),
+                "active": environment.active,
+            })),
+        )
+        .await;
+
         let id = ID::from(environment.id);
         Ok(Environment {
             id,
@@ -170,7 +219,28 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
 
     async fn delete_environment(&self, id: ID) -> Result<(), Error> {
         let id = Uuid::try_from(id).unwrap();
-        self.repository.delete_environment(id).await
+
+        // Get environment name before deletion for activity log
+        let environment = self.repository.get_environment_by_id(id).await?;
+
+        self.repository.delete_environment(id).await?;
+
+        // Log activity (ignore errors to not fail the operation)
+        let _ = crate::utils::activity_logger::log_environment_activity(
+            &self.activity_log_repository,
+            crate::utils::activity_logger::activity_types::ENVIRONMENT_DELETED,
+            &id.to_string(),
+            None,
+            None,
+            format!("Deleted environment '{}'", environment.name),
+            Some(serde_json::json!({
+                "environment_id": id.to_string(),
+                "environment_name": environment.name,
+            })),
+        )
+        .await;
+
+        Ok(())
     }
 
     fn clone_box(&self) -> Box<dyn EnvironmentLogic> {
@@ -181,7 +251,28 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::activity_log::{ActivityLogRepository, MockActivityLogRepository};
     use crate::database::environment::MockEnvironmentRepository;
+
+    fn create_mock_activity_log() -> Box<dyn ActivityLogRepository> {
+        let mut mock = MockActivityLogRepository::new();
+        mock.expect_create_activity().returning(|_| {
+            Ok(crate::database::activity_log::ActivityLogRow {
+                id: uuid::Uuid::new_v4(),
+                activity_type: "TEST".to_string(),
+                entity_type: "test".to_string(),
+                entity_id: "test".to_string(),
+                actor_id: None,
+                actor_name: None,
+                description: "test".to_string(),
+                metadata: None,
+                created_at: chrono::Utc::now(),
+            })
+        });
+        mock.expect_clone_box()
+            .returning(|| create_mock_activity_log());
+        Box::new(mock)
+    }
 
     #[tokio::test]
     async fn test_ok_get_environment_by_id() {
@@ -201,7 +292,7 @@ mod tests {
                 })
             });
 
-        let logic = environment_logic(Box::new(mock_repository));
+        let logic = environment_logic(Box::new(mock_repository), create_mock_activity_log());
         let result = logic
             .get_environment_by_id(ID::try_from(ENV_ID).unwrap())
             .await;
@@ -223,7 +314,7 @@ mod tests {
             .times(1)
             .returning(move |_| Err(Error::NotFound(id)));
 
-        let logic = environment_logic(Box::new(mock_repository));
+        let logic = environment_logic(Box::new(mock_repository), create_mock_activity_log());
         let result = logic
             .get_environment_by_id(ID::try_from(ENV_ID).unwrap())
             .await;
@@ -258,7 +349,7 @@ mod tests {
                 })
             });
 
-        let logic = environment_logic(Box::new(mock_repository));
+        let logic = environment_logic(Box::new(mock_repository), create_mock_activity_log());
         let result = logic.create_environment(ID::from(ID), input).await;
 
         assert!(result.is_ok());
@@ -291,7 +382,7 @@ mod tests {
                 })
             });
 
-        let logic = environment_logic(Box::new(mock_repository));
+        let logic = environment_logic(Box::new(mock_repository), create_mock_activity_log());
         let result = logic.update_environment(ID::from(ID), input).await;
 
         assert!(result.is_ok());
@@ -317,7 +408,7 @@ mod tests {
             .times(1)
             .returning(move |_, _| Err(Error::NotFound(expected_id)));
 
-        let logic = environment_logic(Box::new(mock_repository));
+        let logic = environment_logic(Box::new(mock_repository), create_mock_activity_log());
         let result = logic.update_environment(ID::from(ENV_ID), input).await;
 
         assert!(result.is_err());
@@ -338,7 +429,7 @@ mod tests {
             .times(1)
             .returning(move |_| Ok(()));
 
-        let logic = environment_logic(Box::new(mock_repository));
+        let logic = environment_logic(Box::new(mock_repository), create_mock_activity_log());
         let result = logic.delete_environment(ID::from(ENV_ID)).await;
 
         assert!(result.is_ok());
@@ -355,7 +446,7 @@ mod tests {
             .times(1)
             .returning(move |_| Err(Error::NotFound(id)));
 
-        let logic = environment_logic(Box::new(mock_repository));
+        let logic = environment_logic(Box::new(mock_repository), create_mock_activity_log());
         let result = logic.delete_environment(ID::from(ENV_ID)).await;
 
         assert!(result.is_err());
@@ -392,7 +483,7 @@ mod tests {
                 ])
             });
 
-        let logic = environment_logic(Box::new(mock_repository));
+        let logic = environment_logic(Box::new(mock_repository), create_mock_activity_log());
         let result = logic.get_environments(team_id, None, None).await;
 
         assert!(result.is_ok());
@@ -408,7 +499,7 @@ mod tests {
         let team_id = Uuid::new_v4();
         let env1_id = Uuid::new_v4();
         let env2_id = Uuid::new_v4();
-        
+
         let expected_environments = vec![
             crate::database::entity::Environment {
                 id: env1_id,
@@ -436,15 +527,9 @@ mod tests {
             .times(1)
             .returning(move |_, _, _, _, _| Ok((expected_environments.clone(), 20)));
 
-        let logic = environment_logic(Box::new(mock_repository));
+        let logic = environment_logic(Box::new(mock_repository), create_mock_activity_log());
         let (environments, total) = logic
-            .get_environments_paginated(
-                ID::from(team_id),
-                None,
-                None,
-                1,
-                10,
-            )
+            .get_environments_paginated(ID::from(team_id), None, None, 1, 10)
             .await
             .unwrap();
 
@@ -473,7 +558,7 @@ mod tests {
             .times(1)
             .returning(|_, _, _, _, _| Ok((vec![], 0)));
 
-        let logic = environment_logic(Box::new(mock_repository));
+        let logic = environment_logic(Box::new(mock_repository), create_mock_activity_log());
         let (environments, total) = logic
             .get_environments_paginated(
                 ID::from(team_id),
@@ -492,16 +577,10 @@ mod tests {
     #[tokio::test]
     async fn test_get_environments_paginated_invalid_team_id() {
         let mock_repository = MockEnvironmentRepository::new();
-        let logic = environment_logic(Box::new(mock_repository));
-        
+        let logic = environment_logic(Box::new(mock_repository), create_mock_activity_log());
+
         let result = logic
-            .get_environments_paginated(
-                ID::from("invalid-uuid"),
-                None,
-                None,
-                1,
-                10,
-            )
+            .get_environments_paginated(ID::from("invalid-uuid"), None, None, 1, 10)
             .await;
 
         assert!(matches!(result, Err(Error::InvalidInput(_))));

@@ -71,6 +71,16 @@ pub trait FeatureEvaluationLogic: Send + Sync {
         to_time: DateTime<Utc>,
     ) -> Result<EvaluationSummary, FeatureEvaluationLogicError>;
 
+    /// Count evaluations with simplified filters (for GraphQL API)
+    async fn count_evaluations(
+        &self,
+        from_date: DateTime<Utc>,
+        to_date: DateTime<Utc>,
+        environment_id: Option<String>,
+        client_id: Option<Uuid>,
+        feature_key: Option<String>,
+    ) -> Result<i64, FeatureEvaluationLogicError>;
+
     fn clone_box(&self) -> Box<dyn FeatureEvaluationLogic>;
 }
 
@@ -230,11 +240,11 @@ impl FeatureEvaluationLogic for FeatureEvaluationLogicImpl {
         from_time: DateTime<Utc>,
         to_time: DateTime<Utc>,
     ) -> Result<EvaluationSummary, FeatureEvaluationLogicError> {
-        // Validate time range (max 24 hours)
+        // Validate time range (max 30 days for queries, subscription uses duration_hours)
         let duration = to_time - from_time;
-        if duration.num_hours() > 24 {
+        if duration.num_days() > 30 {
             return Err(FeatureEvaluationLogicError::InvalidInput(
-                "Time range cannot exceed 24 hours".to_string(),
+                "Time range cannot exceed 30 days".to_string(),
             ));
         }
 
@@ -251,6 +261,46 @@ impl FeatureEvaluationLogic for FeatureEvaluationLogicImpl {
             .await?;
 
         Ok(summary)
+    }
+
+    async fn count_evaluations(
+        &self,
+        from_date: DateTime<Utc>,
+        to_date: DateTime<Utc>,
+        environment_id: Option<String>,
+        client_id: Option<Uuid>,
+        feature_key: Option<String>,
+    ) -> Result<i64, FeatureEvaluationLogicError> {
+        // Validate time range (max 7 days for count queries to prevent performance issues)
+        let duration = to_date - from_date;
+        if duration.num_days() > 7 {
+            return Err(FeatureEvaluationLogicError::InvalidInput(
+                "Time range cannot exceed 7 days".to_string(),
+            ));
+        }
+
+        // Validate from_date is not in the future
+        if from_date > Utc::now() {
+            return Err(FeatureEvaluationLogicError::InvalidInput(
+                "From date cannot be in the future".to_string(),
+            ));
+        }
+
+        // Build filter for the repository query
+        let filter = FeatureEvaluationFilter {
+            feature_key,
+            environment_id,
+            client_id,
+            user_context: None,
+            prior_assignment: None,
+            from_date: Some(from_date),
+            to_date: Some(to_date),
+            limit: None,
+            offset: None,
+        };
+
+        let count = self.repository.get_evaluation_count(filter).await?;
+        Ok(count)
     }
 
     fn clone_box(&self) -> Box<dyn FeatureEvaluationLogic> {

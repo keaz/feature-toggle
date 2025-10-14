@@ -51,17 +51,29 @@ impl Clone for Box<dyn PipelineLogic> {
 pub fn pipeline_logic(
     repository: Box<dyn PipelineRepository>,
     environment_logic: Box<dyn EnvironmentLogic>,
+    activity_log_repository: Box<dyn crate::database::activity_log::ActivityLogRepository>,
 ) -> Box<dyn PipelineLogic> {
     Box::new(PipelineLogicImpl {
         repository,
         environment_logic,
+        activity_log_repository,
     })
 }
 
-#[derive(Clone)]
 struct PipelineLogicImpl {
     repository: Box<dyn PipelineRepository>,
     environment_logic: Box<dyn EnvironmentLogic>,
+    activity_log_repository: Box<dyn crate::database::activity_log::ActivityLogRepository>,
+}
+
+impl Clone for PipelineLogicImpl {
+    fn clone(&self) -> Self {
+        Self {
+            repository: self.repository.clone_box(),
+            environment_logic: self.environment_logic.clone_box(),
+            activity_log_repository: self.activity_log_repository.clone_box(),
+        }
+    }
 }
 
 impl PipelineLogicImpl {
@@ -163,9 +175,11 @@ impl PipelineLogic for PipelineLogicImpl {
         page_number: i32,
         page_size: i32,
     ) -> Result<(Vec<Pipeline>, i64), Error> {
-        let team_id = Uuid::try_from(team_id)
-            .map_err(|e| Error::InvalidInput(e.to_string()))?;
-        let (pipelines, total) = self.repository.get_pipelines_paginated(team_id, name, active, page_number, page_size).await?;
+        let team_id = Uuid::try_from(team_id).map_err(|e| Error::InvalidInput(e.to_string()))?;
+        let (pipelines, total) = self
+            .repository
+            .get_pipelines_paginated(team_id, name, active, page_number, page_size)
+            .await?;
         let has_stage = fields.contains(&"stages".to_string());
 
         let stages = pipelines
@@ -203,14 +217,49 @@ impl PipelineLogic for PipelineLogicImpl {
 
     async fn create_pipeline(&self, team_id: ID, input: CreatePipelineInput) -> Result<ID, Error> {
         let team_id = Uuid::try_from(team_id).unwrap();
-        let input = map_to_create_pipeline(team_id, input);
-        let pipeline = self.repository.create_pipeline(input).await?;
+        let pipeline_name = input.name.clone();
+        let input_mapped = map_to_create_pipeline(team_id, input);
+        let pipeline = self.repository.create_pipeline(input_mapped).await?;
+
+        // Log activity (ignore errors to not fail the operation)
+        let _ = crate::utils::activity_logger::log_pipeline_activity(
+            &self.activity_log_repository,
+            crate::utils::activity_logger::activity_types::PIPELINE_CREATED,
+            &pipeline.to_string(),
+            None,
+            None,
+            format!("Created pipeline '{}'", pipeline_name),
+            Some(serde_json::json!({
+                "pipeline_id": pipeline.to_string(),
+                "pipeline_name": pipeline_name,
+                "team_id": team_id.to_string(),
+            })),
+        )
+        .await;
+
         Ok(ID::from(pipeline.to_string()))
     }
 
     async fn update_pipeline(&self, id: ID, input: UpdatePipelineInput) -> Result<Pipeline, Error> {
-        let input = Self::map_to_update_pipeline(id, input);
-        let pipeline = self.repository.update_pipeline(input).await?;
+        let input_mapped = Self::map_to_update_pipeline(id, input);
+        let pipeline = self.repository.update_pipeline(input_mapped).await?;
+
+        // Log activity (ignore errors to not fail the operation)
+        let _ = crate::utils::activity_logger::log_pipeline_activity(
+            &self.activity_log_repository,
+            crate::utils::activity_logger::activity_types::PIPELINE_UPDATED,
+            &pipeline.id.to_string(),
+            None,
+            None,
+            format!("Updated pipeline '{}'", pipeline.name),
+            Some(serde_json::json!({
+                "pipeline_id": pipeline.id.to_string(),
+                "pipeline_name": pipeline.name.clone(),
+                "active": pipeline.active,
+            })),
+        )
+        .await;
+
         Ok(Pipeline {
             id: pipeline.id.into(),
             name: pipeline.name,
@@ -222,9 +271,28 @@ impl PipelineLogic for PipelineLogicImpl {
     }
 
     async fn delete_pipeline(&self, id: ID) -> Result<(), Error> {
-        self.repository
-            .delete_pipeline(Uuid::try_from(id).unwrap())
-            .await?;
+        let pipeline_id = Uuid::try_from(id).unwrap();
+
+        // Get pipeline name before deletion for activity log
+        let pipeline = self.repository.get_pipeline_by_id(pipeline_id).await?;
+
+        self.repository.delete_pipeline(pipeline_id).await?;
+
+        // Log activity (ignore errors to not fail the operation)
+        let _ = crate::utils::activity_logger::log_pipeline_activity(
+            &self.activity_log_repository,
+            crate::utils::activity_logger::activity_types::PIPELINE_DELETED,
+            &pipeline_id.to_string(),
+            None,
+            None,
+            format!("Deleted pipeline '{}'", pipeline.name),
+            Some(serde_json::json!({
+                "pipeline_id": pipeline_id.to_string(),
+                "pipeline_name": pipeline.name,
+            })),
+        )
+        .await;
+
         Ok(())
     }
 
@@ -290,10 +358,31 @@ fn get_stages_to_create(
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::database::activity_log::{ActivityLogRepository, MockActivityLogRepository};
     use crate::database::pipeline::MockPipelineRepository;
     use crate::graphql::schema::{CreateRelationshipInput, CreateStageInput};
     use crate::logic::environment::MockEnvironmentLogic;
     use async_graphql::ID;
+
+    fn create_mock_activity_log() -> Box<dyn ActivityLogRepository> {
+        let mut mock = MockActivityLogRepository::new();
+        mock.expect_create_activity().returning(|_| {
+            Ok(crate::database::activity_log::ActivityLogRow {
+                id: uuid::Uuid::new_v4(),
+                activity_type: "TEST".to_string(),
+                entity_type: "test".to_string(),
+                entity_id: "test".to_string(),
+                actor_id: None,
+                actor_name: None,
+                description: "test".to_string(),
+                metadata: None,
+                created_at: chrono::Utc::now(),
+            })
+        });
+        mock.expect_clone_box()
+            .returning(|| create_mock_activity_log());
+        Box::new(mock)
+    }
 
     #[test]
     pub fn test_map_to_create_pipeline_with_single_stage() {
@@ -426,7 +515,11 @@ mod test {
                 })
             });
 
-        let logic = pipeline_logic(Box::new(repository), Box::new(environment_repo));
+        let logic = pipeline_logic(
+            Box::new(repository),
+            Box::new(environment_repo),
+            create_mock_activity_log(),
+        );
         let result = logic.get_pipeline_by_id(ID::from(ID)).await;
         assert!(result.is_ok());
         let pipeline = result.unwrap();
@@ -444,7 +537,11 @@ mod test {
             .times(1)
             .returning(move |_| Err(Error::NotFound(Uuid::parse_str(ID).unwrap())));
 
-        let logic = pipeline_logic(Box::new(repository), Box::new(environment_repo));
+        let logic = pipeline_logic(
+            Box::new(repository),
+            Box::new(environment_repo),
+            create_mock_activity_log(),
+        );
         let result = logic.get_pipeline_by_id(ID::from(ID)).await;
 
         assert!(result.is_err());
@@ -472,7 +569,11 @@ mod test {
             .times(1)
             .returning(move |_| Ok(id));
 
-        let logic = pipeline_logic(Box::new(repository), Box::new(environment_repo));
+        let logic = pipeline_logic(
+            Box::new(repository),
+            Box::new(environment_repo),
+            create_mock_activity_log(),
+        );
         let result = logic
             .create_pipeline(ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"), input)
             .await;
@@ -527,7 +628,11 @@ mod test {
                 })
             });
 
-        let logic = pipeline_logic(Box::new(repository), Box::new(environment_repo));
+        let logic = pipeline_logic(
+            Box::new(repository),
+            Box::new(environment_repo),
+            create_mock_activity_log(),
+        );
         let result = logic.update_pipeline(ID::from(ID), input).await;
 
         assert!(result.is_ok());
@@ -555,7 +660,11 @@ mod test {
             .times(1)
             .returning(move |_| Err(Error::NotFound(Uuid::parse_str(ID).unwrap())));
 
-        let logic = pipeline_logic(Box::new(repository), Box::new(environment_repo));
+        let logic = pipeline_logic(
+            Box::new(repository),
+            Box::new(environment_repo),
+            create_mock_activity_log(),
+        );
         let result = logic.update_pipeline(ID::from(ID), input).await;
 
         assert!(result.is_err());
@@ -575,7 +684,11 @@ mod test {
             .times(1)
             .returning(move |_| Ok(()));
 
-        let logic = pipeline_logic(Box::new(repository), Box::new(environment_repo));
+        let logic = pipeline_logic(
+            Box::new(repository),
+            Box::new(environment_repo),
+            create_mock_activity_log(),
+        );
         let result = logic.delete_pipeline(ID::from(ID)).await;
 
         assert!(result.is_ok());
@@ -593,7 +706,11 @@ mod test {
             .times(1)
             .returning(move |_| Err(Error::NotFound(Uuid::parse_str(ID).unwrap())));
 
-        let logic = pipeline_logic(Box::new(repository), Box::new(environment_repo));
+        let logic = pipeline_logic(
+            Box::new(repository),
+            Box::new(environment_repo),
+            create_mock_activity_log(),
+        );
         let result = logic.delete_pipeline(ID::from(ID)).await;
 
         assert!(result.is_err());
@@ -629,7 +746,11 @@ mod test {
                 ])
             });
 
-        let logic = pipeline_logic(Box::new(repository), Box::new(environment_repo));
+        let logic = pipeline_logic(
+            Box::new(repository),
+            Box::new(environment_repo),
+            create_mock_activity_log(),
+        );
         let result = logic
             .get_pipelines(
                 ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"),
@@ -648,7 +769,7 @@ mod test {
         let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
         let pipeline1_id = Uuid::new_v4();
         let pipeline2_id = Uuid::new_v4();
-        
+
         let expected_pipelines = vec![
             crate::database::entity::Pipeline {
                 id: pipeline1_id,
@@ -678,16 +799,13 @@ mod test {
             .times(1)
             .returning(move |_, _, _, _, _| Ok((expected_pipelines.clone(), 15)));
 
-        let logic = pipeline_logic(Box::new(repository), Box::new(environment_repo));
+        let logic = pipeline_logic(
+            Box::new(repository),
+            Box::new(environment_repo),
+            create_mock_activity_log(),
+        );
         let (pipelines, total) = logic
-            .get_pipelines_paginated(
-                ID::from(team_id),
-                None,
-                None,
-                vec![],
-                1,
-                10,
-            )
+            .get_pipelines_paginated(ID::from(team_id), None, None, vec![], 1, 10)
             .await
             .unwrap();
 
@@ -717,7 +835,11 @@ mod test {
             .times(1)
             .returning(|_, _, _, _, _| Ok((vec![], 0)));
 
-        let logic = pipeline_logic(Box::new(repository), Box::new(environment_repo));
+        let logic = pipeline_logic(
+            Box::new(repository),
+            Box::new(environment_repo),
+            create_mock_activity_log(),
+        );
         let (pipelines, total) = logic
             .get_pipelines_paginated(
                 ID::from(team_id),
@@ -738,17 +860,14 @@ mod test {
     async fn test_get_pipelines_paginated_invalid_team_id() {
         let repository = MockPipelineRepository::new();
         let environment_repo = MockEnvironmentLogic::new();
-        
-        let logic = pipeline_logic(Box::new(repository), Box::new(environment_repo));
+
+        let logic = pipeline_logic(
+            Box::new(repository),
+            Box::new(environment_repo),
+            create_mock_activity_log(),
+        );
         let result = logic
-            .get_pipelines_paginated(
-                ID::from("invalid-uuid"),
-                None,
-                None,
-                vec![],
-                1,
-                10,
-            )
+            .get_pipelines_paginated(ID::from("invalid-uuid"), None, None, vec![], 1, 10)
             .await;
 
         assert!(matches!(result, Err(Error::InvalidInput(_))));
