@@ -56,7 +56,7 @@ impl KillSwitchRollbackScheduler {
         for feature in features_to_rollback {
             match self
                 .feature_logic
-                .emergency_enable_feature(feature.id.clone())
+                .emergency_enable_feature(feature.id.clone(), None) // Automated rollback - no user actor
                 .await
             {
                 Ok(_) => {

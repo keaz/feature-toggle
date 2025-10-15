@@ -29,22 +29,38 @@ pub struct GqlUser {
 pub trait UserLogic: Send + Sync {
     async fn get_user_by_id(&self, id: ID) -> Result<GqlUser, Error>;
     async fn get_user_by_username(&self, username: String) -> Result<GqlUser, Error>;
-    async fn register_user(&self, input: RegisterUserInput) -> Result<GqlUser, Error>;
+    async fn register_user(
+        &self,
+        input: RegisterUserInput,
+        actor: Option<crate::logic::ActorContext>,
+    ) -> Result<GqlUser, Error>;
     async fn authenticate_user(&self, username: String, password: String)
     -> Result<GqlUser, Error>;
-    async fn update_user(&self, id: ID, input: UpdateGqlUserInput) -> Result<GqlUser, Error>;
+    async fn update_user(
+        &self,
+        id: ID,
+        input: UpdateGqlUserInput,
+        actor: Option<crate::logic::ActorContext>,
+    ) -> Result<GqlUser, Error>;
     async fn reset_password(
         &self,
         id: ID,
         current_password: String,
         new_password: String,
+        actor: Option<crate::logic::ActorContext>,
     ) -> Result<(), Error>;
     async fn set_temporary_password(
         &self,
         user_id: ID,
         temporary_password: String,
+        actor: Option<crate::logic::ActorContext>,
     ) -> Result<(), Error>;
-    async fn assign_user_teams(&self, id: ID, team_ids: Vec<ID>) -> Result<bool, Error>;
+    async fn assign_user_teams(
+        &self,
+        id: ID,
+        team_ids: Vec<ID>,
+        actor: Option<crate::logic::ActorContext>,
+    ) -> Result<bool, Error>;
     async fn get_user_teams(&self, id: ID) -> Result<Vec<Team>, Error>;
     async fn search_users(
         &self,
@@ -142,7 +158,11 @@ impl UserLogic for UserLogicImpl {
         })
     }
 
-    async fn register_user(&self, input: RegisterUserInput) -> Result<GqlUser, Error> {
+    async fn register_user(
+        &self,
+        input: RegisterUserInput,
+        actor: Option<crate::logic::ActorContext>,
+    ) -> Result<GqlUser, Error> {
         if input.username.is_empty() || input.password.is_empty() {
             return Err(Error::InvalidInput(
                 "Username and password are required".to_string(),
@@ -185,13 +205,19 @@ impl UserLogic for UserLogicImpl {
             })
             .await?;
 
+        // Extract actor information
+        let (actor_id, actor_name) = actor
+            .as_ref()
+            .map(|a| a.as_option())
+            .unwrap_or((None, None));
+
         // Log activity (ignore errors to not fail the operation)
         let _ = crate::utils::activity_logger::log_user_activity(
             &self.activity_log_repository,
             crate::utils::activity_logger::activity_types::USER_CREATED,
             &created.id.to_string(),
-            None,
-            None,
+            actor_id,
+            actor_name,
             format!("Created user '{}'", created.username),
             Some(serde_json::json!({
                 "user_id": created.id.to_string(),
@@ -243,7 +269,12 @@ impl UserLogic for UserLogicImpl {
         })
     }
 
-    async fn update_user(&self, id: ID, input: UpdateGqlUserInput) -> Result<GqlUser, Error> {
+    async fn update_user(
+        &self,
+        id: ID,
+        input: UpdateGqlUserInput,
+        actor: Option<crate::logic::ActorContext>,
+    ) -> Result<GqlUser, Error> {
         let id = Uuid::try_from(id).unwrap();
 
         // If updating email, validate uniqueness (allow unchanged or same owner)
@@ -268,13 +299,19 @@ impl UserLogic for UserLogicImpl {
             })
             .await?;
 
+        // Extract actor information
+        let (actor_id, actor_name) = actor
+            .as_ref()
+            .map(|a| a.as_option())
+            .unwrap_or((None, None));
+
         // Log activity (ignore errors to not fail the operation)
         let _ = crate::utils::activity_logger::log_user_activity(
             &self.activity_log_repository,
             crate::utils::activity_logger::activity_types::USER_UPDATED,
             &updated.id.to_string(),
-            None,
-            None,
+            actor_id,
+            actor_name,
             format!("Updated user '{}'", updated.username),
             Some(serde_json::json!({
                 "user_id": updated.id.to_string(),
@@ -302,6 +339,7 @@ impl UserLogic for UserLogicImpl {
         id: ID,
         current_password: String,
         new_password: String,
+        actor: Option<crate::logic::ActorContext>,
     ) -> Result<(), Error> {
         let user_id = Uuid::try_from(id).unwrap();
 
@@ -338,7 +376,8 @@ impl UserLogic for UserLogicImpl {
             .update_password(user_id, new_password_hash, false)
             .await?;
 
-        // Log activity (ignore errors to not fail the operation)
+        // Note: For reset_password, the actor IS the user themselves (self-service password change)
+        // So we use the user's own ID and username for the actor fields
         let _ = crate::utils::activity_logger::log_user_activity(
             &self.activity_log_repository,
             crate::utils::activity_logger::activity_types::USER_PASSWORD_CHANGED,
@@ -360,6 +399,7 @@ impl UserLogic for UserLogicImpl {
         &self,
         user_id: ID,
         temporary_password: String,
+        actor: Option<crate::logic::ActorContext>,
     ) -> Result<(), Error> {
         let user_uuid = Uuid::try_from(user_id).unwrap();
 
@@ -379,13 +419,19 @@ impl UserLogic for UserLogicImpl {
             .update_password(user_uuid, password_hash, true)
             .await?;
 
+        // Extract actor information
+        let (actor_id, actor_name) = actor
+            .as_ref()
+            .map(|a| a.as_option())
+            .unwrap_or((None, None));
+
         // Log activity (ignore errors to not fail the operation)
         let _ = crate::utils::activity_logger::log_user_activity(
             &self.activity_log_repository,
             crate::utils::activity_logger::activity_types::USER_PASSWORD_CHANGED,
             &user_uuid.to_string(),
-            None,
-            None,
+            actor_id,
+            actor_name,
             format!("Temporary password set for user '{}'", _user.username),
             Some(serde_json::json!({
                 "user_id": user_uuid.to_string(),
@@ -398,7 +444,12 @@ impl UserLogic for UserLogicImpl {
         Ok(())
     }
 
-    async fn assign_user_teams(&self, id: ID, team_ids: Vec<ID>) -> Result<bool, Error> {
+    async fn assign_user_teams(
+        &self,
+        id: ID,
+        team_ids: Vec<ID>,
+        actor: Option<crate::logic::ActorContext>,
+    ) -> Result<bool, Error> {
         let user_id = Uuid::try_from(id.clone())
             .map_err(|e| Error::InvalidInput(format!("Invalid user id: {e}")))?;
         let team_ids_uuid: Result<Vec<Uuid>, _> = team_ids
@@ -411,14 +462,20 @@ impl UserLogic for UserLogicImpl {
             .set_user_teams(user_id, team_ids_uuid.clone())
             .await?;
 
+        // Extract actor information
+        let (actor_id, actor_name) = actor
+            .as_ref()
+            .map(|a| a.as_option())
+            .unwrap_or((None, None));
+
         // Log activity for each team assignment (ignore errors to not fail the operation)
         for team_id in &team_ids_uuid {
             let _ = crate::utils::activity_logger::log_team_activity(
                 &self.activity_log_repository,
                 crate::utils::activity_logger::activity_types::USER_ADDED_TO_TEAM,
                 &team_id.to_string(),
-                None,
-                None,
+                actor_id,
+                actor_name.clone(),
                 format!("User '{}' added to team", id.to_string()),
                 Some(serde_json::json!({
                     "user_id": id.to_string(),
@@ -594,15 +651,18 @@ mod tests {
 
         let logic = user_logic(Box::new(mock), create_mock_activity_log());
         let res = logic
-            .register_user(RegisterUserInput {
-                username: "newuser".to_string(),
-                password: "S3cret!".to_string(),
-                first_name: "New".to_string(),
-                last_name: "User".to_string(),
-                email: "new@example.com".to_string(),
-                is_admin: true,
-                is_temporary_password: false,
-            })
+            .register_user(
+                RegisterUserInput {
+                    username: "newuser".to_string(),
+                    password: "S3cret!".to_string(),
+                    first_name: "New".to_string(),
+                    last_name: "User".to_string(),
+                    email: "new@example.com".to_string(),
+                    is_admin: true,
+                    is_temporary_password: false,
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -615,15 +675,18 @@ mod tests {
         let mock = MockUserRepository::new();
         let logic = user_logic(Box::new(mock), create_mock_activity_log());
         let err = logic
-            .register_user(RegisterUserInput {
-                username: "".to_string(),
-                password: "".to_string(),
-                first_name: "A".to_string(),
-                last_name: "B".to_string(),
-                email: "a@b.c".to_string(),
-                is_admin: false,
-                is_temporary_password: false,
-            })
+            .register_user(
+                RegisterUserInput {
+                    username: "".to_string(),
+                    password: "".to_string(),
+                    first_name: "A".to_string(),
+                    last_name: "B".to_string(),
+                    email: "a@b.c".to_string(),
+                    is_admin: false,
+                    is_temporary_password: false,
+                },
+                None,
+            )
             .await
             .err()
             .unwrap();
@@ -641,15 +704,18 @@ mod tests {
             .returning(|_| Ok(true));
         let logic = user_logic(Box::new(mock), create_mock_activity_log());
         let err1 = logic
-            .register_user(RegisterUserInput {
-                username: "exists".to_string(),
-                password: "pw".to_string(),
-                first_name: "A".to_string(),
-                last_name: "B".to_string(),
-                email: "x@y.z".to_string(),
-                is_admin: false,
-                is_temporary_password: false,
-            })
+            .register_user(
+                RegisterUserInput {
+                    username: "exists".to_string(),
+                    password: "pw".to_string(),
+                    first_name: "A".to_string(),
+                    last_name: "B".to_string(),
+                    email: "x@y.z".to_string(),
+                    is_admin: false,
+                    is_temporary_password: false,
+                },
+                None,
+            )
             .await
             .err()
             .unwrap();
@@ -668,15 +734,18 @@ mod tests {
             .returning(|_, _| Ok(true));
         let logic2 = user_logic(Box::new(mock2), create_mock_activity_log());
         let err2 = logic2
-            .register_user(RegisterUserInput {
-                username: "ok".to_string(),
-                password: "pw".to_string(),
-                first_name: "A".to_string(),
-                last_name: "B".to_string(),
-                email: "dup@e.com".to_string(),
-                is_admin: false,
-                is_temporary_password: false,
-            })
+            .register_user(
+                RegisterUserInput {
+                    username: "ok".to_string(),
+                    password: "pw".to_string(),
+                    first_name: "A".to_string(),
+                    last_name: "B".to_string(),
+                    email: "dup@e.com".to_string(),
+                    is_admin: false,
+                    is_temporary_password: false,
+                },
+                None,
+            )
             .await
             .err()
             .unwrap();
@@ -782,6 +851,7 @@ mod tests {
                     is_admin: Some(true),
                     enabled: Some(true),
                 },
+                None,
             )
             .await
             .unwrap();
@@ -809,6 +879,7 @@ mod tests {
                     is_admin: None,
                     enabled: None,
                 },
+                None,
             )
             .await
             .err()
@@ -835,7 +906,7 @@ mod tests {
             .return_once(|_, _| Ok(()));
         let logic = user_logic(Box::new(mock), create_mock_activity_log());
         let ok = logic
-            .assign_user_teams(ID::from(id), vec![ID::from(t1), ID::from(t2)])
+            .assign_user_teams(ID::from(id), vec![ID::from(t1), ID::from(t2)], None)
             .await
             .unwrap();
         assert!(ok);
@@ -858,7 +929,7 @@ mod tests {
 
         let logic = user_logic(Box::new(mock), create_mock_activity_log());
         let result = logic
-            .set_temporary_password(ID::from(user_id), "temp123".to_string())
+            .set_temporary_password(ID::from(user_id), "temp123".to_string(), None)
             .await;
 
         assert!(result.is_ok());

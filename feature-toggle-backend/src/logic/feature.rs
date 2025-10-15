@@ -59,9 +59,23 @@ pub trait FeatureCrudLogic: Send + Sync {
         page_number: i32,
         page_size: i32,
     ) -> Result<(Vec<Feature>, i64), Error>;
-    async fn create_feature(&self, team_id: ID, input: CreateFeatureInput) -> Result<ID, Error>;
-    async fn update_feature(&self, id: ID, input: UpdateFeatureInput) -> Result<Feature, Error>;
-    async fn delete_feature(&self, id: ID) -> Result<(), Error>;
+    async fn create_feature(
+        &self,
+        team_id: ID,
+        input: CreateFeatureInput,
+        actor: Option<crate::logic::ActorContext>,
+    ) -> Result<ID, Error>;
+    async fn update_feature(
+        &self,
+        id: ID,
+        input: UpdateFeatureInput,
+        actor: Option<crate::logic::ActorContext>,
+    ) -> Result<Feature, Error>;
+    async fn delete_feature(
+        &self,
+        id: ID,
+        actor: Option<crate::logic::ActorContext>,
+    ) -> Result<(), Error>;
 
     // Count features
     async fn count_features(&self, team_id: Option<ID>) -> Result<i64, Error>;
@@ -90,8 +104,13 @@ pub trait FeatureCrudLogic: Send + Sync {
         &self,
         id: ID,
         rollback_in_minutes: Option<i32>,
+        actor: Option<crate::logic::ActorContext>,
     ) -> Result<Feature, Error>;
-    async fn emergency_enable_feature(&self, id: ID) -> Result<Feature, Error>;
+    async fn emergency_enable_feature(
+        &self,
+        id: ID,
+        actor: Option<crate::logic::ActorContext>,
+    ) -> Result<Feature, Error>;
     async fn get_features_pending_rollback(&self) -> Result<Vec<Feature>, Error>;
 }
 
@@ -163,9 +182,9 @@ mockall::mock! {
             page_number: i32,
             page_size: i32,
         ) -> Result<(Vec<Feature>, i64), Error>;
-        async fn create_feature(&self, team_id: ID, input: CreateFeatureInput) -> Result<ID, Error>;
-        async fn update_feature(&self, id: ID, input: UpdateFeatureInput) -> Result<Feature, Error>;
-        async fn delete_feature(&self, id: ID) -> Result<(), Error>;
+        async fn create_feature(&self, team_id: ID, input: CreateFeatureInput, actor: Option<crate::logic::ActorContext>) -> Result<ID, Error>;
+        async fn update_feature(&self, id: ID, input: UpdateFeatureInput, actor: Option<crate::logic::ActorContext>) -> Result<Feature, Error>;
+        async fn delete_feature(&self, id: ID, actor: Option<crate::logic::ActorContext>) -> Result<(), Error>;
         async fn count_features(&self, team_id: Option<ID>) -> Result<i64, Error>;
         async fn get_rollout_metrics(&self, team_id: Option<ID>) -> Result<RolloutMetrics, Error>;
         async fn get_features_with_pending_approvals(
@@ -184,8 +203,9 @@ mockall::mock! {
             &self,
             id: ID,
             rollback_in_minutes: Option<i32>,
+            actor: Option<crate::logic::ActorContext>,
         ) -> Result<Feature, Error>;
-        async fn emergency_enable_feature(&self, id: ID) -> Result<Feature, Error>;
+        async fn emergency_enable_feature(&self, id: ID, actor: Option<crate::logic::ActorContext>) -> Result<Feature, Error>;
         async fn get_features_pending_rollback(&self) -> Result<Vec<Feature>, Error>;
     }
 
@@ -466,19 +486,30 @@ impl FeatureCrudLogic for FeatureLogicImpl {
         Ok((mapped_features, total))
     }
 
-    async fn create_feature(&self, team_id: ID, input: CreateFeatureInput) -> Result<ID, Error> {
+    async fn create_feature(
+        &self,
+        team_id: ID,
+        input: CreateFeatureInput,
+        actor: Option<crate::logic::ActorContext>,
+    ) -> Result<ID, Error> {
         let team_id = id_to_uuid(team_id)?;
         let feature_key = input.key.clone();
         let input = Self::map_to_create_feature(team_id, input)?;
         let feature_id = self.repository.create_feature(input).await?;
+
+        // Extract actor information
+        let (actor_id, actor_name) = actor
+            .as_ref()
+            .map(|a| a.as_option())
+            .unwrap_or((None, None));
 
         // Log activity (ignore errors to not fail the operation)
         let _ = crate::utils::activity_logger::log_feature_activity(
             &self.activity_log_repository,
             crate::utils::activity_logger::activity_types::FEATURE_CREATED,
             &feature_id.to_string(),
-            None,
-            None,
+            actor_id,
+            actor_name,
             format!("Created feature '{}'", feature_key),
             Some(serde_json::json!({
                 "feature_id": feature_id.to_string(),
@@ -491,17 +522,28 @@ impl FeatureCrudLogic for FeatureLogicImpl {
         Ok(ID::from(feature_id.to_string()))
     }
 
-    async fn update_feature(&self, id: ID, input: UpdateFeatureInput) -> Result<Feature, Error> {
+    async fn update_feature(
+        &self,
+        id: ID,
+        input: UpdateFeatureInput,
+        actor: Option<crate::logic::ActorContext>,
+    ) -> Result<Feature, Error> {
         let input = Self::map_to_update_feature(id.clone(), input)?;
         let feature = self.repository.update_feature(input).await?;
+
+        // Extract actor information
+        let (actor_id, actor_name) = actor
+            .as_ref()
+            .map(|a| a.as_option())
+            .unwrap_or((None, None));
 
         // Log activity (ignore errors to not fail the operation)
         let _ = crate::utils::activity_logger::log_feature_activity(
             &self.activity_log_repository,
             crate::utils::activity_logger::activity_types::FEATURE_UPDATED,
             &feature.id.to_string(),
-            None,
-            None,
+            actor_id,
+            actor_name,
             format!("Updated feature '{}'", feature.key),
             Some(serde_json::json!({
                 "feature_id": feature.id.to_string(),
@@ -513,17 +555,27 @@ impl FeatureCrudLogic for FeatureLogicImpl {
         Ok(Self::map_entity_to_graphql_feature(feature))
     }
 
-    async fn delete_feature(&self, id: ID) -> Result<(), Error> {
+    async fn delete_feature(
+        &self,
+        id: ID,
+        actor: Option<crate::logic::ActorContext>,
+    ) -> Result<(), Error> {
         let feature_uuid = id_to_uuid(id.clone())?;
         self.repository.delete_feature(feature_uuid).await?;
+
+        // Extract actor information
+        let (actor_id, actor_name) = actor
+            .as_ref()
+            .map(|a| a.as_option())
+            .unwrap_or((None, None));
 
         // Log activity (ignore errors to not fail the operation)
         let _ = crate::utils::activity_logger::log_feature_activity(
             &self.activity_log_repository,
             crate::utils::activity_logger::activity_types::FEATURE_DELETED,
             &id.to_string(),
-            None,
-            None,
+            actor_id,
+            actor_name,
             format!("Deleted feature with ID '{}'", id.to_string()),
             Some(serde_json::json!({
                 "feature_id": id.to_string(),
@@ -708,6 +760,7 @@ impl FeatureCrudLogic for FeatureLogicImpl {
         &self,
         id: ID,
         rollback_in_minutes: Option<i32>,
+        actor: Option<crate::logic::ActorContext>,
     ) -> Result<Feature, Error> {
         let feature_id = id_to_uuid(id)?;
         let feature = self
@@ -715,13 +768,19 @@ impl FeatureCrudLogic for FeatureLogicImpl {
             .emergency_disable_feature(feature_id, rollback_in_minutes)
             .await?;
 
+        // Extract actor information
+        let (actor_id, actor_name) = actor
+            .as_ref()
+            .map(|a| a.as_option())
+            .unwrap_or((None, None));
+
         // Log activity (ignore errors to not fail the operation)
         let _ = crate::utils::activity_logger::log_feature_activity(
             &self.activity_log_repository,
             crate::utils::activity_logger::activity_types::KILL_SWITCH_ACTIVATED,
             &feature.id.to_string(),
-            None,
-            None,
+            actor_id,
+            actor_name,
             format!("Kill switch activated for feature '{}'", feature.key),
             Some(serde_json::json!({
                 "feature_id": feature.id.to_string(),
@@ -734,17 +793,27 @@ impl FeatureCrudLogic for FeatureLogicImpl {
         Ok(Self::map_entity_to_graphql_feature(feature))
     }
 
-    async fn emergency_enable_feature(&self, id: ID) -> Result<Feature, Error> {
+    async fn emergency_enable_feature(
+        &self,
+        id: ID,
+        actor: Option<crate::logic::ActorContext>,
+    ) -> Result<Feature, Error> {
         let feature_id = id_to_uuid(id)?;
         let feature = self.repository.emergency_enable_feature(feature_id).await?;
+
+        // Extract actor information
+        let (actor_id, actor_name) = actor
+            .as_ref()
+            .map(|a| a.as_option())
+            .unwrap_or((None, None));
 
         // Log activity (ignore errors to not fail the operation)
         let _ = crate::utils::activity_logger::log_feature_activity(
             &self.activity_log_repository,
             crate::utils::activity_logger::activity_types::KILL_SWITCH_DEACTIVATED,
             &feature.id.to_string(),
-            None,
-            None,
+            actor_id,
+            actor_name,
             format!("Kill switch deactivated for feature '{}'", feature.key),
             Some(serde_json::json!({
                 "feature_id": feature.id.to_string(),
@@ -901,9 +970,9 @@ impl DeploymentLogic for FeatureLogicImpl {
             // Log activity based on request type (ignore errors to not fail the operation)
             let (activity_type, description) = match request {
                 StageChangeRequestType::Deployed => (
-                    crate::utils::activity_logger::activity_types::STAGE_APPROVED,
+                    crate::utils::activity_logger::activity_types::STAGE_DEPLOYED,
                     format!(
-                        "Approved deployment for feature '{}' stage '{}'",
+                        "Deployed feature '{}' to stage '{}'",
                         db_feature.key,
                         stage_id.to_string()
                     ),
@@ -918,9 +987,9 @@ impl DeploymentLogic for FeatureLogicImpl {
                     ),
                 ),
                 StageChangeRequestType::Rollbacked => (
-                    crate::utils::activity_logger::activity_types::STAGE_APPROVED,
+                    crate::utils::activity_logger::activity_types::STAGE_ROLLBACKED,
                     format!(
-                        "Approved rollback for feature '{}' stage '{}'",
+                        "Rolled back feature '{}' from stage '{}'",
                         db_feature.key,
                         stage_id.to_string()
                     ),
@@ -1193,7 +1262,11 @@ mod test {
             create_mock_activity_log(),
         );
         let result = logic
-            .create_feature(ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"), input)
+            .create_feature(
+                ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"),
+                input,
+                None,
+            )
             .await;
 
         assert!(result.is_ok());
@@ -1246,7 +1319,7 @@ mod test {
             Box::new(environment_logic),
             create_mock_activity_log(),
         );
-        let result = logic.update_feature(ID::from(ID), input).await;
+        let result = logic.update_feature(ID::from(ID), input, None).await;
 
         assert!(result.is_ok());
         let feature = result.unwrap();
@@ -1275,7 +1348,7 @@ mod test {
             Box::new(environment_logic),
             create_mock_activity_log(),
         );
-        let result = logic.delete_feature(ID::from(ID)).await;
+        let result = logic.delete_feature(ID::from(ID), None).await;
 
         assert!(result.is_ok());
     }

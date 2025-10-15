@@ -31,7 +31,7 @@ pub struct CreateActivityLog {
 /// Filter options for querying activity logs
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ActivityLogFilter {
-    pub activity_type: Option<String>,
+    pub activity_types: Option<Vec<String>>,
     pub entity_type: Option<String>,
     pub entity_id: Option<String>,
     pub actor_id: Option<Uuid>,
@@ -116,9 +116,11 @@ impl ActivityLogRepository for PgActivityLogRepository {
         let mut param_count = 0;
 
         // Build dynamic WHERE clause
-        if filter.activity_type.is_some() {
-            param_count += 1;
-            query.push_str(&format!(" AND activity_type = ${}", param_count));
+        if let Some(ref activity_types) = filter.activity_types {
+            if !activity_types.is_empty() {
+                param_count += 1;
+                query.push_str(&format!(" AND activity_type = ANY(${})", param_count));
+            }
         }
         if filter.entity_type.is_some() {
             param_count += 1;
@@ -155,8 +157,10 @@ impl ActivityLogRepository for PgActivityLogRepository {
         let mut sql_query = sqlx::query_as::<_, ActivityLogRow>(&query);
 
         // Bind parameters in the same order
-        if let Some(activity_type) = filter.activity_type {
-            sql_query = sql_query.bind(activity_type);
+        if let Some(ref activity_types) = filter.activity_types {
+            if !activity_types.is_empty() {
+                sql_query = sql_query.bind(activity_types);
+            }
         }
         if let Some(entity_type) = filter.entity_type {
             sql_query = sql_query.bind(entity_type);
@@ -202,9 +206,11 @@ impl ActivityLogRepository for PgActivityLogRepository {
         let mut param_count = 0;
 
         // Build dynamic WHERE clause (same as get_activities but without pagination)
-        if filter.activity_type.is_some() {
-            param_count += 1;
-            query.push_str(&format!(" AND activity_type = ${}", param_count));
+        if let Some(ref activity_types) = filter.activity_types {
+            if !activity_types.is_empty() {
+                param_count += 1;
+                query.push_str(&format!(" AND activity_type = ANY(${})", param_count));
+            }
         }
         if filter.entity_type.is_some() {
             param_count += 1;
@@ -230,8 +236,10 @@ impl ActivityLogRepository for PgActivityLogRepository {
         let mut sql_query = sqlx::query_scalar::<_, i64>(&query);
 
         // Bind parameters in the same order
-        if let Some(activity_type) = filter.activity_type {
-            sql_query = sql_query.bind(activity_type);
+        if let Some(ref activity_types) = filter.activity_types {
+            if !activity_types.is_empty() {
+                sql_query = sql_query.bind(activity_types);
+            }
         }
         if let Some(entity_type) = filter.entity_type {
             sql_query = sql_query.bind(entity_type);
@@ -294,7 +302,7 @@ mod tests {
     fn test_activity_log_filter_default() {
         let filter = ActivityLogFilter::default();
 
-        assert!(filter.activity_type.is_none());
+        assert!(filter.activity_types.is_none());
         assert!(filter.entity_type.is_none());
         assert!(filter.entity_id.is_none());
         assert!(filter.actor_id.is_none());
@@ -305,7 +313,10 @@ mod tests {
     #[test]
     fn test_activity_log_filter_with_values() {
         let filter = ActivityLogFilter {
-            activity_type: Some("feature_created".to_string()),
+            activity_types: Some(vec![
+                "feature_created".to_string(),
+                "feature_updated".to_string(),
+            ]),
             entity_type: Some("feature".to_string()),
             entity_id: Some("123".to_string()),
             actor_id: Some(Uuid::new_v4()),
@@ -315,7 +326,13 @@ mod tests {
             offset: Some(0),
         };
 
-        assert_eq!(filter.activity_type, Some("feature_created".to_string()));
+        assert_eq!(
+            filter.activity_types,
+            Some(vec![
+                "feature_created".to_string(),
+                "feature_updated".to_string()
+            ])
+        );
         assert_eq!(filter.limit, Some(20));
         assert_eq!(filter.offset, Some(0));
     }

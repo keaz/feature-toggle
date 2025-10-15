@@ -30,13 +30,19 @@ pub trait EnvironmentLogic: Send + Sync {
         &self,
         team_id: ID,
         input: CreateEnvironmentInput,
+        actor: Option<crate::logic::ActorContext>,
     ) -> Result<Environment, Error>;
     async fn update_environment(
         &self,
         id: ID,
         input: UpdateEnvironmentInput,
+        actor: Option<crate::logic::ActorContext>,
     ) -> Result<Environment, Error>;
-    async fn delete_environment(&self, id: ID) -> Result<(), Error>;
+    async fn delete_environment(
+        &self,
+        id: ID,
+        actor: Option<crate::logic::ActorContext>,
+    ) -> Result<(), Error>;
 
     fn clone_box(&self) -> Box<dyn EnvironmentLogic>;
 }
@@ -138,6 +144,7 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
         &self,
         team_id: ID,
         input: CreateEnvironmentInput,
+        actor: Option<crate::logic::ActorContext>,
     ) -> Result<Environment, Error> {
         let input = crate::database::environment::CreateEnvironment {
             name: input.name,
@@ -153,13 +160,19 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
         let team_id = Uuid::try_from(team_id).unwrap();
         let environment = self.repository.create_environment(team_id, input).await?;
 
+        // Extract actor information
+        let (actor_id, actor_name) = actor
+            .as_ref()
+            .map(|a| a.as_option())
+            .unwrap_or((None, None));
+
         // Log activity (ignore errors to not fail the operation)
         let _ = crate::utils::activity_logger::log_environment_activity(
             &self.activity_log_repository,
             crate::utils::activity_logger::activity_types::ENVIRONMENT_CREATED,
             &environment.id.to_string(),
-            None,
-            None,
+            actor_id,
+            actor_name,
             format!("Created environment '{}'", environment.name),
             Some(serde_json::json!({
                 "environment_id": environment.id.to_string(),
@@ -183,6 +196,7 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
         &self,
         id: ID,
         input: UpdateEnvironmentInput,
+        actor: Option<crate::logic::ActorContext>,
     ) -> Result<Environment, Error> {
         let input = crate::database::environment::UpdateEnvironment {
             name: input.name,
@@ -192,13 +206,19 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
         let id = Uuid::try_from(id).unwrap();
         let environment = self.repository.update_environment(id, input).await?;
 
+        // Extract actor information
+        let (actor_id, actor_name) = actor
+            .as_ref()
+            .map(|a| a.as_option())
+            .unwrap_or((None, None));
+
         // Log activity (ignore errors to not fail the operation)
         let _ = crate::utils::activity_logger::log_environment_activity(
             &self.activity_log_repository,
             crate::utils::activity_logger::activity_types::ENVIRONMENT_UPDATED,
             &environment.id.to_string(),
-            None,
-            None,
+            actor_id,
+            actor_name,
             format!("Updated environment '{}'", environment.name),
             Some(serde_json::json!({
                 "environment_id": environment.id.to_string(),
@@ -217,7 +237,11 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
         })
     }
 
-    async fn delete_environment(&self, id: ID) -> Result<(), Error> {
+    async fn delete_environment(
+        &self,
+        id: ID,
+        actor: Option<crate::logic::ActorContext>,
+    ) -> Result<(), Error> {
         let id = Uuid::try_from(id).unwrap();
 
         // Get environment name before deletion for activity log
@@ -225,13 +249,19 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
 
         self.repository.delete_environment(id).await?;
 
+        // Extract actor information
+        let (actor_id, actor_name) = actor
+            .as_ref()
+            .map(|a| a.as_option())
+            .unwrap_or((None, None));
+
         // Log activity (ignore errors to not fail the operation)
         let _ = crate::utils::activity_logger::log_environment_activity(
             &self.activity_log_repository,
             crate::utils::activity_logger::activity_types::ENVIRONMENT_DELETED,
             &id.to_string(),
-            None,
-            None,
+            actor_id,
+            actor_name,
             format!("Deleted environment '{}'", environment.name),
             Some(serde_json::json!({
                 "environment_id": id.to_string(),
@@ -350,7 +380,7 @@ mod tests {
             });
 
         let logic = environment_logic(Box::new(mock_repository), create_mock_activity_log());
-        let result = logic.create_environment(ID::from(ID), input).await;
+        let result = logic.create_environment(ID::from(ID), input, None).await;
 
         assert!(result.is_ok());
         let environment = result.unwrap();
@@ -383,7 +413,7 @@ mod tests {
             });
 
         let logic = environment_logic(Box::new(mock_repository), create_mock_activity_log());
-        let result = logic.update_environment(ID::from(ID), input).await;
+        let result = logic.update_environment(ID::from(ID), input, None).await;
 
         assert!(result.is_ok());
         let environment = result.unwrap();
@@ -409,7 +439,9 @@ mod tests {
             .returning(move |_, _| Err(Error::NotFound(expected_id)));
 
         let logic = environment_logic(Box::new(mock_repository), create_mock_activity_log());
-        let result = logic.update_environment(ID::from(ENV_ID), input).await;
+        let result = logic
+            .update_environment(ID::from(ENV_ID), input, None)
+            .await;
 
         assert!(result.is_err());
         let error = result.err().unwrap();
@@ -430,7 +462,7 @@ mod tests {
             .returning(move |_| Ok(()));
 
         let logic = environment_logic(Box::new(mock_repository), create_mock_activity_log());
-        let result = logic.delete_environment(ID::from(ENV_ID)).await;
+        let result = logic.delete_environment(ID::from(ENV_ID), None).await;
 
         assert!(result.is_ok());
     }
@@ -447,7 +479,7 @@ mod tests {
             .returning(move |_| Err(Error::NotFound(id)));
 
         let logic = environment_logic(Box::new(mock_repository), create_mock_activity_log());
-        let result = logic.delete_environment(ID::from(ENV_ID)).await;
+        let result = logic.delete_environment(ID::from(ENV_ID), None).await;
 
         assert!(result.is_err());
         let error = result.err().unwrap();

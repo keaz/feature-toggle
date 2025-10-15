@@ -20,6 +20,7 @@ use async_graphql::Schema;
 use async_graphql::http::GraphiQLSource;
 use async_graphql_actix_web::{GraphQLRequest, GraphQLResponse, GraphQLSubscription};
 use log::error;
+use std::sync::Arc;
 use uuid::Uuid;
 
 #[derive(Debug, thiserror::Error)]
@@ -44,6 +45,12 @@ pub async fn run() -> std::io::Result<()> {
 
     // Initialize activity log repository (shared across all logic layers)
     let activity_log_repository = database::activity_log::activity_log_repository(db_pool.clone());
+    // Wrap in Arc for thread-safe cloning in HttpServer closure
+    let activity_log_repository_arc = Arc::new(activity_log_repository.clone_box());
+
+    // Initialize feature repository (needed for entity resolution in activity logs)
+    let feature_repository = database::feature::feature_repository(db_pool.clone());
+    let feature_repository_arc = Arc::new(feature_repository.clone_box());
 
     let environment_repository = database::environment::environment_repository(db_pool.clone());
     let environment_logic = logic::environment::environment_logic(
@@ -60,7 +67,7 @@ pub async fn run() -> std::io::Result<()> {
         activity_log_repository.clone_box(),
     );
     let feature_logic = logic::feature::feature_logic(
-        database::feature::feature_repository(db_pool.clone()),
+        feature_repository.clone_box(),
         environment_logic.clone(),
         activity_log_repository.clone_box(),
     );
@@ -147,6 +154,8 @@ pub async fn run() -> std::io::Result<()> {
         let schema = Schema::build(Query, MutationRoot, FeatureEvaluationSubscription)
             .data(db_pool.clone())
             .data(updates_tx.clone())
+            .data(activity_log_repository_arc.clone())
+            .data(feature_repository_arc.clone())
             .data(environment_logic.clone())
             .data(team_logic.clone())
             .data(pipeline_logic.clone())

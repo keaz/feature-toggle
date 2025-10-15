@@ -513,8 +513,10 @@ impl Query {
     async fn recent_activities(
         &self,
         ctx: &Context<'_>,
-        #[graphql(desc = "Filter by activity type (e.g., 'feature_created')")]
-        activity_type: Option<String>,
+        #[graphql(
+            desc = "Filter by activity types (e.g., ['stage_deployed', 'stage_rollbacked'])"
+        )]
+        activity_types: Option<Vec<String>>,
         #[graphql(desc = "Filter by entity type (e.g., 'feature', 'user')")] entity_type: Option<
             String,
         >,
@@ -526,12 +528,15 @@ impl Query {
         #[graphql(desc = "Page size (default 20)")] page_size: Option<i32>,
     ) -> GqlResult<ActivityLogPage> {
         debug!(
-            "Fetching recent activities with filters - type: {:?}, entity: {:?}",
-            activity_type, entity_type
+            "Fetching recent activities with filters - types: {:?}, entity: {:?}",
+            activity_types, entity_type
         );
 
         // Get the activity log repository
-        let repo = ctx.data::<Box<dyn crate::database::activity_log::ActivityLogRepository>>()?;
+        let repo = ctx
+            .data::<std::sync::Arc<Box<dyn crate::database::activity_log::ActivityLogRepository>>>(
+            )?;
+        let repo = repo.as_ref();
 
         // Convert actor_id from GraphQL ID to UUID if provided
         let actor_uuid = if let Some(id) = actor_id {
@@ -551,7 +556,7 @@ impl Query {
 
         // Build filter
         let filter = crate::database::activity_log::ActivityLogFilter {
-            activity_type,
+            activity_types,
             entity_type,
             entity_id,
             actor_id: actor_uuid,
@@ -567,21 +572,39 @@ impl Query {
             .await
             .map_err(|e| async_graphql::Error::new(format!("Database error: {}", e)))?;
 
-        // Convert database results to GraphQL types
-        let items = activities
-            .into_iter()
-            .map(|a| ActivityLog {
+        // Get feature repository and environment logic to resolve entity details
+        let feature_repo =
+            ctx.data::<std::sync::Arc<Box<dyn crate::database::feature::FeatureRepository>>>()?;
+        let feature_repo = feature_repo.as_ref();
+
+        let environment_logic =
+            ctx.data::<Box<dyn crate::logic::environment::EnvironmentLogic>>()?;
+
+        // Convert database results to GraphQL types and enrich with entity details
+        let mut items = Vec::new();
+        for a in activities {
+            let entity_details = resolve_entity_details(
+                &a.entity_type,
+                &a.entity_id,
+                &a.metadata,
+                feature_repo.as_ref(),
+                environment_logic.as_ref(),
+            )
+            .await;
+
+            items.push(ActivityLog {
                 id: a.id.into(),
                 activity_type: a.activity_type,
-                entity_type: a.entity_type,
-                entity_id: a.entity_id,
+                entity_type: a.entity_type.clone(),
+                entity_id: a.entity_id.clone(),
+                entity_details,
                 actor_id: a.actor_id.map(|id| id.into()),
                 actor_name: a.actor_name,
                 description: a.description,
                 metadata: a.metadata,
                 created_at: a.created_at,
-            })
-            .collect();
+            });
+        }
 
         Ok(ActivityLogPage {
             items,
@@ -804,6 +827,132 @@ impl Query {
     }
 }
 
+/// Helper function to resolve entity details based on entity type
+async fn resolve_entity_details(
+    entity_type: &str,
+    entity_id: &str,
+    metadata: &Option<serde_json::Value>,
+    feature_repo: &dyn crate::database::feature::FeatureRepository,
+    environment_logic: &dyn crate::logic::environment::EnvironmentLogic,
+) -> Option<crate::graphql::schema::ActivityEntityDetails> {
+    match entity_type {
+        "stage" => {
+            // For stages, try to get feature and environment details
+            if let Ok(stage_uuid) = uuid::Uuid::parse_str(entity_id) {
+                // Try to get feature ID from stage
+                if let Ok(Some(feature_id)) =
+                    feature_repo.get_feature_id_by_stage_id(stage_uuid).await
+                {
+                    // Get the feature to access stage details
+                    if let Ok(feature) = feature_repo.get_feature_by_id(feature_id).await {
+                        // Find the stage in the feature
+                        if let Some(stage) = feature.stages.iter().find(|s| s.id == stage_uuid) {
+                            // Fetch environment details
+                            let environment = environment_logic
+                                .get_environment_by_id(async_graphql::ID::from(
+                                    stage.environment_id,
+                                ))
+                                .await
+                                .ok();
+
+                            let environment_name = environment
+                                .as_ref()
+                                .map(|env| env.name.clone())
+                                .unwrap_or_else(|| format!("Stage ({})", stage.status));
+
+                            // Build stage object with environment
+                            let stage_details = serde_json::json!({
+                                "id": stage.id.to_string(),
+                                "status": stage.status,
+                                "order_index": stage.order_index,
+                                "position": stage.position,
+                                "bucketing_key": stage.bucketing_key,
+                                "environment": environment.as_ref().map(|env| serde_json::json!({
+                                    "id": env.id.to_string(),
+                                    "name": env.name,
+                                    "active": env.active,
+                                }))
+                            });
+
+                            return Some(crate::graphql::schema::ActivityEntityDetails {
+                                id: entity_id.to_string(),
+                                name: format!("{} - {}", feature.key, environment_name),
+                                entity_type: entity_type.to_string(),
+                                details: Some(serde_json::json!({
+                                    "feature_key": feature.key,
+                                    "feature_id": feature_id.to_string(),
+                                    "stage": stage_details,
+                                })),
+                            });
+                        }
+                    }
+                }
+            }
+            // Fallback: use metadata if available
+            if let Some(meta) = metadata {
+                if let (Some(feature_key), Some(status)) = (
+                    meta.get("feature_key").and_then(|v| v.as_str()),
+                    meta.get("status").and_then(|v| v.as_str()),
+                ) {
+                    return Some(crate::graphql::schema::ActivityEntityDetails {
+                        id: entity_id.to_string(),
+                        name: format!("{} ({})", feature_key, status),
+                        entity_type: entity_type.to_string(),
+                        details: Some(meta.clone()),
+                    });
+                }
+            }
+            None
+        }
+        "feature" => {
+            // For features, get the feature name/key
+            if let Ok(feature_uuid) = uuid::Uuid::parse_str(entity_id) {
+                if let Ok(feature) = feature_repo.get_feature_by_id(feature_uuid).await {
+                    return Some(crate::graphql::schema::ActivityEntityDetails {
+                        id: entity_id.to_string(),
+                        name: feature.key.clone(),
+                        entity_type: entity_type.to_string(),
+                        details: Some(serde_json::json!({
+                            "feature_key": feature.key,
+                            "feature_id": feature_uuid.to_string(),
+                            "description": feature.description,
+                        })),
+                    });
+                }
+            }
+            // Fallback: use metadata
+            if let Some(meta) = metadata {
+                if let Some(feature_key) = meta.get("feature_key").and_then(|v| v.as_str()) {
+                    return Some(crate::graphql::schema::ActivityEntityDetails {
+                        id: entity_id.to_string(),
+                        name: feature_key.to_string(),
+                        entity_type: entity_type.to_string(),
+                        details: Some(meta.clone()),
+                    });
+                }
+            }
+            None
+        }
+        _ => {
+            // For other entity types (user, team, client, etc.), just use entity_id as name
+            // or extract from metadata
+            let name = metadata
+                .as_ref()
+                .and_then(|m| m.get("name").or_else(|| m.get("key")))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| entity_id.to_string());
+
+            Some(crate::graphql::schema::ActivityEntityDetails {
+                id: entity_id.to_string(),
+                name,
+                entity_type: entity_type.to_string(),
+                details: metadata.clone(),
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -947,6 +1096,7 @@ mod more_query_tests {
             &self,
             _team_id: ID,
             _input: crate::graphql::schema::CreatePipelineInput,
+            _actor: Option<crate::logic::ActorContext>,
         ) -> Result<ID, crate::Error> {
             unreachable!()
         }
@@ -954,10 +1104,15 @@ mod more_query_tests {
             &self,
             _id: ID,
             _input: crate::graphql::schema::UpdatePipelineInput,
+            _actor: Option<crate::logic::ActorContext>,
         ) -> Result<Pipeline, crate::Error> {
             unreachable!()
         }
-        async fn delete_pipeline(&self, _id: ID) -> Result<(), crate::Error> {
+        async fn delete_pipeline(
+            &self,
+            _id: ID,
+            _actor: Option<crate::logic::ActorContext>,
+        ) -> Result<(), crate::Error> {
             unreachable!()
         }
         fn clone_box(&self) -> Box<dyn crate::logic::pipeline::PipelineLogic> {
@@ -988,6 +1143,7 @@ mod more_query_tests {
         async fn register_user(
             &self,
             _input: crate::logic::user::RegisterUserInput,
+            _actor: Option<crate::logic::ActorContext>,
         ) -> Result<crate::logic::user::GqlUser, crate::Error> {
             unreachable!()
         }
@@ -1002,6 +1158,7 @@ mod more_query_tests {
             &self,
             _id: ID,
             _input: crate::logic::user::UpdateGqlUserInput,
+            _actor: Option<crate::logic::ActorContext>,
         ) -> Result<crate::logic::user::GqlUser, crate::Error> {
             unreachable!()
         }
@@ -1010,6 +1167,7 @@ mod more_query_tests {
             _id: ID,
             _current_password: String,
             _new_password: String,
+            _actor: Option<crate::logic::ActorContext>,
         ) -> Result<(), crate::Error> {
             unreachable!()
         }
@@ -1017,6 +1175,7 @@ mod more_query_tests {
             &self,
             _user_id: ID,
             _temporary_password: String,
+            _actor: Option<crate::logic::ActorContext>,
         ) -> Result<(), crate::Error> {
             unreachable!()
         }
@@ -1024,6 +1183,7 @@ mod more_query_tests {
             &self,
             _id: ID,
             _team_ids: Vec<ID>,
+            _actor: Option<crate::logic::ActorContext>,
         ) -> Result<bool, crate::Error> {
             unreachable!()
         }
@@ -1244,6 +1404,7 @@ mod more_query_tests {
             async fn create_team(
                 &self,
                 _input: crate::graphql::schema::CreateTeamInput,
+                _actor: Option<crate::logic::ActorContext>,
             ) -> Result<Team, crate::Error> {
                 unreachable!()
             }
@@ -1251,6 +1412,7 @@ mod more_query_tests {
                 &self,
                 _id: ID,
                 _input: crate::graphql::schema::UpdateTeamInput,
+                _actor: Option<crate::logic::ActorContext>,
             ) -> Result<Team, crate::Error> {
                 unreachable!()
             }
@@ -1342,6 +1504,7 @@ mod more_query_tests {
             async fn register_user(
                 &self,
                 _input: crate::logic::user::RegisterUserInput,
+                _actor: Option<crate::logic::ActorContext>,
             ) -> Result<crate::logic::user::GqlUser, crate::Error> {
                 unreachable!()
             }
@@ -1356,6 +1519,7 @@ mod more_query_tests {
                 &self,
                 _id: ID,
                 _input: crate::logic::user::UpdateGqlUserInput,
+                _actor: Option<crate::logic::ActorContext>,
             ) -> Result<crate::logic::user::GqlUser, crate::Error> {
                 unreachable!()
             }
@@ -1364,6 +1528,7 @@ mod more_query_tests {
                 _id: ID,
                 _current_password: String,
                 _new_password: String,
+                _actor: Option<crate::logic::ActorContext>,
             ) -> Result<(), crate::Error> {
                 unreachable!()
             }
@@ -1371,6 +1536,7 @@ mod more_query_tests {
                 &self,
                 _user_id: ID,
                 _temporary_password: String,
+                _actor: Option<crate::logic::ActorContext>,
             ) -> Result<(), crate::Error> {
                 unreachable!()
             }
@@ -1378,6 +1544,7 @@ mod more_query_tests {
                 &self,
                 _id: ID,
                 _team_ids: Vec<ID>,
+                _actor: Option<crate::logic::ActorContext>,
             ) -> Result<bool, crate::Error> {
                 unreachable!()
             }
@@ -1593,6 +1760,7 @@ mod more_query_tests {
             async fn register_user(
                 &self,
                 _input: crate::logic::user::RegisterUserInput,
+                _actor: Option<crate::logic::ActorContext>,
             ) -> Result<crate::logic::user::GqlUser, crate::Error> {
                 unreachable!()
             }
@@ -1607,6 +1775,7 @@ mod more_query_tests {
                 &self,
                 _id: ID,
                 _input: crate::logic::user::UpdateGqlUserInput,
+                _actor: Option<crate::logic::ActorContext>,
             ) -> Result<crate::logic::user::GqlUser, crate::Error> {
                 unreachable!()
             }
@@ -1615,6 +1784,7 @@ mod more_query_tests {
                 _id: ID,
                 _current_password: String,
                 _new_password: String,
+                _actor: Option<crate::logic::ActorContext>,
             ) -> Result<(), crate::Error> {
                 unreachable!()
             }
@@ -1622,6 +1792,7 @@ mod more_query_tests {
                 &self,
                 _user_id: ID,
                 _temporary_password: String,
+                _actor: Option<crate::logic::ActorContext>,
             ) -> Result<(), crate::Error> {
                 unreachable!()
             }
@@ -1629,6 +1800,7 @@ mod more_query_tests {
                 &self,
                 _id: ID,
                 _team_ids: Vec<ID>,
+                _actor: Option<crate::logic::ActorContext>,
             ) -> Result<bool, crate::Error> {
                 unreachable!()
             }

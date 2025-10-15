@@ -36,9 +36,23 @@ pub trait PipelineLogic: Send + Sync {
         page_size: i32,
     ) -> Result<(Vec<Pipeline>, i64), Error>;
 
-    async fn create_pipeline(&self, team_id: ID, input: CreatePipelineInput) -> Result<ID, Error>;
-    async fn update_pipeline(&self, id: ID, input: UpdatePipelineInput) -> Result<Pipeline, Error>;
-    async fn delete_pipeline(&self, id: ID) -> Result<(), Error>;
+    async fn create_pipeline(
+        &self,
+        team_id: ID,
+        input: CreatePipelineInput,
+        actor: Option<crate::logic::ActorContext>,
+    ) -> Result<ID, Error>;
+    async fn update_pipeline(
+        &self,
+        id: ID,
+        input: UpdatePipelineInput,
+        actor: Option<crate::logic::ActorContext>,
+    ) -> Result<Pipeline, Error>;
+    async fn delete_pipeline(
+        &self,
+        id: ID,
+        actor: Option<crate::logic::ActorContext>,
+    ) -> Result<(), Error>;
     fn clone_box(&self) -> Box<dyn PipelineLogic>;
 }
 
@@ -215,19 +229,30 @@ impl PipelineLogic for PipelineLogicImpl {
         Ok((mapped_pipelines, total))
     }
 
-    async fn create_pipeline(&self, team_id: ID, input: CreatePipelineInput) -> Result<ID, Error> {
+    async fn create_pipeline(
+        &self,
+        team_id: ID,
+        input: CreatePipelineInput,
+        actor: Option<crate::logic::ActorContext>,
+    ) -> Result<ID, Error> {
         let team_id = Uuid::try_from(team_id).unwrap();
         let pipeline_name = input.name.clone();
         let input_mapped = map_to_create_pipeline(team_id, input);
         let pipeline = self.repository.create_pipeline(input_mapped).await?;
+
+        // Extract actor information
+        let (actor_id, actor_name) = actor
+            .as_ref()
+            .map(|a| a.as_option())
+            .unwrap_or((None, None));
 
         // Log activity (ignore errors to not fail the operation)
         let _ = crate::utils::activity_logger::log_pipeline_activity(
             &self.activity_log_repository,
             crate::utils::activity_logger::activity_types::PIPELINE_CREATED,
             &pipeline.to_string(),
-            None,
-            None,
+            actor_id,
+            actor_name,
             format!("Created pipeline '{}'", pipeline_name),
             Some(serde_json::json!({
                 "pipeline_id": pipeline.to_string(),
@@ -240,17 +265,28 @@ impl PipelineLogic for PipelineLogicImpl {
         Ok(ID::from(pipeline.to_string()))
     }
 
-    async fn update_pipeline(&self, id: ID, input: UpdatePipelineInput) -> Result<Pipeline, Error> {
+    async fn update_pipeline(
+        &self,
+        id: ID,
+        input: UpdatePipelineInput,
+        actor: Option<crate::logic::ActorContext>,
+    ) -> Result<Pipeline, Error> {
         let input_mapped = Self::map_to_update_pipeline(id, input);
         let pipeline = self.repository.update_pipeline(input_mapped).await?;
+
+        // Extract actor information
+        let (actor_id, actor_name) = actor
+            .as_ref()
+            .map(|a| a.as_option())
+            .unwrap_or((None, None));
 
         // Log activity (ignore errors to not fail the operation)
         let _ = crate::utils::activity_logger::log_pipeline_activity(
             &self.activity_log_repository,
             crate::utils::activity_logger::activity_types::PIPELINE_UPDATED,
             &pipeline.id.to_string(),
-            None,
-            None,
+            actor_id,
+            actor_name,
             format!("Updated pipeline '{}'", pipeline.name),
             Some(serde_json::json!({
                 "pipeline_id": pipeline.id.to_string(),
@@ -270,7 +306,11 @@ impl PipelineLogic for PipelineLogicImpl {
         })
     }
 
-    async fn delete_pipeline(&self, id: ID) -> Result<(), Error> {
+    async fn delete_pipeline(
+        &self,
+        id: ID,
+        actor: Option<crate::logic::ActorContext>,
+    ) -> Result<(), Error> {
         let pipeline_id = Uuid::try_from(id).unwrap();
 
         // Get pipeline name before deletion for activity log
@@ -278,13 +318,19 @@ impl PipelineLogic for PipelineLogicImpl {
 
         self.repository.delete_pipeline(pipeline_id).await?;
 
+        // Extract actor information
+        let (actor_id, actor_name) = actor
+            .as_ref()
+            .map(|a| a.as_option())
+            .unwrap_or((None, None));
+
         // Log activity (ignore errors to not fail the operation)
         let _ = crate::utils::activity_logger::log_pipeline_activity(
             &self.activity_log_repository,
             crate::utils::activity_logger::activity_types::PIPELINE_DELETED,
             &pipeline_id.to_string(),
-            None,
-            None,
+            actor_id,
+            actor_name,
             format!("Deleted pipeline '{}'", pipeline.name),
             Some(serde_json::json!({
                 "pipeline_id": pipeline_id.to_string(),
@@ -575,7 +621,11 @@ mod test {
             create_mock_activity_log(),
         );
         let result = logic
-            .create_pipeline(ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"), input)
+            .create_pipeline(
+                ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"),
+                input,
+                None,
+            )
             .await;
 
         assert!(result.is_ok());
@@ -633,7 +683,7 @@ mod test {
             Box::new(environment_repo),
             create_mock_activity_log(),
         );
-        let result = logic.update_pipeline(ID::from(ID), input).await;
+        let result = logic.update_pipeline(ID::from(ID), input, None).await;
 
         assert!(result.is_ok());
         let pipeline = result.unwrap();
@@ -665,7 +715,7 @@ mod test {
             Box::new(environment_repo),
             create_mock_activity_log(),
         );
-        let result = logic.update_pipeline(ID::from(ID), input).await;
+        let result = logic.update_pipeline(ID::from(ID), input, None).await;
 
         assert!(result.is_err());
         let error = result.err().unwrap();
@@ -689,7 +739,7 @@ mod test {
             Box::new(environment_repo),
             create_mock_activity_log(),
         );
-        let result = logic.delete_pipeline(ID::from(ID)).await;
+        let result = logic.delete_pipeline(ID::from(ID), None).await;
 
         assert!(result.is_ok());
     }
@@ -711,7 +761,7 @@ mod test {
             Box::new(environment_repo),
             create_mock_activity_log(),
         );
-        let result = logic.delete_pipeline(ID::from(ID)).await;
+        let result = logic.delete_pipeline(ID::from(ID), None).await;
 
         assert!(result.is_err());
         let error = result.err().unwrap();

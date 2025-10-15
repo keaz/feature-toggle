@@ -6,6 +6,23 @@ use async_graphql::ID;
 use std::collections::HashMap;
 use uuid::Uuid;
 
+/// Actor context for tracking who performed an action
+#[derive(Debug, Clone)]
+pub struct ActorContext {
+    pub id: Uuid,
+    pub name: String,
+}
+
+impl ActorContext {
+    pub fn new(id: Uuid, name: String) -> Self {
+        Self { id, name }
+    }
+
+    pub fn as_option(&self) -> (Option<Uuid>, Option<String>) {
+        (Some(self.id), Some(self.name.clone()))
+    }
+}
+
 pub mod authorization;
 pub mod client;
 pub mod context;

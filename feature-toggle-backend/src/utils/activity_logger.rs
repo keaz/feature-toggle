@@ -50,6 +50,8 @@ pub mod activity_types {
     pub const PIPELINE_DELETED: &str = "pipeline_deleted";
     pub const STAGE_APPROVED: &str = "stage_approved";
     pub const STAGE_REJECTED: &str = "stage_rejected";
+    pub const STAGE_DEPLOYED: &str = "stage_deployed";
+    pub const STAGE_ROLLBACKED: &str = "stage_rollbacked";
 
     // Role activities
     pub const ROLE_ASSIGNED: &str = "role_assigned";

@@ -18,7 +18,7 @@ use crate::logic::role::RoleLogic;
 use crate::logic::team::TeamLogic;
 use crate::logic::user::{RegisterUserInput, UpdateGqlUserInput, UserLogic};
 use crate::middleware::admin_guard::AdminState;
-use async_graphql::{Context, Object, Result as GqlResult, ID};
+use async_graphql::{Context, ID, Object, Result as GqlResult};
 use log::info;
 
 #[cfg(test)]
@@ -51,8 +51,11 @@ impl MutationRoot {
         input: CreateEnvironmentInput,
     ) -> GqlResult<Environment> {
         info!("Creating environment with input: {input:?}");
+        let actor = ctx.data_opt::<crate::JwtUser>().map(|jwt_user| {
+            crate::logic::ActorContext::new(jwt_user.id, jwt_user.username.clone())
+        });
         let logic = ctx.data::<Box<dyn EnvironmentLogic>>()?;
-        Ok(logic.create_environment(team_id, input).await?)
+        Ok(logic.create_environment(team_id, input, actor).await?)
     }
 
     async fn update_environment(
@@ -62,20 +65,29 @@ impl MutationRoot {
         input: UpdateEnvironmentInput,
     ) -> GqlResult<Environment> {
         info!("Updating environment with id: {id:?} and input: {input:?}");
+        let actor = ctx.data_opt::<crate::JwtUser>().map(|jwt_user| {
+            crate::logic::ActorContext::new(jwt_user.id, jwt_user.username.clone())
+        });
         let logic = ctx.data::<Box<dyn EnvironmentLogic>>()?;
-        Ok(logic.update_environment(id, input).await?)
+        Ok(logic.update_environment(id, input, actor).await?)
     }
 
     async fn delete_environment(&self, ctx: &Context<'_>, id: ID) -> GqlResult<bool> {
         info!("Deleting environment with id: {id:?}");
+        let actor = ctx.data_opt::<crate::JwtUser>().map(|jwt_user| {
+            crate::logic::ActorContext::new(jwt_user.id, jwt_user.username.clone())
+        });
         let logic = ctx.data::<Box<dyn EnvironmentLogic>>()?;
-        logic.delete_environment(id).await?;
+        logic.delete_environment(id, actor).await?;
         Ok(true)
     }
 
     async fn create_team(&self, ctx: &Context<'_>, input: CreateTeamInput) -> GqlResult<Team> {
+        let actor = ctx.data_opt::<crate::JwtUser>().map(|jwt_user| {
+            crate::logic::ActorContext::new(jwt_user.id, jwt_user.username.clone())
+        });
         let logic = ctx.data::<Box<dyn TeamLogic>>()?;
-        let team = logic.create_team(input).await?;
+        let team = logic.create_team(input, actor).await?;
         Ok(team)
     }
 
@@ -85,8 +97,11 @@ impl MutationRoot {
         #[graphql(desc = "Id of the Team")] id: ID,
         input: UpdateTeamInput,
     ) -> GqlResult<Team> {
+        let actor = ctx.data_opt::<crate::JwtUser>().map(|jwt_user| {
+            crate::logic::ActorContext::new(jwt_user.id, jwt_user.username.clone())
+        });
         let logic = ctx.data::<Box<dyn TeamLogic>>()?;
-        let team = logic.update_team(id, input).await?;
+        let team = logic.update_team(id, input, actor).await?;
         Ok(team)
     }
 
@@ -98,8 +113,11 @@ impl MutationRoot {
     ) -> GqlResult<ID> {
         info!("Creating pipeline with input: {input:?}");
         input.validate(Some(team_id.clone()), ctx).await?;
+        let actor = ctx.data_opt::<crate::JwtUser>().map(|jwt_user| {
+            crate::logic::ActorContext::new(jwt_user.id, jwt_user.username.clone())
+        });
         let logic = ctx.data::<Box<dyn PipelineLogic>>()?;
-        let pipeline_id = logic.create_pipeline(team_id, input).await?;
+        let pipeline_id = logic.create_pipeline(team_id, input, actor).await?;
         Ok(pipeline_id)
     }
 
@@ -111,15 +129,21 @@ impl MutationRoot {
     ) -> GqlResult<Pipeline> {
         info!("Updating pipeline with input: {input:?}");
         input.validate(Some(id.clone()), ctx).await?;
+        let actor = ctx.data_opt::<crate::JwtUser>().map(|jwt_user| {
+            crate::logic::ActorContext::new(jwt_user.id, jwt_user.username.clone())
+        });
         let logic = ctx.data::<Box<dyn PipelineLogic>>()?;
-        let pipeline = logic.update_pipeline(id, input).await?;
+        let pipeline = logic.update_pipeline(id, input, actor).await?;
         Ok(pipeline)
     }
 
     async fn delete_pipeline(&self, ctx: &Context<'_>, id: ID) -> GqlResult<bool> {
         info!("Deleting pipeline with id: {id:?}");
+        let actor = ctx.data_opt::<crate::JwtUser>().map(|jwt_user| {
+            crate::logic::ActorContext::new(jwt_user.id, jwt_user.username.clone())
+        });
         let logic = ctx.data::<Box<dyn PipelineLogic>>()?;
-        logic.delete_pipeline(id).await?;
+        logic.delete_pipeline(id, actor).await?;
         Ok(true)
     }
 
@@ -130,8 +154,14 @@ impl MutationRoot {
         input: CreateFeatureInput,
     ) -> GqlResult<ID> {
         info!("Creating feature with input: {input:?}");
+
+        // Extract actor information from JWT token
+        let actor = ctx.data_opt::<crate::JwtUser>().map(|jwt_user| {
+            crate::logic::ActorContext::new(jwt_user.id, jwt_user.username.clone())
+        });
+
         let logic = ctx.data::<Box<dyn FeatureLogic>>()?;
-        let feature_id = logic.create_feature(team_id, input).await?;
+        let feature_id = logic.create_feature(team_id, input, actor).await?;
         Ok(feature_id)
     }
 
@@ -142,8 +172,14 @@ impl MutationRoot {
         input: UpdateFeatureInput,
     ) -> GqlResult<Feature> {
         info!("Updating feature with input: {input:?}");
+
+        // Extract actor information from JWT token
+        let actor = ctx.data_opt::<crate::JwtUser>().map(|jwt_user| {
+            crate::logic::ActorContext::new(jwt_user.id, jwt_user.username.clone())
+        });
+
         let logic = ctx.data::<Box<dyn FeatureLogic>>()?;
-        let feature = logic.update_feature(id.clone(), input).await?;
+        let feature = logic.update_feature(id.clone(), input, actor).await?;
 
         // After successful update, publish to gRPC streaming subscribers
         if let (Ok(pool), Ok(updates_tx)) = (
@@ -175,8 +211,14 @@ impl MutationRoot {
 
     async fn delete_feature(&self, ctx: &Context<'_>, id: ID) -> GqlResult<bool> {
         info!("Deleting feature with id: {id:?}");
+
+        // Extract actor information from JWT token
+        let actor = ctx.data_opt::<crate::JwtUser>().map(|jwt_user| {
+            crate::logic::ActorContext::new(jwt_user.id, jwt_user.username.clone())
+        });
+
         let logic = ctx.data::<Box<dyn FeatureLogic>>()?;
-        logic.delete_feature(id).await?;
+        logic.delete_feature(id, actor).await?;
         Ok(true)
     }
 
@@ -187,9 +229,19 @@ impl MutationRoot {
         id: ID,
         rollback_in_minutes: Option<i32>,
     ) -> GqlResult<Feature> {
-        info!("Emergency disabling feature with id: {id:?}, rollback_in_minutes: {rollback_in_minutes:?}");
+        info!(
+            "Emergency disabling feature with id: {id:?}, rollback_in_minutes: {rollback_in_minutes:?}"
+        );
+
+        // Extract actor information from JWT token
+        let actor = ctx.data_opt::<crate::JwtUser>().map(|jwt_user| {
+            crate::logic::ActorContext::new(jwt_user.id, jwt_user.username.clone())
+        });
+
         let logic = ctx.data::<Box<dyn FeatureLogic>>()?;
-        let feature = logic.emergency_disable_feature(id.clone(), rollback_in_minutes).await?;
+        let feature = logic
+            .emergency_disable_feature(id.clone(), rollback_in_minutes, actor)
+            .await?;
 
         // Broadcast feature update for gRPC clients
         if let (Ok(pool), Ok(updates_tx)) = (
@@ -219,14 +271,16 @@ impl MutationRoot {
         Ok(feature)
     }
 
-    async fn emergency_enable_feature(
-        &self,
-        ctx: &Context<'_>,
-        id: ID,
-    ) -> GqlResult<Feature> {
+    async fn emergency_enable_feature(&self, ctx: &Context<'_>, id: ID) -> GqlResult<Feature> {
         info!("Emergency enabling feature with id: {id:?}");
+
+        // Extract actor information from JWT token
+        let actor = ctx.data_opt::<crate::JwtUser>().map(|jwt_user| {
+            crate::logic::ActorContext::new(jwt_user.id, jwt_user.username.clone())
+        });
+
         let logic = ctx.data::<Box<dyn FeatureLogic>>()?;
-        let feature = logic.emergency_enable_feature(id.clone()).await?;
+        let feature = logic.emergency_enable_feature(id.clone(), actor).await?;
 
         // Broadcast feature update for gRPC clients
         if let (Ok(pool), Ok(updates_tx)) = (
@@ -263,8 +317,11 @@ impl MutationRoot {
         input: CreateClientInput,
     ) -> GqlResult<crate::graphql::schema::Client> {
         info!("Creating client with input: {input:?}");
+        let actor = ctx.data_opt::<crate::JwtUser>().map(|jwt_user| {
+            crate::logic::ActorContext::new(jwt_user.id, jwt_user.username.clone())
+        });
         let logic = ctx.data::<Box<dyn ClientLogic>>().unwrap();
-        Ok(logic.create_client(team_id, input).await?)
+        Ok(logic.create_client(team_id, input, actor).await?)
     }
 
     async fn update_client(
@@ -274,14 +331,20 @@ impl MutationRoot {
         input: UpdateClientInput,
     ) -> GqlResult<crate::graphql::schema::Client> {
         info!("Updating client with id: {id:?} and input: {input:?}");
+        let actor = ctx.data_opt::<crate::JwtUser>().map(|jwt_user| {
+            crate::logic::ActorContext::new(jwt_user.id, jwt_user.username.clone())
+        });
         let logic = ctx.data::<Box<dyn ClientLogic>>().unwrap();
-        Ok(logic.update_client(id, input).await?)
+        Ok(logic.update_client(id, input, actor).await?)
     }
 
     async fn delete_client(&self, ctx: &Context<'_>, id: ID) -> GqlResult<bool> {
         info!("Deleting client with id: {id:?}");
+        let actor = ctx.data_opt::<crate::JwtUser>().map(|jwt_user| {
+            crate::logic::ActorContext::new(jwt_user.id, jwt_user.username.clone())
+        });
         let logic = ctx.data::<Box<dyn ClientLogic>>().unwrap();
-        logic.delete_client(id).await?;
+        logic.delete_client(id, actor).await?;
         Ok(true)
     }
 
@@ -453,17 +516,23 @@ impl MutationRoot {
         ctx: &Context<'_>,
         input: GqlRegisterUserInput,
     ) -> GqlResult<User> {
+        let actor = ctx.data_opt::<crate::JwtUser>().map(|jwt_user| {
+            crate::logic::ActorContext::new(jwt_user.id, jwt_user.username.clone())
+        });
         let logic = ctx.data::<Box<dyn UserLogic>>()?;
         let created = logic
-            .register_user(RegisterUserInput {
-                username: input.username,
-                password: input.password,
-                first_name: input.first_name,
-                last_name: input.last_name,
-                email: input.email,
-                is_admin: input.is_admin.unwrap_or(false),
-                is_temporary_password: input.is_temporary_password.unwrap_or(true), // Default to temporary password
-            })
+            .register_user(
+                RegisterUserInput {
+                    username: input.username,
+                    password: input.password,
+                    first_name: input.first_name,
+                    last_name: input.last_name,
+                    email: input.email,
+                    is_admin: input.is_admin.unwrap_or(false),
+                    is_temporary_password: input.is_temporary_password.unwrap_or(true), // Default to temporary password
+                },
+                actor,
+            )
             .await?;
 
         // If an admin was created, flip the admin-exists cache so middleware stops redirecting.
@@ -480,17 +549,23 @@ impl MutationRoot {
         ctx: &Context<'_>,
         input: GqlRegisterUserInput,
     ) -> GqlResult<User> {
+        let actor = ctx.data_opt::<crate::JwtUser>().map(|jwt_user| {
+            crate::logic::ActorContext::new(jwt_user.id, jwt_user.username.clone())
+        });
         let logic = ctx.data::<Box<dyn UserLogic>>()?;
         let created = logic
-            .register_user(RegisterUserInput {
-                username: input.username,
-                password: input.password,
-                first_name: input.first_name,
-                last_name: input.last_name,
-                email: input.email,
-                is_admin: true,               // Force admin to true
-                is_temporary_password: false, // Default to temporary password
-            })
+            .register_user(
+                RegisterUserInput {
+                    username: input.username,
+                    password: input.password,
+                    first_name: input.first_name,
+                    last_name: input.last_name,
+                    email: input.email,
+                    is_admin: true,               // Force admin to true
+                    is_temporary_password: false, // Default to temporary password
+                },
+                actor,
+            )
             .await?;
 
         // If an admin was created, flip the admin-exists cache so middleware stops redirecting.
@@ -569,6 +644,9 @@ impl MutationRoot {
         id: ID,
         input: GqlUpdateUserInput,
     ) -> GqlResult<User> {
+        let actor = ctx.data_opt::<crate::JwtUser>().map(|jwt_user| {
+            crate::logic::ActorContext::new(jwt_user.id, jwt_user.username.clone())
+        });
         let logic = ctx.data::<Box<dyn UserLogic>>()?;
         let u = logic
             .update_user(
@@ -580,6 +658,7 @@ impl MutationRoot {
                     is_admin: input.is_admin,
                     enabled: input.enabled,
                 },
+                actor,
             )
             .await?;
         create_user(u)
@@ -593,9 +672,15 @@ impl MutationRoot {
         let jwt_user = ctx.data::<crate::JwtUser>()?;
         let user_id = ID::from(jwt_user.id);
 
+        // For reset_password, the actor is the user themselves (self-service)
+        let actor = Some(crate::logic::ActorContext::new(
+            jwt_user.id,
+            jwt_user.username.clone(),
+        ));
+
         let logic = ctx.data::<Box<dyn UserLogic>>()?;
         logic
-            .reset_password(user_id, input.current_password, input.new_password)
+            .reset_password(user_id, input.current_password, input.new_password, actor)
             .await?;
 
         Ok(true)
@@ -606,9 +691,12 @@ impl MutationRoot {
         ctx: &Context<'_>,
         input: GqlSetTemporaryPasswordInput,
     ) -> GqlResult<bool> {
+        let actor = ctx.data_opt::<crate::JwtUser>().map(|jwt_user| {
+            crate::logic::ActorContext::new(jwt_user.id, jwt_user.username.clone())
+        });
         let logic = ctx.data::<Box<dyn UserLogic>>()?;
         logic
-            .set_temporary_password(input.user_id, input.temporary_password)
+            .set_temporary_password(input.user_id, input.temporary_password, actor)
             .await?;
 
         Ok(true)
@@ -620,8 +708,13 @@ impl MutationRoot {
         user_id: ID,
         team_ids: Vec<ID>,
     ) -> GqlResult<Vec<Team>> {
+        let actor = ctx.data_opt::<crate::JwtUser>().map(|jwt_user| {
+            crate::logic::ActorContext::new(jwt_user.id, jwt_user.username.clone())
+        });
         let logic = ctx.data::<Box<dyn UserLogic>>()?;
-        let _ = logic.assign_user_teams(user_id.clone(), team_ids).await?;
+        let _ = logic
+            .assign_user_teams(user_id.clone(), team_ids, actor)
+            .await?;
         // Fetch assigned teams to return
         let pool = ctx.data::<sqlx::PgPool>()?;
         let uid =
@@ -649,13 +742,14 @@ impl MutationRoot {
     ) -> GqlResult<Vec<Role>> {
         info!("Assigning roles to user: {user_id:?}");
 
-        // Get user info from JWT context for assigned_by field
-        let jwt_user = ctx.data_opt::<crate::JwtUser>().cloned();
-        let assigned_by = jwt_user.map(|u| ID::from(u.id));
+        // Get user info from JWT context and create ActorContext
+        let actor = ctx.data_opt::<crate::JwtUser>().map(|jwt_user| {
+            crate::logic::ActorContext::new(jwt_user.id, jwt_user.username.clone())
+        });
 
         let logic = ctx.data::<Box<dyn RoleLogic>>()?;
         let roles = logic
-            .assign_user_roles(user_id, input.role_ids, assigned_by)
+            .assign_user_roles(user_id, input.role_ids, actor)
             .await?;
 
         Ok(roles
@@ -816,8 +910,14 @@ async fn map_db_feature_to_full_for_broadcast(
         team_id: f.team_id.to_string(),
         created_at: f.created_at.to_rfc3339(),
         kill_switch_enabled: f.kill_switch_enabled,
-        kill_switch_activated_at: f.kill_switch_activated_at.map(|dt| dt.to_rfc3339()).unwrap_or_default(),
-        rollback_scheduled_at: f.rollback_scheduled_at.map(|dt| dt.to_rfc3339()).unwrap_or_default(),
+        kill_switch_activated_at: f
+            .kill_switch_activated_at
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_default(),
+        rollback_scheduled_at: f
+            .rollback_scheduled_at
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_default(),
         stages: stage_msgs,
         dependencies: deps,
     };
@@ -1812,12 +1912,12 @@ mod more_mutation_tests {
         let team_id_clone = team_id;
         mock.expect_create_environment()
             .times(1)
-            .withf(move |tid, inp| {
+            .withf(move |tid, inp, _actor| {
                 Uuid::try_from(tid.clone()).unwrap() == team_id_clone
                     && inp.name == "staging"
                     && inp.active == true
             })
-            .returning(move |_, _| Ok(expected.clone()));
+            .returning(move |_, _, _| Ok(expected.clone()));
 
         let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
             .data::<Box<dyn crate::logic::environment::EnvironmentLogic>>(Box::new(mock))
@@ -1873,12 +1973,12 @@ mod more_mutation_tests {
         let env_id_clone = env_id;
         mock.expect_update_environment()
             .times(1)
-            .withf(move |id, inp| {
+            .withf(move |id, inp, _actor| {
                 Uuid::try_from(id.clone()).unwrap() == env_id_clone
                     && inp.name.as_ref() == Some(&"production".to_string())
                     && inp.active == Some(false)
             })
-            .returning(move |_, _| Ok(expected.clone()));
+            .returning(move |_, _, _| Ok(expected.clone()));
 
         let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
             .data::<Box<dyn crate::logic::environment::EnvironmentLogic>>(Box::new(mock))
@@ -1921,8 +2021,8 @@ mod more_mutation_tests {
         let env_id_clone = env_id;
         mock.expect_delete_environment()
             .times(1)
-            .withf(move |id| Uuid::try_from(id.clone()).unwrap() == env_id_clone)
-            .returning(move |_| Ok(()));
+            .withf(move |id, _actor| Uuid::try_from(id.clone()).unwrap() == env_id_clone)
+            .returning(move |_, _| Ok(()));
 
         let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
             .data::<Box<dyn crate::logic::environment::EnvironmentLogic>>(Box::new(mock))
@@ -1968,11 +2068,11 @@ mod more_mutation_tests {
 
         mock.expect_create_team()
             .times(1)
-            .withf(move |inp| {
+            .withf(move |inp, _actor| {
                 inp.name == "Development Team"
                     && inp.description == "Team responsible for development"
             })
-            .returning(move |_| Ok(expected.clone()));
+            .returning(move |_, _| Ok(expected.clone()));
 
         let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
             .data::<Box<dyn crate::logic::team::TeamLogic>>(Box::new(mock))
@@ -2028,12 +2128,12 @@ mod more_mutation_tests {
         let team_id_clone = team_id;
         mock.expect_update_team()
             .times(1)
-            .withf(move |id, inp| {
+            .withf(move |id, inp, _actor| {
                 Uuid::try_from(id.clone()).unwrap() == team_id_clone
                     && inp.name.as_ref() == Some(&"Updated Team".to_string())
                     && inp.description.as_ref() == Some(&"Updated description".to_string())
             })
-            .returning(move |_, _| Ok(expected.clone()));
+            .returning(move |_, _, _| Ok(expected.clone()));
 
         let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
             .data::<Box<dyn crate::logic::team::TeamLogic>>(Box::new(mock))
@@ -2102,12 +2202,12 @@ mod more_mutation_tests {
         let team_id_clone2 = team_id;
         mock.expect_create_pipeline()
             .times(1)
-            .withf(move |tid, inp| {
+            .withf(move |tid, inp, _actor| {
                 Uuid::try_from(tid.clone()).unwrap() == team_id_clone2
                     && inp.name == "CI/CD Pipeline"
                     && inp.stages.len() == 1
             })
-            .returning(move |_, _| Ok(ID::from(pipeline_id)));
+            .returning(move |_, _, _| Ok(ID::from(pipeline_id)));
 
         let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
             .data::<Box<dyn crate::logic::pipeline::PipelineLogic>>(Box::new(mock))
@@ -2201,12 +2301,12 @@ mod more_mutation_tests {
         let pipeline_id_clone2 = pipeline_id;
         mock.expect_update_pipeline()
             .times(1)
-            .withf(move |id, inp| {
+            .withf(move |id, inp, _actor| {
                 Uuid::try_from(id.clone()).unwrap() == pipeline_id_clone2
                     && inp.name.as_ref() == Some(&"Updated Pipeline".to_string())
                     && inp.active == Some(false)
             })
-            .returning(move |_, _| Ok(updated_pipeline.clone()));
+            .returning(move |_, _, _| Ok(updated_pipeline.clone()));
 
         let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
             .data::<Box<dyn crate::logic::pipeline::PipelineLogic>>(Box::new(mock))
@@ -2255,8 +2355,8 @@ mod more_mutation_tests {
         let pipeline_id_clone = pipeline_id;
         mock.expect_delete_pipeline()
             .times(1)
-            .withf(move |id| Uuid::try_from(id.clone()).unwrap() == pipeline_id_clone)
-            .returning(move |_| Ok(()));
+            .withf(move |id, _actor| Uuid::try_from(id.clone()).unwrap() == pipeline_id_clone)
+            .returning(move |_, _| Ok(()));
 
         let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
             .data::<Box<dyn crate::logic::pipeline::PipelineLogic>>(Box::new(mock))

@@ -33,9 +33,19 @@ pub trait ClientLogic: Send + Sync {
         &self,
         team_id: ID,
         input: CreateClientInput,
+        actor: Option<crate::logic::ActorContext>,
     ) -> Result<GqlClient, Error>;
-    async fn update_client(&self, id: ID, input: UpdateClientInput) -> Result<GqlClient, Error>;
-    async fn delete_client(&self, id: ID) -> Result<(), Error>;
+    async fn update_client(
+        &self,
+        id: ID,
+        input: UpdateClientInput,
+        actor: Option<crate::logic::ActorContext>,
+    ) -> Result<GqlClient, Error>;
+    async fn delete_client(
+        &self,
+        id: ID,
+        actor: Option<crate::logic::ActorContext>,
+    ) -> Result<(), Error>;
 
     // Count clients
     async fn count_clients(&self, team_id: Option<ID>, enabled: Option<bool>)
@@ -173,6 +183,7 @@ impl ClientLogic for ClientLogicImpl {
         &self,
         team_id: ID,
         input: CreateClientInput,
+        actor: Option<crate::logic::ActorContext>,
     ) -> Result<GqlClient, Error> {
         let team_id = Uuid::parse_str(&team_id.to_string())
             .map_err(|e| Error::InvalidInput(e.to_string()))?;
@@ -210,13 +221,19 @@ impl ClientLogic for ClientLogicImpl {
         };
         let c = self.repository.create_client(team_id, create).await?;
 
+        // Extract actor information
+        let (actor_id, actor_name) = actor
+            .as_ref()
+            .map(|a| a.as_option())
+            .unwrap_or((None, None));
+
         // Log activity (ignore errors to not fail the operation)
         let _ = crate::utils::activity_logger::log_client_activity(
             &self.activity_log_repository,
             crate::utils::activity_logger::activity_types::CLIENT_CREATED,
             &c.id.to_string(),
-            None,
-            None,
+            actor_id,
+            actor_name,
             format!("Created client '{}'", c.name),
             Some(serde_json::json!({
                 "client_id": c.id.to_string(),
@@ -239,7 +256,12 @@ impl ClientLogic for ClientLogicImpl {
         })
     }
 
-    async fn update_client(&self, id: ID, input: UpdateClientInput) -> Result<GqlClient, Error> {
+    async fn update_client(
+        &self,
+        id: ID,
+        input: UpdateClientInput,
+        actor: Option<crate::logic::ActorContext>,
+    ) -> Result<GqlClient, Error> {
         let id =
             Uuid::parse_str(&id.to_string()).map_err(|e| Error::InvalidInput(e.to_string()))?;
 
@@ -277,6 +299,12 @@ impl ClientLogic for ClientLogicImpl {
         };
         let c = self.repository.update_client(id, update).await?;
 
+        // Extract actor information
+        let (actor_id, actor_name) = actor
+            .as_ref()
+            .map(|a| a.as_option())
+            .unwrap_or((None, None));
+
         // Log activity (ignore errors to not fail the operation)
         let activity_type = if let Some(enabled) = input.enabled {
             if enabled {
@@ -292,8 +320,8 @@ impl ClientLogic for ClientLogicImpl {
             &self.activity_log_repository,
             activity_type,
             &c.id.to_string(),
-            None,
-            None,
+            actor_id,
+            actor_name,
             format!("Updated client '{}'", c.name),
             Some(serde_json::json!({
                 "client_id": c.id.to_string(),
@@ -315,7 +343,11 @@ impl ClientLogic for ClientLogicImpl {
         })
     }
 
-    async fn delete_client(&self, id: ID) -> Result<(), Error> {
+    async fn delete_client(
+        &self,
+        id: ID,
+        actor: Option<crate::logic::ActorContext>,
+    ) -> Result<(), Error> {
         let id =
             Uuid::parse_str(&id.to_string()).map_err(|e| Error::InvalidInput(e.to_string()))?;
 
@@ -324,13 +356,19 @@ impl ClientLogic for ClientLogicImpl {
 
         self.repository.delete_client(id).await?;
 
+        // Extract actor information
+        let (actor_id, actor_name) = actor
+            .as_ref()
+            .map(|a| a.as_option())
+            .unwrap_or((None, None));
+
         // Log activity (ignore errors to not fail the operation)
         let _ = crate::utils::activity_logger::log_client_activity(
             &self.activity_log_repository,
             crate::utils::activity_logger::activity_types::CLIENT_DELETED,
             &id.to_string(),
-            None,
-            None,
+            actor_id,
+            actor_name,
             format!("Deleted client '{}'", client.name),
             Some(serde_json::json!({
                 "client_id": id.to_string(),
@@ -422,7 +460,9 @@ mod tests {
             client_type: GqlClientType::Web,
             web_origins: Some(vec![]),
         };
-        let res = logic.create_client(ID::from(Uuid::new_v4()), input).await;
+        let res = logic
+            .create_client(ID::from(Uuid::new_v4()), input, None)
+            .await;
         assert!(matches!(res, Err(Error::InvalidInput(msg)) if msg.contains("Web client must")));
     }
 
@@ -439,7 +479,9 @@ mod tests {
             client_type: GqlClientType::Backend,
             web_origins: Some(vec!["https://x".into()]),
         };
-        let res = logic.create_client(ID::from(Uuid::new_v4()), input).await;
+        let res = logic
+            .create_client(ID::from(Uuid::new_v4()), input, None)
+            .await;
         assert!(
             matches!(res, Err(Error::InvalidInput(msg)) if msg.contains("Backend client cannot"))
         );
@@ -458,7 +500,9 @@ mod tests {
             client_type: Some(GqlClientType::Backend),
             web_origins: Some(vec!["https://x".into()]),
         };
-        let res = logic.update_client(ID::from(Uuid::new_v4()), input).await;
+        let res = logic
+            .update_client(ID::from(Uuid::new_v4()), input, None)
+            .await;
         assert!(
             matches!(res, Err(Error::InvalidInput(msg)) if msg.contains("Backend client cannot"))
         );
@@ -494,7 +538,10 @@ mod tests {
             client_type: GqlClientType::Web,
             web_origins: Some(vec!["https://a".into()]),
         };
-        let out = logic.create_client(ID::from(team_id), input).await.unwrap();
+        let out = logic
+            .create_client(ID::from(team_id), input, None)
+            .await
+            .unwrap();
         assert_eq!(out.client_type, GqlClientType::Web);
         assert_eq!(out.web_origins.len(), 1);
     }

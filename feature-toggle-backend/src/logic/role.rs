@@ -42,7 +42,7 @@ pub trait RoleLogic: Send + Sync {
         &self,
         user_id: ID,
         role_ids: Vec<ID>,
-        assigned_by: Option<ID>,
+        actor: Option<crate::logic::ActorContext>,
     ) -> Result<Vec<GqlRole>, Error>;
     async fn user_has_role(&self, user_id: ID, role_name: &str) -> Result<bool, Error>;
     fn clone_box(&self) -> Box<dyn RoleLogic>;
@@ -101,7 +101,7 @@ impl RoleLogic for RoleLogicImpl {
         &self,
         user_id: ID,
         role_ids: Vec<ID>,
-        assigned_by: Option<ID>,
+        actor: Option<crate::logic::ActorContext>,
     ) -> Result<Vec<GqlRole>, Error> {
         let user_uuid =
             Uuid::try_from(user_id.clone()).map_err(|e| Error::InvalidInput(e.to_string()))?;
@@ -111,32 +111,26 @@ impl RoleLogic for RoleLogicImpl {
             .collect();
         let role_uuids = role_uuids.map_err(|e| Error::InvalidInput(e.to_string()))?;
 
-        let assigned_by_uuid = if let Some(id) = assigned_by.clone() {
-            Some(Uuid::try_from(id).map_err(|e| Error::InvalidInput(e.to_string()))?)
-        } else {
-            None
-        };
+        // Extract actor information for repository call (needs Uuid) and activity logging
+        let (actor_id, actor_name) = actor
+            .as_ref()
+            .map(|a| a.as_option())
+            .unwrap_or((None, None));
 
         self.repository
-            .assign_user_roles(user_uuid, role_uuids.clone(), assigned_by_uuid)
+            .assign_user_roles(user_uuid, role_uuids.clone(), actor_id)
             .await?;
 
         // Log activity for each role assignment (ignore errors to not fail the operation)
         for role_uuid in role_uuids {
             // Get role name for better logging
             if let Ok(role) = self.repository.get_role_by_id(role_uuid).await {
-                let actor_uuid = if let Some(ref id) = assigned_by {
-                    Uuid::try_from(id.clone()).ok()
-                } else {
-                    None
-                };
-
                 let _ = crate::utils::activity_logger::log_role_activity(
                     &self.activity_log_repository,
                     crate::utils::activity_logger::activity_types::ROLE_ASSIGNED,
                     &user_uuid.to_string(),
-                    actor_uuid,
-                    None,
+                    actor_id,
+                    actor_name.clone(),
                     format!("Assigned role '{}' to user", role.name),
                     Some(serde_json::json!({
                         "user_id": user_uuid.to_string(),

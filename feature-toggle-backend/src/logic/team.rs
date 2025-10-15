@@ -14,8 +14,17 @@ pub trait TeamLogic: Send + Sync {
 
     async fn get_teams(&self, name: Option<String>) -> Result<Vec<Team>, Error>;
 
-    async fn create_team(&self, input: CreateTeamInput) -> Result<Team, Error>;
-    async fn update_team(&self, id: ID, input: UpdateTeamInput) -> Result<Team, Error>;
+    async fn create_team(
+        &self,
+        input: CreateTeamInput,
+        actor: Option<crate::logic::ActorContext>,
+    ) -> Result<Team, Error>;
+    async fn update_team(
+        &self,
+        id: ID,
+        input: UpdateTeamInput,
+        actor: Option<crate::logic::ActorContext>,
+    ) -> Result<Team, Error>;
     async fn delete_team(&self, id: Uuid) -> Result<(), Error>;
 
     fn clone_box(&self) -> Box<dyn TeamLogic>;
@@ -75,7 +84,11 @@ impl TeamLogic for TeamLogicImpl {
             .collect())
     }
 
-    async fn create_team(&self, input: CreateTeamInput) -> Result<Team, Error> {
+    async fn create_team(
+        &self,
+        input: CreateTeamInput,
+        actor: Option<crate::logic::ActorContext>,
+    ) -> Result<Team, Error> {
         let input = crate::database::team::CreateTeam {
             name: input.name.clone(),
             description: input.description,
@@ -88,13 +101,19 @@ impl TeamLogic for TeamLogicImpl {
         let team = self.repository.create_team(input).await?;
         let id = ID::from(team.id);
 
+        // Extract actor information
+        let (actor_id, actor_name) = actor
+            .as_ref()
+            .map(|a| a.as_option())
+            .unwrap_or((None, None));
+
         // Log activity (ignore errors to not fail the operation)
         let _ = crate::utils::activity_logger::log_team_activity(
             &self.activity_log_repository,
             crate::utils::activity_logger::activity_types::TEAM_CREATED,
             &team.id.to_string(),
-            None,
-            None,
+            actor_id,
+            actor_name,
             format!("Created team '{}'", team.name),
             Some(serde_json::json!({
                 "team_id": team.id.to_string(),
@@ -110,7 +129,12 @@ impl TeamLogic for TeamLogicImpl {
         })
     }
 
-    async fn update_team(&self, id: ID, input: UpdateTeamInput) -> Result<Team, Error> {
+    async fn update_team(
+        &self,
+        id: ID,
+        input: UpdateTeamInput,
+        actor: Option<crate::logic::ActorContext>,
+    ) -> Result<Team, Error> {
         let input = crate::database::team::UpdateTeam {
             id: Uuid::try_from(id).unwrap(),
             name: input.name,
@@ -120,13 +144,19 @@ impl TeamLogic for TeamLogicImpl {
         let team = self.repository.update_team(input).await?;
         let id = ID::from(team.id);
 
+        // Extract actor information
+        let (actor_id, actor_name) = actor
+            .as_ref()
+            .map(|a| a.as_option())
+            .unwrap_or((None, None));
+
         // Log activity (ignore errors to not fail the operation)
         let _ = crate::utils::activity_logger::log_team_activity(
             &self.activity_log_repository,
             crate::utils::activity_logger::activity_types::TEAM_UPDATED,
             &team.id.to_string(),
-            None,
-            None,
+            actor_id,
+            actor_name,
             format!("Updated team '{}'", team.name),
             Some(serde_json::json!({
                 "team_id": team.id.to_string(),
@@ -246,7 +276,7 @@ mod tests {
             });
 
         let logic = team_logic(Box::new(mock_repository), create_mock_activity_log());
-        let result = logic.create_team(input).await;
+        let result = logic.create_team(input, None).await;
 
         assert!(result.is_ok());
         let team = result.unwrap();
@@ -276,7 +306,7 @@ mod tests {
             });
 
         let logic = team_logic(Box::new(mock_repository), create_mock_activity_log());
-        let result = logic.update_team(ID::from(ID), input).await;
+        let result = logic.update_team(ID::from(ID), input, None).await;
 
         assert!(result.is_ok());
         let team = result.unwrap();
@@ -300,7 +330,7 @@ mod tests {
             .returning(move |_| Err(Error::NotFound(expected_id)));
 
         let logic = team_logic(Box::new(mock_repository), create_mock_activity_log());
-        let result = logic.update_team(ID::from(ENV_ID), input).await;
+        let result = logic.update_team(ID::from(ENV_ID), input, None).await;
 
         assert!(result.is_err());
         let error = result.err().unwrap();

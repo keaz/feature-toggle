@@ -491,6 +491,19 @@ pub struct FeatureGrowthPoint {
     pub cumulative_count: i64,
 }
 
+/// Entity details for activity log enrichment
+#[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
+pub struct ActivityEntityDetails {
+    /// Entity ID
+    pub id: String,
+    /// Entity name/key
+    pub name: String,
+    /// Entity type
+    pub entity_type: String,
+    /// Additional details (e.g., environment name for stages, feature key for features)
+    pub details: Option<serde_json::Value>,
+}
+
 /// Activity log entry for tracking user actions and system events
 #[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
 pub struct ActivityLog {
@@ -502,6 +515,8 @@ pub struct ActivityLog {
     pub entity_type: String,
     /// ID of the affected entity
     pub entity_id: String,
+    /// Enriched entity details (resolved from entity_type and entity_id)
+    pub entity_details: Option<ActivityEntityDetails>,
     /// User who performed the action (nullable for system events)
     pub actor_id: Option<ID>,
     /// Name of the actor for display purposes
