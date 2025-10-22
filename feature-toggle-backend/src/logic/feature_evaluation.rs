@@ -3,6 +3,7 @@ use crate::database::feature_evaluation::{
     FeatureEvaluationRepository, FeatureEvaluationRow,
 };
 use sqlx::types::chrono::{DateTime, Utc};
+use tokio::sync::broadcast::Sender;
 use uuid::Uuid;
 
 #[derive(Debug, thiserror::Error)]
@@ -81,6 +82,20 @@ pub trait FeatureEvaluationLogic: Send + Sync {
         feature_key: Option<String>,
     ) -> Result<i64, FeatureEvaluationLogicError>;
 
+    /// Aggregated evaluations grouped by feature key (top features analytics)
+    async fn get_evaluations_by_feature(
+        &self,
+        from_time: DateTime<Utc>,
+        to_time: DateTime<Utc>,
+        environment_id: Option<String>,
+        client_id: Option<Uuid>,
+        limit: Option<i32>,
+        offset: Option<i32>,
+    ) -> Result<
+        Vec<crate::database::feature_evaluation::EvaluationByFeature>,
+        FeatureEvaluationLogicError,
+    >;
+
     fn clone_box(&self) -> Box<dyn FeatureEvaluationLogic>;
 }
 
@@ -92,13 +107,49 @@ impl Clone for Box<dyn FeatureEvaluationLogic> {
 }
 
 /// Implementation of feature evaluation logic using the repository pattern
+/// Event emitted when a feature evaluation is recorded. This powers the
+/// event-driven GraphQL subscriptions to avoid periodic polling.
+#[derive(Debug, Clone)]
+pub struct FeatureEvaluationEvent {
+    pub feature_key: String,
+    pub environment_id: String,
+    pub client_id: Uuid,
+    pub evaluated_at: DateTime<Utc>,
+    pub evaluation_result: bool,
+    pub prior_assignment: bool,
+    pub user_context: Option<String>,
+}
+
 pub struct FeatureEvaluationLogicImpl {
     repository: Box<dyn FeatureEvaluationRepository>,
+    /// Optional broadcast channel for emitting evaluation events.
+    events_tx: Option<Sender<FeatureEvaluationEvent>>,
 }
 
 impl FeatureEvaluationLogicImpl {
-    pub fn new(repository: Box<dyn FeatureEvaluationRepository>) -> Self {
-        Self { repository }
+    pub fn new(
+        repository: Box<dyn FeatureEvaluationRepository>,
+        events_tx: Option<Sender<FeatureEvaluationEvent>>,
+    ) -> Self {
+        Self {
+            repository,
+            events_tx,
+        }
+    }
+
+    fn emit_event(&self, row: &FeatureEvaluationRow) {
+        if let Some(tx) = &self.events_tx {
+            // Ignore error if there are no active subscribers.
+            let _ = tx.send(FeatureEvaluationEvent {
+                feature_key: row.feature_key.clone(),
+                environment_id: row.environment_id.clone(),
+                client_id: row.client_id,
+                evaluated_at: row.evaluated_at,
+                evaluation_result: row.evaluation_result,
+                prior_assignment: row.prior_assignment,
+                user_context: row.user_context.clone(),
+            });
+        }
     }
 }
 
@@ -139,6 +190,7 @@ impl FeatureEvaluationLogic for FeatureEvaluationLogicImpl {
         };
 
         let result = self.repository.create_evaluation(evaluation).await?;
+        self.emit_event(&result);
         Ok(result)
     }
 
@@ -165,6 +217,10 @@ impl FeatureEvaluationLogic for FeatureEvaluationLogicImpl {
         }
 
         let result = self.repository.bulk_create_evaluations(evaluations).await?;
+        // Emit events for each created evaluation.
+        for row in &result {
+            self.emit_event(row);
+        }
         Ok(result)
     }
 
@@ -194,11 +250,11 @@ impl FeatureEvaluationLogic for FeatureEvaluationLogicImpl {
         to_time: DateTime<Utc>,
         interval_minutes: i32,
     ) -> Result<Vec<EvaluationRatePoint>, FeatureEvaluationLogicError> {
-        // Validate time range (max 24 hours)
+        // Validate time range (max 30 days to support 24H, 7D, and 30D periods)
         let duration = to_time - from_time;
-        if duration.num_hours() > 24 {
+        if duration.num_days() > 30 {
             return Err(FeatureEvaluationLogicError::InvalidInput(
-                "Time range cannot exceed 24 hours".to_string(),
+                "Time range cannot exceed 30 days".to_string(),
             ));
         }
 
@@ -240,7 +296,7 @@ impl FeatureEvaluationLogic for FeatureEvaluationLogicImpl {
         from_time: DateTime<Utc>,
         to_time: DateTime<Utc>,
     ) -> Result<EvaluationSummary, FeatureEvaluationLogicError> {
-        // Validate time range (max 30 days for queries, subscription uses duration_hours)
+        // Validate time range (max 30 days for summary to support 24H, 7D, and 30D periods)
         let duration = to_time - from_time;
         if duration.num_days() > 30 {
             return Err(FeatureEvaluationLogicError::InvalidInput(
@@ -303,9 +359,48 @@ impl FeatureEvaluationLogic for FeatureEvaluationLogicImpl {
         Ok(count)
     }
 
+    async fn get_evaluations_by_feature(
+        &self,
+        from_time: DateTime<Utc>,
+        to_time: DateTime<Utc>,
+        environment_id: Option<String>,
+        client_id: Option<Uuid>,
+        limit: Option<i32>,
+        offset: Option<i32>,
+    ) -> Result<
+        Vec<crate::database::feature_evaluation::EvaluationByFeature>,
+        FeatureEvaluationLogicError,
+    > {
+        // Basic validation: ensure non-inverted range and max window (e.g., 30 days for analytics)
+        if to_time < from_time {
+            return Err(FeatureEvaluationLogicError::InvalidInput(
+                "to_time must be >= from_time".into(),
+            ));
+        }
+        let duration_days = (to_time - from_time).num_days();
+        if duration_days > 30 {
+            return Err(FeatureEvaluationLogicError::InvalidInput(
+                "Time range cannot exceed 30 days".into(),
+            ));
+        }
+        let rows = self
+            .repository
+            .get_evaluations_by_feature(
+                from_time,
+                to_time,
+                environment_id,
+                client_id,
+                limit,
+                offset,
+            )
+            .await?;
+        Ok(rows)
+    }
+
     fn clone_box(&self) -> Box<dyn FeatureEvaluationLogic> {
         Box::new(FeatureEvaluationLogicImpl {
             repository: self.repository.clone_box(),
+            events_tx: self.events_tx.clone(),
         })
     }
 }
@@ -314,7 +409,16 @@ impl FeatureEvaluationLogic for FeatureEvaluationLogicImpl {
 pub fn feature_evaluation_logic(
     repository: Box<dyn FeatureEvaluationRepository>,
 ) -> Box<dyn FeatureEvaluationLogic> {
-    Box::new(FeatureEvaluationLogicImpl::new(repository))
+    // Backwards compatible factory without event channel.
+    Box::new(FeatureEvaluationLogicImpl::new(repository, None))
+}
+
+/// Factory that enables event-driven subscriptions by providing a broadcast Sender.
+pub fn feature_evaluation_logic_with_events(
+    repository: Box<dyn FeatureEvaluationRepository>,
+    events_tx: Sender<FeatureEvaluationEvent>,
+) -> Box<dyn FeatureEvaluationLogic> {
+    Box::new(FeatureEvaluationLogicImpl::new(repository, Some(events_tx)))
 }
 
 #[cfg(test)]
@@ -537,7 +641,7 @@ mod tests {
         let mock_repo = MockFeatureEvaluationRepository::new();
         let logic = feature_evaluation_logic(Box::new(mock_repo));
 
-        let from_time = Utc::now() - chrono::Duration::hours(25); // > 24 hours
+        let from_time = Utc::now() - chrono::Duration::days(31); // > 30 days
         let to_time = Utc::now();
 
         let result = logic
@@ -547,7 +651,7 @@ mod tests {
         assert!(result.is_err());
         match result.err().unwrap() {
             FeatureEvaluationLogicError::InvalidInput(msg) => {
-                assert_eq!(msg, "Time range cannot exceed 24 hours");
+                assert_eq!(msg, "Time range cannot exceed 30 days");
             }
             _ => panic!("Expected InvalidInput error"),
         }
@@ -650,7 +754,7 @@ mod tests {
         let mock_repo = MockFeatureEvaluationRepository::new();
         let logic = feature_evaluation_logic(Box::new(mock_repo));
 
-        let from_time = Utc::now() - chrono::Duration::hours(25); // > 24 hours
+        let from_time = Utc::now() - chrono::Duration::days(31); // > 30 days
         let to_time = Utc::now();
 
         let result = logic
@@ -660,7 +764,7 @@ mod tests {
         assert!(result.is_err());
         match result.err().unwrap() {
             FeatureEvaluationLogicError::InvalidInput(msg) => {
-                assert_eq!(msg, "Time range cannot exceed 24 hours");
+                assert_eq!(msg, "Time range cannot exceed 30 days");
             }
             _ => panic!("Expected InvalidInput error"),
         }

@@ -70,6 +70,7 @@ pub async fn run() -> std::io::Result<()> {
         feature_repository.clone_box(),
         environment_logic.clone(),
         activity_log_repository.clone_box(),
+        database::user::user_repository(db_pool.clone()),
     );
     // Create a broadcast channel for feature updates shared between GraphQL mutations and gRPC streaming
     let (updates_tx, _updates_rx) =
@@ -99,18 +100,15 @@ pub async fn run() -> std::io::Result<()> {
         role_logic.clone(),
         jwt_secret_logic.clone(),
     );
-    let feature_evaluation_logic = logic::feature_evaluation::feature_evaluation_logic(
+    // Broadcast channel for feature evaluation events powering GraphQL subscriptions.
+    let (evaluation_events_tx, _evaluation_events_rx_unused) =
+        tokio::sync::broadcast::channel::<logic::feature_evaluation::FeatureEvaluationEvent>(512);
+    let feature_evaluation_logic = logic::feature_evaluation::feature_evaluation_logic_with_events(
         database::feature_evaluation::feature_evaluation_repository(db_pool.clone()),
+        evaluation_events_tx.clone(),
     );
 
-    // Initialize JWT secret on startup
-    jwt_secret_logic
-        .initialize_secret()
-        .await
-        .expect("Failed to initialize JWT secret");
-    log::info!("JWT secret initialized successfully");
-
-    // Initialize JWT secret on startup
+    // Initialize JWT secret on startup (called once)
     jwt_secret_logic
         .initialize_secret()
         .await
@@ -119,12 +117,21 @@ pub async fn run() -> std::io::Result<()> {
 
     let grpc_pool = db_pool.clone();
     let grpc_updates_tx = updates_tx.clone();
+    // Clone evaluation events sender for gRPC so original can be used later in HttpServer closure
+    let evaluation_events_tx_for_grpc = evaluation_events_tx.clone();
     // Spawn gRPC server on separate task
     let grpc_addr: std::net::SocketAddr = cfg
         .grpc_socket_addr()
         .unwrap_or_else(|_| "0.0.0.0:50051".parse().unwrap());
     tokio::spawn(async move {
-        if let Err(e) = crate::grpc::serve(grpc_pool, grpc_addr, grpc_updates_tx).await {
+        if let Err(e) = crate::grpc::serve(
+            grpc_pool,
+            grpc_addr,
+            grpc_updates_tx,
+            evaluation_events_tx_for_grpc,
+        )
+        .await
+        {
             error!("gRPC server error: {e}");
         }
     });
@@ -154,6 +161,8 @@ pub async fn run() -> std::io::Result<()> {
         let schema = Schema::build(Query, MutationRoot, FeatureEvaluationSubscription)
             .data(db_pool.clone())
             .data(updates_tx.clone())
+            // Channel for evaluation events consumed by subscriptions
+            .data(evaluation_events_tx.clone())
             .data(activity_log_repository_arc.clone())
             .data(feature_repository_arc.clone())
             .data(environment_logic.clone())

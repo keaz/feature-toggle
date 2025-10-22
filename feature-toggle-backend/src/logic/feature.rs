@@ -257,11 +257,13 @@ pub fn feature_logic(
     repository: Box<dyn FeatureRepository>,
     environment_logic: Box<dyn EnvironmentLogic>,
     activity_log_repository: Box<dyn crate::database::activity_log::ActivityLogRepository>,
+    user_repository: Box<dyn crate::database::user::UserRepository>,
 ) -> Box<dyn FeatureLogic> {
     Box::new(FeatureLogicImpl {
         repository,
         environment_logic,
         activity_log_repository,
+        user_repository,
     })
 }
 
@@ -269,6 +271,7 @@ struct FeatureLogicImpl {
     repository: Box<dyn FeatureRepository>,
     environment_logic: Box<dyn EnvironmentLogic>,
     activity_log_repository: Box<dyn crate::database::activity_log::ActivityLogRepository>,
+    user_repository: Box<dyn crate::database::user::UserRepository>,
 }
 
 impl Clone for FeatureLogicImpl {
@@ -277,6 +280,7 @@ impl Clone for FeatureLogicImpl {
             repository: self.repository.clone_box(),
             environment_logic: self.environment_logic.clone_box(),
             activity_log_repository: self.activity_log_repository.clone_box(),
+            user_repository: self.user_repository.clone_box(),
         }
     }
 }
@@ -967,43 +971,109 @@ impl DeploymentLogic for FeatureLogicImpl {
         {
             let db_feature = self.repository.get_feature_by_id(fid).await?;
 
+            // Find the stage to get environment information
+            let stage = db_feature.stages.iter().find(|s| s.id == stage_uuid);
+
+            // Get environment name if stage is found
+            let environment_name = if let Some(stage) = stage {
+                match self
+                    .environment_logic
+                    .get_environment_by_id(ID::from(stage.environment_id))
+                    .await
+                {
+                    Ok(env) => Some(env.name),
+                    Err(_) => None,
+                }
+            } else {
+                None
+            };
+
             // Log activity based on request type (ignore errors to not fail the operation)
             let (activity_type, description) = match request {
-                StageChangeRequestType::Deployed => (
-                    crate::utils::activity_logger::activity_types::STAGE_DEPLOYED,
-                    format!(
-                        "Deployed feature '{}' to stage '{}'",
-                        db_feature.key,
-                        stage_id.to_string()
-                    ),
-                ),
+                StageChangeRequestType::Deployed => {
+                    let desc = if let Some(ref env_name) = environment_name {
+                        format!(
+                            "Deployed feature '{}' to environment '{}'",
+                            db_feature.key, env_name
+                        )
+                    } else {
+                        format!(
+                            "Deployed feature '{}' to stage '{}'",
+                            db_feature.key,
+                            stage_id.to_string()
+                        )
+                    };
+                    (
+                        crate::utils::activity_logger::activity_types::STAGE_DEPLOYED,
+                        desc,
+                    )
+                }
                 StageChangeRequestType::DeploymentRejected
-                | StageChangeRequestType::RollbackRejected => (
-                    crate::utils::activity_logger::activity_types::STAGE_REJECTED,
-                    format!(
-                        "Rejected change request for feature '{}' stage '{}'",
-                        db_feature.key,
-                        stage_id.to_string()
-                    ),
-                ),
-                StageChangeRequestType::Rollbacked => (
-                    crate::utils::activity_logger::activity_types::STAGE_ROLLBACKED,
-                    format!(
-                        "Rolled back feature '{}' from stage '{}'",
-                        db_feature.key,
-                        stage_id.to_string()
-                    ),
-                ),
-                _ => (
-                    "stage_change_requested",
-                    format!(
-                        "Requested {} for feature '{}' stage '{}'",
-                        next_status,
-                        db_feature.key,
-                        stage_id.to_string()
-                    ),
-                ),
+                | StageChangeRequestType::RollbackRejected => {
+                    let desc = if let Some(ref env_name) = environment_name {
+                        format!(
+                            "Rejected change request for feature '{}' environment '{}'",
+                            db_feature.key, env_name
+                        )
+                    } else {
+                        format!(
+                            "Rejected change request for feature '{}' stage '{}'",
+                            db_feature.key,
+                            stage_id.to_string()
+                        )
+                    };
+                    (
+                        crate::utils::activity_logger::activity_types::STAGE_REJECTED,
+                        desc,
+                    )
+                }
+                StageChangeRequestType::Rollbacked => {
+                    let desc = if let Some(ref env_name) = environment_name {
+                        format!(
+                            "Rolled back feature '{}' from environment '{}'",
+                            db_feature.key, env_name
+                        )
+                    } else {
+                        format!(
+                            "Rolled back feature '{}' from stage '{}'",
+                            db_feature.key,
+                            stage_id.to_string()
+                        )
+                    };
+                    (
+                        crate::utils::activity_logger::activity_types::STAGE_ROLLBACKED,
+                        desc,
+                    )
+                }
+                _ => {
+                    let desc = if let Some(ref env_name) = environment_name {
+                        format!(
+                            "Requested {} for feature '{}' environment '{}'",
+                            next_status, db_feature.key, env_name
+                        )
+                    } else {
+                        format!(
+                            "Requested {} for feature '{}' stage '{}'",
+                            next_status,
+                            db_feature.key,
+                            stage_id.to_string()
+                        )
+                    };
+                    ("stage_change_requested", desc)
+                }
             };
+
+            let mut metadata = serde_json::json!({
+                "feature_id": db_feature.id.to_string(),
+                "feature_key": db_feature.key.clone(),
+                "stage_id": stage_id.to_string(),
+                "status": next_status,
+            });
+
+            // Add environment name to metadata if available
+            if let Some(env_name) = environment_name {
+                metadata["environment_name"] = serde_json::json!(env_name);
+            }
 
             let _ = crate::utils::activity_logger::log_activity(
                 &self.activity_log_repository,
@@ -1013,12 +1083,7 @@ impl DeploymentLogic for FeatureLogicImpl {
                 Some(user_id),
                 None,
                 description,
-                Some(serde_json::json!({
-                    "feature_id": db_feature.id.to_string(),
-                    "feature_key": db_feature.key.clone(),
-                    "stage_id": stage_id.to_string(),
-                    "status": next_status,
-                })),
+                Some(metadata),
             )
             .await;
 
@@ -1120,6 +1185,30 @@ mod test {
         Box::new(mock)
     }
 
+    fn create_mock_user_repository() -> Box<dyn crate::database::user::UserRepository> {
+        let mut mock = crate::database::user::MockUserRepository::new();
+        // Allow any number of user repository calls in tests
+        mock.expect_get_user_by_id().returning(|_| {
+            Ok(crate::database::user::User {
+                id: uuid::Uuid::new_v4(),
+                username: "test_user".to_string(),
+                password_hash: "hash".to_string(),
+                first_name: "Test".to_string(),
+                last_name: "User".to_string(),
+                email: "test@example.com".to_string(),
+                is_admin: false,
+                enabled: true,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                last_login: None,
+                is_temporary_password: false,
+            })
+        });
+        mock.expect_clone_box()
+            .returning(|| create_mock_user_repository());
+        Box::new(mock)
+    }
+
     #[test]
     fn test_get_create_stages_to_create() {
         let stages = create_dummy_stages();
@@ -1198,6 +1287,7 @@ mod test {
             Box::new(repository),
             Box::new(environment_logic),
             create_mock_activity_log(),
+            create_mock_user_repository(),
         );
         let result = logic.get_feature_by_id(ID::from(ID)).await;
 
@@ -1225,6 +1315,7 @@ mod test {
             Box::new(repository),
             Box::new(environment_logic),
             create_mock_activity_log(),
+            create_mock_user_repository(),
         );
         let result = logic.get_feature_by_id(ID::from(ID)).await;
 
@@ -1260,6 +1351,7 @@ mod test {
             Box::new(repository),
             Box::new(environment_logic),
             create_mock_activity_log(),
+            create_mock_user_repository(),
         );
         let result = logic
             .create_feature(
@@ -1318,6 +1410,7 @@ mod test {
             Box::new(repository),
             Box::new(environment_logic),
             create_mock_activity_log(),
+            create_mock_user_repository(),
         );
         let result = logic.update_feature(ID::from(ID), input, None).await;
 
@@ -1347,6 +1440,7 @@ mod test {
             Box::new(repository),
             Box::new(environment_logic),
             create_mock_activity_log(),
+            create_mock_user_repository(),
         );
         let result = logic.delete_feature(ID::from(ID), None).await;
 
@@ -1397,6 +1491,7 @@ mod test {
             Box::new(repository),
             Box::new(environment_logic),
             create_mock_activity_log(),
+            create_mock_user_repository(),
         );
         let result = logic
             .get_features(ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"), None, None)
@@ -1452,6 +1547,7 @@ mod test {
             Box::new(repository),
             Box::new(environment_logic),
             create_mock_activity_log(),
+            create_mock_user_repository(),
         );
         let result = logic
             .request_stage_change(
@@ -1510,6 +1606,7 @@ mod test {
             Box::new(repository),
             Box::new(environment_logic),
             create_mock_activity_log(),
+            create_mock_user_repository(),
         );
         let result = logic
             .request_stage_change(
@@ -1563,6 +1660,7 @@ mod test {
             Box::new(repository),
             Box::new(environment_logic),
             create_mock_activity_log(),
+            create_mock_user_repository(),
         );
         let result = logic
             .request_stage_change(
@@ -1615,6 +1713,7 @@ mod test {
             Box::new(repository),
             Box::new(environment_logic),
             create_mock_activity_log(),
+            create_mock_user_repository(),
         );
         let result = logic
             .request_stage_change(
@@ -1668,6 +1767,7 @@ mod test {
             Box::new(repository),
             Box::new(environment_logic),
             create_mock_activity_log(),
+            create_mock_user_repository(),
         );
         let result = logic
             .request_stage_change(
@@ -1721,6 +1821,7 @@ mod test {
             Box::new(repository),
             Box::new(environment_logic),
             create_mock_activity_log(),
+            create_mock_user_repository(),
         );
         let result = logic
             .request_stage_change(
@@ -1765,6 +1866,7 @@ mod test {
             Box::new(repository),
             Box::new(environment_logic),
             create_mock_activity_log(),
+            create_mock_user_repository(),
         );
         let result = logic
             .request_stage_change(
@@ -1801,6 +1903,7 @@ mod test {
             Box::new(repository),
             Box::new(environment_logic),
             create_mock_activity_log(),
+            create_mock_user_repository(),
         );
         let result = logic
             .request_stage_change(
@@ -1861,6 +1964,7 @@ mod test {
             Box::new(repository),
             Box::new(environment_logic),
             create_mock_activity_log(),
+            create_mock_user_repository(),
         );
         let result = logic
             .request_stage_change(
@@ -2005,6 +2109,7 @@ mod test {
             Box::new(repository),
             Box::new(environment_logic),
             create_mock_activity_log(),
+            create_mock_user_repository(),
         );
         let (features, total) = logic
             .get_features_paginated(ID::from(team_id), None, None, 1, 10)
@@ -2041,6 +2146,7 @@ mod test {
             Box::new(repository),
             Box::new(environment_logic),
             create_mock_activity_log(),
+            create_mock_user_repository(),
         );
         let (features, total) = logic
             .get_features_paginated(
@@ -2079,6 +2185,7 @@ mod test {
             Box::new(repo),
             Box::new(env_logic),
             create_mock_activity_log(),
+            create_mock_user_repository(),
         );
         let (features, total) = logic
             .get_features_paginated(
@@ -2117,6 +2224,7 @@ mod test {
             Box::new(repo),
             Box::new(env_logic),
             create_mock_activity_log(),
+            create_mock_user_repository(),
         );
         let (features, total) = logic
             .get_features_paginated(
@@ -2155,6 +2263,7 @@ mod test {
             Box::new(repo),
             Box::new(env_logic),
             create_mock_activity_log(),
+            create_mock_user_repository(),
         );
         let (features, total) = logic
             .get_features_paginated(
@@ -2193,6 +2302,7 @@ mod test {
             Box::new(repo),
             Box::new(env_logic),
             create_mock_activity_log(),
+            create_mock_user_repository(),
         );
         let (features, total) = logic
             .get_features_paginated(
@@ -2218,6 +2328,7 @@ mod test {
             Box::new(repository),
             Box::new(environment_logic),
             create_mock_activity_log(),
+            create_mock_user_repository(),
         );
         let result = logic
             .get_features_paginated(ID::from("invalid-uuid"), None, None, 1, 10)

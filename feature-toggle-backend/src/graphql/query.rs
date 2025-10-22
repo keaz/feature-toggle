@@ -468,9 +468,12 @@ impl Query {
             from_time, to_time, environment_id, client_id
         );
 
-        // Get the feature evaluation repository
-        let repo = ctx
-            .data::<Box<dyn crate::database::feature_evaluation::FeatureEvaluationRepository>>()?;
+        // Retrieve feature evaluation logic (preferred over direct repository access)
+        let logic = ctx
+            .data::<Box<dyn crate::logic::feature_evaluation::FeatureEvaluationLogic>>()
+            .map_err(|_| {
+                async_graphql::Error::new("Feature evaluation logic not found in context")
+            })?;
 
         // Convert client_id from GraphQL ID to UUID if provided
         let client_uuid = if let Some(id) = client_id {
@@ -481,8 +484,8 @@ impl Query {
             None
         };
 
-        // Call the repository method
-        let results = repo
+        // Use logic to fetch evaluations grouped by feature; delegate to repository internally
+        let results = logic
             .get_evaluations_by_feature(
                 from_time,
                 to_time,
@@ -492,7 +495,9 @@ impl Query {
                 offset,
             )
             .await
-            .map_err(|e| async_graphql::Error::new(format!("Database error: {}", e)))?;
+            .map_err(|e| {
+                async_graphql::Error::new(format!("Failed to fetch evaluations by feature: {}", e))
+            })?;
 
         // Convert database results to GraphQL types
         Ok(results
@@ -637,8 +642,10 @@ impl Query {
             ));
         }
 
-        // Get the feature repository
-        let repo = ctx.data::<Box<dyn crate::database::feature::FeatureRepository>>()?;
+        // Get the feature repository (wrapped in Arc)
+        let repo =
+            ctx.data::<std::sync::Arc<Box<dyn crate::database::feature::FeatureRepository>>>()?;
+        let repo = repo.as_ref();
 
         // Convert team_id from GraphQL ID to UUID if provided
         let team_uuid =
@@ -720,12 +727,8 @@ impl Query {
         input: EvaluationSummaryQueryInput,
     ) -> GqlResult<EvaluationSummaryOutput> {
         debug!(
-            "Fetching evaluation summary from {:?} to {:?} with filters: env={:?}, client={:?}, feature={:?}",
-            input.from_time,
-            input.to_time,
-            input.environment_id,
-            input.client_id,
-            input.feature_key
+            "Fetching evaluation summary for period: {:?} with filters: env={:?}, client={:?}, feature={:?}",
+            input.period, input.environment_id, input.client_id, input.feature_key
         );
 
         let logic =
@@ -740,13 +743,18 @@ impl Query {
             None
         };
 
+        // Calculate time range based on period
+        let now = chrono::Utc::now();
+        let (from_time, to_time) =
+            crate::graphql::subscription::calculate_time_range(input.period, now);
+
         let summary = logic
             .get_evaluation_summary(
                 input.feature_key,
                 input.environment_id,
                 client_uuid,
-                input.from_time,
-                input.to_time,
+                from_time,
+                to_time,
             )
             .await
             .map_err(|e| {
@@ -762,6 +770,182 @@ impl Query {
             success_rate: summary.success_rate,
             cache_hit_rate: summary.cache_hit_rate,
         })
+    }
+
+    /// Get evaluation rates with period - provides time-series evaluation metrics for dashboard charts
+    /// Returns aggregated evaluation data bucketed by the specified time interval for the given period
+    async fn evaluation_rates_with_period(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Filter options for evaluation rates with period")]
+        input: crate::graphql::subscription::EvaluationRatesInputWithPeriod,
+    ) -> GqlResult<Vec<crate::graphql::subscription::GqlEvaluationRatePoint>> {
+        debug!(
+            "Fetching evaluation rates for period: {:?} with interval {} minutes, filters: env={:?}, client={:?}, feature={:?}",
+            input.period,
+            input.interval_minutes,
+            input.environment_id,
+            input.client_id,
+            input.feature_key
+        );
+
+        // Validate interval bounds
+        if !(1..=60).contains(&input.interval_minutes) {
+            return Err(async_graphql::Error::new(
+                "Interval must be between 1 and 60 minutes",
+            ));
+        }
+
+        // Parse client_id if provided
+        let client_id = match input.client_id.as_ref().map(|s| uuid::Uuid::parse_str(s)) {
+            Some(Ok(id)) => Some(id),
+            Some(Err(_)) => {
+                return Err(async_graphql::Error::new("Invalid client ID format"));
+            }
+            None => None,
+        };
+
+        let logic =
+            ctx.data::<Box<dyn crate::logic::feature_evaluation::FeatureEvaluationLogic>>()?;
+
+        // Calculate time range based on period
+        let now = chrono::Utc::now();
+        let (from_time, to_time) =
+            crate::graphql::subscription::calculate_time_range(input.period, now);
+
+        // Fetch evaluation rates from logic layer
+        let rates = logic
+            .get_evaluation_rates(
+                input.feature_key,
+                input.environment_id,
+                client_id,
+                from_time,
+                to_time,
+                input.interval_minutes,
+            )
+            .await
+            .map_err(|e| {
+                async_graphql::Error::new(format!("Failed to get evaluation rates: {}", e))
+            })?;
+
+        // Map to GraphQL output type with calculated percentages
+        let mapped = rates
+            .into_iter()
+            .map(|rate| {
+                let success_rate = if rate.evaluation_count > 0 {
+                    (rate.success_count as f64 / rate.evaluation_count as f64) * 100.0
+                } else {
+                    0.0
+                };
+                let cache_hit_rate = if rate.evaluation_count > 0 {
+                    (rate.prior_assignment_count as f64 / rate.evaluation_count as f64) * 100.0
+                } else {
+                    0.0
+                };
+                crate::graphql::subscription::GqlEvaluationRatePoint {
+                    time_bucket: rate.time_bucket.to_rfc3339(),
+                    evaluation_count: rate.evaluation_count,
+                    success_count: rate.success_count,
+                    prior_assignment_count: rate.prior_assignment_count,
+                    success_rate: ((success_rate * 100.0).round() / 100.0),
+                    cache_hit_rate: ((cache_hit_rate * 100.0).round() / 100.0),
+                }
+            })
+            .collect();
+
+        Ok(mapped)
+    }
+
+    /// Get evaluation rates - provides time-series evaluation metrics for dashboard charts
+    /// Returns aggregated evaluation data bucketed by the specified time interval
+    async fn evaluation_rates(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Filter options for evaluation rates")]
+        input: crate::graphql::subscription::EvaluationRatesInput,
+    ) -> GqlResult<Vec<crate::graphql::subscription::GqlEvaluationRatePoint>> {
+        debug!(
+            "Fetching evaluation rates from {:?} to {:?} with interval {} minutes, filters: env={:?}, client={:?}, feature={:?}",
+            input.from_time,
+            input.to_time,
+            input.interval_minutes,
+            input.environment_id,
+            input.client_id,
+            input.feature_key
+        );
+
+        // Validate interval bounds
+        if !(1..=60).contains(&input.interval_minutes) {
+            return Err(async_graphql::Error::new(
+                "Interval must be between 1 and 60 minutes",
+            ));
+        }
+
+        // Validate time range
+        if input.to_time < input.from_time {
+            return Err(async_graphql::Error::new("toTime must be >= fromTime"));
+        }
+
+        let duration_hours = (input.to_time - input.from_time).num_hours();
+        if duration_hours > 24 {
+            return Err(async_graphql::Error::new(
+                "Time range cannot exceed 24 hours",
+            ));
+        }
+
+        // Parse client_id if provided
+        let client_id = match input.client_id.as_ref().map(|s| uuid::Uuid::parse_str(s)) {
+            Some(Ok(id)) => Some(id),
+            Some(Err(_)) => {
+                return Err(async_graphql::Error::new("Invalid client ID format"));
+            }
+            None => None,
+        };
+
+        let logic =
+            ctx.data::<Box<dyn crate::logic::feature_evaluation::FeatureEvaluationLogic>>()?;
+
+        // Fetch evaluation rates from logic layer
+        let rates = logic
+            .get_evaluation_rates(
+                input.feature_key,
+                input.environment_id,
+                client_id,
+                input.from_time,
+                input.to_time,
+                input.interval_minutes,
+            )
+            .await
+            .map_err(|e| {
+                async_graphql::Error::new(format!("Failed to get evaluation rates: {}", e))
+            })?;
+
+        // Map to GraphQL output type with calculated percentages
+        let mapped = rates
+            .into_iter()
+            .map(|rate| {
+                let success_rate = if rate.evaluation_count > 0 {
+                    (rate.success_count as f64 / rate.evaluation_count as f64) * 100.0
+                } else {
+                    0.0
+                };
+                let cache_hit_rate = if rate.evaluation_count > 0 {
+                    (rate.prior_assignment_count as f64 / rate.evaluation_count as f64) * 100.0
+                } else {
+                    0.0
+                };
+                crate::graphql::subscription::GqlEvaluationRatePoint {
+                    time_bucket: rate.time_bucket.to_rfc3339(),
+                    evaluation_count: rate.evaluation_count,
+                    success_count: rate.success_count,
+                    prior_assignment_count: rate.prior_assignment_count,
+                    success_rate: ((success_rate * 100.0).round() / 100.0),
+                    cache_hit_rate: ((cache_hit_rate * 100.0).round() / 100.0),
+                }
+            })
+            .collect();
+
+        Ok(mapped)
     }
 
     /// Get rollout metrics for dashboard - provides insights into pipeline performance

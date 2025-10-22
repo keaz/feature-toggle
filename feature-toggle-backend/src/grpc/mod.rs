@@ -89,6 +89,9 @@ impl FeatureEvaluationSvc {
     pub fn new(
         pool: sqlx::PgPool,
         updates_tx: tokio::sync::broadcast::Sender<pb::FeatureUpdate>,
+        evaluation_events_tx: tokio::sync::broadcast::Sender<
+            crate::logic::feature_evaluation::FeatureEvaluationEvent,
+        >,
     ) -> Self {
         let feature_repo = crate::database::feature::feature_repository(pool.clone());
         let client_repo = crate::database::client::client_repository(pool.clone());
@@ -98,8 +101,12 @@ impl FeatureEvaluationSvc {
             crate::logic::user_flag::user_flag_logic(client_repo.clone(), user_flag_repo.clone());
         let feature_evaluation_repo =
             crate::database::feature_evaluation::feature_evaluation_repository(pool.clone());
+        // Use event-enabled logic so gRPC ingested evaluations broadcast to GraphQL subscriptions
         let feature_evaluation_logic =
-            crate::logic::feature_evaluation::feature_evaluation_logic(feature_evaluation_repo);
+            crate::logic::feature_evaluation::feature_evaluation_logic_with_events(
+                feature_evaluation_repo,
+                evaluation_events_tx.clone(),
+            );
         Self {
             pool,
             feature_repo,
@@ -119,6 +126,9 @@ impl FeatureEvaluationSvc {
         feature_repo: Box<dyn crate::database::feature::FeatureRepository>,
         client_repo: Box<dyn crate::database::client::ClientRepository>,
         updates_tx: tokio::sync::broadcast::Sender<pb::FeatureUpdate>,
+        evaluation_events_tx: tokio::sync::broadcast::Sender<
+            crate::logic::feature_evaluation::FeatureEvaluationEvent,
+        >,
     ) -> Self {
         // Use a dummy pool; not used when repos are injected
         let pool = sqlx::PgPool::connect_lazy("postgres://unused").expect("lazy pool");
@@ -132,7 +142,10 @@ impl FeatureEvaluationSvc {
         let feature_evaluation_repo =
             crate::database::feature_evaluation::feature_evaluation_repository(pool.clone());
         let feature_evaluation_logic =
-            crate::logic::feature_evaluation::feature_evaluation_logic(feature_evaluation_repo);
+            crate::logic::feature_evaluation::feature_evaluation_logic_with_events(
+                feature_evaluation_repo,
+                evaluation_events_tx.clone(),
+            );
         Self {
             pool,
             feature_repo,
@@ -237,8 +250,14 @@ impl FeatureEvaluationSvc {
             team_id: f.team_id.to_string(),
             created_at: f.created_at.to_rfc3339(),
             kill_switch_enabled: f.kill_switch_enabled,
-            kill_switch_activated_at: f.kill_switch_activated_at.map(|dt| dt.to_rfc3339()).unwrap_or_default(),
-            rollback_scheduled_at: f.rollback_scheduled_at.map(|dt| dt.to_rfc3339()).unwrap_or_default(),
+            kill_switch_activated_at: f
+                .kill_switch_activated_at
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_default(),
+            rollback_scheduled_at: f
+                .rollback_scheduled_at
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_default(),
             stages: stage_msgs,
             dependencies: deps,
         };
@@ -847,8 +866,11 @@ pub async fn serve(
     pool: sqlx::PgPool,
     addr: std::net::SocketAddr,
     updates_tx: broadcast::Sender<pb::FeatureUpdate>,
+    evaluation_events_tx: broadcast::Sender<
+        crate::logic::feature_evaluation::FeatureEvaluationEvent,
+    >,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let svc = FeatureEvaluationSvc::new(pool, updates_tx.clone());
+    let svc = FeatureEvaluationSvc::new(pool, updates_tx.clone(), evaluation_events_tx.clone());
     tonic::transport::Server::builder()
         .add_service(FeatureEvaluationServer::new(svc))
         .serve(addr)

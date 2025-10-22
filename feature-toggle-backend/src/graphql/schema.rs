@@ -1,6 +1,9 @@
 use async_graphql::{ComplexObject, Enum, ID, InputObject, Result as GqlResult, SimpleObject};
 use serde::{Deserialize, Serialize};
 
+// Re-export TimePeriod from subscription module
+use crate::graphql::subscription::TimePeriod;
+
 #[derive(Enum, Copy, Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub enum FeatureType {
     Simple,
@@ -627,8 +630,7 @@ pub struct EvaluationCountFilter {
 // Input type for evaluation summary query
 #[derive(InputObject, Debug, Clone)]
 pub struct EvaluationSummaryQueryInput {
-    pub from_time: chrono::DateTime<chrono::Utc>,
-    pub to_time: chrono::DateTime<chrono::Utc>,
+    pub period: TimePeriod,
     pub environment_id: Option<String>,
     pub client_id: Option<ID>,
     pub feature_key: Option<String>,
