@@ -1,9 +1,9 @@
+use crate::Error;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use mockall::automock;
 use sqlx::PgPool;
 use uuid::Uuid;
-use crate::Error;
-use mockall::automock;
 
 #[derive(Debug, Clone)]
 pub struct JwtToken {
@@ -19,7 +19,12 @@ pub struct JwtToken {
 #[automock]
 #[async_trait]
 pub trait JwtTokenRepository: Send + Sync {
-    async fn store_token(&self, user_id: Uuid, token_hash: String, expires_at: DateTime<Utc>) -> Result<JwtToken, Error>;
+    async fn store_token(
+        &self,
+        user_id: Uuid,
+        token_hash: String,
+        expires_at: DateTime<Utc>,
+    ) -> Result<JwtToken, Error>;
     async fn is_token_valid(&self, token_hash: &str) -> Result<bool, Error>;
     async fn revoke_token(&self, token_hash: &str) -> Result<bool, Error>;
     async fn revoke_all_user_tokens(&self, user_id: Uuid) -> Result<u64, Error>;
@@ -45,7 +50,12 @@ struct JwtTokenRepositoryImpl {
 
 #[async_trait]
 impl JwtTokenRepository for JwtTokenRepositoryImpl {
-    async fn store_token(&self, user_id: Uuid, token_hash: String, expires_at: DateTime<Utc>) -> Result<JwtToken, Error> {
+    async fn store_token(
+        &self,
+        user_id: Uuid,
+        token_hash: String,
+        expires_at: DateTime<Utc>,
+    ) -> Result<JwtToken, Error> {
         let token = sqlx::query_as!(
             JwtToken,
             r#"

@@ -5,6 +5,8 @@ use std::path::Path;
 use log::{info, warn};
 use serde::Deserialize;
 
+use crate::cluster::ClusterConfig;
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub allowed_origin: String,
@@ -12,6 +14,9 @@ pub struct Config {
     pub http_addr: String,
     /// Address for gRPC server, e.g., "0.0.0.0:50051"
     pub grpc_addr: String,
+    /// Optional configuration for multi-node replication.
+    #[serde(default)]
+    pub cluster: ClusterConfig,
 }
 
 impl Default for Config {
@@ -20,6 +25,7 @@ impl Default for Config {
             allowed_origin: "http://localhost:5173".to_string(),
             http_addr: "0.0.0.0:8080".to_string(),
             grpc_addr: "0.0.0.0:50051".to_string(),
+            cluster: ClusterConfig::default(),
         }
     }
 }

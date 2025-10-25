@@ -111,6 +111,7 @@ impl Clone for Box<dyn FeatureEvaluationLogic> {
 /// event-driven GraphQL subscriptions to avoid periodic polling.
 #[derive(Debug, Clone)]
 pub struct FeatureEvaluationEvent {
+    pub event_id: Uuid,
     pub feature_key: String,
     pub environment_id: String,
     pub client_id: Uuid,
@@ -141,6 +142,7 @@ impl FeatureEvaluationLogicImpl {
         if let Some(tx) = &self.events_tx {
             // Ignore error if there are no active subscribers.
             let _ = tx.send(FeatureEvaluationEvent {
+                event_id: Uuid::new_v4(),
                 feature_key: row.feature_key.clone(),
                 environment_id: row.environment_id.clone(),
                 client_id: row.client_id,

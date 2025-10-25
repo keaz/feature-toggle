@@ -2,10 +2,10 @@
 // Keeping this file for compatibility during transition
 // TODO: Remove this file once all references are updated
 
+use actix_web::Error;
+use actix_web::dev::{Service, ServiceRequest, ServiceResponse, Transform, forward_ready};
+use futures_util::future::{LocalBoxFuture, Ready, ready};
 use std::rc::Rc;
-use actix_web::dev::{forward_ready, Service, ServiceRequest, ServiceResponse, Transform};
-use actix_web::{Error};
-use futures_util::future::{ready, LocalBoxFuture, Ready};
 
 pub struct SessionGuard {
     ui_origin: String,

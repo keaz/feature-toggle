@@ -182,6 +182,7 @@ async fn subscription_emits_on_event() {
 
     // Act: send an event
     let _ = tx.send(FeatureEvaluationEvent {
+        event_id: Uuid::new_v4(),
         feature_key: "f".into(),
         environment_id: "env".into(),
         client_id: Uuid::new_v4(),

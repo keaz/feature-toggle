@@ -1,10 +1,10 @@
-use crate::database::jwt_secret::{JwtSecretRepository, jwt_secret_repository};
-use crate::database::entity::JwtSecret;
 use crate::Error;
+use crate::database::entity::JwtSecret;
+use crate::database::jwt_secret::{JwtSecretRepository, jwt_secret_repository};
+use log::{error, info, warn};
 use mockall::automock;
 use sqlx::PgPool;
 use uuid::Uuid;
-use log::{info, warn, error};
 
 #[automock]
 #[async_trait::async_trait]
@@ -12,22 +12,22 @@ pub trait JwtSecretLogic: Send + Sync {
     /// Initialize JWT secret on application startup
     /// Returns the active secret, creating one if none exists
     async fn initialize_secret(&self) -> Result<String, Error>;
-    
+
     /// Get the current active JWT secret for signing/verification
     async fn get_current_secret(&self) -> Result<String, Error>;
-    
+
     /// Generate a new JWT secret (admin operation)
     async fn generate_new_secret(&self, created_by: Option<Uuid>) -> Result<JwtSecret, Error>;
-    
+
     /// Verify if a secret is currently active
     async fn verify_secret(&self, secret: &str) -> Result<bool, Error>;
-    
+
     /// Get all secrets for admin purposes
     async fn get_all_secrets(&self) -> Result<Vec<JwtSecret>, Error>;
-    
+
     /// Emergency deactivate all secrets (will require new secret generation)
     async fn deactivate_all_secrets(&self) -> Result<(), Error>;
-    
+
     fn clone_box(&self) -> Box<dyn JwtSecretLogic>;
 }
 
@@ -71,13 +71,18 @@ impl JwtSecretLogic for JwtSecretLogicImpl {
             Some(secret) => Ok(secret.secret),
             None => {
                 error!("No active JWT secret found and application should have one");
-                Err(Error::InvalidInput("No active JWT secret available".to_string()))
+                Err(Error::InvalidInput(
+                    "No active JWT secret available".to_string(),
+                ))
             }
         }
     }
 
     async fn generate_new_secret(&self, created_by: Option<Uuid>) -> Result<JwtSecret, Error> {
-        let secret = self.jwt_secret_repository.generate_new_secret(created_by).await?;
+        let secret = self
+            .jwt_secret_repository
+            .generate_new_secret(created_by)
+            .await?;
         info!("Generated new JWT secret by user: {:?}", created_by);
         Ok(secret)
     }
@@ -114,8 +119,8 @@ pub fn jwt_secret_logic(pool: PgPool) -> Box<dyn JwtSecretLogic> {
 mod tests {
     use super::*;
     use crate::database::jwt_secret::MockJwtSecretRepository;
-    use mockall::predicate::*;
     use chrono::Utc;
+    use mockall::predicate::*;
 
     fn create_test_secret() -> JwtSecret {
         JwtSecret {

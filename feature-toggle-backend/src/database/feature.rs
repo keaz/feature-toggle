@@ -1438,26 +1438,26 @@ impl FeatureRepository for FeatureRepositoryImpl {
             format!(
                 r#"
                 WITH time_series AS (
-                    SELECT 
-                        date_trunc('{}', created_at) as time_bucket,
+                    SELECT
+                        date_trunc('{}', created_at)::timestamptz as time_bucket,
                         team_id,
-                        COUNT(*) as feature_count
+                        COUNT(*)::bigint as feature_count
                     FROM features
-                    WHERE created_at >= $1 
+                    WHERE created_at >= $1
                         AND created_at <= $2
                         AND team_id = $3
                     GROUP BY time_bucket, team_id
                     ORDER BY time_bucket
                 ),
                 cumulative AS (
-                    SELECT 
+                    SELECT
                         time_bucket,
                         team_id,
                         feature_count,
-                        SUM(feature_count) OVER (PARTITION BY team_id ORDER BY time_bucket) as cumulative_count
+                        SUM(feature_count) OVER (PARTITION BY team_id ORDER BY time_bucket)::bigint as cumulative_count
                     FROM time_series
                 )
-                SELECT 
+                SELECT
                     c.time_bucket,
                     c.team_id,
                     t.name as team_name,
@@ -1474,25 +1474,25 @@ impl FeatureRepository for FeatureRepositoryImpl {
             format!(
                 r#"
                 WITH time_series AS (
-                    SELECT 
-                        date_trunc('{}', created_at) as time_bucket,
+                    SELECT
+                        date_trunc('{}', created_at)::timestamptz as time_bucket,
                         team_id,
-                        COUNT(*) as feature_count
+                        COUNT(*)::bigint as feature_count
                     FROM features
-                    WHERE created_at >= $1 
+                    WHERE created_at >= $1
                         AND created_at <= $2
                     GROUP BY time_bucket, team_id
                     ORDER BY time_bucket, team_id
                 ),
                 cumulative AS (
-                    SELECT 
+                    SELECT
                         time_bucket,
                         team_id,
                         feature_count,
-                        SUM(feature_count) OVER (PARTITION BY team_id ORDER BY time_bucket) as cumulative_count
+                        SUM(feature_count) OVER (PARTITION BY team_id ORDER BY time_bucket)::bigint as cumulative_count
                     FROM time_series
                 )
-                SELECT 
+                SELECT
                     c.time_bucket,
                     c.team_id,
                     t.name as team_name,

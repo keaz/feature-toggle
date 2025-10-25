@@ -13,3 +13,17 @@ grpc_addr = "0.0.0.0:50051"
 # JWT secret for token signing and verification
 # IMPORTANT: Change this to a secure random string in production
 jwt_secret = "your_secure_jwt_secret_change_in_production_minimum_32_characters"
+
+# Cluster replication (optional). Uncomment and adjust when running multiple backend instances.
+#[cluster]
+#enabled = true
+#listen_addr = "0.0.0.0:6000"
+#node_id = "backend-1"
+#reconnect_delay_ms = 2000
+#peers = ["10.0.0.2:6000"] # Optional legacy static peers
+## Discovery strategy: either `static` or `dns`.
+#[cluster.discovery]
+#strategy = "dns"
+#record = "feature-toggle-cluster.default.svc.cluster.local"
+#port = 6000
+#refresh_ms = 2000

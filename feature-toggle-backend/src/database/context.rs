@@ -148,19 +148,21 @@ impl ContextRepository for ContextRepositoryImpl {
         page_number: i32,
         page_size: i32,
     ) -> Result<(Vec<Context>, i64), Error> {
-        debug!("DB: get_contexts_paginated team={team_id} key={key:?} page={page_number} size={page_size}");
-        
-        // First, get the total count
-        let mut count_qb = QueryBuilder::<Postgres>::new(
-            "SELECT COUNT(*) FROM contexts c WHERE c.team_id = ",
+        debug!(
+            "DB: get_contexts_paginated team={team_id} key={key:?} page={page_number} size={page_size}"
         );
+
+        // First, get the total count
+        let mut count_qb =
+            QueryBuilder::<Postgres>::new("SELECT COUNT(*) FROM contexts c WHERE c.team_id = ");
         count_qb.push_bind(team_id);
         if let Some(k) = &key {
             let pattern = format!("%{}%", k);
             count_qb.push(" AND c.key ILIKE ").push_bind(pattern);
         }
 
-        let total_count: i64 = count_qb.build_query_scalar()
+        let total_count: i64 = count_qb
+            .build_query_scalar()
             .fetch_one(&self.pool)
             .await
             .map_err(|e| Error::DatabaseError(e))?;
@@ -355,8 +357,8 @@ mod tests {
                 ContextEntry {
                     id: Uuid::new_v4(),
                     value: "EU".to_string(),
-                }
-            ]
+                },
+            ],
         }
     }
 
@@ -407,24 +409,24 @@ mod tests {
     fn test_context_repository_factory() {
         // Test that the factory function has correct signature
         use sqlx::PgPool;
-        
+
         fn _verify_signature(_pool: PgPool) -> Box<dyn ContextRepository> {
             context_repository(_pool)
         }
-        
+
         // Test passes if it compiles
         assert!(true);
     }
 
-    #[test] 
+    #[test]
     fn test_context_repository_impl_creation() {
         // Test the repository constructor signature
         use sqlx::PgPool;
-        
+
         fn _verify_signature(_pool: PgPool) -> ContextRepositoryImpl {
             ContextRepositoryImpl::new(_pool)
         }
-        
+
         // Test passes if it compiles
         assert!(true);
     }
@@ -434,13 +436,13 @@ mod tests {
         let mut mock_repo = MockContextRepository::new();
         let context = sample_context();
         let context_id = context.id;
-        
+
         mock_repo
             .expect_get_context_by_id()
             .with(mockall::predicate::eq(context_id))
             .times(1)
             .returning(move |_| Ok(context.clone()));
-        
+
         let result = mock_repo.get_context_by_id(context_id).await;
         assert!(result.is_ok());
         let retrieved_context = result.unwrap();
@@ -453,16 +455,16 @@ mod tests {
         let mut mock_repo = MockContextRepository::new();
         let team_id = Uuid::new_v4();
         let contexts = vec![sample_context()];
-        
+
         mock_repo
             .expect_get_contexts()
             .with(
                 mockall::predicate::eq(team_id),
-                mockall::predicate::eq(None::<String>)
+                mockall::predicate::eq(None::<String>),
             )
             .times(1)
             .returning(move |_, _| Ok(contexts.clone()));
-        
+
         let result = mock_repo.get_contexts(team_id, None).await;
         assert!(result.is_ok());
         let ctxs = result.unwrap();
@@ -487,21 +489,21 @@ mod tests {
                 ContextEntry {
                     id: Uuid::new_v4(),
                     value: "desktop".to_string(),
-                }
-            ]
+                },
+            ],
         };
-        
+
         mock_repo
             .expect_create_context()
             .with(
                 mockall::predicate::eq(team_id),
                 mockall::predicate::function(|input: &CreateContextInput| {
                     input.key == "user.device" && input.entries.len() == 2
-                })
+                }),
             )
             .times(1)
             .returning(move |_, _| Ok(expected_context.clone()));
-        
+
         let result = mock_repo.create_context(team_id, create_input).await;
         assert!(result.is_ok());
         let created_context = result.unwrap();
@@ -526,23 +528,23 @@ mod tests {
                 ContextEntry {
                     id: Uuid::new_v4(),
                     value: "basic".to_string(),
-                }
-            ]
+                },
+            ],
         };
-        
+
         mock_repo
             .expect_update_context()
             .with(
                 mockall::predicate::eq(context_id),
                 mockall::predicate::function(|input: &UpdateContextInput| {
-                    input.key == Some("user.tier".to_string()) && 
-                    input.entries.is_some() && 
-                    input.entries.as_ref().unwrap().len() == 2
-                })
+                    input.key == Some("user.tier".to_string())
+                        && input.entries.is_some()
+                        && input.entries.as_ref().unwrap().len() == 2
+                }),
             )
             .times(1)
             .returning(move |_, _| Ok(expected_context.clone()));
-        
+
         let result = mock_repo.update_context(context_id, update_input).await;
         assert!(result.is_ok());
         let updated_context = result.unwrap();
@@ -554,13 +556,13 @@ mod tests {
     async fn test_mock_context_repository_delete_context() {
         let mut mock_repo = MockContextRepository::new();
         let context_id = Uuid::new_v4();
-        
+
         mock_repo
             .expect_delete_context()
             .with(mockall::predicate::eq(context_id))
             .times(1)
             .returning(|_| Ok(()));
-        
+
         let result = mock_repo.delete_context(context_id).await;
         assert!(result.is_ok());
     }
@@ -569,14 +571,14 @@ mod tests {
     async fn test_mock_context_repository_error_scenarios() {
         let mut mock_repo = MockContextRepository::new();
         let context_id = Uuid::new_v4();
-        
+
         // Test not found error
         mock_repo
             .expect_get_context_by_id()
             .with(mockall::predicate::eq(context_id))
             .times(1)
             .returning(move |id| Err(Error::NotFound(id)));
-        
+
         let result = mock_repo.get_context_by_id(context_id).await;
         assert!(result.is_err());
         match result.err().unwrap() {
@@ -591,16 +593,16 @@ mod tests {
         let team_id = Uuid::new_v4();
         let key_filter = Some("user.region".to_string());
         let contexts = vec![sample_context()];
-        
+
         mock_repo
             .expect_get_contexts()
             .with(
                 mockall::predicate::eq(team_id),
-                mockall::predicate::eq(key_filter.clone())
+                mockall::predicate::eq(key_filter.clone()),
             )
             .times(1)
             .returning(move |_, _| Ok(contexts.clone()));
-        
+
         let result = mock_repo.get_contexts(team_id, key_filter).await;
         assert!(result.is_ok());
         let ctxs = result.unwrap();

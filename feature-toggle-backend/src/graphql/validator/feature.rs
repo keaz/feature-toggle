@@ -1,11 +1,11 @@
 use crate::graphql::schema::{CreateFeatureInput, FeatureType, UpdateFeatureInput};
 use crate::graphql::validator::{
-    validate_duplicate_environment_and_index, validate_relationships_and_stages, CreateInputValidator,
-    UpdateInputValidator,
+    CreateInputValidator, UpdateInputValidator, validate_duplicate_environment_and_index,
+    validate_relationships_and_stages,
 };
 use crate::logic::feature::FeatureLogic;
 use crate::logic::pipeline::PipelineLogic;
-use async_graphql::{Context, Error, Result, ID};
+use async_graphql::{Context, Error, ID, Result};
 
 impl CreateInputValidator for CreateFeatureInput {
     async fn validate(&self, team_id: Option<ID>, ctx: &Context<'_>) -> Result<(), Error> {
@@ -69,12 +69,22 @@ pub fn validate_stage_transition(current: &str, next: &str) -> Result<(), Error>
     let nxt = next.to_uppercase();
 
     // Define allowed next states for each state
-    let mut allowed: std::collections::HashMap<&str, HashSet<&str>> = std::collections::HashMap::new();
+    let mut allowed: std::collections::HashMap<&str, HashSet<&str>> =
+        std::collections::HashMap::new();
     allowed.insert("NOT_DEPLOYED", HashSet::from(["DEPLOYMENT_REQUESTED"]));
-    allowed.insert("DEPLOYMENT_REQUESTED", HashSet::from(["DEPLOYMENT_REJECTED", "DEPLOYED"]));
-    allowed.insert("DEPLOYMENT_REJECTED", HashSet::from(["DEPLOYMENT_REQUESTED"]));
+    allowed.insert(
+        "DEPLOYMENT_REQUESTED",
+        HashSet::from(["DEPLOYMENT_REJECTED", "DEPLOYED"]),
+    );
+    allowed.insert(
+        "DEPLOYMENT_REJECTED",
+        HashSet::from(["DEPLOYMENT_REQUESTED"]),
+    );
     allowed.insert("DEPLOYED", HashSet::from(["ROLLBACK_REQUESTED"]));
-    allowed.insert("ROLLBACK_REQUESTED", HashSet::from(["ROLLBACK_REJECTED", "ROLLBACKED"]));
+    allowed.insert(
+        "ROLLBACK_REQUESTED",
+        HashSet::from(["ROLLBACK_REJECTED", "ROLLBACKED"]),
+    );
     allowed.insert("ROLLBACK_REJECTED", HashSet::from(["ROLLBACK_REQUESTED"]));
     allowed.insert("ROLLBACKED", HashSet::from(["DEPLOYMENT_REQUESTED"]));
 
@@ -87,10 +97,7 @@ pub fn validate_stage_transition(current: &str, next: &str) -> Result<(), Error>
             cur, nxt
         )));
     }
-    Err(Error::new(format!(
-        "Unknown current status: {}",
-        cur
-    )))
+    Err(Error::new(format!("Unknown current status: {}", cur)))
 }
 
 #[cfg(test)]

@@ -1,3 +1,4 @@
+pub mod cluster;
 mod config;
 pub mod database;
 pub mod graphql;
@@ -103,6 +104,12 @@ pub async fn run() -> std::io::Result<()> {
     // Broadcast channel for feature evaluation events powering GraphQL subscriptions.
     let (evaluation_events_tx, _evaluation_events_rx_unused) =
         tokio::sync::broadcast::channel::<logic::feature_evaluation::FeatureEvaluationEvent>(512);
+
+    let _cluster_guard = cluster::start(
+        &cfg.cluster,
+        updates_tx.clone(),
+        evaluation_events_tx.clone(),
+    );
     let feature_evaluation_logic = logic::feature_evaluation::feature_evaluation_logic_with_events(
         database::feature_evaluation::feature_evaluation_repository(db_pool.clone()),
         evaluation_events_tx.clone(),

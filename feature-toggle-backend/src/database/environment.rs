@@ -118,9 +118,8 @@ impl EnvironmentRepository for EnvironmentRepositoryImpl {
         page_size: i32,
     ) -> Result<(Vec<Environment>, i64), Error> {
         // First, get the total count
-        let mut count_qb = QueryBuilder::<Postgres>::new(
-            "SELECT COUNT(*) FROM environments WHERE team_id = ",
-        );
+        let mut count_qb =
+            QueryBuilder::<Postgres>::new("SELECT COUNT(*) FROM environments WHERE team_id = ");
         count_qb.push_bind(team_id);
 
         if let Some(filter_name) = &name {
@@ -132,7 +131,8 @@ impl EnvironmentRepository for EnvironmentRepositoryImpl {
             count_qb.push(" AND active = ").push_bind(active_value);
         }
 
-        let total_count: i64 = count_qb.build_query_scalar()
+        let total_count: i64 = count_qb
+            .build_query_scalar()
             .fetch_one(&self.pool)
             .await
             .map_err(|e| Error::DatabaseError(e))?;
@@ -290,24 +290,24 @@ mod tests {
     fn test_environment_repository_factory() {
         // Test that the factory function has correct signature
         use sqlx::PgPool;
-        
+
         fn _verify_signature(_pool: PgPool) -> Box<dyn EnvironmentRepository> {
             environment_repository(_pool)
         }
-        
+
         // Test passes if it compiles
         assert!(true);
     }
 
-    #[test] 
+    #[test]
     fn test_environment_repository_impl_creation() {
         // Test the repository constructor signature
         use sqlx::PgPool;
-        
+
         fn _verify_signature(_pool: PgPool) -> EnvironmentRepositoryImpl {
             EnvironmentRepositoryImpl::new(_pool)
         }
-        
+
         // Test passes if it compiles
         assert!(true);
     }
@@ -317,13 +317,13 @@ mod tests {
         let mut mock_repo = MockEnvironmentRepository::new();
         let env = sample_environment();
         let env_id = env.id;
-        
+
         mock_repo
             .expect_get_environment_by_id()
             .with(mockall::predicate::eq(env_id))
             .times(1)
             .returning(move |_| Ok(env.clone()));
-        
+
         let result = mock_repo.get_environment_by_id(env_id).await;
         assert!(result.is_ok());
         let retrieved_env = result.unwrap();
@@ -336,17 +336,17 @@ mod tests {
         let mut mock_repo = MockEnvironmentRepository::new();
         let team_id = Uuid::new_v4();
         let environments = vec![sample_environment()];
-        
+
         mock_repo
             .expect_get_environments()
             .with(
                 mockall::predicate::eq(team_id),
                 mockall::predicate::eq(None::<String>),
-                mockall::predicate::eq(None::<bool>)
+                mockall::predicate::eq(None::<bool>),
             )
             .times(1)
             .returning(move |_, _, _| Ok(environments.clone()));
-        
+
         let result = mock_repo.get_environments(team_id, None, None).await;
         assert!(result.is_ok());
         let envs = result.unwrap();
@@ -365,18 +365,18 @@ mod tests {
             active: true,
             team_id,
         };
-        
+
         mock_repo
             .expect_create_environment()
             .with(
                 mockall::predicate::eq(team_id),
                 mockall::predicate::function(|input: &CreateEnvironment| {
                     input.name == "New Environment" && input.active
-                })
+                }),
             )
             .times(1)
             .returning(move |_, _| Ok(expected_env.clone()));
-        
+
         let result = mock_repo.create_environment(team_id, create_input).await;
         assert!(result.is_ok());
         let created_env = result.unwrap();
@@ -395,18 +395,19 @@ mod tests {
             active: false,
             team_id: Uuid::new_v4(),
         };
-        
+
         mock_repo
             .expect_update_environment()
             .with(
                 mockall::predicate::eq(env_id),
                 mockall::predicate::function(|input: &UpdateEnvironment| {
-                    input.name == Some("Updated Environment".to_string()) && input.active == Some(false)
-                })
+                    input.name == Some("Updated Environment".to_string())
+                        && input.active == Some(false)
+                }),
             )
             .times(1)
             .returning(move |_, _| Ok(expected_env.clone()));
-        
+
         let result = mock_repo.update_environment(env_id, update_input).await;
         assert!(result.is_ok());
         let updated_env = result.unwrap();
@@ -418,13 +419,13 @@ mod tests {
     async fn test_mock_environment_repository_delete_environment() {
         let mut mock_repo = MockEnvironmentRepository::new();
         let env_id = Uuid::new_v4();
-        
+
         mock_repo
             .expect_delete_environment()
             .with(mockall::predicate::eq(env_id))
             .times(1)
             .returning(|_| Ok(()));
-        
+
         let result = mock_repo.delete_environment(env_id).await;
         assert!(result.is_ok());
     }
@@ -433,14 +434,14 @@ mod tests {
     async fn test_mock_environment_repository_error_scenarios() {
         let mut mock_repo = MockEnvironmentRepository::new();
         let env_id = Uuid::new_v4();
-        
+
         // Test not found error
         mock_repo
             .expect_get_environment_by_id()
             .with(mockall::predicate::eq(env_id))
             .times(1)
             .returning(move |id| Err(Error::NotFound(id)));
-        
+
         let result = mock_repo.get_environment_by_id(env_id).await;
         assert!(result.is_err());
         match result.err().unwrap() {
@@ -456,18 +457,20 @@ mod tests {
         let name_filter = Some("Test".to_string());
         let active_filter = Some(true);
         let environments = vec![sample_environment()];
-        
+
         mock_repo
             .expect_get_environments()
             .with(
                 mockall::predicate::eq(team_id),
                 mockall::predicate::eq(name_filter.clone()),
-                mockall::predicate::eq(active_filter)
+                mockall::predicate::eq(active_filter),
             )
             .times(1)
             .returning(move |_, _, _| Ok(environments.clone()));
-        
-        let result = mock_repo.get_environments(team_id, name_filter, active_filter).await;
+
+        let result = mock_repo
+            .get_environments(team_id, name_filter, active_filter)
+            .await;
         assert!(result.is_ok());
         let envs = result.unwrap();
         assert_eq!(envs.len(), 1);

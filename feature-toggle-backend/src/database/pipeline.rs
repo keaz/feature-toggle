@@ -322,9 +322,8 @@ impl PipelineRepository for PipelineRepositoryImpl {
         page_size: i32,
     ) -> Result<(Vec<Pipeline>, i64), Error> {
         // First, get the total count
-        let mut count_query = sqlx::QueryBuilder::new(
-            "SELECT COUNT(DISTINCT p.id) FROM pipelines p"
-        );
+        let mut count_query =
+            sqlx::QueryBuilder::new("SELECT COUNT(DISTINCT p.id) FROM pipelines p");
         count_query.push(" WHERE p.team_id = ").push_bind(team_id);
 
         if let Some(name) = &name {
@@ -332,9 +331,7 @@ impl PipelineRepository for PipelineRepositoryImpl {
             count_query.push_bind(format!("%{name}%"));
         }
         if let Some(active_value) = active {
-            count_query
-                .push(" AND p.active = ")
-                .push_bind(active_value);
+            count_query.push(" AND p.active = ").push_bind(active_value);
         }
 
         let total_count: i64 = count_query

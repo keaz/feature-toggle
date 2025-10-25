@@ -1,3 +1,4 @@
+use crate::Error;
 use crate::database::context::{
     ContextRepository, CreateContextInput as DbCreate, UpdateContextInput as DbUpdate,
 };
@@ -7,7 +8,6 @@ use crate::graphql::schema::{
     Context as GqlContext, ContextEntry as GqlContextEntry, CreateContextInput, UpdateContextInput,
 };
 use crate::logic::stage_builder::id_to_uuid;
-use crate::Error;
 use async_graphql::ID;
 use mockall::automock;
 use uuid::Uuid;
@@ -49,7 +49,11 @@ pub fn context_logic(
     feature_repo: Box<dyn FeatureRepository>,
     updates_tx: tokio::sync::broadcast::Sender<crate::grpc::pb::FeatureUpdate>,
 ) -> Box<dyn ContextLogic> {
-    Box::new(ContextLogicImpl { repository, feature_repo, updates_tx })
+    Box::new(ContextLogicImpl {
+        repository,
+        feature_repo,
+        updates_tx,
+    })
 }
 
 #[derive(Clone)]
@@ -110,8 +114,14 @@ async fn map_db_feature_to_full_for_broadcast(
         team_id: f.team_id.to_string(),
         created_at: f.created_at.to_rfc3339(),
         kill_switch_enabled: f.kill_switch_enabled,
-        kill_switch_activated_at: f.kill_switch_activated_at.map(|dt| dt.to_rfc3339()).unwrap_or_default(),
-        rollback_scheduled_at: f.rollback_scheduled_at.map(|dt| dt.to_rfc3339()).unwrap_or_default(),
+        kill_switch_activated_at: f
+            .kill_switch_activated_at
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_default(),
+        rollback_scheduled_at: f
+            .rollback_scheduled_at
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_default(),
         stages: stage_msgs,
         dependencies: deps,
     };
@@ -144,7 +154,10 @@ impl ContextLogic for ContextLogicImpl {
         page_size: i32,
     ) -> Result<(Vec<GqlContext>, i64), Error> {
         let team_id = id_to_uuid(team_id)?;
-        let (list, total) = self.repository.get_contexts_paginated(team_id, key, page_number, page_size).await?;
+        let (list, total) = self
+            .repository
+            .get_contexts_paginated(team_id, key, page_number, page_size)
+            .await?;
         let contexts = list.into_iter().map(map_db_to_gql).collect();
         Ok((contexts, total))
     }
@@ -181,10 +194,12 @@ impl ContextLogic for ContextLogicImpl {
     }
 
     async fn update_context(&self, id: ID, input: UpdateContextInput) -> Result<GqlContext, Error> {
-        if let Some(k) = &input.key && k.trim().is_empty() {
-                return Err(Error::InvalidInput(
-                    "Context key cannot be empty".to_string(),
-                ));
+        if let Some(k) = &input.key
+            && k.trim().is_empty()
+        {
+            return Err(Error::InvalidInput(
+                "Context key cannot be empty".to_string(),
+            ));
         }
         if let Some(entries) = &input.entries {
             let mut set = std::collections::HashSet::new();
@@ -207,10 +222,17 @@ impl ContextLogic for ContextLogicImpl {
             .await?;
 
         // After successful update, broadcast FeatureFull UPSERTs for all features referencing this context
-        if self.updates_tx.receiver_count() > 0 && let Ok(feature_ids) = self.feature_repo.get_feature_ids_by_context_id(id_uuid).await {
+        if self.updates_tx.receiver_count() > 0
+            && let Ok(feature_ids) = self
+                .feature_repo
+                .get_feature_ids_by_context_id(id_uuid)
+                .await
+        {
             for fid in feature_ids {
                 if let Ok(db_feature) = self.feature_repo.get_feature_by_id(fid).await {
-                    if let Ok(full) = map_db_feature_to_full_for_broadcast(&*self.feature_repo, db_feature).await {
+                    if let Ok(full) =
+                        map_db_feature_to_full_for_broadcast(&*self.feature_repo, db_feature).await
+                    {
                         let _ = self.updates_tx.send(crate::grpc::pb::FeatureUpdate {
                             message_id: uuid::Uuid::new_v4().to_string(),
                             action: crate::grpc::pb::feature_update::Action::Upsert as i32,
@@ -367,11 +389,8 @@ mod tests {
 
         let (tx, rx) = tokio::sync::broadcast::channel::<crate::grpc::pb::FeatureUpdate>(8);
         drop(rx);
-        let logic = super::context_logic(
-            Box::new(repo),
-            Box::new(MockFeatureRepository::new()),
-            tx,
-        );
+        let logic =
+            super::context_logic(Box::new(repo), Box::new(MockFeatureRepository::new()), tx);
         let input = CreateContextInput {
             key: expected_key.clone(),
             entries: vec!["US".into(), "UK".into()],
@@ -401,11 +420,8 @@ mod tests {
             });
         let (tx, rx) = tokio::sync::broadcast::channel::<crate::grpc::pb::FeatureUpdate>(8);
         drop(rx);
-        let logic = super::context_logic(
-            Box::new(repo),
-            Box::new(MockFeatureRepository::new()),
-            tx,
-        );
+        let logic =
+            super::context_logic(Box::new(repo), Box::new(MockFeatureRepository::new()), tx);
         let input = UpdateContextInput {
             key: Some("country".into()),
             entries: Some(vec!["US".into()]),
@@ -425,11 +441,8 @@ mod tests {
             .returning(|_| Ok(()));
         let (tx, rx) = tokio::sync::broadcast::channel::<crate::grpc::pb::FeatureUpdate>(8);
         drop(rx);
-        let logic = super::context_logic(
-            Box::new(repo),
-            Box::new(MockFeatureRepository::new()),
-            tx,
-        );
+        let logic =
+            super::context_logic(Box::new(repo), Box::new(MockFeatureRepository::new()), tx);
         logic.delete_context(ID::from(id)).await.unwrap();
     }
 
@@ -439,18 +452,16 @@ mod tests {
         let team_id = Uuid::new_v4();
         let context1_id = Uuid::new_v4();
         let context2_id = Uuid::new_v4();
-        
+
         let expected_contexts = vec![
             DbContext {
                 id: context1_id,
                 team_id,
                 key: "country".into(),
-                entries: vec![
-                    DbContextEntry {
-                        id: Uuid::new_v4(),
-                        value: "US".into(),
-                    },
-                ],
+                entries: vec![DbContextEntry {
+                    id: Uuid::new_v4(),
+                    value: "US".into(),
+                }],
             },
             DbContext {
                 id: context2_id,
@@ -468,7 +479,7 @@ mod tests {
                 ],
             },
         ];
-        
+
         repo.expect_get_contexts_paginated()
             .with(
                 mockall::predicate::eq(team_id),
@@ -481,19 +492,11 @@ mod tests {
 
         let (tx, rx) = tokio::sync::broadcast::channel::<crate::grpc::pb::FeatureUpdate>(8);
         drop(rx);
-        let logic = super::context_logic(
-            Box::new(repo),
-            Box::new(MockFeatureRepository::new()),
-            tx,
-        );
-        
+        let logic =
+            super::context_logic(Box::new(repo), Box::new(MockFeatureRepository::new()), tx);
+
         let (contexts, total) = logic
-            .get_contexts_paginated(
-                ID::from(team_id),
-                None,
-                1,
-                10,
-            )
+            .get_contexts_paginated(ID::from(team_id), None, 1, 10)
             .await
             .unwrap();
 
@@ -509,7 +512,7 @@ mod tests {
     async fn test_get_contexts_paginated_with_key_filter() {
         let mut repo = MockContextRepository::new();
         let team_id = Uuid::new_v4();
-        
+
         repo.expect_get_contexts_paginated()
             .with(
                 mockall::predicate::eq(team_id),
@@ -522,19 +525,11 @@ mod tests {
 
         let (tx, rx) = tokio::sync::broadcast::channel::<crate::grpc::pb::FeatureUpdate>(8);
         drop(rx);
-        let logic = super::context_logic(
-            Box::new(repo),
-            Box::new(MockFeatureRepository::new()),
-            tx,
-        );
-        
+        let logic =
+            super::context_logic(Box::new(repo), Box::new(MockFeatureRepository::new()), tx);
+
         let (contexts, total) = logic
-            .get_contexts_paginated(
-                ID::from(team_id),
-                Some("country".to_string()),
-                2,
-                5,
-            )
+            .get_contexts_paginated(ID::from(team_id), Some("country".to_string()), 2, 5)
             .await
             .unwrap();
 
@@ -547,19 +542,11 @@ mod tests {
         let repo = MockContextRepository::new();
         let (tx, rx) = tokio::sync::broadcast::channel::<crate::grpc::pb::FeatureUpdate>(8);
         drop(rx);
-        let logic = super::context_logic(
-            Box::new(repo),
-            Box::new(MockFeatureRepository::new()),
-            tx,
-        );
-        
+        let logic =
+            super::context_logic(Box::new(repo), Box::new(MockFeatureRepository::new()), tx);
+
         let result = logic
-            .get_contexts_paginated(
-                ID::from("invalid-uuid"),
-                None,
-                1,
-                10,
-            )
+            .get_contexts_paginated(ID::from("invalid-uuid"), None, 1, 10)
             .await;
 
         assert!(matches!(result, Err(Error::InvalidInput(_))));

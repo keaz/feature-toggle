@@ -1,4 +1,4 @@
-use async_graphql::{EmptySubscription, Request, Schema, ID};
+use async_graphql::{EmptySubscription, ID, Request, Schema};
 use feature_toggle_backend::graphql::mutation::MutationRoot;
 use feature_toggle_backend::graphql::query::Query as GqlQuery;
 use feature_toggle_backend::logic::role::MockRoleLogic;

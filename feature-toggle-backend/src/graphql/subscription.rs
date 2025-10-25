@@ -871,9 +871,9 @@ impl FeatureEvaluationSubscription {
 
         // Helper closure to fetch and yield evaluation data
         let fetch_evaluations = |logic: &Box<dyn FeatureEvaluationLogic>,
-                                  input: &EvaluationsByFeatureLiveInput,
-                                  client_id: Option<Uuid>,
-                                  seq: i64| {
+                                 input: &EvaluationsByFeatureLiveInput,
+                                 client_id: Option<Uuid>,
+                                 seq: i64| {
             let logic_clone = logic.clone();
             let input_clone = input.clone();
             async move {
@@ -881,27 +881,37 @@ impl FeatureEvaluationSubscription {
                 let now = Utc::now();
                 let (from_time, to_time) = calculate_time_range(input_clone.period, now);
 
-                match logic_clone.get_evaluations_by_feature(
-                    from_time,
-                    to_time,
-                    input_clone.environment_id.clone(),
-                    client_id,
-                    input_clone.limit,
-                    input_clone.offset,
-                ).await {
+                match logic_clone
+                    .get_evaluations_by_feature(
+                        from_time,
+                        to_time,
+                        input_clone.environment_id.clone(),
+                        client_id,
+                        input_clone.limit,
+                        input_clone.offset,
+                    )
+                    .await
+                {
                     Ok(rows) => {
-                        log::debug!("[subscriptions] evaluations_by_feature_live sending {} rows (seq={})", rows.len(), seq);
+                        log::debug!(
+                            "[subscriptions] evaluations_by_feature_live sending {} rows (seq={})",
+                            rows.len(),
+                            seq
+                        );
                         let emission_time = Utc::now().to_rfc3339();
-                        let mapped = rows.into_iter().map(|r| GqlEvaluationByFeatureRow {
-                            feature_key: r.feature_key,
-                            total_evaluations: r.total_evaluations,
-                            successful_evaluations: r.successful_evaluations,
-                            cached_evaluations: r.cached_evaluations,
-                            unique_users: r.unique_users,
-                            last_evaluated_at: r.last_evaluated_at.to_rfc3339(),
-                            sequence: seq,
-                            emitted_at: emission_time.clone(),
-                        }).collect();
+                        let mapped = rows
+                            .into_iter()
+                            .map(|r| GqlEvaluationByFeatureRow {
+                                feature_key: r.feature_key,
+                                total_evaluations: r.total_evaluations,
+                                successful_evaluations: r.successful_evaluations,
+                                cached_evaluations: r.cached_evaluations,
+                                unique_users: r.unique_users,
+                                last_evaluated_at: r.last_evaluated_at.to_rfc3339(),
+                                sequence: seq,
+                                emitted_at: emission_time.clone(),
+                            })
+                            .collect();
                         Ok(mapped)
                     }
                     Err(e) => Err(format!("Failed to get evaluationsByFeature: {}", e)),
