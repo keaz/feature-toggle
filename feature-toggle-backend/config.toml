@@ -17,10 +17,10 @@ jwt_secret = "your_secure_jwt_secret_change_in_production_minimum_32_characters"
 # Cluster replication (optional). Uncomment and adjust when running multiple backend instances.
 # Uses database-backed discovery where nodes register themselves in PostgreSQL and discover
 # peers via heartbeat table (similar to JGroups JDBC_PING - no external service discovery needed).
+# Each node automatically generates a unique UUID as its node_id, making it suitable for auto-scaling.
 #[cluster]
 #enabled = true
 #listen_addr = "0.0.0.0:6000"
-#node_id = "backend-1"  # Optional: defaults to random UUID if not set
 #reconnect_delay_ms = 2000
 
 ## Database-backed peer discovery configuration

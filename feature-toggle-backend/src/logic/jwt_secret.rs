@@ -52,7 +52,24 @@ impl JwtSecretLogicImpl {
 #[async_trait::async_trait]
 impl JwtSecretLogic for JwtSecretLogicImpl {
     async fn initialize_secret(&self) -> Result<String, Error> {
-        match self.jwt_secret_repository.get_active_secret().await? {
+        // Use PostgreSQL advisory lock to prevent race conditions when multiple pods start simultaneously
+        // Advisory lock ID: Hash of "jwt_secret_init" = 1234567890 (arbitrary constant)
+        const JWT_INIT_LOCK_ID: i64 = 1234567890;
+
+        // Try to acquire advisory lock with a short timeout
+        // This ensures only one pod initializes the secret at a time
+        let lock_acquired = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
+            .bind(JWT_INIT_LOCK_ID)
+            .fetch_one(self.jwt_secret_repository.pool())
+            .await
+            .unwrap_or(false);
+
+        if !lock_acquired {
+            // Another pod is initializing, wait briefly and check again
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        }
+
+        let result = match self.jwt_secret_repository.get_active_secret().await? {
             Some(secret) => {
                 info!("Found existing active JWT secret");
                 Ok(secret.secret)
@@ -63,7 +80,17 @@ impl JwtSecretLogic for JwtSecretLogicImpl {
                 info!("Generated new JWT secret for application startup");
                 Ok(secret.secret)
             }
+        };
+
+        // Release advisory lock if we acquired it
+        if lock_acquired {
+            let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+                .bind(JWT_INIT_LOCK_ID)
+                .execute(self.jwt_secret_repository.pool())
+                .await;
         }
+
+        result
     }
 
     async fn get_current_secret(&self) -> Result<String, Error> {

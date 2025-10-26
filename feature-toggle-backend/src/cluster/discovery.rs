@@ -23,8 +23,6 @@ pub enum PeerEvent {
 /// Configuration for database-backed discovery
 #[derive(Debug, Clone)]
 pub struct DbDiscoveryConfig {
-    /// Unique identifier for this node
-    pub node_id: String,
     /// Address where this node listens for cluster connections
     pub listen_addr: String,
     /// Interval between heartbeat updates (seconds)
@@ -38,7 +36,6 @@ pub struct DbDiscoveryConfig {
 impl Default for DbDiscoveryConfig {
     fn default() -> Self {
         Self {
-            node_id: uuid::Uuid::new_v4().to_string(),
             listen_addr: "127.0.0.1:50052".to_string(),
             heartbeat_interval_secs: 30,
             stale_threshold_secs: 90,
@@ -104,12 +101,17 @@ impl Drop for DbDiscoveryHandle {
 pub struct DbDiscoveryService {
     config: DbDiscoveryConfig,
     repo: ClusterNodeRepo,
+    node_id: String,
 }
 
 impl DbDiscoveryService {
-    /// Create a new discovery service
+    /// Create a new discovery service with a dynamically generated node ID
     pub fn new(config: DbDiscoveryConfig, repo: ClusterNodeRepo) -> Self {
-        Self { config, repo }
+        Self {
+            config,
+            repo,
+            node_id: uuid::Uuid::new_v4().to_string(),
+        }
     }
 
     /// Start the discovery service
@@ -122,14 +124,11 @@ impl DbDiscoveryService {
     ///
     /// Returns a handle to control the service and receive peer events.
     pub async fn start(self) -> Result<DbDiscoveryHandle, super::db_discovery::ClusterDbError> {
-        let node_id = self.config.node_id.clone();
+        let node_id = self.node_id.clone();
         let listen_addr = self.config.listen_addr.clone();
 
         // Register this node
-        info!(
-            "Registering cluster node {} at {}",
-            node_id, listen_addr
-        );
+        info!("Registering cluster node {} at {}", node_id, listen_addr);
         self.repo.register_node(&node_id, &listen_addr).await?;
 
         let (peer_event_tx, peer_event_rx) = mpsc::channel::<PeerEvent>(100);
@@ -283,11 +282,10 @@ mod tests {
     use sqlx::postgres::PgPoolOptions;
     use std::env;
     use std::time::Duration;
-    use tokio::time::{timeout, sleep};
+    use tokio::time::{sleep, timeout};
 
     async fn setup_test_repo(node_prefix: &str) -> ClusterNodeRepo {
-        let database_url = env::var("DATABASE_URL")
-            .expect("DATABASE_URL must be set for tests");
+        let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set for tests");
 
         let pool = PgPoolOptions::new()
             .max_connections(2)
@@ -296,10 +294,13 @@ mod tests {
             .expect("Failed to connect to test database");
 
         // Clean up any existing test nodes for this prefix
-        sqlx::query(&format!("DELETE FROM cluster_nodes WHERE node_id LIKE '{}-%'", node_prefix))
-            .execute(&pool)
-            .await
-            .expect("Failed to clean up test data");
+        sqlx::query(&format!(
+            "DELETE FROM cluster_nodes WHERE node_id LIKE '{}-%'",
+            node_prefix
+        ))
+        .execute(&pool)
+        .await
+        .expect("Failed to clean up test data");
 
         ClusterNodeRepo::new(pool)
     }
@@ -310,7 +311,6 @@ mod tests {
         let repo = setup_test_repo("disco-test-1").await;
 
         let config = DbDiscoveryConfig {
-            node_id: "disco-test-1-node".to_string(),
             listen_addr: "127.0.0.1:50001".to_string(),
             heartbeat_interval_secs: 10,
             stale_threshold_secs: 30,
@@ -318,10 +318,11 @@ mod tests {
         };
 
         let service = DbDiscoveryService::new(config, repo.clone());
+        let node_id = service.node_id.clone(); // Capture the generated node_id
         let handle = service.start().await.unwrap();
 
         // Verify node was registered
-        let node = repo.get_node("disco-test-1-node").await.unwrap();
+        let node = repo.get_node(&node_id).await.unwrap();
         assert!(node.is_some());
         assert_eq!(node.unwrap().listen_addr, "127.0.0.1:50001");
 
@@ -335,7 +336,6 @@ mod tests {
         let repo = setup_test_repo("disco-test-2").await;
 
         let config = DbDiscoveryConfig {
-            node_id: "disco-test-2-node".to_string(),
             listen_addr: "127.0.0.1:50002".to_string(),
             heartbeat_interval_secs: 1, // Fast heartbeat for testing
             stale_threshold_secs: 30,
@@ -343,15 +343,16 @@ mod tests {
         };
 
         let service = DbDiscoveryService::new(config, repo.clone());
+        let node_id = service.node_id.clone(); // Capture the generated node_id
         let handle = service.start().await.unwrap();
 
         // Get initial heartbeat
         sleep(Duration::from_millis(500)).await;
-        let node1 = repo.get_node("disco-test-2-node").await.unwrap().unwrap();
+        let node1 = repo.get_node(&node_id).await.unwrap().unwrap();
 
         // Wait for heartbeat to update
         sleep(Duration::from_millis(1500)).await;
-        let node2 = repo.get_node("disco-test-2-node").await.unwrap().unwrap();
+        let node2 = repo.get_node(&node_id).await.unwrap().unwrap();
 
         // Heartbeat should have been updated
         assert!(node2.last_heartbeat > node1.last_heartbeat);
@@ -367,7 +368,6 @@ mod tests {
 
         // Register node A
         let config_a = DbDiscoveryConfig {
-            node_id: "disco-test-3-node-a".to_string(),
             listen_addr: "127.0.0.1:50003".to_string(),
             heartbeat_interval_secs: 1,
             stale_threshold_secs: 30,
@@ -382,7 +382,6 @@ mod tests {
 
         // Register node B
         let config_b = DbDiscoveryConfig {
-            node_id: "disco-test-3-node-b".to_string(),
             listen_addr: "127.0.0.1:50004".to_string(),
             heartbeat_interval_secs: 1,
             stale_threshold_secs: 30,
@@ -411,7 +410,9 @@ mod tests {
         let repo = setup_test_repo("disco-test-4").await;
 
         // Manually register a stale node
-        repo.register_node("disco-test-4-stale", "127.0.0.1:50005").await.unwrap();
+        repo.register_node("disco-test-4-stale", "127.0.0.1:50005")
+            .await
+            .unwrap();
 
         // Make it stale by updating heartbeat to past
         sqlx::query(
@@ -424,10 +425,9 @@ mod tests {
 
         // Start node A with short stale threshold
         let config_a = DbDiscoveryConfig {
-            node_id: "disco-test-4-node-a".to_string(),
             listen_addr: "127.0.0.1:50006".to_string(),
             heartbeat_interval_secs: 1,
-            stale_threshold_secs: 3, // 3 seconds threshold
+            stale_threshold_secs: 3,  // 3 seconds threshold
             cleanup_interval_secs: 2, // Cleanup every 2 seconds
         };
 
@@ -439,7 +439,10 @@ mod tests {
 
         // Stale node should be removed
         let stale_node = repo.get_node("disco-test-4-stale").await.unwrap();
-        assert!(stale_node.is_none(), "Stale node should have been cleaned up");
+        assert!(
+            stale_node.is_none(),
+            "Stale node should have been cleaned up"
+        );
 
         // Cleanup
         handle_a.shutdown().await;
@@ -451,7 +454,6 @@ mod tests {
         let repo = setup_test_repo("disco-test-5").await;
 
         let config = DbDiscoveryConfig {
-            node_id: "disco-test-5-node".to_string(),
             listen_addr: "127.0.0.1:50007".to_string(),
             heartbeat_interval_secs: 10,
             stale_threshold_secs: 30,
@@ -459,10 +461,11 @@ mod tests {
         };
 
         let service = DbDiscoveryService::new(config, repo.clone());
+        let node_id = service.node_id.clone(); // Capture the generated node_id
         let handle = service.start().await.unwrap();
 
         // Verify node exists
-        let node = repo.get_node("disco-test-5-node").await.unwrap();
+        let node = repo.get_node(&node_id).await.unwrap();
         assert!(node.is_some());
 
         // Shutdown
@@ -470,7 +473,7 @@ mod tests {
         sleep(Duration::from_millis(200)).await;
 
         // Node should be deregistered
-        let node = repo.get_node("disco-test-5-node").await.unwrap();
+        let node = repo.get_node(&node_id).await.unwrap();
         assert!(node.is_none(), "Node should be deregistered after shutdown");
     }
 
@@ -481,7 +484,6 @@ mod tests {
 
         // Start node A
         let config_a = DbDiscoveryConfig {
-            node_id: "disco-test-6-node-a".to_string(),
             listen_addr: "127.0.0.1:50008".to_string(),
             heartbeat_interval_secs: 1,
             stale_threshold_secs: 2,
@@ -493,7 +495,6 @@ mod tests {
 
         // Start node B
         let config_b = DbDiscoveryConfig {
-            node_id: "disco-test-6-node-b".to_string(),
             listen_addr: "127.0.0.1:50009".to_string(),
             heartbeat_interval_secs: 1,
             stale_threshold_secs: 2,
@@ -507,7 +508,10 @@ mod tests {
         let event = timeout(Duration::from_secs(3), handle_a.peer_events.recv())
             .await
             .expect("Timeout waiting for peer added");
-        assert_eq!(event, Some(PeerEvent::PeerAdded("127.0.0.1:50009".to_string())));
+        assert_eq!(
+            event,
+            Some(PeerEvent::PeerAdded("127.0.0.1:50009".to_string()))
+        );
 
         // Shutdown node B
         handle_b.shutdown().await;
@@ -517,7 +521,10 @@ mod tests {
         let event = timeout(Duration::from_secs(4), handle_a.peer_events.recv())
             .await
             .expect("Timeout waiting for peer removed");
-        assert_eq!(event, Some(PeerEvent::PeerRemoved("127.0.0.1:50009".to_string())));
+        assert_eq!(
+            event,
+            Some(PeerEvent::PeerRemoved("127.0.0.1:50009".to_string()))
+        );
 
         // Cleanup
         handle_a.shutdown().await;

@@ -299,7 +299,6 @@ pub fn start(
     let repo = db_discovery::ClusterNodeRepo::new(pool);
 
     let discovery_config = discovery::DbDiscoveryConfig {
-        node_id: node_id.clone(),
         listen_addr: cfg.listen_addr.clone(),
         heartbeat_interval_secs: cfg.discovery.heartbeat_interval_secs,
         stale_threshold_secs: cfg.discovery.stale_threshold_secs,
@@ -333,9 +332,11 @@ pub fn start(
                                 let state_for_peer = state_clone.clone();
                                 let peer_clone = peer_addr.clone();
                                 let connector_handle = tokio::spawn(async move {
-                                    run_peer_connector(state_for_peer, peer_clone, reconnect_delay).await;
+                                    run_peer_connector(state_for_peer, peer_clone, reconnect_delay)
+                                        .await;
                                 });
-                                peer_connectors.insert(peer_addr, AbortOnDrop::new(connector_handle));
+                                peer_connectors
+                                    .insert(peer_addr, AbortOnDrop::new(connector_handle));
                             }
                         }
                         discovery::PeerEvent::PeerRemoved(peer_addr) => {
@@ -423,15 +424,33 @@ async fn run_peer_connector(state: Arc<ClusterState>, peer: String, reconnect_de
     let mut wire_rx = state.wire_tx.subscribe();
     let mut has_notified = false;
 
-    info!("Cluster node {} starting peer connector for {}", state.node_id, peer);
-    eprintln!("CLUSTER: Node {} starting peer connector for {}", state.node_id, peer);
+    info!(
+        "Cluster node {} starting peer connector for {}",
+        state.node_id, peer
+    );
+    eprintln!(
+        "CLUSTER: Node {} starting peer connector for {}",
+        state.node_id, peer
+    );
     loop {
-        debug!("Cluster node {} attempting to connect to peer {}...", state.node_id, peer);
-        eprintln!("CLUSTER: Node {} attempting to connect to {}...", state.node_id, peer);
+        debug!(
+            "Cluster node {} attempting to connect to peer {}...",
+            state.node_id, peer
+        );
+        eprintln!(
+            "CLUSTER: Node {} attempting to connect to {}...",
+            state.node_id, peer
+        );
         match TcpStream::connect(&peer).await {
             Ok(stream) => {
-                info!("Cluster node {} successfully connected to peer {}", state.node_id, peer);
-                eprintln!("CLUSTER: Node {} successfully connected to peer {}", state.node_id, peer);
+                info!(
+                    "Cluster node {} successfully connected to peer {}",
+                    state.node_id, peer
+                );
+                eprintln!(
+                    "CLUSTER: Node {} successfully connected to peer {}",
+                    state.node_id, peer
+                );
 
                 // Notify that at least one connection is ready (do this once)
                 if !has_notified {
@@ -440,8 +459,13 @@ async fn run_peer_connector(state: Arc<ClusterState>, peer: String, reconnect_de
                     has_notified = true;
                 }
 
-                if let Err(err) =
-                    connection_loop_with_rx(state.clone(), stream, format!("outbound:{}", peer), &mut wire_rx).await
+                if let Err(err) = connection_loop_with_rx(
+                    state.clone(),
+                    stream,
+                    format!("outbound:{}", peer),
+                    &mut wire_rx,
+                )
+                .await
                 {
                     info!("Cluster connection to {} closed with error: {}", peer, err);
                 }
@@ -451,10 +475,18 @@ async fn run_peer_connector(state: Arc<ClusterState>, peer: String, reconnect_de
                     "Cluster node {} failed to connect to {}: {}",
                     state.node_id, peer, err
                 );
-                eprintln!("CLUSTER: Node {} failed to connect to {}: {}", state.node_id, peer, err);
+                eprintln!(
+                    "CLUSTER: Node {} failed to connect to {}: {}",
+                    state.node_id, peer, err
+                );
             }
         }
-        debug!("Cluster node {} sleeping {}ms before reconnect to {}", state.node_id, reconnect_delay.as_millis(), peer);
+        debug!(
+            "Cluster node {} sleeping {}ms before reconnect to {}",
+            state.node_id,
+            reconnect_delay.as_millis(),
+            peer
+        );
         sleep(reconnect_delay).await;
 
         // After sleep, drain any messages that arrived while disconnected to prevent lag errors
@@ -529,9 +561,16 @@ async fn handle_incoming(state: Arc<ClusterState>, bytes: WireMessage) {
                     return;
                 }
                 if state.feature_deduper.mark_seen(&update.message_id).await {
-                    debug!(
-                        "Cluster node {} received feature update {}",
-                        state.node_id, update.message_id
+                    info!(
+                        "Cluster node {} received feature update {} for key '{}', broadcasting to {} local subscribers",
+                        state.node_id,
+                        update.message_id,
+                        update
+                            .feature
+                            .as_ref()
+                            .map(|f| f.key.as_str())
+                            .unwrap_or(&update.feature_key),
+                        state.feature_updates_tx.receiver_count()
                     );
                     let _ = state.feature_updates_tx.send(update.clone());
                     // Relay to other peers to ensure propagation in sparse topologies.
@@ -572,30 +611,51 @@ async fn forward_feature_updates(
     wire_tx: broadcast::Sender<WireMessage>,
 ) {
     let mut rx = state.feature_updates_tx.subscribe();
-    info!("Cluster node {} starting forward_feature_updates task", state.node_id);
+    info!(
+        "Cluster node {} starting forward_feature_updates task",
+        state.node_id
+    );
     loop {
         match rx.recv().await {
             Ok(update) => {
-                debug!("Cluster node {} received feature update message_id={}", state.node_id, update.message_id);
+                debug!(
+                    "Cluster node {} received feature update message_id={}",
+                    state.node_id, update.message_id
+                );
                 if update.message_id.is_empty() {
-                    debug!("Cluster node {} skipping update with empty message_id", state.node_id);
+                    debug!(
+                        "Cluster node {} skipping update with empty message_id",
+                        state.node_id
+                    );
                     continue;
                 }
                 if !state.feature_deduper.mark_seen(&update.message_id).await {
-                    debug!("Cluster node {} skipping duplicate update message_id={}", state.node_id, update.message_id);
+                    debug!(
+                        "Cluster node {} skipping duplicate update message_id={}",
+                        state.node_id, update.message_id
+                    );
                     continue;
                 }
 
-                info!("Cluster node {} forwarding feature update message_id={} to {} peers",
-                    state.node_id, update.message_id, wire_tx.receiver_count());
+                info!(
+                    "Cluster node {} forwarding feature update message_id={} to {} peers",
+                    state.node_id,
+                    update.message_id,
+                    wire_tx.receiver_count()
+                );
                 let message = pb::ClusterMessage {
                     node_id: state.node_id.clone(),
                     payload: Some(pb::cluster_message::Payload::FeatureUpdate(update.clone())),
                 };
                 let bytes = Arc::new(message.encode_to_vec());
                 match wire_tx.send(bytes) {
-                    Ok(count) => info!("Cluster node {} sent to {} receivers", state.node_id, count),
-                    Err(_) => warn!("Cluster node {} failed to send (no receivers)", state.node_id),
+                    Ok(count) => {
+                        info!("Cluster node {} sent to {} receivers", state.node_id, count)
+                    }
+                    Err(_) => warn!(
+                        "Cluster node {} failed to send (no receivers)",
+                        state.node_id
+                    ),
                 }
             }
             Err(broadcast::error::RecvError::Closed) => break,

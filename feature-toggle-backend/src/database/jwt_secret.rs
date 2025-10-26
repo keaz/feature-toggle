@@ -27,6 +27,9 @@ pub trait JwtSecretRepository: Send + Sync {
     /// Get all secrets (for admin purposes)
     async fn get_all_secrets(&self) -> Result<Vec<JwtSecret>, Error>;
 
+    /// Get database pool for advanced operations (like advisory locks)
+    fn pool(&self) -> &PgPool;
+
     fn clone_box(&self) -> Box<dyn JwtSecretRepository>;
 }
 
@@ -55,7 +58,9 @@ impl JwtSecretRepository for JwtSecretRepositoryImpl {
                FROM jwt_secrets 
                WHERE is_active = true
                ORDER BY created_at DESC
-               LIMIT 1"#
+               LIMIT 1
+               -- Use FOR SHARE to ensure consistent reads in multi-instance deployments
+               FOR SHARE"#
         )
         .fetch_optional(&self.pool)
         .await;
@@ -123,6 +128,10 @@ impl JwtSecretRepository for JwtSecretRepositoryImpl {
         .await;
 
         handle_error(None, result)
+    }
+
+    fn pool(&self) -> &PgPool {
+        &self.pool
     }
 
     fn clone_box(&self) -> Box<dyn JwtSecretRepository> {

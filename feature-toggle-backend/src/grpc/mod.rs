@@ -658,15 +658,38 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
         // Prepare outgoing channel
         let (out_tx, out_rx) = mpsc::channel::<Result<pb::FeatureUpdate, Status>>(64);
 
-        // Send initial snapshot: only for features that were previously requested via GetFeatureByKeyRequest for this client.
+        // Determine which keys to track for this subscription:
+        // - If subscribe.feature_keys is non-empty, use those specific keys
+        // - If subscribe.feature_keys is empty, subscribe to ALL features for this client
+        //   (useful for edge servers that want to receive all updates)
+        let subscribe_all = subscribe.feature_keys.is_empty();
+
+        log::info!(
+            "gRPC: Client {} subscribing to feature updates (subscribe_all={}, requested_feature_keys={:?})",
+            client_id,
+            subscribe_all,
+            subscribe.feature_keys
+        );
+
+        // Merge subscription keys with previously requested keys from GetFeatureByKeyRequest
+        let mut subscription_keys: std::collections::HashSet<String> = if subscribe_all {
+            std::collections::HashSet::new() // Will match all keys
+        } else {
+            subscribe.feature_keys.iter().cloned().collect()
+        };
+
+        // Add any keys that were previously requested via GetFeatureByKeyRequest
+        {
+            let map = self.requested_keys.read().await;
+            if let Some(prev_keys) = map.get(&client_id) {
+                subscription_keys.extend(prev_keys.iter().cloned());
+            }
+        }
+
+        // Send initial snapshot for tracked keys
         {
             let feature_repo = &self.feature_repo;
-            let keys_snapshot: Vec<String> = {
-                let map = self.requested_keys.read().await;
-                map.get(&client_id)
-                    .map(|set| set.iter().cloned().collect())
-                    .unwrap_or_else(Vec::new)
-            };
+            let keys_snapshot: Vec<String> = subscription_keys.iter().cloned().collect();
 
             for k in keys_snapshot {
                 let mut features = feature_repo
@@ -688,11 +711,11 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
             }
         }
 
-        // Subscribe to shared broadcaster for live updates, filtering per client's requested keys
+        // Subscribe to shared broadcaster for live updates
         let mut rx = self.updates_tx.subscribe();
         let out_tx_clone = out_tx.clone();
-        let requested_keys = self.requested_keys.clone();
-        let client_id_for_filter = client_id;
+        let subscription_keys_for_filter = subscription_keys.clone();
+        let subscribe_all_for_filter = subscribe_all;
         tokio::spawn(async move {
             loop {
                 match rx.recv().await {
@@ -703,15 +726,30 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
                         } else {
                             update.feature_key.clone()
                         };
-                        // Check if the client has requested this key (dynamic check)
-                        let should_send = {
-                            let map = requested_keys.read().await;
-                            map.get(&client_id_for_filter)
-                                .map(|set| set.contains(&key_for_update))
-                                .unwrap_or(false)
-                        };
-                        if should_send && out_tx_clone.send(Ok(update)).await.is_err() {
-                            break;
+
+                        // Determine if we should send this update:
+                        // - If subscribe_all is true, send everything (edge servers)
+                        // - Otherwise, check if the key is in the subscription set
+                        let should_send = subscribe_all_for_filter
+                            || subscription_keys_for_filter.contains(&key_for_update);
+
+                        if should_send {
+                            log::info!(
+                                "gRPC: Sending feature update message_id={} key='{}' to edge client (subscribe_all={})",
+                                update.message_id,
+                                key_for_update,
+                                subscribe_all_for_filter
+                            );
+                            if out_tx_clone.send(Ok(update)).await.is_err() {
+                                log::warn!("gRPC: Client stream closed, stopping update task");
+                                break;
+                            }
+                        } else {
+                            log::debug!(
+                                "gRPC: Filtering out update message_id={} key='{}' (not in subscription keys)",
+                                update.message_id,
+                                key_for_update
+                            );
                         }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
