@@ -455,6 +455,22 @@ mod tests {
     async fn test_delete_environment() {
         let mut mock_repository = MockEnvironmentRepository::new();
         const ENV_ID: &str = "51ecc366-f1cd-4d3d-ab73-fa60bad98f27";
+        let id = Uuid::parse_str(ENV_ID).unwrap();
+
+        // Mock get_environment_by_id (called for activity logging)
+        mock_repository
+            .expect_get_environment_by_id()
+            .withf(move |mock_id| mock_id.eq(&Uuid::parse_str(ENV_ID).unwrap()))
+            .times(1)
+            .returning(move |_| {
+                Ok(crate::database::entity::Environment {
+                    id,
+                    name: "Test Environment".to_string(),
+                    active: true,
+                    team_id: Uuid::new_v4(),
+                })
+            });
+
         mock_repository
             .expect_delete_environment()
             .withf(|mock_id| mock_id.eq(&Uuid::parse_str(ENV_ID).unwrap()))
@@ -472,9 +488,11 @@ mod tests {
         let mut mock_repository = MockEnvironmentRepository::new();
         const ENV_ID: &str = "51ecc366-f1cd-4d3d-ab73-fa60bad98f27";
         let id = Uuid::parse_str(ENV_ID).unwrap();
+
+        // Mock get_environment_by_id (called for activity logging) - returns error
         mock_repository
-            .expect_delete_environment()
-            .withf(|mock_id| mock_id.eq(&Uuid::parse_str(ENV_ID).unwrap()))
+            .expect_get_environment_by_id()
+            .withf(move |mock_id| mock_id.eq(&Uuid::parse_str(ENV_ID).unwrap()))
             .times(1)
             .returning(move |_| Err(Error::NotFound(id)));
 

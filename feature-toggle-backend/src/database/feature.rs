@@ -524,6 +524,7 @@ impl FeatureRepositoryImpl {
                        parent_stage_id = $3,
                        position = $4,
                        bucketing_key = $5,
+                       enabled = $6
                    WHERE id = $7"#,
             )
             .bind(stage.environment_id)
@@ -531,6 +532,7 @@ impl FeatureRepositoryImpl {
             .bind(parent_stage_id)
             .bind(&stage.position)
             .bind(stage.bucketing_key.clone())
+            .bind(stage.enabled)
             .bind(stage.id)
             .execute(&mut *tx)
             .await;

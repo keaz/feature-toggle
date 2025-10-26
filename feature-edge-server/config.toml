@@ -1,0 +1,46 @@
+# Edge Server Configuration
+
+# Backend gRPC server address
+backend_grpc = "http://127.0.0.1:50051"
+
+# HTTP server bind address
+http_addr = "0.0.0.0:8081"
+
+# Client credentials for backend authentication
+client_id = "a1b2c3d4-0000-4000-8000-000000000001"
+client_secret = "TEST_WEB_KEY_1"
+
+# gRPC connection settings
+[grpc]
+# Connection timeout in seconds
+connect_timeout_secs = 5
+# Request timeout in seconds
+timeout_secs = 10
+# TCP keepalive interval in seconds
+tcp_keepalive_secs = 30
+# HTTP/2 keepalive interval in seconds
+http2_keepalive_secs = 20
+# Keep connection alive even when idle
+keep_alive_while_idle = true
+# Maximum concurrent requests
+concurrency_limit = 256
+# Enable TCP_NODELAY
+tcp_nodelay = true
+
+# Flush settings
+[flush]
+# User assignment flush interval in seconds
+assignment_flush_secs = 10
+# Evaluation events flush interval in seconds
+evaluation_flush_secs = 30
+
+# Retry settings
+[retry]
+# Base delay for exponential backoff in milliseconds
+base_delay_ms = 500
+# Maximum retry attempts for direct gRPC calls
+max_attempts = 3
+# Initial delay for stream reconnection in seconds
+stream_initial_delay_secs = 1
+# Maximum delay for stream reconnection in seconds
+stream_max_delay_secs = 30

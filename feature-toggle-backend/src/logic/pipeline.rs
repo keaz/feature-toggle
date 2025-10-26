@@ -728,6 +728,23 @@ mod test {
         let environment_repo = MockEnvironmentLogic::new();
 
         const ID: &str = "3eef17bc-9e06-411d-b5f4-7a786e68bb96";
+        let pipeline_id = Uuid::parse_str(ID).unwrap();
+
+        // Mock get_pipeline_by_id (called for activity logging)
+        repository
+            .expect_get_pipeline_by_id()
+            .withf(move |mock_id| mock_id.eq(&Uuid::parse_str(ID).unwrap()))
+            .times(1)
+            .returning(move |_| {
+                Ok(crate::database::entity::Pipeline {
+                    id: pipeline_id,
+                    name: "Test Pipeline".to_string(),
+                    active: true,
+                    team_id: Uuid::new_v4(),
+                    stages: vec![],
+                })
+            });
+
         repository
             .expect_delete_pipeline()
             .withf(|mock_id| mock_id.eq(&Uuid::parse_str(ID).unwrap()))
@@ -750,11 +767,14 @@ mod test {
         let environment_repo = MockEnvironmentLogic::new();
 
         const ID: &str = "51ecc366-f1cd-4d3d-ab73-fa60bad98fca";
+        let pipeline_id = Uuid::parse_str(ID).unwrap();
+
+        // Mock get_pipeline_by_id (called for activity logging) - returns error
         repository
-            .expect_delete_pipeline()
-            .withf(|mock_id| mock_id.eq(&Uuid::parse_str(ID).unwrap()))
+            .expect_get_pipeline_by_id()
+            .withf(move |mock_id| mock_id.eq(&Uuid::parse_str(ID).unwrap()))
             .times(1)
-            .returning(move |_| Err(Error::NotFound(Uuid::parse_str(ID).unwrap())));
+            .returning(move |_| Err(Error::NotFound(pipeline_id)));
 
         let logic = pipeline_logic(
             Box::new(repository),

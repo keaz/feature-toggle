@@ -25,7 +25,8 @@ async fn start_server_with_repos(
         .unwrap();
     let addr = listener.local_addr().unwrap();
     let incoming = TcpListenerStream::new(listener);
-    let svc = FeatureEvaluationSvc::new_with_repos(feature_repo, client_repo, updates_tx);
+    let (evaluation_events_tx, _) = broadcast::channel(32);
+    let svc = FeatureEvaluationSvc::new_with_repos(feature_repo, client_repo, updates_tx, evaluation_events_tx);
     let router = Server::builder().add_service(FeatureEvaluationServer::new(svc));
     let handle = tokio::spawn(async move {
         router.serve_with_incoming(incoming).await.unwrap();

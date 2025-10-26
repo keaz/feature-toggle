@@ -107,6 +107,7 @@ pub async fn run() -> std::io::Result<()> {
 
     let _cluster_guard = cluster::start(
         &cfg.cluster,
+        Some(db_pool.clone()),
         updates_tx.clone(),
         evaluation_events_tx.clone(),
     );

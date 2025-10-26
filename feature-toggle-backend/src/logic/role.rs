@@ -212,12 +212,27 @@ mod tests {
         let user_id = ID::from(Uuid::new_v4());
         let role_id = ID::from(Uuid::new_v4());
         let role_ids = vec![role_id.clone()];
+        let role_uuid = Uuid::try_from(role_id.clone()).unwrap();
 
         // Mock the assign operation
         mock_repo
             .expect_assign_user_roles()
             .times(1)
             .return_once(|_, _, _| Ok(()));
+
+        // Mock get_role_by_id (called for activity logging)
+        mock_repo
+            .expect_get_role_by_id()
+            .times(1)
+            .return_once(move |_| {
+                Ok(Role {
+                    id: role_uuid,
+                    name: "Approver".to_string(),
+                    description: "Can approve deployment requests".to_string(),
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                })
+            });
 
         // Mock the get_user_roles call that happens after assignment
         let expected_role = Role {

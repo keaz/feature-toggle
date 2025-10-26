@@ -1505,7 +1505,7 @@ mod test {
     #[tokio::test]
     async fn test_request_stage_change_deployment_requested() {
         let mut repository = MockFeatureRepository::new();
-        let environment_logic = MockEnvironmentLogic::new();
+        let mut environment_logic = MockEnvironmentLogic::new();
 
         let stage_id = Uuid::new_v4();
         let feature_id = Uuid::new_v4();
@@ -1543,6 +1543,19 @@ mod test {
             .times(1)
             .returning(|_, _, _, _| Ok(true));
 
+        // Mock get_environment_by_id (called for activity logging)
+        environment_logic
+            .expect_get_environment_by_id()
+            .times(1)
+            .returning(|_| {
+                Ok(crate::graphql::schema::Environment {
+                    id: ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"),
+                    name: "Test Environment".to_string(),
+                    active: true,
+                    team_id: ID::from(Uuid::new_v4()),
+                })
+            });
+
         let logic = feature_logic(
             Box::new(repository),
             Box::new(environment_logic),
@@ -1565,7 +1578,7 @@ mod test {
     #[tokio::test]
     async fn test_request_stage_change_deployment_rejected() {
         let mut repository = MockFeatureRepository::new();
-        let environment_logic = MockEnvironmentLogic::new();
+        let mut environment_logic = MockEnvironmentLogic::new();
 
         let stage_id = Uuid::new_v4();
         let feature_id = Uuid::new_v4();
@@ -1602,6 +1615,19 @@ mod test {
             .times(1)
             .returning(|_, _, _| Ok(true));
 
+        // Mock get_environment_by_id (called for activity logging)
+        environment_logic
+            .expect_get_environment_by_id()
+            .times(1)
+            .returning(|_| {
+                Ok(crate::graphql::schema::Environment {
+                    id: ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"),
+                    name: "Test Environment".to_string(),
+                    active: true,
+                    team_id: ID::from(Uuid::new_v4()),
+                })
+            });
+
         let logic = feature_logic(
             Box::new(repository),
             Box::new(environment_logic),
@@ -1622,7 +1648,7 @@ mod test {
     #[tokio::test]
     async fn test_request_stage_change_deployed() {
         let mut repository = MockFeatureRepository::new();
-        let environment_logic = MockEnvironmentLogic::new();
+        let mut environment_logic = MockEnvironmentLogic::new();
 
         let stage_id = Uuid::new_v4();
         let feature_id = Uuid::new_v4();
@@ -1656,6 +1682,19 @@ mod test {
             .times(1)
             .returning(|_, _, _| Ok(true));
 
+        // Mock get_environment_by_id (called for activity logging)
+        environment_logic
+            .expect_get_environment_by_id()
+            .times(1)
+            .returning(|_| {
+                Ok(crate::graphql::schema::Environment {
+                    id: ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"),
+                    name: "Test Environment".to_string(),
+                    active: true,
+                    team_id: ID::from(Uuid::new_v4()),
+                })
+            });
+
         let logic = feature_logic(
             Box::new(repository),
             Box::new(environment_logic),
@@ -1676,7 +1715,7 @@ mod test {
     #[tokio::test]
     async fn test_request_stage_change_rollback_requested() {
         let mut repository = MockFeatureRepository::new();
-        let environment_logic = MockEnvironmentLogic::new();
+        let mut environment_logic = MockEnvironmentLogic::new();
 
         let stage_id = Uuid::new_v4();
         let feature_id = Uuid::new_v4();
@@ -1709,6 +1748,19 @@ mod test {
             .times(1)
             .returning(|_, _, _, _| Ok(true));
 
+        // Mock get_environment_by_id (called for activity logging)
+        environment_logic
+            .expect_get_environment_by_id()
+            .times(1)
+            .returning(|_| {
+                Ok(crate::graphql::schema::Environment {
+                    id: ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"),
+                    name: "Test Environment".to_string(),
+                    active: true,
+                    team_id: ID::from(Uuid::new_v4()),
+                })
+            });
+
         let logic = feature_logic(
             Box::new(repository),
             Box::new(environment_logic),
@@ -1729,7 +1781,7 @@ mod test {
     #[tokio::test]
     async fn test_request_stage_change_rollback_rejected() {
         let mut repository = MockFeatureRepository::new();
-        let environment_logic = MockEnvironmentLogic::new();
+        let mut environment_logic = MockEnvironmentLogic::new();
 
         let stage_id = Uuid::new_v4();
         let feature_id = Uuid::new_v4();
@@ -1763,6 +1815,19 @@ mod test {
             .times(1)
             .returning(|_, _, _| Ok(true));
 
+        // Mock get_environment_by_id (called for activity logging)
+        environment_logic
+            .expect_get_environment_by_id()
+            .times(1)
+            .returning(|_| {
+                Ok(crate::graphql::schema::Environment {
+                    id: ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"),
+                    name: "Test Environment".to_string(),
+                    active: true,
+                    team_id: ID::from(Uuid::new_v4()),
+                })
+            });
+
         let logic = feature_logic(
             Box::new(repository),
             Box::new(environment_logic),
@@ -1783,7 +1848,7 @@ mod test {
     #[tokio::test]
     async fn test_request_stage_change_rollbacked() {
         let mut repository = MockFeatureRepository::new();
-        let environment_logic = MockEnvironmentLogic::new();
+        let mut environment_logic = MockEnvironmentLogic::new();
 
         let stage_id = Uuid::new_v4();
         let feature_id = Uuid::new_v4();
@@ -1816,6 +1881,19 @@ mod test {
             )
             .times(1)
             .returning(|_, _, _| Ok(true));
+
+        // Mock get_environment_by_id (called for activity logging)
+        environment_logic
+            .expect_get_environment_by_id()
+            .times(1)
+            .returning(|_| {
+                Ok(crate::graphql::schema::Environment {
+                    id: ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"),
+                    name: "Test Environment".to_string(),
+                    active: true,
+                    team_id: ID::from(Uuid::new_v4()),
+                })
+            });
 
         let logic = feature_logic(
             Box::new(repository),

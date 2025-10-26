@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     io::Cursor,
     net::SocketAddr,
     sync::Arc,
@@ -11,7 +11,7 @@ use log::{debug, error, info, warn};
 use prost::Message;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream, lookup_host},
+    net::{TcpListener, TcpStream},
     select,
     sync::{Mutex, broadcast},
     task::{JoinHandle, JoinSet},
@@ -21,29 +21,41 @@ use uuid::Uuid;
 
 use crate::{grpc::pb, logic::feature_evaluation::FeatureEvaluationEvent};
 
+pub mod db_discovery;
+pub mod discovery;
+
 type WireMessage = Arc<Vec<u8>>;
 
-fn default_refresh_ms() -> u64 {
-    2_000
+/// Database-backed cluster discovery configuration
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct DiscoveryConfig {
+    #[serde(default = "default_heartbeat_interval")]
+    pub heartbeat_interval_secs: u64,
+    #[serde(default = "default_stale_threshold")]
+    pub stale_threshold_secs: u64,
+    #[serde(default = "default_cleanup_interval")]
+    pub cleanup_interval_secs: u64,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(tag = "strategy", rename_all = "snake_case")]
-pub enum DiscoveryConfig {
-    Static {
-        peers: Vec<String>,
-    },
-    Dns {
-        record: String,
-        port: u16,
-        #[serde(default = "default_refresh_ms")]
-        refresh_ms: u64,
-    },
+fn default_heartbeat_interval() -> u64 {
+    30
+}
+
+fn default_stale_threshold() -> u64 {
+    90
+}
+
+fn default_cleanup_interval() -> u64 {
+    60
 }
 
 impl Default for DiscoveryConfig {
     fn default() -> Self {
-        Self::Static { peers: Vec::new() }
+        Self {
+            heartbeat_interval_secs: 30,
+            stale_threshold_secs: 90,
+            cleanup_interval_secs: 60,
+        }
     }
 }
 
@@ -75,9 +87,7 @@ pub struct ClusterConfig {
     pub enabled: bool,
     /// Address the node listens on for peer connections, e.g. "0.0.0.0:6000".
     pub listen_addr: String,
-    /// Backwards-compatible static peer list.
-    pub peers: Vec<String>,
-    /// Dynamic discovery mechanism.
+    /// Database-backed discovery configuration.
     pub discovery: DiscoveryConfig,
     /// Optional static identifier for the node. Defaults to a random UUID.
     pub node_id: Option<String>,
@@ -90,7 +100,6 @@ impl Default for ClusterConfig {
         Self {
             enabled: false,
             listen_addr: "0.0.0.0:6000".to_string(),
-            peers: Vec::new(),
             discovery: DiscoveryConfig::default(),
             node_id: None,
             reconnect_delay_ms: 2_000,
@@ -106,11 +115,31 @@ const WIRE_BUFFER: usize = 1024;
 /// Guard that keeps background tasks alive for the cluster runtime.
 pub struct ClusterHandle {
     tasks: Vec<AbortOnDrop>,
+    connection_ready_rx: tokio::sync::watch::Receiver<bool>,
 }
 
 impl ClusterHandle {
-    fn new(tasks: Vec<AbortOnDrop>) -> Self {
-        Self { tasks }
+    fn new(
+        tasks: Vec<AbortOnDrop>,
+        connection_ready_rx: tokio::sync::watch::Receiver<bool>,
+    ) -> Self {
+        Self {
+            tasks,
+            connection_ready_rx,
+        }
+    }
+
+    /// Wait for at least one peer connection to be established.
+    /// Useful in tests to ensure the cluster is ready before sending messages.
+    pub async fn wait_for_connection_ready(&self) {
+        let mut rx = self.connection_ready_rx.clone();
+        // Wait until the value becomes true, with a timeout
+        let timeout_duration = tokio::time::Duration::from_secs(10);
+        tokio::time::timeout(timeout_duration, async {
+            rx.wait_for(|&ready| ready).await.ok();
+        })
+        .await
+        .expect("Cluster connection timed out after 10 seconds");
     }
 }
 
@@ -123,29 +152,36 @@ impl Drop for ClusterHandle {
 struct ClusterState {
     node_id: String,
     wire_tx: broadcast::Sender<WireMessage>,
+    _wire_rx_keepalive: broadcast::Receiver<WireMessage>,
     feature_updates_tx: broadcast::Sender<pb::FeatureUpdate>,
     evaluation_events_tx: broadcast::Sender<FeatureEvaluationEvent>,
     listen_addr: Option<std::net::SocketAddr>,
     feature_deduper: Arc<Deduper>,
     evaluation_deduper: Arc<Deduper>,
+    /// Tracks if at least one peer connection has been established
+    connection_ready_tx: tokio::sync::watch::Sender<bool>,
 }
 
 impl ClusterState {
     fn new(
         node_id: String,
         wire_tx: broadcast::Sender<WireMessage>,
+        wire_rx_keepalive: broadcast::Receiver<WireMessage>,
         feature_updates_tx: broadcast::Sender<pb::FeatureUpdate>,
         evaluation_events_tx: broadcast::Sender<FeatureEvaluationEvent>,
         listen_addr: Option<std::net::SocketAddr>,
+        connection_ready_tx: tokio::sync::watch::Sender<bool>,
     ) -> Self {
         Self {
             node_id,
             wire_tx,
+            _wire_rx_keepalive: wire_rx_keepalive,
             feature_updates_tx,
             evaluation_events_tx,
             listen_addr,
             feature_deduper: Arc::new(Deduper::new(FEATURE_DEDUP_TTL, DEDUP_MAX_ENTRIES)),
             evaluation_deduper: Arc::new(Deduper::new(EVALUATION_DEDUP_TTL, DEDUP_MAX_ENTRIES)),
+            connection_ready_tx,
         }
     }
 }
@@ -184,8 +220,15 @@ impl Deduper {
 }
 
 /// Starts the cluster replication tasks and returns a guard to keep them alive.
+///
+/// # Arguments
+/// * `cfg` - Cluster configuration
+/// * `db_pool` - Optional database pool (required for Database discovery mode)
+/// * `feature_updates_tx` - Channel for broadcasting feature updates
+/// * `evaluation_events_tx` - Channel for broadcasting evaluation events
 pub fn start(
     cfg: &ClusterConfig,
+    db_pool: Option<sqlx::PgPool>,
     feature_updates_tx: broadcast::Sender<pb::FeatureUpdate>,
     evaluation_events_tx: broadcast::Sender<FeatureEvaluationEvent>,
 ) -> Option<ClusterHandle> {
@@ -201,13 +244,16 @@ pub fn start(
     let reconnect_delay = Duration::from_millis(cfg.reconnect_delay_ms.max(250));
     let listen_addr = cfg.listen_addr.parse::<SocketAddr>().ok();
 
-    let (wire_tx, _) = broadcast::channel::<WireMessage>(WIRE_BUFFER);
+    let (wire_tx, wire_rx_keepalive) = broadcast::channel::<WireMessage>(WIRE_BUFFER);
+    let (connection_ready_tx, connection_ready_rx) = tokio::sync::watch::channel(false);
     let state = Arc::new(ClusterState::new(
         node_id.clone(),
         wire_tx.clone(),
+        wire_rx_keepalive,
         feature_updates_tx.clone(),
         evaluation_events_tx.clone(),
         listen_addr,
+        connection_ready_tx,
     ));
 
     info!(
@@ -248,43 +294,69 @@ pub fn start(
         tasks.push(AbortOnDrop::new(handle));
     }
 
-    // Backwards-compatible static peers field.
-    if !cfg.peers.is_empty() {
-        tasks.extend(spawn_static_connectors(
-            state.clone(),
-            cfg.peers.clone(),
-            reconnect_delay,
-        ));
-    }
+    // Database-backed discovery
+    let pool = db_pool.expect("Database pool required for cluster discovery");
+    let repo = db_discovery::ClusterNodeRepo::new(pool);
 
-    // Discovery-specific peers.
-    match &cfg.discovery {
-        DiscoveryConfig::Static { peers } => {
-            if !peers.is_empty() {
-                tasks.extend(spawn_static_connectors(
-                    state.clone(),
-                    peers.clone(),
-                    reconnect_delay,
-                ));
+    let discovery_config = discovery::DbDiscoveryConfig {
+        node_id: node_id.clone(),
+        listen_addr: cfg.listen_addr.clone(),
+        heartbeat_interval_secs: cfg.discovery.heartbeat_interval_secs,
+        stale_threshold_secs: cfg.discovery.stale_threshold_secs,
+        cleanup_interval_secs: cfg.discovery.cleanup_interval_secs,
+    };
+
+    let service = discovery::DbDiscoveryService::new(discovery_config, repo);
+
+    // Spawn task to start discovery service and handle peer events
+    let state_clone = state.clone();
+    let self_addr = state.listen_addr;
+    let discovery_handle = tokio::spawn(async move {
+        match service.start().await {
+            Ok(mut handle) => {
+                info!("Database discovery service started for node {}", node_id);
+
+                // Track active peer connectors
+                let mut peer_connectors: HashMap<String, AbortOnDrop> = HashMap::new();
+
+                // Handle peer events
+                while let Some(event) = handle.peer_events.recv().await {
+                    match event {
+                        discovery::PeerEvent::PeerAdded(peer_addr) => {
+                            if should_skip_peer(self_addr, &peer_addr) {
+                                info!("Skipping self peer {}", peer_addr);
+                                continue;
+                            }
+
+                            if !peer_connectors.contains_key(&peer_addr) {
+                                info!("Connecting to discovered peer: {}", peer_addr);
+                                let state_for_peer = state_clone.clone();
+                                let peer_clone = peer_addr.clone();
+                                let connector_handle = tokio::spawn(async move {
+                                    run_peer_connector(state_for_peer, peer_clone, reconnect_delay).await;
+                                });
+                                peer_connectors.insert(peer_addr, AbortOnDrop::new(connector_handle));
+                            }
+                        }
+                        discovery::PeerEvent::PeerRemoved(peer_addr) => {
+                            if let Some(connector) = peer_connectors.remove(&peer_addr) {
+                                info!("Removing connector for peer: {}", peer_addr);
+                                drop(connector); // Abort the connector task
+                            }
+                        }
+                    }
+                }
+                info!("Database discovery peer event handler shutting down");
+            }
+            Err(e) => {
+                error!("Failed to start database discovery service: {}", e);
             }
         }
-        DiscoveryConfig::Dns {
-            record,
-            port,
-            refresh_ms,
-        } => {
-            let state_clone = state.clone();
-            let record = record.clone();
-            let port = *port;
-            let refresh = Duration::from_millis((*refresh_ms).max(250));
-            let handle = tokio::spawn(async move {
-                run_dns_discovery(state_clone, record, port, refresh, reconnect_delay).await;
-            });
-            tasks.push(AbortOnDrop::new(handle));
-        }
-    }
+    });
 
-    Some(ClusterHandle::new(tasks))
+    tasks.push(AbortOnDrop::new(discovery_handle));
+
+    Some(ClusterHandle::new(tasks, connection_ready_rx))
 }
 
 async fn run_listener(state: Arc<ClusterState>, listen_addr: String) {
@@ -295,6 +367,7 @@ async fn run_listener(state: Arc<ClusterState>, listen_addr: String) {
                 state.node_id, listen_addr
             );
             let mut join_set = JoinSet::new();
+            let mut has_notified = false;
             loop {
                 select! {
                     accept_res = listener.accept() => {
@@ -302,6 +375,13 @@ async fn run_listener(state: Arc<ClusterState>, listen_addr: String) {
                             Ok((stream, addr)) => {
                                 let peer_label = format!("inbound:{}", addr);
                                 let state_clone = state.clone();
+
+                                // Notify that at least one connection is ready (do this once)
+                                if !has_notified {
+                                    let _ = state.connection_ready_tx.send(true);
+                                    has_notified = true;
+                                }
+
                                 join_set.spawn(async move {
                                     if let Err(err) = connection_loop(state_clone, stream, peer_label).await {
                                         debug!("Inbound cluster connection ended: {}", err);
@@ -338,24 +418,49 @@ async fn run_listener(state: Arc<ClusterState>, listen_addr: String) {
 }
 
 async fn run_peer_connector(state: Arc<ClusterState>, peer: String, reconnect_delay: Duration) {
+    // Subscribe ONCE before entering the loop to ensure we're ready to receive messages
+    // as soon as forward_feature_updates starts sending them
+    let mut wire_rx = state.wire_tx.subscribe();
+    let mut has_notified = false;
+
+    info!("Cluster node {} starting peer connector for {}", state.node_id, peer);
+    eprintln!("CLUSTER: Node {} starting peer connector for {}", state.node_id, peer);
     loop {
+        debug!("Cluster node {} attempting to connect to peer {}...", state.node_id, peer);
+        eprintln!("CLUSTER: Node {} attempting to connect to {}...", state.node_id, peer);
         match TcpStream::connect(&peer).await {
             Ok(stream) => {
-                info!("Cluster node {} connected to peer {}", state.node_id, peer);
+                info!("Cluster node {} successfully connected to peer {}", state.node_id, peer);
+                eprintln!("CLUSTER: Node {} successfully connected to peer {}", state.node_id, peer);
+
+                // Notify that at least one connection is ready (do this once)
+                if !has_notified {
+                    info!("Cluster node {} notifying connection ready", state.node_id);
+                    let _ = state.connection_ready_tx.send(true);
+                    has_notified = true;
+                }
+
                 if let Err(err) =
-                    connection_loop(state.clone(), stream, format!("outbound:{}", peer)).await
+                    connection_loop_with_rx(state.clone(), stream, format!("outbound:{}", peer), &mut wire_rx).await
                 {
-                    debug!("Cluster connection to {} closed with error: {}", peer, err);
+                    info!("Cluster connection to {} closed with error: {}", peer, err);
                 }
             }
             Err(err) => {
-                debug!(
+                warn!(
                     "Cluster node {} failed to connect to {}: {}",
                     state.node_id, peer, err
                 );
+                eprintln!("CLUSTER: Node {} failed to connect to {}: {}", state.node_id, peer, err);
             }
         }
+        debug!("Cluster node {} sleeping {}ms before reconnect to {}", state.node_id, reconnect_delay.as_millis(), peer);
         sleep(reconnect_delay).await;
+
+        // After sleep, drain any messages that arrived while disconnected to prevent lag errors
+        while wire_rx.try_recv().is_ok() {
+            // Discard buffered messages from disconnect period
+        }
     }
 }
 
@@ -364,9 +469,19 @@ async fn connection_loop(
     stream: TcpStream,
     label: String,
 ) -> std::io::Result<()> {
+    // For inbound connections, create a new subscription
+    let mut outbound_rx = state.wire_tx.subscribe();
+    connection_loop_with_rx(state, stream, label, &mut outbound_rx).await
+}
+
+async fn connection_loop_with_rx(
+    state: Arc<ClusterState>,
+    stream: TcpStream,
+    label: String,
+    outbound_rx: &mut broadcast::Receiver<WireMessage>,
+) -> std::io::Result<()> {
     stream.set_nodelay(true)?;
     let (mut reader, mut writer) = stream.into_split();
-    let mut outbound_rx = state.wire_tx.subscribe();
 
     loop {
         select! {
@@ -457,22 +572,31 @@ async fn forward_feature_updates(
     wire_tx: broadcast::Sender<WireMessage>,
 ) {
     let mut rx = state.feature_updates_tx.subscribe();
+    info!("Cluster node {} starting forward_feature_updates task", state.node_id);
     loop {
         match rx.recv().await {
             Ok(update) => {
+                debug!("Cluster node {} received feature update message_id={}", state.node_id, update.message_id);
                 if update.message_id.is_empty() {
+                    debug!("Cluster node {} skipping update with empty message_id", state.node_id);
                     continue;
                 }
                 if !state.feature_deduper.mark_seen(&update.message_id).await {
+                    debug!("Cluster node {} skipping duplicate update message_id={}", state.node_id, update.message_id);
                     continue;
                 }
 
+                info!("Cluster node {} forwarding feature update message_id={} to {} peers",
+                    state.node_id, update.message_id, wire_tx.receiver_count());
                 let message = pb::ClusterMessage {
                     node_id: state.node_id.clone(),
                     payload: Some(pb::cluster_message::Payload::FeatureUpdate(update.clone())),
                 };
                 let bytes = Arc::new(message.encode_to_vec());
-                let _ = wire_tx.send(bytes);
+                match wire_tx.send(bytes) {
+                    Ok(count) => info!("Cluster node {} sent to {} receivers", state.node_id, count),
+                    Err(_) => warn!("Cluster node {} failed to send (no receivers)", state.node_id),
+                }
             }
             Err(broadcast::error::RecvError::Closed) => break,
             Err(broadcast::error::RecvError::Lagged(skipped)) => {
@@ -554,96 +678,6 @@ fn decode_cluster_message(bytes: &WireMessage) -> Result<pb::ClusterMessage, pro
     let slice: &[u8] = bytes.as_ref();
     let mut cursor = Cursor::new(slice);
     pb::ClusterMessage::decode(&mut cursor)
-}
-
-fn spawn_static_connectors<I>(
-    state: Arc<ClusterState>,
-    peers: I,
-    reconnect_delay: Duration,
-) -> Vec<AbortOnDrop>
-where
-    I: IntoIterator<Item = String>,
-{
-    let mut handles = Vec::new();
-    let mut seen = HashSet::new();
-    let self_addr = state.listen_addr;
-
-    for peer in peers.into_iter() {
-        if !seen.insert(peer.clone()) {
-            continue;
-        }
-        if should_skip_peer(self_addr, &peer) {
-            continue;
-        }
-        let state_clone = state.clone();
-        let peer_clone = peer.clone();
-        let handle = tokio::spawn(async move {
-            run_peer_connector(state_clone, peer_clone, reconnect_delay).await;
-        });
-        handles.push(AbortOnDrop::new(handle));
-    }
-
-    handles
-}
-
-async fn run_dns_discovery(
-    state: Arc<ClusterState>,
-    record: String,
-    port: u16,
-    refresh: Duration,
-    reconnect_delay: Duration,
-) {
-    info!(
-        "Cluster node {} starting DNS discovery for {}:{}",
-        state.node_id, record, port
-    );
-
-    let mut connectors: HashMap<String, AbortOnDrop> = HashMap::new();
-    loop {
-        match lookup_host((record.as_str(), port)).await {
-            Ok(iter) => {
-                let mut desired: HashSet<String> = HashSet::new();
-                for addr in iter {
-                    let peer = addr.to_string();
-                    if should_skip_peer(state.listen_addr, &peer) {
-                        continue;
-                    }
-                    desired.insert(peer.clone());
-                    if connectors.contains_key(&peer) {
-                        continue;
-                    }
-                    let state_clone = state.clone();
-                    let peer_clone = peer.clone();
-                    let handle = tokio::spawn(async move {
-                        run_peer_connector(state_clone, peer_clone, reconnect_delay).await;
-                    });
-                    connectors.insert(peer, AbortOnDrop::new(handle));
-                }
-
-                // Abort obsolete connectors
-                let mut removed = Vec::new();
-                for key in connectors.keys() {
-                    if !desired.contains(key) {
-                        removed.push(key.clone());
-                    }
-                }
-                for key in removed {
-                    if let Some(handle) = connectors.remove(&key) {
-                        // dropping AbortOnDrop triggers abort
-                        drop(handle);
-                    }
-                }
-            }
-            Err(err) => {
-                warn!(
-                    "Cluster node {} failed DNS lookup for {}:{} - {}",
-                    state.node_id, record, port, err
-                );
-            }
-        }
-
-        sleep(refresh).await;
-    }
 }
 
 fn should_skip_peer(self_addr: Option<SocketAddr>, peer: &str) -> bool {

@@ -166,7 +166,7 @@ async fn subscription_emits_on_event() {
 
     // Execute subscription manually using schema.execute_stream
     let mut stream = schema.execute_stream({
-        let mut req = Request::new("subscription($input: EvaluationRatesInput!){ evaluation_rates(input:$input){ timeBucket evaluationCount successCount priorAssignmentCount successRate cacheHitRate } }");
+        let mut req = Request::new("subscription($input: EvaluationRatesInput!){ evaluationRates(input:$input){ timeBucket evaluationCount successCount priorAssignmentCount successRate cacheHitRate } }");
     let mut outer: async_graphql::indexmap::IndexMap<async_graphql::Name, async_graphql::Value> = Default::default();
     let mut input_obj: async_graphql::indexmap::IndexMap<async_graphql::Name, async_graphql::Value> = Default::default();
     input_obj.insert(async_graphql::Name::new("featureKey"), async_graphql::Value::Null);
@@ -180,6 +180,18 @@ async fn subscription_emits_on_event() {
         req
     });
 
+    // First, consume the initial response (sent immediately on subscription)
+    if let Some(initial_resp) = stream.next().await {
+        // Initial response should contain the stub data
+        if let Some(data) = initial_resp.data.into_json().ok() {
+            if let Some(rates) = data.get("evaluationRates") {
+                if rates.is_array() {
+                    // Initial response received successfully
+                }
+            }
+        }
+    }
+
     // Act: send an event
     let _ = tx.send(FeatureEvaluationEvent {
         event_id: Uuid::new_v4(),
@@ -192,14 +204,13 @@ async fn subscription_emits_on_event() {
         user_context: None,
     });
 
-    // Assert: next response contains data array with one rate point
-    // We poll until we get a response with data (ignore initial pending/no-event frames)
+    // Assert: next response (after the event) contains data array with one rate point
     let mut found = false;
     for _ in 0..5 {
         // limit attempts
         if let Some(resp) = stream.next().await {
             if let Some(data) = resp.data.into_json().ok() {
-                if let Some(rates) = data.get("evaluation_rates") {
+                if let Some(rates) = data.get("evaluationRates") {
                     if rates.is_array() && !rates.as_array().unwrap().is_empty() {
                         let first = &rates.as_array().unwrap()[0];
                         assert_eq!(first.get("evaluationCount").unwrap().as_i64().unwrap(), 10);
