@@ -56,12 +56,12 @@ impl KillSwitchRollbackScheduler {
         for feature in features_to_rollback {
             match self
                 .feature_logic
-                .emergency_enable_feature(feature.id.clone(), None) // Automated rollback - no user actor
+                .execute_scheduled_disable(feature.id.clone(), None) // Automated disable - no user actor
                 .await
             {
                 Ok(_) => {
                     info!(
-                        "Auto-rolled back feature: {} ({:?})",
+                        "Auto-disabled feature via scheduled rollback: {} ({:?})",
                         feature.key, feature.id
                     );
                     processed_count += 1;
@@ -86,7 +86,7 @@ impl KillSwitchRollbackScheduler {
                                 error: String::new(),
                             });
                             info!(
-                                "Broadcast feature update for auto-rollback: {} ({:?})",
+                                "Broadcast feature update for auto-disable: {} ({:?})",
                                 feature.key, feature.id
                             );
                         } else {
@@ -104,7 +104,7 @@ impl KillSwitchRollbackScheduler {
                 }
                 Err(e) => {
                     warn!(
-                        "Failed to auto-rollback feature {} ({:?}): {}",
+                        "Failed to auto-disable feature {} ({:?}): {}",
                         feature.key, feature.id, e
                     );
                 }
@@ -178,5 +178,66 @@ impl KillSwitchRollbackScheduler {
             stages: stage_msgs,
             dependencies: deps,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::feature::MockFeatureRepository;
+    use crate::graphql::schema::Feature as GraphQLFeature;
+    use crate::graphql::schema::FeatureType as GraphQLFeatureType;
+    use crate::logic::feature::MockFeatureLogic;
+    use async_graphql::ID;
+    use chrono::Utc;
+
+    const FEATURE_ID: &str = "11111111-1111-1111-1111-111111111111";
+
+    fn sample_feature() -> GraphQLFeature {
+        GraphQLFeature {
+            id: ID::from(FEATURE_ID),
+            key: "scheduled-kill".to_string(),
+            description: None,
+            feature_type: GraphQLFeatureType::Simple,
+            enabled: Some(true),
+            kill_switch_enabled: true,
+            kill_switch_activated_at: None,
+            rollback_scheduled_at: Some(Utc::now() - chrono::Duration::minutes(5)),
+            dependencies: vec![],
+            relationships: vec![],
+            stages: vec![],
+            team_id: ID::from("22222222-2222-2222-2222-222222222222"),
+        }
+    }
+
+    #[tokio::test]
+    async fn scheduler_disables_due_features() {
+        let mut logic = MockFeatureLogic::new();
+        logic
+            .expect_get_features_pending_rollback()
+            .times(1)
+            .returning(|| Ok(vec![sample_feature()]));
+        logic
+            .expect_execute_scheduled_disable()
+            .times(1)
+            .withf(|id, actor| {
+                id == &ID::from(FEATURE_ID) && actor.is_none()
+            })
+            .returning(|_, _| Ok(sample_feature()));
+
+        let mut repo = MockFeatureRepository::new();
+        repo.expect_get_feature_by_id()
+            .returning(|_| Err(crate::Error::NotFound(uuid::Uuid::new_v4())));
+
+        let pool = sqlx::PgPool::connect_lazy("postgres://unused").unwrap();
+        let (tx, _rx) = tokio::sync::broadcast::channel(4);
+
+        let scheduler = KillSwitchRollbackScheduler::new(Box::new(logic), Box::new(repo), pool, tx);
+
+        let processed = scheduler
+            .check_and_process_rollbacks()
+            .await
+            .expect("scheduler should succeed");
+        assert_eq!(processed, 1);
     }
 }

@@ -162,8 +162,15 @@ impl FeatureEvaluationSvc {
 
     async fn map_db_feature_to_engine(&self, f: db::Feature) -> Result<engine::Feature, Status> {
         let repo = &self.feature_repo;
-        let mut stages = Vec::with_capacity(f.stages.len());
-        for s in f.stages.into_iter() {
+        let db::Feature {
+            stages: db_stages,
+            kill_switch_enabled,
+            rollback_scheduled_at,
+            ..
+        } = f;
+
+        let mut stages = Vec::with_capacity(db_stages.len());
+        for s in db_stages.into_iter() {
             // Load stage criterias
             let crits = repo
                 .get_stage_criteria(s.id)
@@ -193,6 +200,8 @@ impl FeatureEvaluationSvc {
 
         Ok(engine::Feature {
             enabled: true, // top-level enablement not stored; treat as enabled
+            kill_switch_enabled,
+            rollback_scheduled_at,
             dependencies: deps,
             stages,
         })

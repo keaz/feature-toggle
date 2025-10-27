@@ -40,7 +40,10 @@ async fn cluster_db_discovery_propagates_feature_updates() {
 
     let port_a = free_port();
     let port_b = free_port();
-    println!("TEST: Allocated ports: port_a={}, port_b={}", port_a, port_b);
+    println!(
+        "TEST: Allocated ports: port_a={}, port_b={}",
+        port_a, port_b
+    );
 
     let cfg_a = ClusterConfig {
         enabled: true,
@@ -79,16 +82,18 @@ async fn cluster_db_discovery_propagates_feature_updates() {
         &cfg_a,
         Some(pool.clone()),
         updates_a.clone(),
-        eval_a.clone()
-    ).expect("cluster A guard");
+        eval_a.clone(),
+    )
+    .expect("cluster A guard");
 
     println!("TEST: Starting node B");
     let guard_b = feature_toggle_backend::cluster::start(
         &cfg_b,
         Some(pool.clone()),
         updates_b.clone(),
-        eval_b.clone()
-    ).expect("cluster B guard");
+        eval_b.clone(),
+    )
+    .expect("cluster B guard");
 
     println!("TEST: Waiting for database discovery and connections to be established");
     // Wait for database discovery and connections to be established
@@ -96,10 +101,12 @@ async fn cluster_db_discovery_propagates_feature_updates() {
 
     println!("TEST: Checking nodes in database");
     // Check if nodes are registered
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cluster_nodes WHERE node_id LIKE 'cluster-test-%'")
-        .fetch_one(&pool)
-        .await
-        .expect("Failed to count test nodes");
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM cluster_nodes WHERE node_id LIKE 'cluster-test-%'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("Failed to count test nodes");
     println!("TEST: Found {} nodes in database", count);
     assert_eq!(count, 2, "Both nodes should be registered in database");
 
@@ -152,10 +159,12 @@ async fn cluster_db_discovery_propagates_feature_updates() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Verify nodes were deregistered
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cluster_nodes WHERE node_id LIKE 'cluster-test-%'")
-        .fetch_one(&pool)
-        .await
-        .expect("Failed to count test nodes");
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM cluster_nodes WHERE node_id LIKE 'cluster-test-%'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("Failed to count test nodes");
 
     println!("TEST: Nodes remaining after cleanup: {}", count);
     assert_eq!(count, 0, "Nodes should be deregistered after shutdown");

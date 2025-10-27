@@ -1106,6 +1106,7 @@ dependencies = [
 name = "evaluation-engine"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "serde",
  "sha2",
 ]
@@ -1151,6 +1152,7 @@ name = "feature-edge-server"
 version = "0.1.0"
 dependencies = [
  "actix-web",
+ "chrono",
  "config",
  "evaluation-engine",
  "log4rs",

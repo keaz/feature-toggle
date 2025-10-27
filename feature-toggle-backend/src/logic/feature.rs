@@ -112,6 +112,11 @@ pub trait FeatureCrudLogic: Send + Sync {
         actor: Option<crate::logic::ActorContext>,
     ) -> Result<Feature, Error>;
     async fn get_features_pending_rollback(&self) -> Result<Vec<Feature>, Error>;
+    async fn execute_scheduled_disable(
+        &self,
+        id: ID,
+        actor: Option<crate::logic::ActorContext>,
+    ) -> Result<Feature, Error>;
 }
 
 /// Stage context and criteria management operations
@@ -207,6 +212,7 @@ mockall::mock! {
         ) -> Result<Feature, Error>;
         async fn emergency_enable_feature(&self, id: ID, actor: Option<crate::logic::ActorContext>) -> Result<Feature, Error>;
         async fn get_features_pending_rollback(&self) -> Result<Vec<Feature>, Error>;
+        async fn execute_scheduled_disable(&self, id: ID, actor: Option<crate::logic::ActorContext>) -> Result<Feature, Error>;
     }
 
     #[async_trait::async_trait]
@@ -778,6 +784,20 @@ impl FeatureCrudLogic for FeatureLogicImpl {
             .map(|a| a.as_option())
             .unwrap_or((None, None));
 
+        let log_message = match rollback_in_minutes {
+            Some(minutes) if minutes > 0 => {
+                let scheduled = feature
+                    .rollback_scheduled_at
+                    .map(|dt| dt.to_rfc3339())
+                    .unwrap_or_else(|| "unknown".to_string());
+                format!(
+                    "Kill switch scheduled for feature '{}' at {} (in {} minutes)",
+                    feature.key, scheduled, minutes
+                )
+            }
+            _ => format!("Kill switch activated for feature '{}'", feature.key),
+        };
+
         // Log activity (ignore errors to not fail the operation)
         let _ = crate::utils::activity_logger::log_feature_activity(
             &self.activity_log_repository,
@@ -785,7 +805,7 @@ impl FeatureCrudLogic for FeatureLogicImpl {
             &feature.id.to_string(),
             actor_id,
             actor_name,
-            format!("Kill switch activated for feature '{}'", feature.key),
+            log_message,
             Some(serde_json::json!({
                 "feature_id": feature.id.to_string(),
                 "feature_key": feature.key.clone(),
@@ -835,6 +855,45 @@ impl FeatureCrudLogic for FeatureLogicImpl {
             .into_iter()
             .map(Self::map_entity_to_graphql_feature)
             .collect())
+    }
+
+    async fn execute_scheduled_disable(
+        &self,
+        id: ID,
+        actor: Option<crate::logic::ActorContext>,
+    ) -> Result<Feature, Error> {
+        let feature_id = id_to_uuid(id)?;
+        let feature = self
+            .repository
+            .execute_scheduled_disable(feature_id)
+            .await?;
+
+        // Extract actor information
+        let (actor_id, actor_name) = actor
+            .as_ref()
+            .map(|a| a.as_option())
+            .unwrap_or((None, None));
+
+        // Log the scheduled disable execution
+        let _ = crate::utils::activity_logger::log_feature_activity(
+            &self.activity_log_repository,
+            crate::utils::activity_logger::activity_types::KILL_SWITCH_ACTIVATED,
+            &feature.id.to_string(),
+            actor_id,
+            actor_name,
+            format!(
+                "Scheduled kill switch executed for feature '{}' (auto-disabled)",
+                feature.key
+            ),
+            Some(serde_json::json!({
+                "feature_id": feature.id.to_string(),
+                "feature_key": feature.key.clone(),
+                "scheduled_execution": true,
+            })),
+        )
+        .await;
+
+        Ok(Self::map_entity_to_graphql_feature(feature))
     }
 }
 

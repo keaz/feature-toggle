@@ -251,8 +251,7 @@ mod tests {
     use std::time::Duration;
 
     async fn setup_test_db() -> PgPool {
-        let database_url = env::var("DATABASE_URL")
-            .expect("DATABASE_URL must be set for tests");
+        let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set for tests");
 
         let pool = PgPoolOptions::new()
             .max_connections(2)
@@ -302,10 +301,14 @@ mod tests {
         let repo = ClusterNodeRepo::new(pool.clone());
 
         // Register node first time
-        repo.register_node("test-node-2", "127.0.0.1:50051").await.unwrap();
+        repo.register_node("test-node-2", "127.0.0.1:50051")
+            .await
+            .unwrap();
 
         // Register same node with different address (should update)
-        repo.register_node("test-node-2", "127.0.0.1:50052").await.unwrap();
+        repo.register_node("test-node-2", "127.0.0.1:50052")
+            .await
+            .unwrap();
 
         // Verify address was updated
         let node = repo.get_node("test-node-2").await.unwrap().unwrap();
@@ -333,7 +336,9 @@ mod tests {
         let repo = ClusterNodeRepo::new(pool.clone());
 
         // Register node first
-        repo.register_node("test-node-3", "127.0.0.1:50051").await.unwrap();
+        repo.register_node("test-node-3", "127.0.0.1:50051")
+            .await
+            .unwrap();
 
         let node_before = repo.get_node("test-node-3").await.unwrap().unwrap();
 
@@ -368,9 +373,15 @@ mod tests {
         let repo = ClusterNodeRepo::new(pool.clone());
 
         // Register multiple nodes
-        repo.register_node("test-node-4", "127.0.0.1:50051").await.unwrap();
-        repo.register_node("test-node-5", "127.0.0.1:50052").await.unwrap();
-        repo.register_node("test-node-6", "127.0.0.1:50053").await.unwrap();
+        repo.register_node("test-node-4", "127.0.0.1:50051")
+            .await
+            .unwrap();
+        repo.register_node("test-node-5", "127.0.0.1:50052")
+            .await
+            .unwrap();
+        repo.register_node("test-node-6", "127.0.0.1:50053")
+            .await
+            .unwrap();
 
         // Get peers for node-4 (should see node-5 and node-6)
         let peers = repo.get_active_peers("test-node-4", 60).await.unwrap();
@@ -389,8 +400,12 @@ mod tests {
         let repo = ClusterNodeRepo::new(pool.clone());
 
         // Register nodes
-        repo.register_node("test-node-7", "127.0.0.1:50051").await.unwrap();
-        repo.register_node("test-node-8", "127.0.0.1:50052").await.unwrap();
+        repo.register_node("test-node-7", "127.0.0.1:50051")
+            .await
+            .unwrap();
+        repo.register_node("test-node-8", "127.0.0.1:50052")
+            .await
+            .unwrap();
 
         // Make node-8 stale by manually updating its heartbeat to the past
         sqlx::query(
@@ -415,7 +430,9 @@ mod tests {
         let repo = ClusterNodeRepo::new(pool.clone());
 
         // Register and then deregister
-        repo.register_node("test-node-9", "127.0.0.1:50051").await.unwrap();
+        repo.register_node("test-node-9", "127.0.0.1:50051")
+            .await
+            .unwrap();
 
         let node = repo.get_node("test-node-9").await.unwrap();
         assert!(node.is_some());
@@ -448,9 +465,15 @@ mod tests {
         let repo = ClusterNodeRepo::new(pool.clone());
 
         // Register multiple nodes
-        repo.register_node("test-node-10", "127.0.0.1:50051").await.unwrap();
-        repo.register_node("test-node-11", "127.0.0.1:50052").await.unwrap();
-        repo.register_node("test-node-12", "127.0.0.1:50053").await.unwrap();
+        repo.register_node("test-node-10", "127.0.0.1:50051")
+            .await
+            .unwrap();
+        repo.register_node("test-node-11", "127.0.0.1:50052")
+            .await
+            .unwrap();
+        repo.register_node("test-node-12", "127.0.0.1:50053")
+            .await
+            .unwrap();
 
         // Make some nodes stale
         sqlx::query(
@@ -468,7 +491,8 @@ mod tests {
 
         // Verify only active node remains
         let all_nodes = repo.get_all_nodes().await.unwrap();
-        let test_nodes: Vec<_> = all_nodes.iter()
+        let test_nodes: Vec<_> = all_nodes
+            .iter()
             .filter(|n| n.node_id.starts_with("test-"))
             .collect();
         assert_eq!(test_nodes.len(), 1);
@@ -484,11 +508,16 @@ mod tests {
         let repo = ClusterNodeRepo::new(pool.clone());
 
         // Register multiple nodes
-        repo.register_node("test-node-13", "127.0.0.1:50051").await.unwrap();
-        repo.register_node("test-node-14", "127.0.0.1:50052").await.unwrap();
+        repo.register_node("test-node-13", "127.0.0.1:50051")
+            .await
+            .unwrap();
+        repo.register_node("test-node-14", "127.0.0.1:50052")
+            .await
+            .unwrap();
 
         let all_nodes = repo.get_all_nodes().await.unwrap();
-        let test_nodes: Vec<_> = all_nodes.iter()
+        let test_nodes: Vec<_> = all_nodes
+            .iter()
             .filter(|n| n.node_id.starts_with("test-"))
             .collect();
 
@@ -510,10 +539,8 @@ mod tests {
             .map(|i| {
                 let repo = repo.clone();
                 tokio::spawn(async move {
-                    repo.register_node(
-                        "test-node-concurrent",
-                        &format!("127.0.0.1:5005{}", i)
-                    ).await
+                    repo.register_node("test-node-concurrent", &format!("127.0.0.1:5005{}", i))
+                        .await
                 })
             })
             .collect();

@@ -33,3 +33,10 @@ login time, should capture First name, last name, email. Password should be stor
 We should be able to use a actix_web Middleware for check admin account exist or not.
 this Middleware should run after the AcceslogMiddleware.
 Use sqlx migration scripts to create user table. No need to specify database schema when creating table.
+
+## Kill switch scheduling
+
+- Scheduling a kill switch (`rollback_in_minutes` > 0) now defers the disable until the stored `rollback_scheduled_at`. Requests evaluate to `false` the moment that timestamp passes, even if the backend scheduler has not yet flipped the flag.
+- The backend scheduler consumes the pending list and sets `kill_switch_enabled = false` for overdue features while broadcasting updates so edge nodes evict sticky assignments.
+- Before running backend or edge tests locally, seed the database with the provided fixtures:
+  `psql -d "$DATABASE_URL" -f init.sql`

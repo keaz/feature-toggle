@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE features\n               SET kill_switch_enabled = false,\n                   kill_switch_activated_at = $1,\n                   rollback_scheduled_at = NULL\n               WHERE id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "af1e5bd4593190295bb5d4895e3d896c9129e35d4dd5f60c1c0fcae7180bae82"
+}

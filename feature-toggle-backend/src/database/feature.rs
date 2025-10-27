@@ -212,6 +212,9 @@ pub trait FeatureRepository: Send + Sync {
 
     async fn get_features_pending_rollback(&self) -> Result<Vec<Feature>, Error>;
 
+    // Execute the actual disable for scheduled rollback (called by scheduler)
+    async fn execute_scheduled_disable(&self, feature_id: Uuid) -> Result<Feature, Error>;
+
     // Helper: find owning feature id for a stage
     async fn get_feature_id_by_stage_id(&self, stage_id: Uuid) -> Result<Option<Uuid>, Error>;
 
@@ -1337,16 +1340,25 @@ impl FeatureRepository for FeatureRepositoryImpl {
         rollback_in_minutes: Option<i32>,
     ) -> Result<Feature, Error> {
         let now = chrono::Utc::now();
-        let rollback_at =
-            rollback_in_minutes.map(|minutes| now + chrono::Duration::minutes(minutes as i64));
+
+        // When a rollback window is provided, we treat it as a future kill-switch activation point.
+        // Until that time the feature remains enabled, but carries the scheduled timestamp.
+        let (kill_switch_enabled, activated_at, rollback_at) = match rollback_in_minutes {
+            Some(minutes) if minutes > 0 => {
+                let schedule = now + chrono::Duration::minutes(minutes as i64);
+                (true, None, Some(schedule))
+            }
+            _ => (false, Some(now), None),
+        };
 
         let result = sqlx::query!(
-            r#"UPDATE features 
-               SET kill_switch_enabled = true, 
-                   kill_switch_activated_at = $1,
-                   rollback_scheduled_at = $2
-               WHERE id = $3"#,
-            now,
+            r#"UPDATE features
+               SET kill_switch_enabled = $1,
+                   kill_switch_activated_at = $2,
+                   rollback_scheduled_at = $3
+               WHERE id = $4"#,
+            kill_switch_enabled,
+            activated_at,
             rollback_at,
             feature_id
         )
@@ -1359,8 +1371,8 @@ impl FeatureRepository for FeatureRepositoryImpl {
 
     async fn emergency_enable_feature(&self, feature_id: Uuid) -> Result<Feature, Error> {
         let result = sqlx::query!(
-            r#"UPDATE features 
-               SET kill_switch_enabled = false, 
+            r#"UPDATE features
+               SET kill_switch_enabled = true,
                    kill_switch_activated_at = NULL,
                    rollback_scheduled_at = NULL
                WHERE id = $1"#,
@@ -1376,13 +1388,13 @@ impl FeatureRepository for FeatureRepositoryImpl {
     async fn get_features_pending_rollback(&self) -> Result<Vec<Feature>, Error> {
         let now = chrono::Utc::now();
         let result = sqlx::query_as::<_, FeatureWithStageRow>(
-            r#"SELECT f.id as feature_id, f.key as feature_key, f.description, f.feature_type, f.team_id, f.created_at, 
+            r#"SELECT f.id as feature_id, f.key as feature_key, f.description, f.feature_type, f.team_id, f.created_at,
             f.kill_switch_enabled, f.kill_switch_activated_at, f.rollback_scheduled_at,
             s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
             s.parent_stage_id, s.position, s.bucketing_key, s.status, s.enabled
             FROM features f LEFT JOIN features_pipeline_stages s ON f.id = s.feature_id
-            WHERE f.kill_switch_enabled = true 
-              AND f.rollback_scheduled_at IS NOT NULL 
+            WHERE f.kill_switch_enabled = true
+              AND f.rollback_scheduled_at IS NOT NULL
               AND f.rollback_scheduled_at <= $1
             ORDER BY f.rollback_scheduled_at ASC"#,
         )
@@ -1418,6 +1430,43 @@ impl FeatureRepository for FeatureRepositoryImpl {
         }
 
         Ok(features)
+    }
+
+    async fn execute_scheduled_disable(&self, feature_id: Uuid) -> Result<Feature, Error> {
+        let now = chrono::Utc::now();
+
+        // Start a transaction to update both feature and stages atomically
+        let mut tx = self.pool.begin().await.map_err(|e| Error::DatabaseError(e))?;
+
+        // Disable the feature (kill_switch_enabled = false means feature is disabled)
+        let result = sqlx::query!(
+            r#"UPDATE features
+               SET kill_switch_enabled = false,
+                   kill_switch_activated_at = $1,
+                   rollback_scheduled_at = NULL
+               WHERE id = $2"#,
+            now,
+            feature_id
+        )
+        .execute(&mut *tx)
+        .await;
+
+        handle_error(Some(feature_id), result)?;
+
+        // Disable all stages for this feature
+        sqlx::query!(
+            r#"UPDATE features_pipeline_stages
+               SET enabled = false
+               WHERE feature_id = $1"#,
+            feature_id
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| Error::DatabaseError(e))?;
+
+        tx.commit().await.map_err(|e| Error::DatabaseError(e))?;
+
+        self.get_feature_by_id(feature_id).await
     }
 
     async fn get_feature_growth(
@@ -1820,7 +1869,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
         // Count total features with active kill switches
         let mut count_query = sqlx::QueryBuilder::new(
             "SELECT COUNT(DISTINCT f.id) FROM features f \
-             WHERE f.kill_switch_enabled = true",
+             WHERE f.kill_switch_enabled = false",
         );
 
         if let Some(tid) = team_id {
@@ -1843,14 +1892,14 @@ impl FeatureRepository for FeatureRepositoryImpl {
 
         // Query features with kill switches (with stages joined)
         let mut query_builder = sqlx::QueryBuilder::new(
-            r#"SELECT DISTINCT ON (f.id) f.id as feature_id, f.key as feature_key, f.description, 
-               f.feature_type, f.team_id, f.created_at, f.kill_switch_enabled, 
+            r#"SELECT DISTINCT ON (f.id) f.id as feature_id, f.key as feature_key, f.description,
+               f.feature_type, f.team_id, f.created_at, f.kill_switch_enabled,
                f.kill_switch_activated_at, f.rollback_scheduled_at,
                s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
                s.parent_stage_id, s.position, s.bucketing_key, s.status, s.enabled
                FROM features f
                LEFT JOIN features_pipeline_stages s ON f.id = s.feature_id
-               WHERE f.kill_switch_enabled = true"#,
+               WHERE f.kill_switch_enabled = false"#,
         );
 
         if let Some(tid) = team_id {
@@ -1950,8 +1999,8 @@ mod tests {
 
         let feature = result.unwrap();
         assert!(
-            feature.kill_switch_enabled,
-            "Kill switch should be enabled (feature disabled)"
+            !feature.kill_switch_enabled,
+            "Kill switch should be activated (feature disabled, kill_switch_enabled=false)"
         );
         assert!(
             feature.kill_switch_activated_at.is_some(),
@@ -1987,11 +2036,11 @@ mod tests {
         let feature = result.unwrap();
         assert!(
             feature.kill_switch_enabled,
-            "Kill switch should be enabled (feature disabled)"
+            "Kill switch should remain enabled until the scheduled disable time"
         );
         assert!(
-            feature.kill_switch_activated_at.is_some(),
-            "Activation time should be set"
+            feature.kill_switch_activated_at.is_none(),
+            "Activation time should not be set until the disable executes"
         );
         assert!(
             feature.rollback_scheduled_at.is_some(),
@@ -2048,8 +2097,8 @@ mod tests {
 
         let feature = result.unwrap();
         assert!(
-            !feature.kill_switch_enabled,
-            "Kill switch should be disabled (feature enabled)"
+            feature.kill_switch_enabled,
+            "Kill switch should be deactivated (feature enabled, kill_switch_enabled=true)"
         );
         assert!(
             feature.kill_switch_activated_at.is_none(),
@@ -2108,8 +2157,7 @@ mod tests {
         // Disable feature1 with rollback in the past (should be returned)
         let past_time = Utc::now() - Duration::minutes(10);
         sqlx::query!(
-            r#"UPDATE features SET kill_switch_enabled = true, kill_switch_activated_at = $1, rollback_scheduled_at = $2 WHERE id = $3"#,
-            past_time,
+            r#"UPDATE features SET kill_switch_enabled = true, kill_switch_activated_at = NULL, rollback_scheduled_at = $1 WHERE id = $2"#,
             past_time,
             feature1_id
         ).execute(&pool).await.expect("Failed to setup feature1");
@@ -2117,8 +2165,7 @@ mod tests {
         // Disable feature2 with rollback in the future (should NOT be returned)
         let future_time = Utc::now() + Duration::minutes(10);
         sqlx::query!(
-            r#"UPDATE features SET kill_switch_enabled = true, kill_switch_activated_at = $1, rollback_scheduled_at = $2 WHERE id = $3"#,
-            Utc::now(),
+            r#"UPDATE features SET kill_switch_enabled = true, kill_switch_activated_at = NULL, rollback_scheduled_at = $1 WHERE id = $2"#,
             future_time,
             feature2_id
         ).execute(&pool).await.expect("Failed to setup feature2");
@@ -2152,7 +2199,7 @@ mod tests {
         if let Some(feature) = returned_feature1 {
             assert!(
                 feature.kill_switch_enabled,
-                "Returned feature should be disabled"
+                "Returned feature should remain enabled until the scheduled disable executes"
             );
             assert!(
                 feature.rollback_scheduled_at.is_some(),
@@ -2173,66 +2220,65 @@ mod tests {
         let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
         let feature_id = setup_test_feature(&pool, team_id).await;
 
-        // Test disable -> get -> enable -> get cycle
+        // Test disable (scheduled) -> actual disable -> enable cycle
         let before_disable = Utc::now();
 
-        // 1. Disable with rollback
-        repo.emergency_disable_feature(feature_id, Some(120))
+        // 1. Schedule disable with rollback window
+        let scheduled = repo
+            .emergency_disable_feature(feature_id, Some(120))
             .await
-            .expect("Should disable feature");
+            .expect("Should schedule feature disable");
 
-        // 2. Retrieve and verify disabled state
+        assert!(scheduled.kill_switch_enabled);
+        assert!(scheduled.kill_switch_activated_at.is_none());
+        assert!(scheduled.rollback_scheduled_at.is_some());
+
+        // 2. Retrieve and verify pending state
+        let pending_feature = repo
+            .get_feature_by_id(feature_id)
+            .await
+            .expect("Should retrieve pending feature");
+        assert!(pending_feature.kill_switch_enabled);
+        assert!(pending_feature.kill_switch_activated_at.is_none());
+        let scheduled_time = pending_feature.rollback_scheduled_at.expect("scheduled time");
+        assert!(
+            scheduled_time >= before_disable,
+            "Scheduled disable should be after the request time"
+        );
+
+        // 3. Simulate scheduler executing the disable now
+        repo.emergency_disable_feature(feature_id, None)
+            .await
+            .expect("Scheduler disable should succeed");
+
         let disabled_feature = repo
             .get_feature_by_id(feature_id)
             .await
             .expect("Should retrieve disabled feature");
+        assert!(
+            !disabled_feature.kill_switch_enabled,
+            "Feature should be disabled after scheduled execution"
+        );
+        let activation_time = disabled_feature
+            .kill_switch_activated_at
+            .expect("Activation time");
+        assert!(activation_time >= before_disable);
+        assert!(disabled_feature.rollback_scheduled_at.is_none());
 
-        assert!(
-            disabled_feature.kill_switch_enabled,
-            "Feature should be disabled"
-        );
-        assert!(
-            disabled_feature.kill_switch_activated_at.is_some(),
-            "Should have activation time"
-        );
-        assert!(
-            disabled_feature.rollback_scheduled_at.is_some(),
-            "Should have rollback time"
-        );
-
-        let activation_time = disabled_feature.kill_switch_activated_at.unwrap();
-        assert!(
-            activation_time >= before_disable,
-            "Activation time should be after disable call"
-        );
-        assert!(
-            activation_time <= Utc::now(),
-            "Activation time should not be in future"
-        );
-
-        // 3. Enable feature
+        // 4. Enable feature
         repo.emergency_enable_feature(feature_id)
             .await
             .expect("Should enable feature");
 
-        // 4. Retrieve and verify enabled state
+        // 5. Retrieve and verify enabled state
         let enabled_feature = repo
             .get_feature_by_id(feature_id)
             .await
             .expect("Should retrieve enabled feature");
 
-        assert!(
-            !enabled_feature.kill_switch_enabled,
-            "Feature should be enabled"
-        );
-        assert!(
-            enabled_feature.kill_switch_activated_at.is_none(),
-            "Should clear activation time"
-        );
-        assert!(
-            enabled_feature.rollback_scheduled_at.is_none(),
-            "Should clear rollback time"
-        );
+        assert!(enabled_feature.kill_switch_enabled);
+        assert!(enabled_feature.kill_switch_activated_at.is_none());
+        assert!(enabled_feature.rollback_scheduled_at.is_none());
 
         cleanup_test_feature(&pool, feature_id).await;
     }
@@ -2250,8 +2296,16 @@ mod tests {
 
         let feature = result.unwrap();
         assert!(
-            feature.rollback_scheduled_at.is_some(),
-            "Should schedule immediate rollback"
+            !feature.kill_switch_enabled,
+            "Zero minute rollback should result in immediate disable"
+        );
+        assert!(
+            feature.kill_switch_activated_at.is_some(),
+            "Immediate disable should record activation time"
+        );
+        assert!(
+            feature.rollback_scheduled_at.is_none(),
+            "Immediate disable should not keep a scheduled timestamp"
         );
         cleanup_test_feature(&pool, feature1_id).await;
 
@@ -2264,10 +2318,12 @@ mod tests {
         assert!(result.is_ok(), "Large minute rollback should work");
 
         let feature = result.unwrap();
-        assert!(
-            feature.rollback_scheduled_at.is_some(),
-            "Should schedule far future rollback"
-        );
+        assert!(feature.kill_switch_enabled);
+        assert!(feature.kill_switch_activated_at.is_none());
+        let scheduled = feature
+            .rollback_scheduled_at
+            .expect("Should schedule far future rollback");
+        assert!(scheduled > Utc::now());
         cleanup_test_feature(&pool, feature2_id).await;
     }
 }

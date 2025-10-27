@@ -9,6 +9,7 @@ use utoipa_swagger_ui::SwaggerUi;
 mod config;
 mod grpc_client;
 mod handlers;
+mod kill_switch;
 
 mod pb {
     #![allow(clippy::all)]
@@ -69,17 +70,42 @@ impl FeatureCache {
         }
     }
 
-    pub async fn delete_by_key(&self, key: &str) {
+    pub async fn delete_by_key(&self, key: &str) -> Option<String> {
         let mut by_key = self.by_key.write().await;
         if let Some(f) = by_key.remove(key) {
+            let feature_id = f.id.clone();
             let mut by_id = self.by_id.write().await;
             by_id.remove(&f.id);
+            Some(feature_id)
+        } else {
+            None
         }
     }
 
     pub async fn get_by_key(&self, key: &str) -> Option<pb::FeatureFull> {
         let by_key = self.by_key.read().await;
         by_key.get(key).cloned()
+    }
+}
+
+impl AppState {
+    pub async fn purge_assignments_for_feature(&self, feature_id: &str) {
+        {
+            let mut set = self.assigned_true.write().await;
+            let keys: Vec<String> = set
+                .iter()
+                .filter(|entry| entry.split('|').nth(1) == Some(feature_id))
+                .cloned()
+                .collect();
+            for key in keys {
+                set.remove(&key);
+            }
+        }
+
+        {
+            let mut pending = self.pending_assignments.write().await;
+            pending.retain(|assignment| assignment.feature_id != feature_id);
+        }
     }
 }
 
@@ -208,7 +234,67 @@ mod tests {
 
         cache.upsert(f1.clone()).await;
         assert!(cache.get_by_key("test_key").await.is_some());
-        cache.delete_by_key("test_key").await;
+        let removed = cache.delete_by_key("test_key").await;
+        assert_eq!(removed.as_deref(), Some("test_id"));
         assert!(cache.get_by_key("test_key").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_purge_assignments_for_feature() {
+        let cache = Arc::new(FeatureCache::default());
+        let channel = Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
+        let grpc_client = pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
+        let state = AppState {
+            cache,
+            grpc: Arc::new(tokio::sync::Mutex::new(grpc_client)),
+            client_id: "client".into(),
+            client_secret: "secret".into(),
+            connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            assigned_true: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            pending_assignments: Arc::new(RwLock::new(Vec::new())),
+            flush_interval: Duration::from_secs(60),
+            pending_evaluation_events: Arc::new(RwLock::new(Vec::new())),
+            evaluation_flush_interval: Duration::from_secs(60),
+            retry_config: config::RetryConfig::default(),
+        };
+
+        let feature_id = "fea-123";
+        {
+            let mut set = state.assigned_true.write().await;
+            set.insert(format!("user-1|{}|env-1", feature_id));
+            set.insert(format!("user-2|{}|env-1", feature_id));
+            set.insert("user-3|other|env".to_string());
+        }
+
+        {
+            let mut pending = state.pending_assignments.write().await;
+            pending.push(crate::grpc_client::UserAssignment {
+                user_id: "user-1".into(),
+                feature_id: feature_id.into(),
+                environment_id: "env-1".into(),
+                assigned: true,
+            });
+            pending.push(crate::grpc_client::UserAssignment {
+                user_id: "user-9".into(),
+                feature_id: "other".into(),
+                environment_id: "env-1".into(),
+                assigned: true,
+            });
+        }
+
+        state.purge_assignments_for_feature(feature_id).await;
+
+        let set = state.assigned_true.read().await;
+        assert_eq!(set.len(), 1);
+        assert!(set.iter().all(|entry| !entry.contains(feature_id)));
+        drop(set);
+
+        let pending = state.pending_assignments.read().await;
+        assert_eq!(pending.len(), 1);
+        assert!(
+            pending
+                .iter()
+                .all(|assignment| assignment.feature_id != feature_id)
+        );
     }
 }

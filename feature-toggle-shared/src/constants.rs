@@ -48,21 +48,33 @@ mod tests {
 
     #[test]
     fn test_stage_status_as_str() {
-        assert_eq!(StageStatus::DeploymentRequested.as_str(), "DEPLOYMENT_REQUESTED");
+        assert_eq!(
+            StageStatus::DeploymentRequested.as_str(),
+            "DEPLOYMENT_REQUESTED"
+        );
         assert_eq!(StageStatus::Deployed.as_str(), "DEPLOYED");
         assert_eq!(StageStatus::RollbackRejected.as_str(), "ROLLBACK_REJECTED");
     }
 
     #[test]
     fn test_stage_status_from_str() {
-        assert_eq!(StageStatus::from_str("DEPLOYMENT_REQUESTED"), Some(StageStatus::DeploymentRequested));
-        assert_eq!(StageStatus::from_str("DEPLOYED"), Some(StageStatus::Deployed));
+        assert_eq!(
+            StageStatus::from_str("DEPLOYMENT_REQUESTED"),
+            Some(StageStatus::DeploymentRequested)
+        );
+        assert_eq!(
+            StageStatus::from_str("DEPLOYED"),
+            Some(StageStatus::Deployed)
+        );
         assert_eq!(StageStatus::from_str("INVALID"), None);
     }
 
     #[test]
     fn test_stage_status_display() {
-        assert_eq!(format!("{}", StageStatus::DeploymentRequested), "DEPLOYMENT_REQUESTED");
+        assert_eq!(
+            format!("{}", StageStatus::DeploymentRequested),
+            "DEPLOYMENT_REQUESTED"
+        );
         assert_eq!(format!("{}", StageStatus::Rollbacked), "ROLLBACKED");
     }
 

@@ -1,8 +1,11 @@
 -- Add kill switch functionality to features table
 -- This allows emergency disable/enable of features globally
+-- NOTE: kill_switch_enabled semantics:
+--   true  = feature is ENABLED (kill switch is OFF/not activated) - DEFAULT
+--   false = feature is DISABLED (kill switch is ON/activated)
 
 ALTER TABLE features
-ADD COLUMN kill_switch_enabled BOOLEAN NOT NULL DEFAULT false;
+ADD COLUMN kill_switch_enabled BOOLEAN NOT NULL DEFAULT true;
 
 -- Add timestamps for tracking kill switch activation and automatic rollback
 ALTER TABLE features 

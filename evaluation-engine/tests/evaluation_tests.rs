@@ -1,3 +1,4 @@
+use chrono::{Duration, Utc};
 use evaluation_engine::{
     Context, Feature, FeatureEvaluationContext, FeatureStage, StageContext, StageCriterion,
 };
@@ -46,6 +47,8 @@ fn evaluate_returns_false_when_feature_disabled() {
     let ctx = mk_ctx("feat", "env-a", &[]);
     let feature = Feature {
         enabled: false,
+        kill_switch_enabled: true,
+        rollback_scheduled_at: None,
         dependencies: vec![],
         stages: vec![],
     };
@@ -58,6 +61,8 @@ fn evaluate_requires_matching_environment_stage() {
     let stg = stage("env-b", true, None, vec![]);
     let feature = Feature {
         enabled: true,
+        kill_switch_enabled: true,
+        rollback_scheduled_at: None,
         dependencies: vec![],
         stages: vec![stg],
     };
@@ -70,6 +75,8 @@ fn evaluate_requires_stage_enabled() {
     let stg = stage("env-a", false, None, vec![]);
     let feature = Feature {
         enabled: true,
+        kill_switch_enabled: true,
+        rollback_scheduled_at: None,
         dependencies: vec![],
         stages: vec![stg],
     };
@@ -82,6 +89,8 @@ fn evaluate_passes_when_no_criteria_and_enabled_stage() {
     let stg = stage("env-a", true, None, vec![]);
     let feature = Feature {
         enabled: true,
+        kill_switch_enabled: true,
+        rollback_scheduled_at: None,
         dependencies: vec![],
         stages: vec![stg],
     };
@@ -100,6 +109,8 @@ fn evaluate_fails_without_bucketing_identity_when_criteria_present() {
     );
     let feature = Feature {
         enabled: true,
+        kill_switch_enabled: true,
+        rollback_scheduled_at: None,
         dependencies: vec![],
         stages: vec![stg],
     };
@@ -118,6 +129,8 @@ fn evaluate_respects_custom_bucketing_key() {
     );
     let feature = Feature {
         enabled: true,
+        kill_switch_enabled: true,
+        rollback_scheduled_at: None,
         dependencies: vec![],
         stages: vec![stg],
     };
@@ -133,6 +146,8 @@ fn evaluate_respects_rollout_percentage_thresholds() {
     // With 0% rollout nobody should pass
     let f0 = Feature {
         enabled: true,
+        kill_switch_enabled: true,
+        rollback_scheduled_at: None,
         dependencies: vec![],
         stages: vec![stg(0)],
     };
@@ -142,6 +157,8 @@ fn evaluate_respects_rollout_percentage_thresholds() {
     // With 100% rollout everybody with matching criteria passes
     let f100 = Feature {
         enabled: true,
+        kill_switch_enabled: true,
+        rollback_scheduled_at: None,
         dependencies: vec![],
         stages: vec![stg(100)],
     };
@@ -160,6 +177,8 @@ fn evaluate_requires_matching_context_value() {
     );
     let feature = Feature {
         enabled: true,
+        kill_switch_enabled: true,
+        rollback_scheduled_at: None,
         dependencies: vec![],
         stages: vec![stg],
     };
@@ -173,17 +192,23 @@ fn evaluate_all_dependencies_must_pass() {
 
     let dep1 = Feature {
         enabled: true,
+        kill_switch_enabled: true,
+        rollback_scheduled_at: None,
         dependencies: vec![],
         stages: vec![stage("env", true, None, vec![])],
     };
     let dep2 = Feature {
         enabled: true,
+        kill_switch_enabled: true,
+        rollback_scheduled_at: None,
         dependencies: vec![],
         stages: vec![stage("env", false, None, vec![])],
     };
 
     let root = Feature {
         enabled: true,
+        kill_switch_enabled: true,
+        rollback_scheduled_at: None,
         dependencies: vec![dep1, dep2],
         stages: vec![stage("env", true, None, vec![])],
     };
@@ -197,18 +222,82 @@ fn evaluate_nested_dependencies_true() {
     // dep inner chain that all pass
     let leaf = Feature {
         enabled: true,
+        kill_switch_enabled: true,
+        rollback_scheduled_at: None,
         dependencies: vec![],
         stages: vec![stage("env", true, None, vec![])],
     };
     let mid = Feature {
         enabled: true,
+        kill_switch_enabled: true,
+        rollback_scheduled_at: None,
         dependencies: vec![leaf],
         stages: vec![stage("env", true, None, vec![])],
     };
     let root = Feature {
         enabled: true,
+        kill_switch_enabled: true,
+        rollback_scheduled_at: None,
         dependencies: vec![mid],
         stages: vec![stage("env", true, None, vec![])],
     };
     assert!(evaluation_engine::evaluate(ctx, root));
+}
+
+#[test]
+fn evaluate_returns_false_when_kill_switch_activated() {
+    // Test that kill switch (kill_switch_enabled = false) disables the feature
+    let ctx = mk_ctx("feat", "env-a", &[("user.id", "user1")]);
+    let stg = stage("env-a", true, None, vec![]);
+    let feature = Feature {
+        enabled: true,
+        kill_switch_enabled: false, // Kill switch is activated
+        rollback_scheduled_at: None,
+        dependencies: vec![],
+        stages: vec![stg],
+    };
+    assert!(!evaluation_engine::evaluate(ctx, feature));
+}
+
+#[test]
+fn evaluate_returns_false_when_scheduled_kill_elapsed() {
+    let ctx = mk_ctx("feat", "env-a", &[("user.id", "user42")]);
+    let stg = stage("env-a", true, None, vec![]);
+    let feature = Feature {
+        enabled: true,
+        kill_switch_enabled: true,
+        rollback_scheduled_at: Some(Utc::now() - Duration::minutes(5)),
+        dependencies: vec![],
+        stages: vec![stg],
+    };
+    assert!(!evaluation_engine::evaluate(ctx, feature));
+}
+
+#[test]
+fn evaluate_passes_when_kill_switch_not_activated() {
+    // Test that kill_switch_enabled = true allows normal evaluation
+    let ctx = mk_ctx("feat", "env-a", &[("user.id", "user1")]);
+    let stg = stage("env-a", true, None, vec![]);
+    let feature = Feature {
+        enabled: true,
+        kill_switch_enabled: true, // Kill switch is not activated
+        rollback_scheduled_at: None,
+        dependencies: vec![],
+        stages: vec![stg],
+    };
+    assert!(evaluation_engine::evaluate(ctx, feature));
+}
+
+#[test]
+fn evaluate_passes_when_scheduled_kill_in_future() {
+    let ctx = mk_ctx("feat", "env-a", &[("user.id", "user9")]);
+    let stg = stage("env-a", true, None, vec![]);
+    let feature = Feature {
+        enabled: true,
+        kill_switch_enabled: true,
+        rollback_scheduled_at: Some(Utc::now() + Duration::minutes(5)),
+        dependencies: vec![],
+        stages: vec![stg],
+    };
+    assert!(evaluation_engine::evaluate(ctx, feature));
 }

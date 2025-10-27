@@ -235,6 +235,9 @@ ON CONFLICT (id) DO NOTHING;
 
 DELETE FROM public.features;
 
+-- Ensure the default is set correctly (fix for inverted logic)
+ALTER TABLE features ALTER COLUMN kill_switch_enabled SET DEFAULT true;
+
 INSERT INTO
     public.features (
         id,
@@ -621,6 +624,12 @@ ON CONFLICT (id) DO NOTHING;
 
 -- Kill Switch Test Data
 -- Add kill switch specific test features for comprehensive testing
+-- NOTE: kill_switch_enabled semantics:
+--   true  = feature is ENABLED (kill switch is OFF/not activated)
+--   false = feature is DISABLED (kill switch is ON/activated)
+-- NOTE: rollback_scheduled_at is used to schedule a future disable
+--   When the scheduler runs, it picks up features where rollback_scheduled_at <= now()
+--   and then executes execute_scheduled_disable to actually disable them
 INSERT INTO
     public.features (
         id,
@@ -634,11 +643,11 @@ INSERT INTO
         rollback_scheduled_at
     )
 VALUES
-    -- Feature with kill switch disabled (for testing emergency disable)
+    -- Normal feature (enabled, for testing emergency disable scheduling)
     (
         'a0000000-0000-4000-8000-000000000001',
         'normal-feature',
-        'Normal feature that can be disabled',
+        'Normal feature that can have kill switch scheduled',
         'Simple',
         '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
         now(),
@@ -651,7 +660,7 @@ VALUES
 (
     'a0000000-0000-4000-8000-000000000002',
     'disabled-feature',
-    'Feature that is currently disabled',
+    'Feature that is currently disabled by kill switch',
     'Simple',
     '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
     now(),
@@ -660,16 +669,16 @@ VALUES
     NULL
 ),
 
--- Feature with rollback scheduled for past (should be picked up by rollback job)
+-- Feature with rollback scheduled for past (should be picked up by scheduler and disabled)
 (
     'a0000000-0000-4000-8000-000000000003',
     'past-rollback-feature',
-    'Feature with expired rollback time',
+    'Feature with expired rollback time - scheduler should disable this',
     'Simple',
     '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
     now(),
-    false,
-    now() - interval '2 hours',
+    true,
+    NULL,
     now() - interval '30 minutes'
 ),
 
@@ -677,20 +686,20 @@ VALUES
 (
     'a0000000-0000-4000-8000-000000000004',
     'future-rollback-feature',
-    'Feature with future rollback scheduled',
+    'Feature with future rollback scheduled - still enabled until then',
     'Simple',
     '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
     now(),
-    false,
-    now() - interval '10 minutes',
+    true,
+    NULL,
     now() + interval '1 hour'
 ),
 
--- Feature disabled without rollback scheduled (manual disable)
+-- Feature disabled without rollback scheduled (immediate manual disable)
 (
     'a0000000-0000-4000-8000-000000000005',
     'manual-disabled-feature',
-    'Feature disabled manually without rollback',
+    'Feature disabled immediately without scheduling',
     'Simple',
     '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
     now(),
@@ -699,7 +708,7 @@ VALUES
     NULL
 ),
 
--- Complex contextual feature for kill switch testing
+-- Complex contextual feature for kill switch testing (enabled)
 (
     'a0000000-0000-4000-8000-000000000006',
     'contextual-kill-switch-feature',

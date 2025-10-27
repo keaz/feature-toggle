@@ -34,8 +34,9 @@ async fn test_create_environment() {
     let pool = init_pg_pool().await;
     let repository = environment::environment_repository(pool);
 
+    let unique_name = format!("New Environment {}", Uuid::new_v4());
     let input = CreateEnvironment {
-        name: "New Environment".to_string(),
+        name: unique_name.clone(),
         active: true,
     };
     let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
@@ -43,7 +44,7 @@ async fn test_create_environment() {
 
     assert!(result.is_ok());
     let environment = result.unwrap();
-    assert_eq!(environment.name, "New Environment");
+    assert_eq!(environment.name, unique_name);
     assert!(environment.active);
 }
 

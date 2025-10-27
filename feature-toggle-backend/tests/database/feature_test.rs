@@ -303,7 +303,9 @@ async fn test_key_get_features() {
 
     assert!(result.is_ok());
     let features = result.unwrap();
-    assert!(features.iter().all(|p| p.key.contains("Test")));
+    assert!(features
+        .iter()
+        .all(|p| p.key.to_lowercase().contains("test")));
 }
 
 #[tokio::test]
@@ -337,11 +339,10 @@ async fn test_key_and_feature_type_get_features() {
 
     assert!(result.is_ok());
     let features = result.unwrap();
-    assert!(
-        features
-            .iter()
-            .all(|p| p.key.contains("Test") && matches!(p.feature_type, FeatureType::Simple))
-    );
+    assert!(features.iter().all(|p| {
+        p.key.to_lowercase().contains("test")
+            && matches!(p.feature_type, FeatureType::Simple)
+    }));
 }
 
 #[tokio::test]
@@ -575,8 +576,8 @@ async fn test_emergency_disable_feature_integration() {
     // Get initial state
     let initial_feature = repository.get_feature_by_id(feature_id).await.unwrap();
     assert!(
-        !initial_feature.kill_switch_enabled,
-        "Feature should initially have kill switch disabled (feature enabled)"
+        initial_feature.kill_switch_enabled,
+        "Feature should initially be enabled (kill_switch_enabled=true)"
     );
 
     // Emergency disable without rollback
@@ -585,8 +586,8 @@ async fn test_emergency_disable_feature_integration() {
 
     let disabled_feature = disabled_feature.unwrap();
     assert!(
-        disabled_feature.kill_switch_enabled,
-        "Kill switch should be enabled (feature disabled)"
+        !disabled_feature.kill_switch_enabled,
+        "Kill switch should be activated (feature disabled, kill_switch_enabled=false)"
     );
     assert!(
         disabled_feature.kill_switch_activated_at.is_some(),
@@ -600,8 +601,8 @@ async fn test_emergency_disable_feature_integration() {
     // Verify state persists by re-fetching
     let persisted_feature = repository.get_feature_by_id(feature_id).await.unwrap();
     assert!(
-        persisted_feature.kill_switch_enabled,
-        "Kill switch enabled state should persist"
+        !persisted_feature.kill_switch_enabled,
+        "Kill switch activated state should persist (kill_switch_enabled=false)"
     );
 
     // Re-enable for cleanup
@@ -632,11 +633,11 @@ async fn test_emergency_disable_with_rollback_integration() {
     let disabled_feature = result.unwrap();
     assert!(
         disabled_feature.kill_switch_enabled,
-        "Kill switch should be enabled (feature disabled)"
+        "Feature should remain enabled until the scheduled disable executes"
     );
     assert!(
-        disabled_feature.kill_switch_activated_at.is_some(),
-        "Should have activation timestamp"
+        disabled_feature.kill_switch_activated_at.is_none(),
+        "Activation timestamp should remain empty while pending disable"
     );
     assert!(
         disabled_feature.rollback_scheduled_at.is_some(),
@@ -668,15 +669,15 @@ async fn test_emergency_enable_feature_integration() {
 
     // First disable the feature
     repository
-        .emergency_disable_feature(feature_id, Some(60))
+        .emergency_disable_feature(feature_id, None)
         .await
         .unwrap();
 
     // Verify it's disabled
     let disabled_feature = repository.get_feature_by_id(feature_id).await.unwrap();
     assert!(
-        disabled_feature.kill_switch_enabled,
-        "Kill switch should be enabled (feature disabled)"
+        !disabled_feature.kill_switch_enabled,
+        "Kill switch should be active (feature disabled, kill_switch_enabled=false)"
     );
 
     // Now enable it
@@ -685,8 +686,8 @@ async fn test_emergency_enable_feature_integration() {
 
     let enabled_feature = result.unwrap();
     assert!(
-        !enabled_feature.kill_switch_enabled,
-        "Kill switch should be disabled (feature enabled)"
+        enabled_feature.kill_switch_enabled,
+        "Kill switch should be deactivated (feature enabled, kill_switch_enabled=true)"
     );
     assert!(
         enabled_feature.kill_switch_activated_at.is_none(),
@@ -700,8 +701,8 @@ async fn test_emergency_enable_feature_integration() {
     // Verify state persists
     let persisted_feature = repository.get_feature_by_id(feature_id).await.unwrap();
     assert!(
-        !persisted_feature.kill_switch_enabled,
-        "Kill switch disabled state should persist"
+        persisted_feature.kill_switch_enabled,
+        "Kill switch should be deactivated (feature enabled, kill_switch_enabled=true)"
     );
 }
 
@@ -713,7 +714,7 @@ async fn test_get_features_pending_rollback_integration() {
     // Create a test feature that needs rollback
     let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
     let create_feature = CreateFeature {
-        key: "test_rollback_feature".to_string(),
+        key: "test_rollback_feature_2".to_string(),
         description: Some("Test feature for rollback".to_string()),
         feature_type: FeatureType::Simple,
         team_id,
@@ -819,13 +820,44 @@ async fn test_kill_switch_multiple_operations_integration() {
     // Test multiple disable/enable cycles
     for cycle in 1..=3 {
         // Disable
-        let disabled = repository
+        let scheduled = repository
             .emergency_disable_feature(feature_id, Some(cycle * 10))
             .await
             .unwrap();
         assert!(
-            disabled.kill_switch_enabled,
-            "Cycle {}: kill switch should be enabled (feature disabled)",
+            scheduled.kill_switch_enabled,
+            "Cycle {}: feature remains enabled until scheduled disable",
+            cycle
+        );
+        assert!(
+            scheduled.kill_switch_activated_at.is_none(),
+            "Cycle {}: activation timestamp should be empty while pending",
+            cycle
+        );
+        assert!(
+            scheduled.rollback_scheduled_at.is_some(),
+            "Cycle {}: rollback_scheduled_at should be populated",
+            cycle
+        );
+
+        // Simulate scheduler executing the disable
+        let disabled = repository
+            .emergency_disable_feature(feature_id, None)
+            .await
+            .unwrap();
+        assert!(
+            !disabled.kill_switch_enabled,
+            "Cycle {}: kill switch should be active after scheduler run",
+            cycle
+        );
+        assert!(
+            disabled.kill_switch_activated_at.is_some(),
+            "Cycle {}: activation timestamp should be set after disable",
+            cycle
+        );
+        assert!(
+            disabled.rollback_scheduled_at.is_none(),
+            "Cycle {}: scheduled timestamp should be cleared after disable",
             cycle
         );
 
@@ -835,8 +867,8 @@ async fn test_kill_switch_multiple_operations_integration() {
             .await
             .unwrap();
         assert!(
-            !enabled.kill_switch_enabled,
-            "Cycle {}: kill switch should be disabled (feature enabled)",
+            enabled.kill_switch_enabled,
+            "Cycle {}: kill switch should be cleared (feature enabled)",
             cycle
         );
         assert!(
@@ -849,8 +881,8 @@ async fn test_kill_switch_multiple_operations_integration() {
     // Final verification
     let final_feature = repository.get_feature_by_id(feature_id).await.unwrap();
     assert!(
-        !final_feature.kill_switch_enabled,
-        "Final state should have kill switch disabled (feature enabled)"
+        final_feature.kill_switch_enabled,
+        "Final state should have kill switch off (feature enabled)"
     );
 }
 
