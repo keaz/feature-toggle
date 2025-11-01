@@ -18,8 +18,6 @@ pub struct Context {
 #[derive(Deserialize, Serialize, Clone)]
 pub struct Feature {
     pub enabled: bool,
-    pub kill_switch_enabled: bool,
-    pub rollback_scheduled_at: Option<DateTime<Utc>>,
     pub dependencies: Vec<Feature>,
     pub stages: Vec<FeatureStage>,
 }
@@ -104,18 +102,6 @@ fn passes_stage_criteria(ec: &FeatureEvaluationContext, stage: &FeatureStage) ->
 
 pub fn evaluate(evaluation_context: FeatureEvaluationContext, feature: Feature) -> bool {
     // Kill switch check: if kill_switch_enabled is false, feature is disabled
-    if !feature.kill_switch_enabled {
-        return false;
-    }
-
-    // Scheduled kill switch activation: if the scheduled timestamp has elapsed, treat as disabled
-    if let Some(rollback_at) = feature.rollback_scheduled_at {
-        if rollback_at <= Utc::now() {
-            return false;
-        }
-    }
-
-    // Feature must be enabled
     if !feature.enabled {
         return false;
     }

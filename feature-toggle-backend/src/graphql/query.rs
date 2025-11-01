@@ -1030,44 +1030,46 @@ async fn resolve_entity_details(
                     // Get the feature to access stage details
                     if let Ok(feature) = feature_repo.get_feature_by_id(feature_id).await {
                         // Find the stage in the feature
-                        if let Some(stage) = feature.stages.iter().find(|s| s.id == stage_uuid) {
-                            // Fetch environment details
-                            let environment = environment_logic
-                                .get_environment_by_id(async_graphql::ID::from(
-                                    stage.environment_id,
-                                ))
-                                .await
-                                .ok();
+                        if let Ok(stages) = feature_repo.get_feature_stages(feature_id).await {
+                            if let Some(stage) = stages.iter().find(|s| s.id == stage_uuid) {
+                                // Fetch environment details
+                                let environment = environment_logic
+                                    .get_environment_by_id(async_graphql::ID::from(
+                                        stage.environment_id,
+                                    ))
+                                    .await
+                                    .ok();
 
-                            let environment_name = environment
-                                .as_ref()
-                                .map(|env| env.name.clone())
-                                .unwrap_or_else(|| format!("Stage ({})", stage.status));
+                                let environment_name = environment
+                                    .as_ref()
+                                    .map(|env| env.name.clone())
+                                    .unwrap_or_else(|| format!("Stage ({})", stage.status));
 
-                            // Build stage object with environment
-                            let stage_details = serde_json::json!({
-                                "id": stage.id.to_string(),
-                                "status": stage.status,
-                                "order_index": stage.order_index,
-                                "position": stage.position,
-                                "bucketing_key": stage.bucketing_key,
-                                "environment": environment.as_ref().map(|env| serde_json::json!({
-                                    "id": env.id.to_string(),
-                                    "name": env.name,
-                                    "active": env.active,
-                                }))
-                            });
+                                // Build stage object with environment
+                                let stage_details = serde_json::json!({
+                                    "id": stage.id.to_string(),
+                                    "status": stage.status,
+                                    "order_index": stage.order_index,
+                                    "position": stage.position,
+                                    "bucketing_key": stage.bucketing_key,
+                                    "environment": environment.as_ref().map(|env| serde_json::json!({
+                                        "id": env.id.to_string(),
+                                        "name": env.name,
+                                        "active": env.active,
+                                    }))
+                                });
 
-                            return Some(crate::graphql::schema::ActivityEntityDetails {
-                                id: entity_id.to_string(),
-                                name: format!("{} - {}", feature.key, environment_name),
-                                entity_type: entity_type.to_string(),
-                                details: Some(serde_json::json!({
-                                    "feature_key": feature.key,
-                                    "feature_id": feature_id.to_string(),
-                                    "stage": stage_details,
-                                })),
-                            });
+                                return Some(crate::graphql::schema::ActivityEntityDetails {
+                                    id: entity_id.to_string(),
+                                    name: format!("{} - {}", feature.key, environment_name),
+                                    entity_type: entity_type.to_string(),
+                                    details: Some(serde_json::json!({
+                                        "feature_key": feature.key,
+                                        "feature_id": feature_id.to_string(),
+                                        "stage": stage_details,
+                                    })),
+                                });
+                            }
                         }
                     }
                 }

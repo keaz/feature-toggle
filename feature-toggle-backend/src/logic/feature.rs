@@ -382,7 +382,7 @@ impl FeatureLogicImpl {
             key: feature.key,
             description: feature.description,
             feature_type: Self::map_entity_to_graphql_feature_type(feature.feature_type),
-            enabled: None, // This would need to be determined based on the feature's stages
+            enabled: feature.active,
             kill_switch_enabled: feature.kill_switch_enabled,
             kill_switch_activated_at: feature.kill_switch_activated_at,
             rollback_scheduled_at: feature.rollback_scheduled_at,
@@ -392,8 +392,6 @@ impl FeatureLogicImpl {
                 .into_iter()
                 .map(|d| d.depends_on_id.into())
                 .collect(),
-            stages: vec![],
-            relationships: vec![],
         }
     }
 }
@@ -403,54 +401,7 @@ impl FeatureCrudLogic for FeatureLogicImpl {
     async fn get_feature_by_id(&self, id: ID) -> Result<Feature, Error> {
         let id = Uuid::try_from(id).map_err(|_| Error::InvalidInput("Invalid ID".to_string()))?;
         let feature = self.repository.get_feature_by_id(id).await?;
-        // Build stage vectors: one for borrowing (environment map) and another for ownership (relationships)
-        let db_stages_for_env: Vec<Box<dyn DBStage>> = feature
-            .stages
-            .iter()
-            .map(|stage| Box::new(stage.clone()) as Box<dyn DBStage>)
-            .collect();
-
-        let environment_map =
-            get_environment_map(&*self.environment_logic, &db_stages_for_env, true).await?;
-
-        // Separate owned vector for relationships (create_relationships consumes the vector)
-        let db_stages_for_rels: Vec<Box<dyn DBStage>> = feature
-            .stages
-            .iter()
-            .map(|stage| Box::new(stage.clone()) as Box<dyn DBStage>)
-            .collect();
-
-        let mut stages = map_stages(true, &environment_map, &db_stages_for_env, stage_factory);
-        let relationships = create_relationships(true, db_stages_for_rels, relationship_factory);
-
-        // Populate bucketing_key on stages from the database entity
-        use std::collections::HashMap;
-        let bucketing_map: HashMap<String, Option<String>> = feature
-            .stages
-            .iter()
-            .map(|s| (s.id.to_string(), s.bucketing_key.clone()))
-            .collect();
-        for stage in stages.iter_mut() {
-            if let Some(b) = bucketing_map.get(&stage.id.to_string()) {
-                stage.bucketing_key = b.clone();
-            }
-        }
-        // Populate status on stages from the database entity
-        let status_map: std::collections::HashMap<String, String> = feature
-            .stages
-            .iter()
-            .map(|s| (s.id.to_string(), s.status.clone()))
-            .collect();
-        for stage in stages.iter_mut() {
-            if let Some(st) = status_map.get(&stage.id.to_string()) {
-                stage.status = st.clone();
-            }
-        }
-
-        let mut feature = Self::map_entity_to_graphql_feature(feature);
-        stages.sort_by(|a, b| a.order_index.cmp(&b.order_index));
-        feature.stages = stages;
-        feature.relationships = relationships;
+        let feature = Self::map_entity_to_graphql_feature(feature);
         Ok(feature)
     }
 
@@ -655,48 +606,7 @@ impl FeatureCrudLogic for FeatureLogicImpl {
         // Map each feature and load its environments
         let mut mapped_features = Vec::new();
         for feature in features {
-            // Build stage vectors for environment loading
-            let db_stages_for_env: Vec<Box<dyn DBStage>> = feature
-                .stages
-                .iter()
-                .map(|stage| Box::new(stage.clone()) as Box<dyn DBStage>)
-                .collect();
-
-            let environment_map =
-                get_environment_map(&*self.environment_logic, &db_stages_for_env, true).await?;
-
-            // Map stages with environments
-            let mut stages = map_stages(true, &environment_map, &db_stages_for_env, stage_factory);
-
-            // Populate bucketing_key on stages from the database entity
-            use std::collections::HashMap;
-            let bucketing_map: HashMap<String, Option<String>> = feature
-                .stages
-                .iter()
-                .map(|s| (s.id.to_string(), s.bucketing_key.clone()))
-                .collect();
-            for stage in stages.iter_mut() {
-                if let Some(b) = bucketing_map.get(&stage.id.to_string()) {
-                    stage.bucketing_key = b.clone();
-                }
-            }
-
-            // Populate status on stages from the database entity
-            let status_map: HashMap<String, String> = feature
-                .stages
-                .iter()
-                .map(|s| (s.id.to_string(), s.status.clone()))
-                .collect();
-            for stage in stages.iter_mut() {
-                if let Some(st) = status_map.get(&stage.id.to_string()) {
-                    stage.status = st.clone();
-                }
-            }
-
-            // Create feature with properly mapped stages
-            let mut mapped_feature = Self::map_entity_to_graphql_feature(feature);
-            stages.sort_by(|a, b| a.order_index.cmp(&b.order_index));
-            mapped_feature.stages = stages;
+            let mapped_feature = Self::map_entity_to_graphql_feature(feature);
             mapped_features.push(mapped_feature);
         }
 
@@ -718,48 +628,8 @@ impl FeatureCrudLogic for FeatureLogicImpl {
         // Map each feature and load its environments
         let mut mapped_features = Vec::new();
         for feature in features {
-            // Build stage vectors for environment loading
-            let db_stages_for_env: Vec<Box<dyn DBStage>> = feature
-                .stages
-                .iter()
-                .map(|stage| Box::new(stage.clone()) as Box<dyn DBStage>)
-                .collect();
-
-            let environment_map =
-                get_environment_map(&*self.environment_logic, &db_stages_for_env, true).await?;
-
-            // Map stages with environments
-            let mut stages = map_stages(true, &environment_map, &db_stages_for_env, stage_factory);
-
-            // Populate bucketing_key on stages from the database entity
-            use std::collections::HashMap;
-            let bucketing_map: HashMap<String, Option<String>> = feature
-                .stages
-                .iter()
-                .map(|s| (s.id.to_string(), s.bucketing_key.clone()))
-                .collect();
-            for stage in stages.iter_mut() {
-                if let Some(b) = bucketing_map.get(&stage.id.to_string()) {
-                    stage.bucketing_key = b.clone();
-                }
-            }
-
-            // Populate status on stages from the database entity
-            let status_map: HashMap<String, String> = feature
-                .stages
-                .iter()
-                .map(|s| (s.id.to_string(), s.status.clone()))
-                .collect();
-            for stage in stages.iter_mut() {
-                if let Some(st) = status_map.get(&stage.id.to_string()) {
-                    stage.status = st.clone();
-                }
-            }
-
             // Create feature with properly mapped stages
             let mut mapped_feature = Self::map_entity_to_graphql_feature(feature);
-            stages.sort_by(|a, b| a.order_index.cmp(&b.order_index));
-            mapped_feature.stages = stages;
             mapped_features.push(mapped_feature);
         }
 
@@ -838,7 +708,10 @@ impl FeatureCrudLogic for FeatureLogicImpl {
             &feature.id.to_string(),
             actor_id,
             actor_name,
-            format!("Kill switch deactivated for feature '{}'", feature.key),
+            format!(
+                "Feature is enabled and kill switch deactivated for '{}'",
+                feature.key
+            ),
             Some(serde_json::json!({
                 "feature_id": feature.id.to_string(),
                 "feature_key": feature.key.clone(),
@@ -979,23 +852,16 @@ impl DeploymentLogic for FeatureLogicImpl {
             StageChangeRequestType::RollbackRejected => StageStatus::RollbackRejected.as_str(),
             StageChangeRequestType::Rollbacked => StageStatus::Rollbacked.as_str(),
         };
-        // Validate transition based on current status
-        if let Some(fid) = self
-            .repository
-            .get_feature_id_by_stage_id(stage_uuid)
-            .await?
-        {
-            let db_feature = self.repository.get_feature_by_id(fid).await?;
-            if let Some(stage) = db_feature.stages.iter().find(|s| s.id == stage_uuid) {
-                // Use the GraphQL validator to validate transition
-                if let Err(e) = crate::graphql::validator::feature::validate_stage_transition(
-                    &stage.status,
-                    next_status,
-                ) {
-                    return Err(Error::InvalidInput(format!("{:?}", e)));
-                }
-            } else {
-                return Err(Error::NotFound(stage_uuid));
+
+        let stage = self.repository.get_stage_by_id(stage_uuid).await?;
+
+        if let Some(stage) = stage {
+            // Use the GraphQL validator to validate transition
+            if let Err(e) = crate::graphql::validator::feature::validate_stage_transition(
+                &stage.status,
+                next_status,
+            ) {
+                return Err(Error::InvalidInput(format!("{:?}", e)));
             }
         } else {
             return Err(Error::NotFound(stage_uuid));
@@ -1031,7 +897,11 @@ impl DeploymentLogic for FeatureLogicImpl {
             let db_feature = self.repository.get_feature_by_id(fid).await?;
 
             // Find the stage to get environment information
-            let stage = db_feature.stages.iter().find(|s| s.id == stage_uuid);
+            let stages = self
+                .repository
+                .get_feature_stages(db_feature.id.clone())
+                .await?;
+            let stage = stages.iter().find(|s| s.id == stage_uuid);
 
             // Get environment name if stage is found
             let environment_name = if let Some(stage) = stage {
@@ -1191,29 +1061,6 @@ fn map_db_criterion_to_gql(
     }
 }
 
-fn relationship_factory(source_id: i32, target_id: i32) -> FeatureRelationship {
-    FeatureRelationship {
-        source_id,
-        target_id,
-    }
-}
-
-fn stage_factory(
-    id: ID,
-    environment: Environment,
-    order_index: i32,
-    position: String,
-) -> FeatureStage {
-    FeatureStage {
-        id,
-        environment,
-        order_index,
-        position,
-        bucketing_key: None,
-        status: "NOT_DEPLOYED".to_string(),
-    }
-}
-
 #[cfg(test)]
 mod test {
     use super::*;
@@ -1333,11 +1180,11 @@ mod test {
                     description: Some("Test description".to_string()),
                     feature_type: EntityFeatureType::Simple,
                     team_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
+                    active: true,
                     created_at: chrono::Utc::now(),
                     kill_switch_enabled: true,
                     kill_switch_activated_at: None,
                     rollback_scheduled_at: None,
-                    stages: vec![],
                     dependencies: vec![],
                 })
             });
@@ -1457,10 +1304,10 @@ mod test {
                     feature_type: EntityFeatureType::Contextual,
                     team_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
                     created_at: chrono::Utc::now(),
+                    active: true,
                     kill_switch_enabled: true,
                     kill_switch_activated_at: None,
                     rollback_scheduled_at: None,
-                    stages: vec![],
                     dependencies: vec![],
                 })
             });
@@ -1525,9 +1372,9 @@ mod test {
                         team_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
                         created_at: chrono::Utc::now(),
                         kill_switch_enabled: true,
+                        active: true,
                         kill_switch_activated_at: None,
                         rollback_scheduled_at: None,
-                        stages: vec![],
                         dependencies: vec![],
                     },
                     EntityFeature {
@@ -1538,9 +1385,9 @@ mod test {
                         team_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
                         created_at: chrono::Utc::now(),
                         kill_switch_enabled: true,
+                        active: true,
                         kill_switch_activated_at: None,
                         rollback_scheduled_at: None,
-                        stages: vec![],
                         dependencies: vec![],
                     },
                 ])
@@ -2175,20 +2022,10 @@ mod test {
             feature_type: crate::database::entity::FeatureType::Simple,
             team_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
             created_at: chrono::Utc::now(),
+            active: true,
             kill_switch_enabled: true,
             kill_switch_activated_at: None,
             rollback_scheduled_at: None,
-            stages: vec![crate::database::entity::FeaturePipelineStage {
-                id: stage_id,
-                feature_id,
-                environment_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
-                order_index: 0,
-                parent_stage_id: None,
-                position: "{ \"x\": 250, \"y\": 250 }".to_string(),
-                enabled: true,
-                bucketing_key: None,
-                status: status.to_string(),
-            }],
             dependencies: vec![],
         }
     }
@@ -2208,11 +2045,11 @@ mod test {
                 description: Some("First feature".to_string()),
                 feature_type: crate::database::entity::FeatureType::Simple,
                 team_id,
+                active: true,
                 created_at: chrono::Utc::now(),
                 kill_switch_enabled: false,
                 kill_switch_activated_at: None,
                 rollback_scheduled_at: None,
-                stages: vec![],
                 dependencies: vec![],
             },
             crate::database::entity::Feature {
@@ -2221,11 +2058,11 @@ mod test {
                 description: Some("Second feature".to_string()),
                 feature_type: crate::database::entity::FeatureType::Contextual,
                 team_id,
+                active: true,
                 created_at: chrono::Utc::now(),
                 kill_switch_enabled: true,
                 kill_switch_activated_at: None,
                 rollback_scheduled_at: None,
-                stages: vec![],
                 dependencies: vec![],
             },
         ];
@@ -2342,7 +2179,7 @@ mod test {
     #[tokio::test]
     async fn test_get_features_paginated_negative_page() {
         let mut repo = MockFeatureRepository::new();
-        let mut env_logic = MockEnvironmentLogic::new();
+        let env_logic = MockEnvironmentLogic::new();
         let environment_id = Uuid::new_v4();
 
         // Test with negative page_number (passed through as-is)

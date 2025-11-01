@@ -38,7 +38,7 @@ pub mod team;
 pub mod user;
 pub mod user_flag;
 
-fn create_relationships<R: Relationship + 'static>(
+pub fn create_relationships<R: Relationship + 'static>(
     has_stage: bool,
     stages: Vec<Box<dyn DBStage>>,
     relationship_factory: impl Fn(i32, i32) -> R,
@@ -65,7 +65,7 @@ fn create_relationships<R: Relationship + 'static>(
     relationships
 }
 
-fn map_stages<R: Stage + 'static>(
+pub fn map_stages<R: Stage + 'static>(
     has_stage: bool,
     environment_map: &HashMap<Uuid, Environment>,
     stages: &Vec<Box<dyn DBStage>>,

@@ -1,5 +1,4 @@
 use crate::AppState;
-use crate::kill_switch::is_scheduled_disable_due;
 use crate::pb;
 use std::time::Duration;
 use tokio_retry::Retry;
@@ -189,8 +188,7 @@ async fn handle_feature_update(app: &AppState, update: pb::FeatureUpdate) {
         x if x == Action::Upsert as i32 || x == Action::Snapshot as i32 => {
             if let Some(f) = update.feature {
                 let feature_id = f.id.clone();
-                let should_purge =
-                    !f.kill_switch_enabled || is_scheduled_disable_due(&f.rollback_scheduled_at);
+                let should_purge = !f.active;
                 app.cache.upsert(f).await;
                 if should_purge {
                     app.purge_assignments_for_feature(&feature_id).await;

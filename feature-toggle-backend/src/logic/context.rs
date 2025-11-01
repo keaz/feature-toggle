@@ -70,8 +70,9 @@ async fn map_db_feature_to_full_for_broadcast(
 ) -> Result<crate::grpc::pb::FeatureFull, crate::Error> {
     use crate::grpc::pb;
     // stages with criterias
-    let mut stage_msgs: Vec<pb::FeatureStageFull> = Vec::with_capacity(f.stages.len());
-    for s in f.stages.iter() {
+    let stages = repo.get_feature_stages(f.id).await?;
+    let mut stage_msgs: Vec<pb::FeatureStageFull> = Vec::with_capacity(stages.len());
+    for s in stages.iter() {
         let crits = repo.get_stage_criteria(s.id).await?;
         let criterias = crits
             .into_iter()
@@ -112,6 +113,7 @@ async fn map_db_feature_to_full_for_broadcast(
         description: f.description.unwrap_or_default(),
         feature_type: format!("{:?}", f.feature_type),
         team_id: f.team_id.to_string(),
+        active: f.active,
         created_at: f.created_at.to_rfc3339(),
         kill_switch_enabled: f.kill_switch_enabled,
         kill_switch_activated_at: f

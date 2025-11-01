@@ -120,12 +120,12 @@ impl KillSwitchRollbackScheduler {
         f: crate::database::entity::Feature,
     ) -> Result<crate::grpc::pb::FeatureFull, crate::Error> {
         use crate::grpc::pb;
-        let repo = crate::database::feature::feature_repository(pool.clone());
-
+        let feature_repository = crate::database::feature::feature_repository(pool.clone());
+        let stages = feature_repository.get_feature_stages(f.id).await?;
         // stages with criterias
-        let mut stage_msgs: Vec<pb::FeatureStageFull> = Vec::with_capacity(f.stages.len());
-        for s in f.stages.iter() {
-            let crits = repo.get_stage_criteria(s.id).await?;
+        let mut stage_msgs: Vec<pb::FeatureStageFull> = Vec::with_capacity(stages.len());
+        for s in stages.iter() {
+            let crits = feature_repository.get_stage_criteria(s.id).await?;
             let criterias = crits
                 .into_iter()
                 .map(|c| pb::StageCriterionFull {
@@ -165,6 +165,7 @@ impl KillSwitchRollbackScheduler {
             description: f.description.unwrap_or_default(),
             feature_type: format!("{:?}", f.feature_type),
             team_id: f.team_id.to_string(),
+            active: f.active,
             created_at: f.created_at.to_rfc3339(),
             kill_switch_enabled: f.kill_switch_enabled,
             kill_switch_activated_at: f
@@ -199,13 +200,11 @@ mod tests {
             key: "scheduled-kill".to_string(),
             description: None,
             feature_type: GraphQLFeatureType::Simple,
-            enabled: Some(true),
+            enabled: true,
             kill_switch_enabled: true,
             kill_switch_activated_at: None,
             rollback_scheduled_at: Some(Utc::now() - chrono::Duration::minutes(5)),
             dependencies: vec![],
-            relationships: vec![],
-            stages: vec![],
             team_id: ID::from("22222222-2222-2222-2222-222222222222"),
         }
     }
@@ -220,9 +219,7 @@ mod tests {
         logic
             .expect_execute_scheduled_disable()
             .times(1)
-            .withf(|id, actor| {
-                id == &ID::from(FEATURE_ID) && actor.is_none()
-            })
+            .withf(|id, actor| id == &ID::from(FEATURE_ID) && actor.is_none())
             .returning(|_, _| Ok(sample_feature()));
 
         let mut repo = MockFeatureRepository::new();

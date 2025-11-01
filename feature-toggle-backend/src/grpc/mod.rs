@@ -163,12 +163,19 @@ impl FeatureEvaluationSvc {
     async fn map_db_feature_to_engine(&self, f: db::Feature) -> Result<engine::Feature, Status> {
         let repo = &self.feature_repo;
         let db::Feature {
-            stages: db_stages,
             kill_switch_enabled,
             rollback_scheduled_at,
             ..
         } = f;
 
+        let db_stages = repo.get_feature_stages(f.id).await;
+        if db_stages.is_err() {
+            return Err(Status::internal(format!(
+                "db error: {}",
+                db_stages.err().unwrap()
+            )));
+        }
+        let db_stages = db_stages.unwrap();
         let mut stages = Vec::with_capacity(db_stages.len());
         for s in db_stages.into_iter() {
             // Load stage criterias
@@ -199,9 +206,7 @@ impl FeatureEvaluationSvc {
         let deps: Vec<engine::Feature> = vec![];
 
         Ok(engine::Feature {
-            enabled: true, // top-level enablement not stored; treat as enabled
-            kill_switch_enabled,
-            rollback_scheduled_at,
+            enabled: f.active,
             dependencies: deps,
             stages,
         })
@@ -211,8 +216,16 @@ impl FeatureEvaluationSvc {
         let repo = &self.feature_repo;
 
         // Map stages and load criterias for each
-        let mut stage_msgs: Vec<pb::FeatureStageFull> = Vec::with_capacity(f.stages.len());
-        for s in f.stages.iter() {
+        let stages = repo.get_feature_stages(f.id).await;
+        if stages.is_err() {
+            return Err(Status::internal(format!(
+                "db error: {}",
+                stages.err().unwrap()
+            )));
+        }
+        let stages = stages.unwrap();
+        let mut stage_msgs: Vec<pb::FeatureStageFull> = Vec::with_capacity(stages.len());
+        for s in stages.iter() {
             let crits = repo
                 .get_stage_criteria(s.id)
                 .await
@@ -258,6 +271,7 @@ impl FeatureEvaluationSvc {
             feature_type: format!("{:?}", f.feature_type),
             team_id: f.team_id.to_string(),
             created_at: f.created_at.to_rfc3339(),
+            active: f.active,
             kill_switch_enabled: f.kill_switch_enabled,
             kill_switch_activated_at: f
                 .kill_switch_activated_at

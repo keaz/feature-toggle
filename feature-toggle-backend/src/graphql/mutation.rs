@@ -1,3 +1,6 @@
+use std::sync::Arc;
+
+use crate::database::feature::FeatureRepository;
 use crate::graphql::create_user;
 use crate::graphql::schema::{
     AssignUserRolesInput, CreateClientInput, CreateEnvironmentInput, CreateFeatureInput,
@@ -187,13 +190,14 @@ impl MutationRoot {
             ctx.data::<tokio::sync::broadcast::Sender<crate::grpc::pb::FeatureUpdate>>(),
         ) {
             // Try to load the updated feature from DB and broadcast an UPSERT
-            let repo = crate::database::feature::feature_repository(pool.clone());
+            let feature_repository =
+                ctx.data::<Box<dyn crate::database::feature::FeatureRepository>>()?;
             if let Ok(fid) = uuid::Uuid::try_from(id.clone())
-                && let Ok(db_feature) = repo.get_feature_by_id(fid).await
+                && let Ok(db_feature) = feature_repository.get_feature_by_id(fid).await
             {
                 // Map db_feature -> pb::FeatureFull
                 if let Ok(full) =
-                    map_db_feature_to_full_for_broadcast(pool.clone(), db_feature).await
+                    map_db_feature_to_full_for_broadcast(&**feature_repository, db_feature).await
                 {
                     let _ = updates_tx.send(crate::grpc::pb::FeatureUpdate {
                         message_id: uuid::Uuid::new_v4().to_string(),
@@ -249,13 +253,14 @@ impl MutationRoot {
             ctx.data::<tokio::sync::broadcast::Sender<crate::grpc::pb::FeatureUpdate>>(),
         ) {
             // Try to load the updated feature from DB and broadcast an UPSERT
-            let repo = crate::database::feature::feature_repository(pool.clone());
+            let feature_repository = ctx.data::<Arc<Box<dyn FeatureRepository>>>()?;
             if let Ok(fid) = uuid::Uuid::try_from(id.clone())
-                && let Ok(db_feature) = repo.get_feature_by_id(fid).await
+                && let Ok(db_feature) = feature_repository.get_feature_by_id(fid).await
             {
                 // Map db_feature -> pb::FeatureFull
                 if let Ok(full) =
-                    map_db_feature_to_full_for_broadcast(pool.clone(), db_feature).await
+                    map_db_feature_to_full_for_broadcast(&**feature_repository.as_ref(), db_feature)
+                        .await
                 {
                     let _ = updates_tx.send(crate::grpc::pb::FeatureUpdate {
                         message_id: uuid::Uuid::new_v4().to_string(),
@@ -288,13 +293,15 @@ impl MutationRoot {
             ctx.data::<tokio::sync::broadcast::Sender<crate::grpc::pb::FeatureUpdate>>(),
         ) {
             // Try to load the updated feature from DB and broadcast an UPSERT
-            let repo = crate::database::feature::feature_repository(pool.clone());
+            let feature_repository =
+                ctx.data::<Box<dyn crate::database::feature::FeatureRepository>>()?;
+
             if let Ok(fid) = uuid::Uuid::try_from(id.clone())
-                && let Ok(db_feature) = repo.get_feature_by_id(fid).await
+                && let Ok(db_feature) = feature_repository.get_feature_by_id(fid).await
             {
                 // Map db_feature -> pb::FeatureFull
                 if let Ok(full) =
-                    map_db_feature_to_full_for_broadcast(pool.clone(), db_feature).await
+                    map_db_feature_to_full_for_broadcast(&**feature_repository, db_feature).await
                 {
                     let _ = updates_tx.send(crate::grpc::pb::FeatureUpdate {
                         message_id: uuid::Uuid::new_v4().to_string(),
@@ -400,6 +407,8 @@ impl MutationRoot {
         >,
     ) -> GqlResult<Vec<crate::graphql::schema::StageCriterion>> {
         let logic = ctx.data::<Box<dyn FeatureLogic>>()?;
+        let feature_repository =
+            ctx.data::<Box<dyn crate::database::feature::FeatureRepository>>()?;
         let result = logic.set_stage_criteria(stage_id.clone(), criteria).await?;
 
         // After updating criterias for a stage, broadcast an UPSERT for the owning feature
@@ -411,10 +420,9 @@ impl MutationRoot {
             .get_feature_id_by_stage_id(stage_id.clone())
             .await
         {
-            let repo = crate::database::feature::feature_repository(pool.clone());
-            if let Ok(db_feature) = repo.get_feature_by_id(feature_id).await
+            if let Ok(db_feature) = feature_repository.get_feature_by_id(feature_id).await
                 && let Ok(full) =
-                    map_db_feature_to_full_for_broadcast(pool.clone(), db_feature).await
+                    map_db_feature_to_full_for_broadcast(&**feature_repository, db_feature).await
             {
                 let _ = updates_tx.send(crate::grpc::pb::FeatureUpdate {
                     message_id: uuid::Uuid::new_v4().to_string(),
@@ -489,11 +497,13 @@ impl MutationRoot {
         ) {
             // Get the feature ID from the returned feature
             if let Ok(fid) = uuid::Uuid::try_from(feature.id.clone()) {
-                let repo = crate::database::feature::feature_repository(pool.clone());
-                if let Ok(db_feature) = repo.get_feature_by_id(fid).await {
+                let feature_repository =
+                    ctx.data::<Box<dyn crate::database::feature::FeatureRepository>>()?;
+                if let Ok(db_feature) = feature_repository.get_feature_by_id(fid).await {
                     // Map db_feature -> pb::FeatureFull
                     if let Ok(full) =
-                        map_db_feature_to_full_for_broadcast(pool.clone(), db_feature).await
+                        map_db_feature_to_full_for_broadcast(&**feature_repository, db_feature)
+                            .await
                     {
                         let _ = updates_tx.send(crate::grpc::pb::FeatureUpdate {
                             message_id: uuid::Uuid::new_v4().to_string(),
@@ -859,16 +869,16 @@ impl MutationRoot {
 }
 
 async fn map_db_feature_to_full_for_broadcast(
-    pool: sqlx::PgPool,
+    feature_repository: &dyn crate::database::feature::FeatureRepository,
     f: crate::database::entity::Feature,
 ) -> Result<crate::grpc::pb::FeatureFull, crate::Error> {
     use crate::grpc::pb;
-    let repo = crate::database::feature::feature_repository(pool.clone());
 
     // stages with criterias
-    let mut stage_msgs: Vec<pb::FeatureStageFull> = Vec::with_capacity(f.stages.len());
-    for s in f.stages.iter() {
-        let crits = repo.get_stage_criteria(s.id).await?;
+    let stages = feature_repository.get_feature_stages(f.id).await?;
+    let mut stage_msgs: Vec<pb::FeatureStageFull> = Vec::with_capacity(stages.len());
+    for s in stages.iter() {
+        let crits = feature_repository.get_stage_criteria(s.id).await?;
         let criterias = crits
             .into_iter()
             .map(|c| pb::StageCriterionFull {
@@ -908,6 +918,7 @@ async fn map_db_feature_to_full_for_broadcast(
         description: f.description.unwrap_or_default(),
         feature_type: format!("{:?}", f.feature_type),
         team_id: f.team_id.to_string(),
+        active: f.active,
         created_at: f.created_at.to_rfc3339(),
         kill_switch_enabled: f.kill_switch_enabled,
         kill_switch_activated_at: f
@@ -1859,13 +1870,11 @@ mod more_mutation_tests {
             key: "test_feature".to_string(),
             description: Some("Test description".to_string()),
             feature_type: crate::graphql::schema::FeatureType::Simple,
-            enabled: Some(true),
+            enabled: true,
             kill_switch_enabled: true,
             kill_switch_activated_at: None,
             rollback_scheduled_at: None,
             dependencies: vec![],
-            relationships: vec![],
-            stages: vec![],
             team_id: async_graphql::ID::from(Uuid::new_v4().to_string()),
         }
     }
@@ -1873,19 +1882,6 @@ mod more_mutation_tests {
     // Helper function to create a mock feature with a specific stage status
     fn create_mock_feature_with_stage_status(status: &str) -> crate::graphql::schema::Feature {
         let mut feature = create_mock_feature();
-        feature.stages = vec![crate::graphql::schema::FeatureStage {
-            id: async_graphql::ID::from(Uuid::new_v4().to_string()),
-            environment: crate::graphql::schema::Environment {
-                id: async_graphql::ID::from(Uuid::new_v4().to_string()),
-                name: "test_env".to_string(),
-                team_id: async_graphql::ID::from(Uuid::new_v4().to_string()),
-                active: true,
-            },
-            order_index: 0,
-            position: "test_position".to_string(),
-            bucketing_key: None,
-            status: status.to_string(),
-        }];
         feature
     }
 

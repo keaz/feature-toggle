@@ -1,6 +1,6 @@
 use crate::database::entity::{Feature, FeatureDependency, FeaturePipelineStage, FeatureType};
 use crate::database::{Error, handle_error};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Utc, format};
 use mockall::automock;
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgQueryResult;
@@ -98,6 +98,20 @@ pub struct UpdateFeature {
 }
 
 #[derive(Debug, sqlx::FromRow, Clone)]
+struct Features {
+    feature_id: Uuid,
+    feature_key: String,
+    description: Option<String>,
+    feature_type: String,
+    team_id: Uuid,
+    created_at: DateTime<Utc>,
+    kill_switch_enabled: bool,
+    kill_switch_activated_at: Option<DateTime<Utc>>,
+    rollback_scheduled_at: Option<DateTime<Utc>>,
+    feature_enabled: bool,
+}
+
+#[derive(Debug, sqlx::FromRow, Clone)]
 struct FeatureWithStageRow {
     feature_id: Uuid,
     feature_key: String,
@@ -108,16 +122,7 @@ struct FeatureWithStageRow {
     kill_switch_enabled: bool,
     kill_switch_activated_at: Option<DateTime<Utc>>,
     rollback_scheduled_at: Option<DateTime<Utc>>,
-
-    stage_id: Option<Uuid>,
-    feature_id_stage: Option<Uuid>,
-    environment_id: Option<Uuid>,
-    order_index: Option<i32>,
-    parent_stage_id: Option<Uuid>,
-    position: Option<String>,
-    bucketing_key: Option<String>,
-    status: Option<String>,
-    enabled: Option<bool>,
+    feature_enabled: bool,
 }
 
 #[derive(Debug, sqlx::FromRow, Clone)]
@@ -138,6 +143,10 @@ struct FeaturePipelineStageRow {
     pub status: String,
     pub enabled: bool,
 }
+
+const FEATURE_SELECT: &str = r#"SELECT f.id as feature_id, f.key as feature_key, f.description, f.feature_type, f.team_id, f.created_at, 
+            f.kill_switch_enabled, f.kill_switch_activated_at, f.rollback_scheduled_at, f.active as feature_enabled
+			FROM features f"#;
 
 #[automock]
 #[async_trait::async_trait]
@@ -181,6 +190,12 @@ pub trait FeatureRepository: Send + Sync {
         criteria: Vec<CreateStageCriterion>,
     ) -> Result<Vec<crate::database::entity::StageCriterion>, Error>;
 
+    async fn get_feature_stages(
+        &self,
+        feature_id: Uuid,
+    ) -> Result<Vec<FeaturePipelineStage>, Error>;
+
+    async fn get_stage_by_id(&self, stage_id: Uuid) -> Result<Option<FeaturePipelineStage>, Error>;
     // New: get features referencing a given context id
     async fn get_feature_ids_by_context_id(&self, context_id: Uuid) -> Result<Vec<Uuid>, Error>;
 
@@ -281,57 +296,6 @@ impl FeatureRepositoryImpl {
             .await;
 
         handle_error(Some(id), result)
-    }
-
-    async fn get_feature_stages(
-        &self,
-        feature_id: Option<&Uuid>,
-        parent_stage_id: Option<&Uuid>,
-    ) -> Result<Vec<FeaturePipelineStage>, Error> {
-        let mut query_builder = sqlx::QueryBuilder::new(
-            r#"SELECT id, feature_id, environment_id, order_index, parent_stage_id, position, bucketing_key, status, enabled FROM features_pipeline_stages"#,
-        );
-
-        let mut has_where = false;
-        if feature_id.is_some() || parent_stage_id.is_some() {
-            query_builder.push(" WHERE ");
-        }
-
-        if let Some(feature_id) = feature_id {
-            query_builder.push(" feature_id = ");
-            query_builder.push_bind(feature_id);
-            has_where = true;
-        }
-        if let Some(parent_stage_id) = parent_stage_id {
-            if has_where {
-                query_builder.push(" AND ");
-            }
-            query_builder
-                .push("parent_stage_id = ")
-                .push_bind(parent_stage_id);
-        }
-
-        let result = query_builder
-            .build_query_as::<FeaturePipelineStageRow>()
-            .fetch_all(&self.pool)
-            .await;
-
-        let rows = handle_error(None, result)?;
-        let stages = rows
-            .into_iter()
-            .map(|r| FeaturePipelineStage {
-                id: r.id,
-                feature_id: r.feature_id,
-                environment_id: r.environment_id,
-                order_index: r.order_index,
-                parent_stage_id: r.parent_stage_id,
-                position: r.position,
-                enabled: r.enabled, // Use the actual enabled field from database
-                bucketing_key: r.bucketing_key,
-                status: r.status,
-            })
-            .collect::<Vec<FeaturePipelineStage>>();
-        Ok(stages)
     }
 
     async fn get_feature_dependencies(
@@ -474,7 +438,7 @@ impl FeatureRepositoryImpl {
         input: Vec<CreateFeatureStage>,
         tx: &mut PgConnection,
     ) -> Result<PgQueryResult, Error> {
-        let existing_stages = self.get_feature_stages(Some(feature_id), None).await?;
+        let existing_stages = self.get_feature_stages(feature_id.clone()).await?;
         if existing_stages.is_empty() {
             return self.create_feature_stage(feature_id, input, tx).await;
         }
@@ -632,33 +596,6 @@ impl FeatureRepositoryImpl {
     fn map_row_to_feature(features: Vec<FeatureWithStageRow>) -> Feature {
         let feature = &features[0];
 
-        let mut seen = HashSet::new();
-        let stages = &features
-            .clone()
-            .split_off(0)
-            .into_iter()
-            .filter(|r| {
-                if let Some(stage_id) = r.stage_id {
-                    seen.insert(stage_id)
-                } else {
-                    true // Keep rows without a stage_id
-                }
-            })
-            .filter_map(|r| {
-                r.stage_id.map(|id| FeaturePipelineStage {
-                    id,
-                    feature_id: r.feature_id_stage.unwrap(),
-                    environment_id: r.environment_id.unwrap(),
-                    order_index: r.order_index.unwrap(),
-                    parent_stage_id: r.parent_stage_id,
-                    position: r.position.unwrap(),
-                    enabled: r.enabled.unwrap_or(false), // Use the actual enabled field from database
-                    bucketing_key: r.bucketing_key,
-                    status: r.status.unwrap_or_else(|| "NOT_DEPLOYED".to_string()),
-                })
-            })
-            .collect::<Vec<FeaturePipelineStage>>();
-
         let feature_type = match feature.feature_type.as_str() {
             "Simple" => FeatureType::Simple,
             "Contextual" => FeatureType::Contextual,
@@ -671,11 +608,11 @@ impl FeatureRepositoryImpl {
             description: feature.description.clone(),
             feature_type,
             team_id: feature.team_id,
+            active: feature.feature_enabled,
             created_at: feature.created_at,
             kill_switch_enabled: feature.kill_switch_enabled,
             kill_switch_activated_at: feature.kill_switch_activated_at,
             rollback_scheduled_at: feature.rollback_scheduled_at,
-            stages: stages.clone(),
             dependencies: vec![], // Dependencies will be loaded separately
         }
     }
@@ -759,6 +696,65 @@ impl FeatureRepositoryImpl {
 
 #[async_trait::async_trait]
 impl FeatureRepository for FeatureRepositoryImpl {
+    async fn get_stage_by_id(&self, stage_id: Uuid) -> Result<Option<FeaturePipelineStage>, Error> {
+        let result = sqlx::query_as!(
+            FeaturePipelineStageRow,
+            r#"SELECT id, feature_id, environment_id, order_index, parent_stage_id, position, bucketing_key, status, enabled 
+            FROM features_pipeline_stages WHERE id = $1"#,
+            stage_id
+        )
+        .fetch_optional(&self.pool)
+        .await;
+
+        let result = handle_error(None, result)?;
+        let stage = result.map(|stage| {
+            FeaturePipelineStage {
+                id: stage.id,
+                feature_id: stage.feature_id,
+                environment_id: stage.environment_id,
+                order_index: stage.order_index,
+                parent_stage_id: stage.parent_stage_id,
+                position: stage.position,
+                enabled: stage.enabled, // Use the actual enabled field from database
+                bucketing_key: stage.bucketing_key,
+                status: stage.status,
+            }
+        });
+
+        Ok(stage)
+    }
+
+    async fn get_feature_stages(
+        &self,
+        feature_id: Uuid,
+    ) -> Result<Vec<FeaturePipelineStage>, Error> {
+        let result = sqlx::query_as!(
+            FeaturePipelineStageRow,
+            r#"SELECT id, feature_id, environment_id, order_index, parent_stage_id, position, bucketing_key, status, enabled 
+            FROM features_pipeline_stages WHERE feature_id = $1"#,
+            feature_id
+        )
+        .fetch_all(&self.pool)
+        .await;
+
+        let rows = handle_error(None, result)?;
+        let stages = rows
+            .into_iter()
+            .map(|r| FeaturePipelineStage {
+                id: r.id,
+                feature_id: r.feature_id,
+                environment_id: r.environment_id,
+                order_index: r.order_index,
+                parent_stage_id: r.parent_stage_id,
+                position: r.position,
+                enabled: r.enabled, // Use the actual enabled field from database
+                bucketing_key: r.bucketing_key,
+                status: r.status,
+            })
+            .collect::<Vec<FeaturePipelineStage>>();
+        Ok(stages)
+    }
+
     async fn get_stage_criteria(
         &self,
         stage_id: Uuid,
@@ -867,18 +863,14 @@ impl FeatureRepository for FeatureRepositoryImpl {
         tx.commit().await.map_err(Error::DatabaseError)?;
         self.get_stage_criteria(stage_id).await
     }
+
     async fn get_feature_by_id(&self, id: Uuid) -> Result<Feature, Error> {
         let result = sqlx::query_as::<_, FeatureWithStageRow>(
-            r#"SELECT f.id as feature_id, f.key as feature_key, f.description, f.feature_type, f.team_id, f.created_at, 
-            f.kill_switch_enabled, f.kill_switch_activated_at, f.rollback_scheduled_at,
-            s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
-            s.parent_stage_id, s.position, s.bucketing_key, s.status, s.enabled
-			FROM features f LEFT JOIN features_pipeline_stages s ON f.id = s.feature_id
-			WHERE f.id = $1"#,
+            format!("{} WHERE f.id = $1", FEATURE_SELECT).as_str(),
         )
-            .bind(id)
-            .fetch_all(&self.pool)
-            .await;
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await;
 
         let features = handle_error(Some(id), result)?;
         if features.is_empty() {
@@ -900,13 +892,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
         key: Option<String>,
         feature_type: Option<FeatureType>,
     ) -> Result<Vec<Feature>, Error> {
-        let mut query_builder = sqlx::QueryBuilder::new(
-            r#"SELECT f.id as feature_id, f.key as feature_key, f.description, f.feature_type, f.team_id, f.created_at, 
-            f.kill_switch_enabled, f.kill_switch_activated_at, f.rollback_scheduled_at,
-            s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
-            s.parent_stage_id, s.position, s.bucketing_key, s.status, s.enabled
-			FROM features f LEFT JOIN features_pipeline_stages s ON f.id = s.feature_id"#,
-        );
+        let mut query_builder = sqlx::QueryBuilder::new(FEATURE_SELECT);
         query_builder.push(" WHERE f.team_id = ").push_bind(team_id);
 
         if let Some(key) = key {
@@ -991,13 +977,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
 
         // Now get the paginated results
         let offset = (page_number - 1) * page_size;
-        let mut query_builder = sqlx::QueryBuilder::new(
-            r#"SELECT f.id as feature_id, f.key as feature_key, f.description, f.feature_type, f.team_id, f.created_at, 
-            f.kill_switch_enabled, f.kill_switch_activated_at, f.rollback_scheduled_at,
-            s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
-            s.parent_stage_id, s.position, s.bucketing_key, s.status, s.enabled
-			FROM features f LEFT JOIN features_pipeline_stages s ON f.id = s.feature_id"#,
-        );
+        let mut query_builder = sqlx::QueryBuilder::new(FEATURE_SELECT);
         query_builder.push(" WHERE f.team_id = ").push_bind(team_id);
 
         if let Some(key) = key {
@@ -1343,23 +1323,25 @@ impl FeatureRepository for FeatureRepositoryImpl {
 
         // When a rollback window is provided, we treat it as a future kill-switch activation point.
         // Until that time the feature remains enabled, but carries the scheduled timestamp.
-        let (kill_switch_enabled, activated_at, rollback_at) = match rollback_in_minutes {
+        let (kill_switch_enabled, activated_at, rollback_at, active) = match rollback_in_minutes {
             Some(minutes) if minutes > 0 => {
                 let schedule = now + chrono::Duration::minutes(minutes as i64);
-                (true, None, Some(schedule))
+                (true, None, Some(schedule), true)
             }
-            _ => (false, Some(now), None),
+            _ => (false, Some(now), None, false),
         };
 
         let result = sqlx::query!(
             r#"UPDATE features
-               SET kill_switch_enabled = $1,
-                   kill_switch_activated_at = $2,
-                   rollback_scheduled_at = $3
-               WHERE id = $4"#,
+                SET kill_switch_enabled = $1,
+                kill_switch_activated_at = $2,
+                rollback_scheduled_at = $3,
+                active = $4
+               WHERE id = $5"#,
             kill_switch_enabled,
             activated_at,
             rollback_at,
+            active,
             feature_id
         )
         .execute(&self.pool)
@@ -1372,10 +1354,11 @@ impl FeatureRepository for FeatureRepositoryImpl {
     async fn emergency_enable_feature(&self, feature_id: Uuid) -> Result<Feature, Error> {
         let result = sqlx::query!(
             r#"UPDATE features
-               SET kill_switch_enabled = true,
-                   kill_switch_activated_at = NULL,
-                   rollback_scheduled_at = NULL
-               WHERE id = $1"#,
+                SET kill_switch_enabled = false,
+                active = true, 
+                kill_switch_activated_at = NULL,
+                rollback_scheduled_at = NULL
+                WHERE id = $1"#,
             feature_id
         )
         .execute(&self.pool)
@@ -1388,15 +1371,14 @@ impl FeatureRepository for FeatureRepositoryImpl {
     async fn get_features_pending_rollback(&self) -> Result<Vec<Feature>, Error> {
         let now = chrono::Utc::now();
         let result = sqlx::query_as::<_, FeatureWithStageRow>(
-            r#"SELECT f.id as feature_id, f.key as feature_key, f.description, f.feature_type, f.team_id, f.created_at,
-            f.kill_switch_enabled, f.kill_switch_activated_at, f.rollback_scheduled_at,
-            s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
-            s.parent_stage_id, s.position, s.bucketing_key, s.status, s.enabled
-            FROM features f LEFT JOIN features_pipeline_stages s ON f.id = s.feature_id
-            WHERE f.kill_switch_enabled = true
-              AND f.rollback_scheduled_at IS NOT NULL
-              AND f.rollback_scheduled_at <= $1
-            ORDER BY f.rollback_scheduled_at ASC"#,
+            format!(
+                r#"{} WHERE f.kill_switch_enabled = true
+                AND f.rollback_scheduled_at IS NOT NULL
+                AND f.rollback_scheduled_at <= $1
+                ORDER BY f.rollback_scheduled_at ASC"#,
+                FEATURE_SELECT
+            )
+            .as_str(),
         )
         .bind(now)
         .fetch_all(&self.pool)
@@ -1436,12 +1418,17 @@ impl FeatureRepository for FeatureRepositoryImpl {
         let now = chrono::Utc::now();
 
         // Start a transaction to update both feature and stages atomically
-        let mut tx = self.pool.begin().await.map_err(|e| Error::DatabaseError(e))?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| Error::DatabaseError(e))?;
 
         // Disable the feature (kill_switch_enabled = false means feature is disabled)
         let result = sqlx::query!(
             r#"UPDATE features
                SET kill_switch_enabled = false,
+                   active = false,
                    kill_switch_activated_at = $1,
                    rollback_scheduled_at = NULL
                WHERE id = $2"#,
@@ -1452,18 +1439,6 @@ impl FeatureRepository for FeatureRepositoryImpl {
         .await;
 
         handle_error(Some(feature_id), result)?;
-
-        // Disable all stages for this feature
-        sqlx::query!(
-            r#"UPDATE features_pipeline_stages
-               SET enabled = false
-               WHERE feature_id = $1"#,
-            feature_id
-        )
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| Error::DatabaseError(e))?;
-
         tx.commit().await.map_err(|e| Error::DatabaseError(e))?;
 
         self.get_feature_by_id(feature_id).await
@@ -1847,9 +1822,6 @@ impl FeatureRepository for FeatureRepositoryImpl {
         for id in order {
             if let Some(rows) = map.remove(&id) {
                 let mut feature = Self::map_row_to_feature(rows);
-                // Load all stages for this feature
-                let all_stages = self.get_feature_stages(Some(&id), None).await?;
-                feature.stages = all_stages;
                 // Load dependencies
                 let dependencies = self.get_feature_dependencies(&id).await?;
                 feature.dependencies = dependencies;
@@ -1931,9 +1903,6 @@ impl FeatureRepository for FeatureRepositoryImpl {
         for id in order {
             if let Some(rows) = map.remove(&id) {
                 let mut feature = Self::map_row_to_feature(rows);
-                // Load all stages for this feature
-                let all_stages = self.get_feature_stages(Some(&id), None).await?;
-                feature.stages = all_stages;
                 // Load dependencies
                 let dependencies = self.get_feature_dependencies(&id).await?;
                 feature.dependencies = dependencies;
@@ -2240,7 +2209,9 @@ mod tests {
             .expect("Should retrieve pending feature");
         assert!(pending_feature.kill_switch_enabled);
         assert!(pending_feature.kill_switch_activated_at.is_none());
-        let scheduled_time = pending_feature.rollback_scheduled_at.expect("scheduled time");
+        let scheduled_time = pending_feature
+            .rollback_scheduled_at
+            .expect("scheduled time");
         assert!(
             scheduled_time >= before_disable,
             "Scheduled disable should be after the request time"

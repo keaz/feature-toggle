@@ -1,8 +1,15 @@
+use std::sync::Arc;
+
 use async_graphql::{ComplexObject, Enum, ID, InputObject, Result as GqlResult, SimpleObject};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 // Re-export TimePeriod from subscription module
-use crate::graphql::subscription::TimePeriod;
+use crate::{
+    database::{entity::DBStage, feature::FeatureRepository},
+    graphql::subscription::TimePeriod,
+    logic::{create_relationships, get_environment_map, map_stages},
+};
 
 #[derive(Enum, Copy, Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub enum FeatureType {
@@ -20,19 +27,116 @@ pub enum RuleOperator {
 }
 
 #[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
+#[graphql(complex)]
 pub struct Feature {
     pub id: ID,
     pub key: String,
     pub description: Option<String>,
     pub feature_type: FeatureType,
-    pub enabled: Option<bool>,
+    pub enabled: bool,
     pub kill_switch_enabled: bool,
     pub kill_switch_activated_at: Option<chrono::DateTime<chrono::Utc>>,
     pub rollback_scheduled_at: Option<chrono::DateTime<chrono::Utc>>,
     pub dependencies: Vec<ID>,
-    pub relationships: Vec<FeatureRelationship>,
-    pub stages: Vec<FeatureStage>,
     pub team_id: ID,
+}
+
+#[ComplexObject]
+impl Feature {
+    async fn stages(&self, ctx: &async_graphql::Context<'_>) -> GqlResult<Vec<FeatureStage>> {
+        let repository = ctx.data::<Arc<Box<dyn FeatureRepository>>>().unwrap();
+
+        let environment_logic = ctx
+            .data::<Box<dyn crate::logic::environment::EnvironmentLogic>>()
+            .unwrap();
+
+        let stages = repository
+            .get_feature_stages(Uuid::try_from(self.id.clone()).unwrap())
+            .await
+            .unwrap_or_default();
+
+        // Build stage vectors: one for borrowing (environment map) and another for ownership (relationships)
+        let db_stages_for_env: Vec<Box<dyn DBStage>> = stages
+            .iter()
+            .map(|stage| Box::new(stage.clone()) as Box<dyn DBStage>)
+            .collect();
+
+        let environment_map =
+            get_environment_map(&**environment_logic, &db_stages_for_env, true).await?;
+
+        let mut stages = map_stages(true, &environment_map, &db_stages_for_env, stage_factory);
+
+        // Populate bucketing_key on stages from the database entity
+        // Since there is no way to map the bucketing_key during the initial map_stages, we do it here
+        use std::collections::HashMap;
+        let bucketing_map: HashMap<String, Option<String>> = stages
+            .iter()
+            .map(|s| (s.id.to_string(), s.bucketing_key.clone()))
+            .collect();
+        for stage in stages.iter_mut() {
+            if let Some(b) = bucketing_map.get(&stage.id.to_string()) {
+                stage.bucketing_key = b.clone();
+            }
+        }
+        // Populate status on stages from the database entity
+        let status_map: std::collections::HashMap<String, String> = stages
+            .iter()
+            .map(|s| (s.id.to_string(), s.status.clone()))
+            .collect();
+
+        for stage in stages.iter_mut() {
+            if let Some(st) = status_map.get(&stage.id.to_string()) {
+                stage.status = st.clone();
+            }
+        }
+
+        stages.sort_by(|a, b| a.order_index.cmp(&b.order_index));
+
+        Ok(stages)
+    }
+
+    async fn relationships(
+        &self,
+        ctx: &async_graphql::Context<'_>,
+    ) -> GqlResult<Vec<FeatureRelationship>> {
+        let repository = ctx.data::<Arc<Box<dyn FeatureRepository>>>().unwrap();
+
+        let stages = repository
+            .get_feature_stages(Uuid::try_from(self.id.clone()).unwrap())
+            .await
+            .unwrap_or_default();
+
+        let db_stages_for_rels: Vec<Box<dyn DBStage>> = stages
+            .iter()
+            .map(|stage| Box::new(stage.clone()) as Box<dyn DBStage>)
+            .collect();
+
+        let relationships = create_relationships(true, db_stages_for_rels, relationship_factory);
+        Ok(relationships)
+    }
+}
+
+fn relationship_factory(source_id: i32, target_id: i32) -> FeatureRelationship {
+    FeatureRelationship {
+        source_id,
+        target_id,
+    }
+}
+
+fn stage_factory(
+    id: ID,
+    environment: Environment,
+    order_index: i32,
+    position: String,
+) -> FeatureStage {
+    FeatureStage {
+        id,
+        environment,
+        order_index,
+        position,
+        bucketing_key: None,
+        status: "NOT_DEPLOYED".to_string(),
+    }
 }
 
 #[derive(SimpleObject, Clone, Debug, Serialize, Deserialize, Copy)]

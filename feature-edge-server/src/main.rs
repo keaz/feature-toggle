@@ -9,7 +9,6 @@ use utoipa_swagger_ui::SwaggerUi;
 mod config;
 mod grpc_client;
 mod handlers;
-mod kill_switch;
 
 mod pb {
     #![allow(clippy::all)]
@@ -225,6 +224,7 @@ mod tests {
             feature_type: String::new(),
             team_id: String::new(),
             created_at: String::new(),
+            active: true,
             kill_switch_enabled: false,
             kill_switch_activated_at: String::new(),
             rollback_scheduled_at: String::new(),

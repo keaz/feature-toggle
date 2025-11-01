@@ -72,6 +72,7 @@ message FeatureFull {
   string rollback_scheduled_at = 9; // ISO 8601 timestamp or empty
   repeated FeatureStageFull stages = 10;
   repeated FeatureDependencyFull dependencies = 11;
+  bool active = 12;
 }
 
 message GetFeatureByKeyResponse {

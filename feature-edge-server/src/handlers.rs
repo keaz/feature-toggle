@@ -1,5 +1,4 @@
 use crate::grpc_client::{assignment_key, fetch_client_info_via_grpc, fetch_feature_via_grpc};
-use crate::kill_switch::parse_rollback_timestamp;
 use crate::pb;
 use crate::{AppState, EvaluationEvent};
 use actix_web::{HttpResponse, Responder, web};
@@ -38,7 +37,7 @@ pub struct EvaluateHttpResponse {
 }
 
 /// Map protobuf feature to evaluation engine format
-fn map_proto_to_engine(f: &pb::FeatureFull, rollback_at: Option<DateTime<Utc>>) -> engine::Feature {
+fn map_proto_to_engine(f: &pb::FeatureFull) -> engine::Feature {
     let stages = f
         .stages
         .iter()
@@ -78,9 +77,7 @@ fn map_proto_to_engine(f: &pb::FeatureFull, rollback_at: Option<DateTime<Utc>>) 
         .collect();
 
     engine::Feature {
-        enabled: true, // Top-level flag not present in proto; default to true
-        kill_switch_enabled: f.kill_switch_enabled,
-        rollback_scheduled_at: rollback_at,
+        enabled: f.active,    //
         dependencies: vec![], // For minimal implementation, ignore dependency recursion
         stages,
     }
@@ -214,6 +211,12 @@ pub async fn evaluate_handler(
         }
     };
 
+    // This is kill switch enabled we should disable the feature.
+    if !feature.active {
+        app.purge_assignments_for_feature(&feature.id).await;
+        return Ok(web::Json(EvaluateHttpResponse { enabled: false }));
+    }
+
     let stage = feature
         .stages
         .iter()
@@ -221,20 +224,6 @@ pub async fn evaluate_handler(
 
     if stage.is_none() || !stage.unwrap().enabled {
         return Ok(web::Json(EvaluateHttpResponse { enabled: false }));
-    }
-
-    // Check kill switch - if kill_switch_enabled is false, feature is disabled
-    if !feature.kill_switch_enabled {
-        app.purge_assignments_for_feature(&feature.id).await;
-        return Ok(web::Json(EvaluateHttpResponse { enabled: false }));
-    }
-
-    let rollback_at = parse_rollback_timestamp(&feature.rollback_scheduled_at);
-    if let Some(ts) = rollback_at {
-        if ts <= Utc::now() {
-            app.purge_assignments_for_feature(&feature.id).await;
-            return Ok(web::Json(EvaluateHttpResponse { enabled: false }));
-        }
     }
 
     let stage = stage.unwrap();
@@ -253,7 +242,7 @@ pub async fn evaluate_handler(
         if app.assigned_true.read().await.contains(&key) {
             (true, true) // cached assignment
         } else {
-            let engine_feature = map_proto_to_engine(&feature, rollback_at.clone());
+            let engine_feature = map_proto_to_engine(&feature);
             let ec = map_http_context_to_engine(
                 feature_key,
                 req.environment_id.clone(),
@@ -263,7 +252,7 @@ pub async fn evaluate_handler(
             (enabled, false) // fresh evaluation
         }
     } else {
-        let engine_feature = map_proto_to_engine(&feature, rollback_at.clone());
+        let engine_feature = map_proto_to_engine(&feature);
         let ec = map_http_context_to_engine(
             feature_key,
             req.environment_id.clone(),
