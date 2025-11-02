@@ -173,6 +173,7 @@ pub async fn run() -> std::io::Result<()> {
             .data(evaluation_events_tx.clone())
             .data(activity_log_repository_arc.clone())
             .data(feature_repository_arc.clone())
+            .data(feature_repository.clone())
             .data(environment_logic.clone())
             .data(team_logic.clone())
             .data(pipeline_logic.clone())

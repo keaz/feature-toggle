@@ -498,13 +498,14 @@ impl MutationRoot {
         ) {
             // Get the feature ID from the returned feature
             if let Ok(fid) = uuid::Uuid::try_from(feature.id.clone()) {
-                let feature_repository =
-                    ctx.data::<Box<dyn crate::database::feature::FeatureRepository>>()?;
+                let feature_repository = ctx.data::<Arc<Box<dyn FeatureRepository>>>()?;
                 if let Ok(db_feature) = feature_repository.get_feature_by_id(fid).await {
                     // Map db_feature -> pb::FeatureFull
-                    if let Ok(full) =
-                        map_db_feature_to_full_for_broadcast(&**feature_repository, db_feature)
-                            .await
+                    if let Ok(full) = map_db_feature_to_full_for_broadcast(
+                        &**feature_repository.as_ref(),
+                        db_feature,
+                    )
+                    .await
                     {
                         let _ = updates_tx.send(crate::grpc::pb::FeatureUpdate {
                             message_id: uuid::Uuid::new_v4().to_string(),

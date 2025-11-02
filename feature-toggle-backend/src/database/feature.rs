@@ -490,16 +490,14 @@ impl FeatureRepositoryImpl {
                        order_index = $2,
                        parent_stage_id = $3,
                        position = $4,
-                       bucketing_key = $5,
-                       enabled = $6
-                   WHERE id = $7"#,
+                       bucketing_key = $5
+                   WHERE id = $6"#,
             )
             .bind(stage.environment_id)
             .bind(stage.order_index)
             .bind(parent_stage_id)
             .bind(&stage.position)
             .bind(stage.bucketing_key.clone())
-            .bind(stage.enabled)
             .bind(stage.id)
             .execute(&mut *tx)
             .await;

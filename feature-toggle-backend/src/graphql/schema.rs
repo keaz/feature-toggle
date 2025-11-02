@@ -50,13 +50,13 @@ impl Feature {
             .data::<Box<dyn crate::logic::environment::EnvironmentLogic>>()
             .unwrap();
 
-        let stages = repository
+        let db_stages = repository
             .get_feature_stages(Uuid::try_from(self.id.clone()).unwrap())
             .await
             .unwrap_or_default();
 
         // Build stage vectors: one for borrowing (environment map) and another for ownership (relationships)
-        let db_stages_for_env: Vec<Box<dyn DBStage>> = stages
+        let db_stages_for_env: Vec<Box<dyn DBStage>> = db_stages
             .iter()
             .map(|stage| Box::new(stage.clone()) as Box<dyn DBStage>)
             .collect();
@@ -69,7 +69,7 @@ impl Feature {
         // Populate bucketing_key on stages from the database entity
         // Since there is no way to map the bucketing_key during the initial map_stages, we do it here
         use std::collections::HashMap;
-        let bucketing_map: HashMap<String, Option<String>> = stages
+        let bucketing_map: HashMap<String, Option<String>> = db_stages
             .iter()
             .map(|s| (s.id.to_string(), s.bucketing_key.clone()))
             .collect();
@@ -79,7 +79,7 @@ impl Feature {
             }
         }
         // Populate status on stages from the database entity
-        let status_map: std::collections::HashMap<String, String> = stages
+        let status_map: std::collections::HashMap<String, String> = db_stages
             .iter()
             .map(|s| (s.id.to_string(), s.status.clone()))
             .collect();
