@@ -2,18 +2,305 @@ use async_graphql::{Context, Enum, InputObject, Result as GqlResult, SimpleObjec
 use async_stream::stream;
 use chrono::{DateTime, Utc};
 use futures_util::stream::Stream;
+use std::pin::Pin;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::database::activity_log::{ActivityLogFilter, ActivityLogRepository};
+use crate::database::feature_evaluation::{
+    EvaluationByFeature, EvaluationRatePoint, EvaluationSummary,
+};
 use crate::logic::client::ClientLogic;
 use crate::logic::feature::FeatureLogic;
-use crate::logic::feature_evaluation::FeatureEvaluationLogic;
+use crate::logic::feature_evaluation::{FeatureEvaluationEvent, FeatureEvaluationLogic};
 use std::sync::Arc;
+
+/// Typed alias for GraphQL subscription streams returned by resolvers.
+type GqlStream<T> = Pin<Box<dyn Stream<Item = GqlResult<T>> + Send>>;
 
 // Helper to round a percentage value (already in 0-100 range) to 2 decimal places
 fn round_pct(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
+}
+
+/// Convenience helper to emit a single error event and close the stream early.
+fn stream_error<T>(message: impl Into<String>) -> GqlStream<T> {
+    let message = message.into();
+    Box::pin(futures_util::stream::once(async move {
+        Err(async_graphql::Error::new(message))
+    }))
+}
+
+/// Emit a one-shot stream that propagates an existing GraphQL error.
+fn stream_failure<T>(error: async_graphql::Error) -> GqlStream<T> {
+    Box::pin(futures_util::stream::once(async move { Err(error) }))
+}
+
+/// Parse an optional string UUID field into the typed value used in logic layer.
+fn parse_optional_uuid(input: &Option<String>, field_name: &str) -> Result<Option<Uuid>, String> {
+    match input.as_ref() {
+        Some(raw) => Uuid::parse_str(raw)
+            .map(Some)
+            .map_err(|_| format!("Invalid {} format", field_name)),
+        None => Ok(None),
+    }
+}
+
+/// Convert domain rate rows into GraphQL-friendly points with rounded percentages.
+fn map_rate_points(source: Vec<EvaluationRatePoint>) -> Vec<GqlEvaluationRatePoint> {
+    source
+        .into_iter()
+        .map(|rate| {
+            let success_rate = if rate.evaluation_count > 0 {
+                (rate.success_count as f64 / rate.evaluation_count as f64) * 100.0
+            } else {
+                0.0
+            };
+            let cache_hit_rate = if rate.evaluation_count > 0 {
+                (rate.prior_assignment_count as f64 / rate.evaluation_count as f64) * 100.0
+            } else {
+                0.0
+            };
+
+            GqlEvaluationRatePoint {
+                time_bucket: rate.time_bucket.to_rfc3339(),
+                evaluation_count: rate.evaluation_count,
+                success_count: rate.success_count,
+                prior_assignment_count: rate.prior_assignment_count,
+                success_rate: round_pct(success_rate),
+                cache_hit_rate: round_pct(cache_hit_rate),
+            }
+        })
+        .collect()
+}
+
+/// Convert aggregated summary data into a GraphQL response using the provided timestamp.
+fn map_summary(summary: EvaluationSummary, generated_at: DateTime<Utc>) -> GqlEvaluationSummary {
+    GqlEvaluationSummary {
+        total_evaluations: summary.total_evaluations,
+        successful_evaluations: summary.successful_evaluations,
+        cached_evaluations: summary.cached_evaluations,
+        unique_users: summary.unique_users,
+        top_feature_key: summary.top_feature_key,
+        success_rate: round_pct(summary.success_rate),
+        cache_hit_rate: round_pct(summary.cache_hit_rate),
+        generated_at: generated_at.to_rfc3339(),
+    }
+}
+
+/// Clamp a timestamp so we never query for data in the future.
+fn clamp_to_now(target: DateTime<Utc>, now: DateTime<Utc>) -> DateTime<Utc> {
+    if target > now { now } else { target }
+}
+
+/// Fetch the evaluation logic dependency from the request context.
+fn get_evaluation_logic(
+    ctx: &Context<'_>,
+) -> Result<Box<dyn FeatureEvaluationLogic>, async_graphql::Error> {
+    ctx.data::<Box<dyn FeatureEvaluationLogic>>()
+        .map(|logic| logic.clone())
+        .map_err(|_| async_graphql::Error::new("Feature evaluation logic not found in context"))
+}
+
+/// Subscribe to the broadcast channel that emits feature evaluation events.
+fn evaluation_events_receiver(
+    ctx: &Context<'_>,
+) -> Result<broadcast::Receiver<FeatureEvaluationEvent>, async_graphql::Error> {
+    ctx.data::<tokio::sync::broadcast::Sender<FeatureEvaluationEvent>>()
+        .map(|tx| tx.subscribe())
+        .map_err(|_| async_graphql::Error::new("Evaluation events channel not found"))
+}
+
+/// Invoke the logic layer to load evaluation rates and format for GraphQL clients.
+async fn load_rates(
+    logic: &Box<dyn FeatureEvaluationLogic>,
+    feature_key: Option<String>,
+    environment_id: Option<String>,
+    client_id: Option<Uuid>,
+    from_time: DateTime<Utc>,
+    to_time: DateTime<Utc>,
+    interval_minutes: i32,
+) -> Result<Vec<GqlEvaluationRatePoint>, String> {
+    logic
+        .get_evaluation_rates(
+            feature_key,
+            environment_id,
+            client_id,
+            from_time,
+            to_time,
+            interval_minutes,
+        )
+        .await
+        .map(map_rate_points)
+        .map_err(|e| format!("Failed to get evaluation rates: {}", e))
+}
+
+/// Load evaluation summary aggregates and convert to GraphQL response.
+async fn load_summary(
+    logic: &Box<dyn FeatureEvaluationLogic>,
+    feature_key: Option<String>,
+    environment_id: Option<String>,
+    client_id: Option<Uuid>,
+    from_time: DateTime<Utc>,
+    to_time: DateTime<Utc>,
+    generated_at: DateTime<Utc>,
+) -> Result<GqlEvaluationSummary, String> {
+    logic
+        .get_evaluation_summary(feature_key, environment_id, client_id, from_time, to_time)
+        .await
+        .map(|summary| map_summary(summary, generated_at))
+        .map_err(|e| format!("Failed to get evaluation summary: {}", e))
+}
+
+/// Aggregate both rates and summary for the dashboard view in one round-trip.
+async fn load_dashboard_data(
+    logic: &Box<dyn FeatureEvaluationLogic>,
+    input: &EvaluationRatesInput,
+    client_id: Option<Uuid>,
+    from_time: DateTime<Utc>,
+    to_time: DateTime<Utc>,
+    generated_at: DateTime<Utc>,
+) -> Result<GqlEvaluationDashboardData, String> {
+    let (rates_result, summary_result) = tokio::join!(
+        logic.get_evaluation_rates(
+            input.feature_key.clone(),
+            input.environment_id.clone(),
+            client_id,
+            from_time,
+            to_time,
+            input.interval_minutes,
+        ),
+        logic.get_evaluation_summary(
+            input.feature_key.clone(),
+            input.environment_id.clone(),
+            client_id,
+            from_time,
+            to_time,
+        )
+    );
+
+    match (rates_result, summary_result) {
+        (Ok(rates), Ok(summary)) => Ok(GqlEvaluationDashboardData {
+            rates: map_rate_points(rates),
+            summary: map_summary(summary, generated_at),
+            generated_at: generated_at.to_rfc3339(),
+        }),
+        (Err(e), _) | (_, Err(e)) => Err(format!("Failed to get evaluation dashboard data: {}", e)),
+    }
+}
+
+/// Pull the top-features aggregation and adapt it for GraphQL.
+async fn load_evaluations_by_feature(
+    logic: &Box<dyn FeatureEvaluationLogic>,
+    input: &EvaluationsByFeatureLiveInput,
+    client_id: Option<Uuid>,
+    sequence: i64,
+    emitted_at: DateTime<Utc>,
+) -> Result<Vec<GqlEvaluationByFeatureRow>, String> {
+    let (from_time, to_time) = calculate_time_range(input.period, emitted_at);
+    logic
+        .get_evaluations_by_feature(
+            from_time,
+            to_time,
+            input.environment_id.clone(),
+            client_id,
+            input.limit,
+            input.offset,
+        )
+        .await
+        .map(|rows| {
+            let emitted_at = emitted_at.to_rfc3339();
+            rows.into_iter()
+                .map(|row: EvaluationByFeature| GqlEvaluationByFeatureRow {
+                    feature_key: row.feature_key,
+                    total_evaluations: row.total_evaluations,
+                    successful_evaluations: row.successful_evaluations,
+                    cached_evaluations: row.cached_evaluations,
+                    unique_users: row.unique_users,
+                    last_evaluated_at: row.last_evaluated_at.to_rfc3339(),
+                    sequence,
+                    emitted_at: emitted_at.clone(),
+                })
+                .collect()
+        })
+        .map_err(|e| format!("Failed to get evaluationsByFeature: {}", e))
+}
+
+/// Compute high-level system metrics used on the dashboard summary cards.
+async fn load_system_metrics(
+    feature_logic: &Box<dyn FeatureLogic>,
+    client_logic: &Box<dyn ClientLogic>,
+    evaluation_logic: &Box<dyn FeatureEvaluationLogic>,
+) -> Result<GqlSystemMetrics, String> {
+    let now = Utc::now();
+
+    let today_start = now.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc();
+    let today_end = now;
+    let yesterday_start = (now - chrono::Duration::days(1))
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc();
+    let yesterday_end = today_start;
+    let (from_7d, to_7d) = calculate_time_range(TimePeriod::D7, now);
+
+    let feature_logic_clone = feature_logic.clone();
+    let client_logic_active = client_logic.clone();
+    let client_logic_total = client_logic.clone();
+    let evaluation_logic_today = evaluation_logic.clone();
+    let evaluation_logic_yesterday = evaluation_logic.clone();
+    let evaluation_logic_summary = evaluation_logic.clone();
+
+    let (
+        total_features_result,
+        active_clients_result,
+        total_clients_result,
+        evaluations_today_result,
+        evaluations_yesterday_result,
+        summary_7d_result,
+    ) = tokio::join!(
+        feature_logic_clone.count_features(None),
+        client_logic_active.count_clients(None, Some(true)),
+        client_logic_total.count_clients(None, None),
+        evaluation_logic_today.count_evaluations(today_start, today_end, None, None, None),
+        evaluation_logic_yesterday.count_evaluations(
+            yesterday_start,
+            yesterday_end,
+            None,
+            None,
+            None
+        ),
+        evaluation_logic_summary.get_evaluation_summary(None, None, None, from_7d, to_7d)
+    );
+
+    match (
+        total_features_result,
+        active_clients_result,
+        total_clients_result,
+        evaluations_today_result,
+        evaluations_yesterday_result,
+        summary_7d_result,
+    ) {
+        (
+            Ok(total_features),
+            Ok(active_clients),
+            Ok(total_clients),
+            Ok(evaluations_today),
+            Ok(evaluations_yesterday),
+            Ok(summary),
+        ) => Ok(GqlSystemMetrics {
+            total_features,
+            active_clients,
+            total_clients,
+            evaluations_today,
+            evaluations_yesterday,
+            success_rate: round_pct(summary.success_rate),
+            total_evaluations_7d: summary.total_evaluations,
+            successful_evaluations_7d: summary.successful_evaluations,
+            generated_at: now.to_rfc3339(),
+        }),
+        _ => Err("Failed to fetch system metrics".to_string()),
+    }
 }
 
 /// Calculate from_time and to_time based on the given period
@@ -204,136 +491,59 @@ impl FeatureEvaluationSubscription {
         &self,
         ctx: &Context<'_>,
         input: EvaluationRatesInputWithPeriod,
-    ) -> impl Stream<Item = GqlResult<Vec<GqlEvaluationRatePoint>>> {
-        // Validation: interval bounds
+    ) -> GqlStream<Vec<GqlEvaluationRatePoint>> {
         if !(1..=60).contains(&input.interval_minutes) {
-            return Box::pin(futures_util::stream::once(async {
-                Err("Interval must be between 1 and 60 minutes".into())
-            }))
-                as std::pin::Pin<
-                    Box<dyn Stream<Item = GqlResult<Vec<GqlEvaluationRatePoint>>> + Send>,
-                >;
+            return stream_error("Interval must be between 1 and 60 minutes");
         }
 
-        let client_id = match input.client_id.as_ref().map(|s| Uuid::parse_str(s)) {
-            Some(Ok(id)) => Some(id),
-            Some(Err(_)) => {
-                return Box::pin(futures_util::stream::once(async {
-                    Err("Invalid client ID format".into())
-                }))
-                    as std::pin::Pin<
-                        Box<dyn Stream<Item = GqlResult<Vec<GqlEvaluationRatePoint>>> + Send>,
-                    >;
-            }
-            None => None,
+        let client_id = match parse_optional_uuid(&input.client_id, "client ID") {
+            Ok(id) => id,
+            Err(err) => return stream_error(err),
         };
 
-        let logic = match ctx.data::<Box<dyn FeatureEvaluationLogic>>() {
-            Ok(l) => l.clone(),
-            Err(_) => {
-                return Box::pin(futures_util::stream::once(async {
-                    Err("Feature evaluation logic not found in context".into())
-                }))
-                    as std::pin::Pin<
-                        Box<dyn Stream<Item = GqlResult<Vec<GqlEvaluationRatePoint>>> + Send>,
-                    >;
-            }
+        let logic = match get_evaluation_logic(ctx) {
+            Ok(logic) => logic,
+            Err(err) => return stream_failure(err),
         };
 
-        // Obtain evaluation event broadcast sender
-        let mut events_rx =
-            match ctx.data::<tokio::sync::broadcast::Sender<
-                crate::logic::feature_evaluation::FeatureEvaluationEvent,
-            >>() {
-                Ok(tx) => tx.subscribe(),
-                Err(_) => {
-                    return Box::pin(futures_util::stream::once(async {
-                        Err("Evaluation events channel not found".into())
-                    }))
-                        as std::pin::Pin<
-                            Box<dyn Stream<Item = GqlResult<Vec<GqlEvaluationRatePoint>>> + Send>,
-                        >;
-                }
-            };
-
-        // Helper closure to fetch and yield evaluation rates
-        let fetch_rates = |logic: &Box<dyn FeatureEvaluationLogic>,
-                           input: &EvaluationRatesInputWithPeriod,
-                           client_id: Option<Uuid>| {
-            let logic_clone = logic.clone();
-            let input_clone = input.clone();
-            async move {
-                let now = Utc::now();
-                let (from_time, to_time) = calculate_time_range(input_clone.period, now);
-                match logic_clone
-                    .get_evaluation_rates(
-                        input_clone.feature_key.clone(),
-                        input_clone.environment_id.clone(),
-                        client_id,
-                        from_time,
-                        to_time,
-                        input_clone.interval_minutes,
-                    )
-                    .await
-                {
-                    Ok(rates) => {
-                        let mapped = rates
-                            .into_iter()
-                            .map(|rate| {
-                                let success_rate = if rate.evaluation_count > 0 {
-                                    (rate.success_count as f64 / rate.evaluation_count as f64)
-                                        * 100.0
-                                } else {
-                                    0.0
-                                };
-                                let cache_hit_rate = if rate.evaluation_count > 0 {
-                                    (rate.prior_assignment_count as f64
-                                        / rate.evaluation_count as f64)
-                                        * 100.0
-                                } else {
-                                    0.0
-                                };
-
-                                GqlEvaluationRatePoint {
-                                    time_bucket: rate.time_bucket.to_rfc3339(),
-                                    evaluation_count: rate.evaluation_count,
-                                    success_count: rate.success_count,
-                                    prior_assignment_count: rate.prior_assignment_count,
-                                    success_rate: round_pct(success_rate),
-                                    cache_hit_rate: round_pct(cache_hit_rate),
-                                }
-                            })
-                            .collect();
-                        Ok(mapped)
-                    }
-                    Err(e) => Err(format!("Failed to get evaluation rates: {}", e)),
-                }
-            }
+        let mut events_rx = match evaluation_events_receiver(ctx) {
+            Ok(rx) => rx,
+            Err(err) => return stream_failure(err),
         };
 
         let stream = stream! {
-            // Send initial data immediately on subscription connect
-            match fetch_rates(&logic, &input, client_id).await {
-                Ok(rates) => {
-                    yield Ok(rates);
-                }
-                Err(e) => {
-                    yield Err(e.into());
-                }
+            let now = Utc::now();
+            let (from_time, to_time) = calculate_time_range(input.period, now);
+            match load_rates(
+                &logic,
+                input.feature_key.clone(),
+                input.environment_id.clone(),
+                client_id,
+                from_time,
+                to_time,
+                input.interval_minutes,
+            ).await {
+                Ok(rates) => yield Ok(rates),
+                Err(err) => yield Err(err.into()),
             }
 
-            // Continue listening for events and send updated data
             loop {
                 match events_rx.recv().await {
                     Ok(_) => {
                         log::debug!("[subscriptions] evaluation event received; recomputing aggregation");
-                        match fetch_rates(&logic, &input, client_id).await {
-                            Ok(rates) => {
-                                yield Ok(rates);
-                            }
-                            Err(e) => {
-                                yield Err(e.into());
-                            }
+                        let now = Utc::now();
+                        let (from_time, to_time) = calculate_time_range(input.period, now);
+                        match load_rates(
+                            &logic,
+                            input.feature_key.clone(),
+                            input.environment_id.clone(),
+                            client_id,
+                            from_time,
+                            to_time,
+                            input.interval_minutes,
+                        ).await {
+                            Ok(rates) => yield Ok(rates),
+                            Err(err) => yield Err(err.into()),
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
@@ -342,7 +552,6 @@ impl FeatureEvaluationSubscription {
             }
         };
         Box::pin(stream)
-            as std::pin::Pin<Box<dyn Stream<Item = GqlResult<Vec<GqlEvaluationRatePoint>>> + Send>>
     }
 
     /// Subscribe to real-time feature evaluation rates
@@ -357,159 +566,65 @@ impl FeatureEvaluationSubscription {
         &self,
         ctx: &Context<'_>,
         input: EvaluationRatesInput,
-    ) -> impl Stream<Item = GqlResult<Vec<GqlEvaluationRatePoint>>> {
-        // Validation: interval bounds
+    ) -> GqlStream<Vec<GqlEvaluationRatePoint>> {
         if !(1..=60).contains(&input.interval_minutes) {
-            return Box::pin(futures_util::stream::once(async {
-                Err("Interval must be between 1 and 60 minutes".into())
-            }))
-                as std::pin::Pin<
-                    Box<dyn Stream<Item = GqlResult<Vec<GqlEvaluationRatePoint>>> + Send>,
-                >;
+            return stream_error("Interval must be between 1 and 60 minutes");
         }
-        // Validate time range (max 24h for subscription window)
         if input.to_time < input.from_time {
-            return Box::pin(futures_util::stream::once(async {
-                Err("toTime must be >= fromTime".into())
-            }))
-                as std::pin::Pin<
-                    Box<dyn Stream<Item = GqlResult<Vec<GqlEvaluationRatePoint>>> + Send>,
-                >;
+            return stream_error("toTime must be >= fromTime");
         }
         let duration_hours = (input.to_time - input.from_time).num_hours();
         if duration_hours > 24 {
-            return Box::pin(futures_util::stream::once(async {
-                Err("Time range cannot exceed 24 hours".into())
-            }))
-                as std::pin::Pin<
-                    Box<dyn Stream<Item = GqlResult<Vec<GqlEvaluationRatePoint>>> + Send>,
-                >;
+            return stream_error("Time range cannot exceed 24 hours");
         }
 
-        let client_id = match input.client_id.as_ref().map(|s| Uuid::parse_str(s)) {
-            Some(Ok(id)) => Some(id),
-            Some(Err(_)) => {
-                return Box::pin(futures_util::stream::once(async {
-                    Err("Invalid client ID format".into())
-                }))
-                    as std::pin::Pin<
-                        Box<dyn Stream<Item = GqlResult<Vec<GqlEvaluationRatePoint>>> + Send>,
-                    >;
-            }
-            None => None,
+        let client_id = match parse_optional_uuid(&input.client_id, "client ID") {
+            Ok(id) => id,
+            Err(err) => return stream_error(err),
         };
 
-        let logic = match ctx.data::<Box<dyn FeatureEvaluationLogic>>() {
-            Ok(l) => l.clone(),
-            Err(_) => {
-                return Box::pin(futures_util::stream::once(async {
-                    Err("Feature evaluation logic not found in context".into())
-                }))
-                    as std::pin::Pin<
-                        Box<dyn Stream<Item = GqlResult<Vec<GqlEvaluationRatePoint>>> + Send>,
-                    >;
-            }
+        let logic = match get_evaluation_logic(ctx) {
+            Ok(logic) => logic,
+            Err(err) => return stream_failure(err),
         };
 
-        // Obtain evaluation event broadcast sender injected during schema build
-        // We expect a Sender<FeatureEvaluationEvent> to be inserted under a known type.
-        let mut events_rx =
-            match ctx.data::<tokio::sync::broadcast::Sender<
-                crate::logic::feature_evaluation::FeatureEvaluationEvent,
-            >>() {
-                Ok(tx) => tx.subscribe(),
-                Err(_) => {
-                    return Box::pin(futures_util::stream::once(async {
-                        Err("Evaluation events channel not found".into())
-                    }))
-                        as std::pin::Pin<
-                            Box<dyn Stream<Item = GqlResult<Vec<GqlEvaluationRatePoint>>> + Send>,
-                        >;
-                }
-            };
-
-        // Helper closure to fetch and yield evaluation rates
-        let fetch_rates = |logic: &Box<dyn FeatureEvaluationLogic>,
-                           input: &EvaluationRatesInput,
-                           client_id: Option<Uuid>| {
-            let logic_clone = logic.clone();
-            let input_clone = input.clone();
-            async move {
-                let now = Utc::now();
-                let upper = if input_clone.to_time > now {
-                    now
-                } else {
-                    input_clone.to_time
-                };
-                let from_time = input_clone.from_time;
-                match logic_clone
-                    .get_evaluation_rates(
-                        input_clone.feature_key.clone(),
-                        input_clone.environment_id.clone(),
-                        client_id,
-                        from_time,
-                        upper,
-                        input_clone.interval_minutes,
-                    )
-                    .await
-                {
-                    Ok(rates) => {
-                        let mapped: Vec<GqlEvaluationRatePoint> = rates
-                            .into_iter()
-                            .map(|rate| {
-                                let success_rate = if rate.evaluation_count > 0 {
-                                    (rate.success_count as f64 / rate.evaluation_count as f64)
-                                        * 100.0
-                                } else {
-                                    0.0
-                                };
-                                let cache_hit_rate = if rate.evaluation_count > 0 {
-                                    (rate.prior_assignment_count as f64
-                                        / rate.evaluation_count as f64)
-                                        * 100.0
-                                } else {
-                                    0.0
-                                };
-                                GqlEvaluationRatePoint {
-                                    time_bucket: rate.time_bucket.to_rfc3339(),
-                                    evaluation_count: rate.evaluation_count,
-                                    success_count: rate.success_count,
-                                    prior_assignment_count: rate.prior_assignment_count,
-                                    success_rate: round_pct(success_rate),
-                                    cache_hit_rate: round_pct(cache_hit_rate),
-                                }
-                            })
-                            .collect();
-                        Ok(mapped)
-                    }
-                    Err(e) => Err(format!("Failed to get evaluation rates: {}", e)),
-                }
-            }
+        let mut events_rx = match evaluation_events_receiver(ctx) {
+            Ok(rx) => rx,
+            Err(err) => return stream_failure(err),
         };
 
-        // Wrap broadcast receiver into a stream. Send initial data on connect, then updates on events.
         let stream = stream! {
-            // Send initial data immediately on subscription connect
-            match fetch_rates(&logic, &input, client_id).await {
-                Ok(rates) => {
-                    yield Ok(rates);
-                }
-                Err(e) => {
-                    yield Err(e.into());
-                }
+            let now = Utc::now();
+            let upper = clamp_to_now(input.to_time, now);
+            match load_rates(
+                &logic,
+                input.feature_key.clone(),
+                input.environment_id.clone(),
+                client_id,
+                input.from_time,
+                upper,
+                input.interval_minutes,
+            ).await {
+                Ok(rates) => yield Ok(rates),
+                Err(err) => yield Err(err.into()),
             }
 
-            // Continue listening for events and send updated data
             loop {
                 match events_rx.recv().await {
                     Ok(_evt) => {
-                        match fetch_rates(&logic, &input, client_id).await {
-                            Ok(rates) => {
-                                yield Ok(rates);
-                            }
-                            Err(e) => {
-                                yield Err(e.into());
-                            }
+                        let now = Utc::now();
+                        let upper = clamp_to_now(input.to_time, now);
+                        match load_rates(
+                            &logic,
+                            input.feature_key.clone(),
+                            input.environment_id.clone(),
+                            client_id,
+                            input.from_time,
+                            upper,
+                            input.interval_minutes,
+                        ).await {
+                            Ok(rates) => yield Ok(rates),
+                            Err(err) => yield Err(err.into()),
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
@@ -519,7 +634,6 @@ impl FeatureEvaluationSubscription {
         };
 
         Box::pin(stream)
-            as std::pin::Pin<Box<dyn Stream<Item = GqlResult<Vec<GqlEvaluationRatePoint>>> + Send>>
     }
 
     /// Subscribe to real-time evaluation summary statistics
@@ -534,107 +648,55 @@ impl FeatureEvaluationSubscription {
         &self,
         ctx: &Context<'_>,
         input: EvaluationSummaryInput,
-    ) -> impl Stream<Item = GqlResult<GqlEvaluationSummary>> {
-        let client_id = match input.client_id.as_ref().map(|s| Uuid::parse_str(s)) {
-            Some(Ok(id)) => Some(id),
-            Some(Err(_)) => {
-                return Box::pin(futures_util::stream::once(async {
-                    Err("Invalid client ID format".into())
-                }))
-                    as std::pin::Pin<
-                        Box<dyn Stream<Item = GqlResult<GqlEvaluationSummary>> + Send>,
-                    >;
-            }
-            None => None,
+    ) -> GqlStream<GqlEvaluationSummary> {
+        let client_id = match parse_optional_uuid(&input.client_id, "client ID") {
+            Ok(id) => id,
+            Err(err) => return stream_error(err),
         };
-        let logic = match ctx.data::<Box<dyn FeatureEvaluationLogic>>() {
-            Ok(l) => l.clone(),
-            Err(_) => {
-                return Box::pin(futures_util::stream::once(async {
-                    Err("Feature evaluation logic not found in context".into())
-                }))
-                    as std::pin::Pin<
-                        Box<dyn Stream<Item = GqlResult<GqlEvaluationSummary>> + Send>,
-                    >;
-            }
-        };
-        let mut events_rx =
-            match ctx.data::<tokio::sync::broadcast::Sender<
-                crate::logic::feature_evaluation::FeatureEvaluationEvent,
-            >>() {
-                Ok(tx) => tx.subscribe(),
-                Err(_) => {
-                    return Box::pin(futures_util::stream::once(async {
-                        Err("Evaluation events channel not found".into())
-                    }))
-                        as std::pin::Pin<
-                            Box<dyn Stream<Item = GqlResult<GqlEvaluationSummary>> + Send>,
-                        >;
-                }
-            };
 
-        // Helper closure to fetch and yield evaluation summary
-        let fetch_summary = |logic: &Box<dyn FeatureEvaluationLogic>,
-                             input: &EvaluationSummaryInput,
-                             client_id: Option<Uuid>| {
-            let logic_clone = logic.clone();
-            let input_clone = input.clone();
-            async move {
-                let now = Utc::now();
-                let (from_time, to_time) = calculate_time_range(input_clone.period, now);
-                match logic_clone
-                    .get_evaluation_summary(
-                        input_clone.feature_key.clone(),
-                        input_clone.environment_id.clone(),
-                        client_id,
-                        from_time,
-                        to_time,
-                    )
-                    .await
-                {
-                    Ok(summary) => {
-                        // summary.success_rate & cache_hit_rate are already 0-100 percentages from logic layer
-                        let success_rate = summary.success_rate;
-                        let cache_hit_rate = summary.cache_hit_rate;
-                        Ok(GqlEvaluationSummary {
-                            total_evaluations: summary.total_evaluations,
-                            successful_evaluations: summary.successful_evaluations,
-                            cached_evaluations: summary.cached_evaluations,
-                            unique_users: summary.unique_users,
-                            top_feature_key: summary.top_feature_key,
-                            success_rate: round_pct(success_rate),
-                            cache_hit_rate: round_pct(cache_hit_rate),
-                            generated_at: now.to_rfc3339(),
-                        })
-                    }
-                    Err(e) => Err(format!("Failed to get evaluation summary: {}", e)),
-                }
-            }
+        let logic = match get_evaluation_logic(ctx) {
+            Ok(logic) => logic,
+            Err(err) => return stream_failure(err),
+        };
+
+        let mut events_rx = match evaluation_events_receiver(ctx) {
+            Ok(rx) => rx,
+            Err(err) => return stream_failure(err),
         };
 
         let stream = stream! {
-            // Send initial data immediately on subscription connect
-            match fetch_summary(&logic, &input, client_id).await {
-                Ok(summary) => {
-                    yield Ok(summary);
-                }
-                Err(e) => {
-                    yield Err(e.into());
-                }
+            let now = Utc::now();
+            let (from_time, to_time) = calculate_time_range(input.period, now);
+            match load_summary(
+                &logic,
+                input.feature_key.clone(),
+                input.environment_id.clone(),
+                client_id,
+                from_time,
+                to_time,
+                now,
+            ).await {
+                Ok(summary) => yield Ok(summary),
+                Err(err) => yield Err(err.into()),
             }
 
-            // Continue listening for events and send updated data
             loop {
                 match events_rx.recv().await {
                     Ok(_) => {
                         log::debug!("[subscriptions] evaluation event received; recomputing aggregation");
-                        match fetch_summary(&logic, &input, client_id).await {
-                            Ok(summary) => {
-                                yield Ok(summary);
-                            }
-                            Err(e) => {
-                                yield Err(e.into());
-                            }
+                        let now = Utc::now();
+                        let (from_time, to_time) = calculate_time_range(input.period, now);
+                        match load_summary(
+                            &logic,
+                            input.feature_key.clone(),
+                            input.environment_id.clone(),
+                            client_id,
+                            from_time,
+                            to_time,
+                            now,
+                        ).await {
+                            Ok(summary) => yield Ok(summary),
+                            Err(err) => yield Err(err.into()),
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
@@ -643,7 +705,6 @@ impl FeatureEvaluationSubscription {
             }
         };
         Box::pin(stream)
-            as std::pin::Pin<Box<dyn Stream<Item = GqlResult<GqlEvaluationSummary>> + Send>>
     }
 
     /// Subscribe to combined dashboard data (rates + summary)
@@ -658,156 +719,62 @@ impl FeatureEvaluationSubscription {
         &self,
         ctx: &Context<'_>,
         input: EvaluationRatesInput,
-    ) -> impl Stream<Item = GqlResult<GqlEvaluationDashboardData>> {
-        // Early validation and setup
+    ) -> GqlStream<GqlEvaluationDashboardData> {
         if input.interval_minutes < 1 || input.interval_minutes > 60 {
-            return Box::pin(futures_util::stream::once(async {
-                Err("Interval must be between 1 and 60 minutes".into())
-            }))
-                as std::pin::Pin<
-                    Box<dyn Stream<Item = GqlResult<GqlEvaluationDashboardData>> + Send>,
-                >;
+            return stream_error("Interval must be between 1 and 60 minutes");
         }
         if input.to_time < input.from_time {
-            return Box::pin(futures_util::stream::once(async {
-                Err("toTime must be >= fromTime".into())
-            }))
-                as std::pin::Pin<
-                    Box<dyn Stream<Item = GqlResult<GqlEvaluationDashboardData>> + Send>,
-                >;
+            return stream_error("toTime must be >= fromTime");
         }
         if (input.to_time - input.from_time).num_hours() > 24 {
-            return Box::pin(futures_util::stream::once(async {
-                Err("Time range cannot exceed 24 hours".into())
-            }))
-                as std::pin::Pin<
-                    Box<dyn Stream<Item = GqlResult<GqlEvaluationDashboardData>> + Send>,
-                >;
+            return stream_error("Time range cannot exceed 24 hours");
         }
 
-        let client_id = match input.client_id.as_ref().map(|s| Uuid::parse_str(s)) {
-            Some(Ok(id)) => Some(id),
-            Some(Err(_)) => {
-                return Box::pin(futures_util::stream::once(async {
-                    Err("Invalid client ID format".into())
-                }))
-                    as std::pin::Pin<
-                        Box<dyn Stream<Item = GqlResult<GqlEvaluationDashboardData>> + Send>,
-                    >;
-            }
-            None => None,
+        let client_id = match parse_optional_uuid(&input.client_id, "client ID") {
+            Ok(id) => id,
+            Err(err) => return stream_error(err),
         };
 
-        let logic = match ctx.data::<Box<dyn FeatureEvaluationLogic>>() {
-            Ok(logic) => logic.clone(),
-            Err(_) => {
-                return Box::pin(futures_util::stream::once(async {
-                    Err("Feature evaluation logic not found in context".into())
-                }))
-                    as std::pin::Pin<
-                        Box<dyn Stream<Item = GqlResult<GqlEvaluationDashboardData>> + Send>,
-                    >;
-            }
+        let logic = match get_evaluation_logic(ctx) {
+            Ok(logic) => logic,
+            Err(err) => return stream_failure(err),
         };
 
-        let mut events_rx =
-            match ctx.data::<tokio::sync::broadcast::Sender<
-                crate::logic::feature_evaluation::FeatureEvaluationEvent,
-            >>() {
-                Ok(tx) => tx.subscribe(),
-                Err(_) => {
-                    return Box::pin(futures_util::stream::once(async {
-                        Err("Evaluation events channel not found".into())
-                    }))
-                        as std::pin::Pin<
-                            Box<dyn Stream<Item = GqlResult<GqlEvaluationDashboardData>> + Send>,
-                        >;
-                }
-            };
+        let mut events_rx = match evaluation_events_receiver(ctx) {
+            Ok(rx) => rx,
+            Err(err) => return stream_failure(err),
+        };
 
         let stream = stream! {
-            // Helper closure to fetch and yield dashboard data
-            async fn fetch_dashboard_data(
-                logic: &Box<dyn FeatureEvaluationLogic>,
-                input: &EvaluationRatesInput,
-                client_id: Option<Uuid>
-            ) -> Result<GqlEvaluationDashboardData, String> {
-                let now = Utc::now();
-                let upper = if input.to_time > now { now } else { input.to_time };
-                let from_time = input.from_time;
-                let (rates_result, summary_result) = tokio::join!(
-                    logic.get_evaluation_rates(
-                        input.feature_key.clone(),
-                        input.environment_id.clone(),
-                        client_id,
-                        from_time,
-                        upper,
-                        input.interval_minutes,
-                    ),
-                    logic.get_evaluation_summary(
-                        input.feature_key.clone(),
-                        input.environment_id.clone(),
-                        client_id,
-                        from_time,
-                        upper,
-                    )
-                );
-                match (rates_result, summary_result) {
-                    (Ok(rates), Ok(summary)) => {
-                        let gql_rates = rates.into_iter().map(|rate| {
-                            let success_rate = if rate.evaluation_count > 0 { (rate.success_count as f64 / rate.evaluation_count as f64) * 100.0 } else { 0.0 };
-                            let cache_hit_rate = if rate.evaluation_count > 0 { (rate.prior_assignment_count as f64 / rate.evaluation_count as f64) * 100.0 } else { 0.0 };
-                            GqlEvaluationRatePoint {
-                                time_bucket: rate.time_bucket.to_rfc3339(),
-                                evaluation_count: rate.evaluation_count,
-                                success_count: rate.success_count,
-                                prior_assignment_count: rate.prior_assignment_count,
-                                success_rate: round_pct(success_rate),
-                                cache_hit_rate: round_pct(cache_hit_rate),
-                            }
-                        }).collect();
-                        Ok(GqlEvaluationDashboardData {
-                            rates: gql_rates,
-                            summary: GqlEvaluationSummary {
-                                total_evaluations: summary.total_evaluations,
-                                successful_evaluations: summary.successful_evaluations,
-                                cached_evaluations: summary.cached_evaluations,
-                                unique_users: summary.unique_users,
-                                top_feature_key: summary.top_feature_key,
-                                success_rate: round_pct(summary.success_rate),
-                                cache_hit_rate: round_pct(summary.cache_hit_rate),
-                                generated_at: now.to_rfc3339(),
-                            },
-                            generated_at: now.to_rfc3339(),
-                        })
-                    }
-                    (Err(e), _) | (_, Err(e)) => {
-                        Err(format!("Failed to get evaluation dashboard data: {}", e))
-                    }
-                }
+            let now = Utc::now();
+            let upper = clamp_to_now(input.to_time, now);
+            match load_dashboard_data(
+                &logic,
+                &input,
+                client_id,
+                input.from_time,
+                upper,
+                now,
+            ).await {
+                Ok(data) => yield Ok(data),
+                Err(err) => yield Err(err.into()),
             }
 
-            // Send initial data immediately on subscription connect
-            match fetch_dashboard_data(&logic, &input, client_id).await {
-                Ok(data) => {
-                    yield Ok(data);
-                }
-                Err(e) => {
-                    yield Err(e.into());
-                }
-            }
-
-            // Continue listening for events and send updated data
             loop {
                 match events_rx.recv().await {
                     Ok(_) => {
-                        match fetch_dashboard_data(&logic, &input, client_id).await {
-                            Ok(data) => {
-                                yield Ok(data);
-                            }
-                            Err(e) => {
-                                yield Err(e.into());
-                            }
+                        let now = Utc::now();
+                        let upper = clamp_to_now(input.to_time, now);
+                        match load_dashboard_data(
+                            &logic,
+                            &input,
+                            client_id,
+                            input.from_time,
+                            upper,
+                            now,
+                        ).await {
+                            Ok(data) => yield Ok(data),
+                            Err(err) => yield Err(err.into()),
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
@@ -816,7 +783,6 @@ impl FeatureEvaluationSubscription {
             }
         };
         Box::pin(stream)
-            as std::pin::Pin<Box<dyn Stream<Item = GqlResult<GqlEvaluationDashboardData>> + Send>>
     }
 
     /// Live stream of evaluations grouped by feature ("Top Features")
@@ -825,124 +791,56 @@ impl FeatureEvaluationSubscription {
         &self,
         ctx: &Context<'_>,
         input: EvaluationsByFeatureLiveInput,
-    ) -> impl Stream<Item = GqlResult<Vec<GqlEvaluationByFeatureRow>>> {
-        // Validate client_id format
-        let client_id = match input.client_id.as_ref().map(|s| Uuid::parse_str(s)) {
-            Some(Ok(id)) => Some(id),
-            Some(Err(_)) => {
-                return Box::pin(futures_util::stream::once(async {
-                    Err("Invalid client ID format".into())
-                }))
-                    as std::pin::Pin<
-                        Box<dyn Stream<Item = GqlResult<Vec<GqlEvaluationByFeatureRow>>> + Send>,
-                    >;
-            }
-            None => None,
+    ) -> GqlStream<Vec<GqlEvaluationByFeatureRow>> {
+        let client_id = match parse_optional_uuid(&input.client_id, "client ID") {
+            Ok(id) => id,
+            Err(err) => return stream_error(err),
         };
 
-        let logic = match ctx.data::<Box<dyn FeatureEvaluationLogic>>() {
-            Ok(l) => l.clone(),
-            Err(_) => {
-                return Box::pin(futures_util::stream::once(async {
-                    Err("Feature evaluation logic not found in context".into())
-                }))
-                    as std::pin::Pin<
-                        Box<dyn Stream<Item = GqlResult<Vec<GqlEvaluationByFeatureRow>>> + Send>,
-                    >;
-            }
+        let logic = match get_evaluation_logic(ctx) {
+            Ok(logic) => logic,
+            Err(err) => return stream_failure(err),
         };
 
-        let mut events_rx =
-            match ctx.data::<tokio::sync::broadcast::Sender<
-                crate::logic::feature_evaluation::FeatureEvaluationEvent,
-            >>() {
-                Ok(tx) => tx.subscribe(),
-                Err(_) => {
-                    return Box::pin(futures_util::stream::once(async {
-                        Err("Evaluation events channel not found".into())
-                    }))
-                        as std::pin::Pin<
-                            Box<
-                                dyn Stream<Item = GqlResult<Vec<GqlEvaluationByFeatureRow>>> + Send,
-                            >,
-                        >;
-                }
-            };
-
-        // Helper closure to fetch and yield evaluation data
-        let fetch_evaluations = |logic: &Box<dyn FeatureEvaluationLogic>,
-                                 input: &EvaluationsByFeatureLiveInput,
-                                 client_id: Option<Uuid>,
-                                 seq: i64| {
-            let logic_clone = logic.clone();
-            let input_clone = input.clone();
-            async move {
-                // Calculate time range dynamically based on period (rolling window)
-                let now = Utc::now();
-                let (from_time, to_time) = calculate_time_range(input_clone.period, now);
-
-                match logic_clone
-                    .get_evaluations_by_feature(
-                        from_time,
-                        to_time,
-                        input_clone.environment_id.clone(),
-                        client_id,
-                        input_clone.limit,
-                        input_clone.offset,
-                    )
-                    .await
-                {
-                    Ok(rows) => {
-                        log::debug!(
-                            "[subscriptions] evaluations_by_feature_live sending {} rows (seq={})",
-                            rows.len(),
-                            seq
-                        );
-                        let emission_time = Utc::now().to_rfc3339();
-                        let mapped = rows
-                            .into_iter()
-                            .map(|r| GqlEvaluationByFeatureRow {
-                                feature_key: r.feature_key,
-                                total_evaluations: r.total_evaluations,
-                                successful_evaluations: r.successful_evaluations,
-                                cached_evaluations: r.cached_evaluations,
-                                unique_users: r.unique_users,
-                                last_evaluated_at: r.last_evaluated_at.to_rfc3339(),
-                                sequence: seq,
-                                emitted_at: emission_time.clone(),
-                            })
-                            .collect();
-                        Ok(mapped)
-                    }
-                    Err(e) => Err(format!("Failed to get evaluationsByFeature: {}", e)),
-                }
-            }
+        let mut events_rx = match evaluation_events_receiver(ctx) {
+            Ok(rx) => rx,
+            Err(err) => return stream_failure(err),
         };
 
         let mut seq: i64 = 0;
         let stream = stream! {
-            // Send initial data immediately on subscription connect
-            match fetch_evaluations(&logic, &input, client_id, seq).await {
+            let emitted_at = Utc::now();
+            match load_evaluations_by_feature(&logic, &input, client_id, seq, emitted_at).await {
                 Ok(rows) => {
+                    log::debug!(
+                        "[subscriptions] evaluations_by_feature_live sending {} rows (seq={})",
+                        rows.len(),
+                        seq
+                    );
                     yield Ok(rows);
                 }
-                Err(e) => {
-                    yield Err(e.into());
+                Err(err) => {
+                    yield Err(err.into());
                 }
             }
 
-            // Continue listening for events and send updated data
             loop {
                 match events_rx.recv().await {
                     Ok(_) => {
                         seq += 1;
                         log::debug!("[subscriptions] evaluation event received; recomputing evaluations by feature");
-                        match fetch_evaluations(&logic, &input, client_id, seq).await {
+                        let emitted_at = Utc::now();
+                        match load_evaluations_by_feature(&logic, &input, client_id, seq, emitted_at).await {
                             Ok(rows) => {
+                                log::debug!(
+                                    "[subscriptions] evaluations_by_feature_live sending {} rows (seq={})",
+                                    rows.len(),
+                                    seq
+                                );
                                 yield Ok(rows);
                             }
-                            Err(e) => {
-                                yield Err(e.into());
+                            Err(err) => {
+                                yield Err(err.into());
                             }
                         }
                     }
@@ -953,9 +851,6 @@ impl FeatureEvaluationSubscription {
         };
 
         Box::pin(stream)
-            as std::pin::Pin<
-                Box<dyn Stream<Item = GqlResult<Vec<GqlEvaluationByFeatureRow>>> + Send>,
-            >
     }
 
     /// Subscribe to real-time system metrics for dashboard KPIs
@@ -963,162 +858,44 @@ impl FeatureEvaluationSubscription {
     ///
     /// # Returns
     /// Stream of system-wide metrics including feature count, client counts, evaluation counts, and success rates
-    async fn system_metrics(
-        &self,
-        ctx: &Context<'_>,
-    ) -> impl Stream<Item = GqlResult<GqlSystemMetrics>> {
+    async fn system_metrics(&self, ctx: &Context<'_>) -> GqlStream<GqlSystemMetrics> {
         let feature_logic = match ctx.data::<Box<dyn FeatureLogic>>() {
             Ok(l) => l.clone(),
             Err(_) => {
-                return Box::pin(futures_util::stream::once(async {
-                    Err("Feature logic not found in context".into())
-                }))
-                    as std::pin::Pin<Box<dyn Stream<Item = GqlResult<GqlSystemMetrics>> + Send>>;
+                return stream_error("Feature logic not found in context");
             }
         };
 
         let client_logic = match ctx.data::<Box<dyn ClientLogic>>() {
             Ok(l) => l.clone(),
             Err(_) => {
-                return Box::pin(futures_util::stream::once(async {
-                    Err("Client logic not found in context".into())
-                }))
-                    as std::pin::Pin<Box<dyn Stream<Item = GqlResult<GqlSystemMetrics>> + Send>>;
+                return stream_error("Client logic not found in context");
             }
         };
 
-        let evaluation_logic = match ctx.data::<Box<dyn FeatureEvaluationLogic>>() {
-            Ok(l) => l.clone(),
-            Err(_) => {
-                return Box::pin(futures_util::stream::once(async {
-                    Err("Feature evaluation logic not found in context".into())
-                }))
-                    as std::pin::Pin<Box<dyn Stream<Item = GqlResult<GqlSystemMetrics>> + Send>>;
-            }
+        let evaluation_logic = match get_evaluation_logic(ctx) {
+            Ok(logic) => logic,
+            Err(err) => return stream_failure(err),
         };
 
-        let mut events_rx =
-            match ctx.data::<tokio::sync::broadcast::Sender<
-                crate::logic::feature_evaluation::FeatureEvaluationEvent,
-            >>() {
-                Ok(tx) => tx.subscribe(),
-                Err(_) => {
-                    return Box::pin(futures_util::stream::once(async {
-                        Err("Evaluation events channel not found".into())
-                    }))
-                        as std::pin::Pin<
-                            Box<dyn Stream<Item = GqlResult<GqlSystemMetrics>> + Send>,
-                        >;
-                }
-            };
-
-        // Helper closure to fetch system metrics
-        let fetch_metrics =
-            |feature_logic: &Box<dyn FeatureLogic>,
-             client_logic: &Box<dyn ClientLogic>,
-             evaluation_logic: &Box<dyn FeatureEvaluationLogic>| {
-                let feature_logic_clone = feature_logic.clone();
-                let client_logic_clone = client_logic.clone();
-                let evaluation_logic_clone = evaluation_logic.clone();
-                async move {
-                    let now = Utc::now();
-
-                    // Calculate time ranges
-                    let today_start = now.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc();
-                    let today_end = now;
-                    let yesterday_start = (now - chrono::Duration::days(1))
-                        .date_naive()
-                        .and_hms_opt(0, 0, 0)
-                        .unwrap()
-                        .and_utc();
-                    let yesterday_end = today_start;
-                    let (from_7d, to_7d) = calculate_time_range(TimePeriod::D7, now);
-
-                    // Fetch all metrics concurrently
-                    let (
-                        total_features_result,
-                        active_clients_result,
-                        total_clients_result,
-                        evaluations_today_result,
-                        evaluations_yesterday_result,
-                        summary_7d_result,
-                    ) = tokio::join!(
-                        feature_logic_clone.count_features(None),
-                        client_logic_clone.count_clients(None, Some(true)),
-                        client_logic_clone.count_clients(None, None),
-                        evaluation_logic_clone.count_evaluations(
-                            today_start,
-                            today_end,
-                            None,
-                            None,
-                            None
-                        ),
-                        evaluation_logic_clone.count_evaluations(
-                            yesterday_start,
-                            yesterday_end,
-                            None,
-                            None,
-                            None
-                        ),
-                        evaluation_logic_clone
-                            .get_evaluation_summary(None, None, None, from_7d, to_7d)
-                    );
-
-                    // Handle results
-                    match (
-                        total_features_result,
-                        active_clients_result,
-                        total_clients_result,
-                        evaluations_today_result,
-                        evaluations_yesterday_result,
-                        summary_7d_result,
-                    ) {
-                        (
-                            Ok(total_features),
-                            Ok(active_clients),
-                            Ok(total_clients),
-                            Ok(evaluations_today),
-                            Ok(evaluations_yesterday),
-                            Ok(summary),
-                        ) => Ok(GqlSystemMetrics {
-                            total_features,
-                            active_clients,
-                            total_clients,
-                            evaluations_today,
-                            evaluations_yesterday,
-                            success_rate: round_pct(summary.success_rate),
-                            total_evaluations_7d: summary.total_evaluations,
-                            successful_evaluations_7d: summary.successful_evaluations,
-                            generated_at: now.to_rfc3339(),
-                        }),
-                        _ => Err("Failed to fetch system metrics".to_string()),
-                    }
-                }
-            };
+        let mut events_rx = match evaluation_events_receiver(ctx) {
+            Ok(rx) => rx,
+            Err(err) => return stream_failure(err),
+        };
 
         let stream = stream! {
-            // Send initial data immediately on subscription connect
-            match fetch_metrics(&feature_logic, &client_logic, &evaluation_logic).await {
-                Ok(metrics) => {
-                    yield Ok(metrics);
-                }
-                Err(e) => {
-                    yield Err(e.into());
-                }
+            match load_system_metrics(&feature_logic, &client_logic, &evaluation_logic).await {
+                Ok(metrics) => yield Ok(metrics),
+                Err(err) => yield Err(err.into()),
             }
 
-            // Continue listening for events and send updated data
             loop {
                 match events_rx.recv().await {
                     Ok(_) => {
                         log::debug!("[subscriptions] evaluation event received; recomputing system metrics");
-                        match fetch_metrics(&feature_logic, &client_logic, &evaluation_logic).await {
-                            Ok(metrics) => {
-                                yield Ok(metrics);
-                            }
-                            Err(e) => {
-                                yield Err(e.into());
-                            }
+                        match load_system_metrics(&feature_logic, &client_logic, &evaluation_logic).await {
+                            Ok(metrics) => yield Ok(metrics),
+                            Err(err) => yield Err(err.into()),
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
@@ -1127,7 +904,6 @@ impl FeatureEvaluationSubscription {
             }
         };
         Box::pin(stream)
-            as std::pin::Pin<Box<dyn Stream<Item = GqlResult<GqlSystemMetrics>> + Send>>
     }
 
     /// Subscribe to real-time recent activities for dashboard activity feed
@@ -1146,14 +922,11 @@ impl FeatureEvaluationSubscription {
         page_size: Option<i32>,
         page_number: Option<i32>,
         activity_types: Option<Vec<String>>,
-    ) -> impl Stream<Item = GqlResult<GqlActivityLogPage>> {
+    ) -> GqlStream<GqlActivityLogPage> {
         let activity_repo = match ctx.data::<Arc<Box<dyn ActivityLogRepository>>>() {
             Ok(repo) => repo.clone(),
             Err(_) => {
-                return Box::pin(futures_util::stream::once(async {
-                    Err("Activity log repository not found in context".into())
-                }))
-                    as std::pin::Pin<Box<dyn Stream<Item = GqlResult<GqlActivityLogPage>> + Send>>;
+                return stream_error("Activity log repository not found in context");
             }
         };
 
@@ -1245,7 +1018,6 @@ impl FeatureEvaluationSubscription {
         };
 
         Box::pin(stream)
-            as std::pin::Pin<Box<dyn Stream<Item = GqlResult<GqlActivityLogPage>> + Send>>
     }
 
     /// Real-time subscription for feature growth over time
@@ -1266,27 +1038,14 @@ impl FeatureEvaluationSubscription {
         #[graphql(desc = "End time for feature growth data")] to_time: DateTime<Utc>,
         #[graphql(desc = "Time interval: 'day', 'week', or 'month'")] interval: String,
         #[graphql(desc = "Filter by team ID (optional)")] team_id: Option<async_graphql::ID>,
-    ) -> impl Stream<Item = GqlResult<Vec<crate::graphql::schema::FeatureGrowthPoint>>> {
+    ) -> GqlStream<Vec<crate::graphql::schema::FeatureGrowthPoint>> {
         use crate::database::feature::FeatureRepository;
         use std::time::Duration;
 
         // Get the feature repository from context
         let feature_repo = match ctx.data::<Arc<Box<dyn FeatureRepository>>>() {
             Ok(repo) => repo.clone(),
-            Err(e) => {
-                return Box::pin(stream! {
-                    yield Err(e.into());
-                })
-                    as std::pin::Pin<
-                        Box<
-                            dyn Stream<
-                                    Item = GqlResult<
-                                        Vec<crate::graphql::schema::FeatureGrowthPoint>,
-                                    >,
-                                > + Send,
-                        >,
-                    >;
-            }
+            Err(e) => return stream_failure(e.into()),
         };
 
         // Clone values for use in async block
@@ -1367,12 +1126,6 @@ impl FeatureEvaluationSubscription {
         };
 
         Box::pin(stream)
-            as std::pin::Pin<
-                Box<
-                    dyn Stream<Item = GqlResult<Vec<crate::graphql::schema::FeatureGrowthPoint>>>
-                        + Send,
-                >,
-            >
     }
 }
 

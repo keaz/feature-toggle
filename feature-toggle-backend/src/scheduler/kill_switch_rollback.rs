@@ -200,8 +200,8 @@ mod tests {
             key: "scheduled-kill".to_string(),
             description: None,
             feature_type: GraphQLFeatureType::Simple,
-            enabled: true, // Feature is still enabled
-            kill_switch_enabled: true, // Kill switch is enabled (not activated yet)
+            enabled: true,                  // Feature is still enabled
+            kill_switch_enabled: true,      // Kill switch is enabled (not activated yet)
             kill_switch_activated_at: None, // Not activated yet
             rollback_scheduled_at: Some(Utc::now() - chrono::Duration::minutes(5)), // Scheduled in the past
             dependencies: vec![],
@@ -215,7 +215,7 @@ mod tests {
             key: "scheduled-kill".to_string(),
             description: None,
             feature_type: GraphQLFeatureType::Simple,
-            enabled: false, // Feature is now disabled (active = false)
+            enabled: false,             // Feature is now disabled (active = false)
             kill_switch_enabled: false, // Kill switch is now activated (disabled)
             kill_switch_activated_at: Some(Utc::now()), // Activation timestamp set
             rollback_scheduled_at: None, // Cleared after execution
@@ -271,7 +271,10 @@ mod tests {
             .check_and_process_rollbacks()
             .await
             .expect("scheduler should succeed");
-        assert_eq!(processed, 0, "No features should be processed when none are pending");
+        assert_eq!(
+            processed, 0,
+            "No features should be processed when none are pending"
+        );
     }
 
     #[tokio::test]
@@ -297,6 +300,9 @@ mod tests {
             .check_and_process_rollbacks()
             .await
             .expect("scheduler should not fail on individual feature errors");
-        assert_eq!(processed, 0, "Failed disable should not be counted as processed");
+        assert_eq!(
+            processed, 0,
+            "Failed disable should not be counted as processed"
+        );
     }
 }

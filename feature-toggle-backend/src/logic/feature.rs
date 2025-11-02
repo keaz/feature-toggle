@@ -1752,8 +1752,7 @@ mod test {
         let stage_id = Uuid::new_v4();
         let feature_id = Uuid::new_v4();
         let user_id = Uuid::new_v4();
-        let stage =
-            create_pipeline_stage_with_status(stage_id, feature_id, "ROLLBACK_REQUESTED");
+        let stage = create_pipeline_stage_with_status(stage_id, feature_id, "ROLLBACK_REQUESTED");
 
         let stage_clone_for_lookup = stage.clone();
         repository
@@ -1835,8 +1834,7 @@ mod test {
         let stage_id = Uuid::new_v4();
         let feature_id = Uuid::new_v4();
         let user_id = Uuid::new_v4();
-        let stage =
-            create_pipeline_stage_with_status(stage_id, feature_id, "ROLLBACK_REQUESTED");
+        let stage = create_pipeline_stage_with_status(stage_id, feature_id, "ROLLBACK_REQUESTED");
 
         let stage_clone_for_lookup = stage.clone();
         repository
@@ -2121,9 +2119,7 @@ mod test {
             active: true,
             kill_switch_enabled: true,
             kill_switch_activated_at: None,
-            rollback_scheduled_at: Some(
-                chrono::Utc::now() + chrono::Duration::minutes(30),
-            ),
+            rollback_scheduled_at: Some(chrono::Utc::now() + chrono::Duration::minutes(30)),
             dependencies: vec![],
         }
     }

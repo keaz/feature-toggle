@@ -106,21 +106,19 @@ async fn evaluate_validation_errors() {
         .expect_get_features()
         .returning(move |_team, key, _ftype| {
             let res: Result<Vec<db::Feature>, Error> = match key.as_deref() {
-                Some("Test Feature") => {
-                    Ok(vec![db::Feature {
-                        id: feature_id,
-                        key: "Test Feature".into(),
-                        description: Some(String::new()),
-                        feature_type: db::FeatureType::Simple,
-                        team_id,
-                        active: true,
-                        created_at: Utc::now(),
-                        kill_switch_enabled: true,
-                        kill_switch_activated_at: None,
-                        rollback_scheduled_at: Some(Utc::now() + ChronoDuration::minutes(30)),
-                        dependencies: vec![],
-                    }])
-                }
+                Some("Test Feature") => Ok(vec![db::Feature {
+                    id: feature_id,
+                    key: "Test Feature".into(),
+                    description: Some(String::new()),
+                    feature_type: db::FeatureType::Simple,
+                    team_id,
+                    active: true,
+                    created_at: Utc::now(),
+                    kill_switch_enabled: true,
+                    kill_switch_activated_at: None,
+                    rollback_scheduled_at: Some(Utc::now() + ChronoDuration::minutes(30)),
+                    dependencies: vec![],
+                }]),
                 _ => Ok(vec![]),
             };
             res
@@ -265,21 +263,19 @@ async fn evaluate_auth_and_success() {
         .expect_get_features()
         .returning(move |_team, key, _ftype| {
             let res: Result<Vec<db::Feature>, Error> = match key.as_deref() {
-                Some("Test Feature") => {
-                    Ok(vec![db::Feature {
-                        id: feature_id,
-                        key: "Test Feature".into(),
-                        description: Some(String::new()),
-                        feature_type: db::FeatureType::Simple,
-                        team_id,
-                        active: true,
-                        created_at: Utc::now(),
-                        kill_switch_enabled: true,
-                        kill_switch_activated_at: None,
-                        rollback_scheduled_at: Some(Utc::now() + ChronoDuration::minutes(45)),
-                        dependencies: vec![],
-                    }])
-                }
+                Some("Test Feature") => Ok(vec![db::Feature {
+                    id: feature_id,
+                    key: "Test Feature".into(),
+                    description: Some(String::new()),
+                    feature_type: db::FeatureType::Simple,
+                    team_id,
+                    active: true,
+                    created_at: Utc::now(),
+                    kill_switch_enabled: true,
+                    kill_switch_activated_at: None,
+                    rollback_scheduled_at: Some(Utc::now() + ChronoDuration::minutes(45)),
+                    dependencies: vec![],
+                }]),
                 _ => Ok(vec![]),
             };
             res
@@ -401,21 +397,19 @@ async fn get_feature_by_key_and_stream_branches() {
         .expect_get_features()
         .returning(move |_team, key, _ftype| {
             let res: Result<Vec<db::Feature>, Error> = match key.as_deref() {
-                Some("Test Feature") => {
-                    Ok(vec![db::Feature {
-                        id: feature_id,
-                        key: "Test Feature".into(),
-                        description: Some(String::new()),
-                        feature_type: db::FeatureType::Simple,
-                        team_id,
-                        active: true,
-                        created_at: Utc::now(),
-                        kill_switch_enabled: true,
-                        kill_switch_activated_at: None,
-                        rollback_scheduled_at: Some(Utc::now() + ChronoDuration::minutes(15)),
-                        dependencies: vec![],
-                    }])
-                }
+                Some("Test Feature") => Ok(vec![db::Feature {
+                    id: feature_id,
+                    key: "Test Feature".into(),
+                    description: Some(String::new()),
+                    feature_type: db::FeatureType::Simple,
+                    team_id,
+                    active: true,
+                    created_at: Utc::now(),
+                    kill_switch_enabled: true,
+                    kill_switch_activated_at: None,
+                    rollback_scheduled_at: Some(Utc::now() + ChronoDuration::minutes(15)),
+                    dependencies: vec![],
+                }]),
                 _ => Ok(vec![]),
             };
             res
@@ -769,11 +763,11 @@ async fn get_feature_by_key_and_stream_branches() {
                 id: uuid::Uuid::new_v4().to_string(),
                 key: "Test Feature".into(),
                 description: String::new(),
-            feature_type: "Simple".into(),
-            team_id: "51ecc366-f1cd-4d3d-ab73-fa60bad98f27".into(),
-            created_at: chrono::Utc::now().to_rfc3339(),
-            active: true,
-            kill_switch_enabled: true,
+                feature_type: "Simple".into(),
+                team_id: "51ecc366-f1cd-4d3d-ab73-fa60bad98f27".into(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                active: true,
+                kill_switch_enabled: true,
                 kill_switch_activated_at: String::new(),
                 rollback_scheduled_at: chrono::Utc::now().to_rfc3339(),
                 stages: vec![],

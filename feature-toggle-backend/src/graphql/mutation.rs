@@ -939,9 +939,9 @@ async fn map_db_feature_to_full_for_broadcast(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::feature::MockFeatureRepository;
     use crate::graphql::query::Query as GqlQuery;
     use crate::logic::context::MockContextLogic;
-    use crate::database::feature::MockFeatureRepository;
     use async_graphql::{EmptySubscription, Request, Schema};
 
     #[tokio::test]
@@ -1035,9 +1035,7 @@ mod tests {
 
         let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
             .data::<Box<dyn crate::logic::feature::FeatureLogic>>(Box::new(mock))
-            .data::<Box<dyn crate::database::feature::FeatureRepository>>(Box::new(
-                feature_repo,
-            ))
+            .data::<Box<dyn crate::database::feature::FeatureRepository>>(Box::new(feature_repo))
             .finish();
 
         let gql = r#"
@@ -1139,14 +1137,14 @@ mod tests {
 #[cfg(test)]
 mod more_mutation_tests {
     use super::*;
-    use crate::graphql::query::Query as GqlQuery;
-    use crate::logic::context::MockContextLogic;
     use crate::database::entity::FeaturePipelineStage;
     use crate::database::feature::MockFeatureRepository;
+    use crate::graphql::query::Query as GqlQuery;
+    use crate::logic::context::MockContextLogic;
     use crate::logic::environment::MockEnvironmentLogic;
     use async_graphql::{EmptySubscription, Request, Schema};
-    use uuid::Uuid;
     use std::sync::Arc;
+    use uuid::Uuid;
 
     #[tokio::test]
     async fn test_update_context_mutation_calls_logic() {
