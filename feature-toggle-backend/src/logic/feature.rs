@@ -1065,7 +1065,7 @@ fn map_db_criterion_to_gql(
 mod test {
     use super::*;
     use crate::database::activity_log::MockActivityLogRepository;
-    use crate::database::entity::Feature as EntityFeature;
+    use crate::database::entity::{Feature as EntityFeature, FeaturePipelineStage};
     use crate::database::feature::MockFeatureRepository;
     use crate::graphql::schema::FeatureType;
     use crate::logic::environment::MockEnvironmentLogic;
@@ -1416,19 +1416,34 @@ mod test {
         let stage_id = Uuid::new_v4();
         let feature_id = Uuid::new_v4();
         let user_id = Uuid::new_v4();
+        let stage = create_pipeline_stage_with_status(stage_id, feature_id, "NOT_DEPLOYED");
+
+        let stage_clone_for_lookup = stage.clone();
+        repository
+            .expect_get_stage_by_id()
+            .with(mockall::predicate::eq(stage_id))
+            .times(1)
+            .returning(move |_| Ok(Some(stage_clone_for_lookup.clone())));
+
+        let stage_clone_for_list = stage.clone();
+        repository
+            .expect_get_feature_stages()
+            .with(mockall::predicate::eq(feature_id))
+            .times(1)
+            .returning(move |_| Ok(vec![stage_clone_for_list.clone()]));
 
         // Mock the feature lookup for stage validation
         repository
             .expect_get_feature_id_by_stage_id()
             .with(mockall::predicate::eq(stage_id))
-            .times(2) // Called twice: once for validation, once after update
+            .times(1) // Called once after the stage change
             .returning(move |_| Ok(Some(feature_id)));
 
         // Mock the feature retrieval for validation
         repository
             .expect_get_feature_by_id()
             .with(mockall::predicate::eq(feature_id))
-            .times(2) // Called once for validation, once after update
+            .times(1) // Called once after the stage change
             .returning(move |_| {
                 Ok(create_entity_feature_with_stage_status(
                     feature_id,
@@ -1489,19 +1504,34 @@ mod test {
         let stage_id = Uuid::new_v4();
         let feature_id = Uuid::new_v4();
         let user_id = Uuid::new_v4();
+        let stage = create_pipeline_stage_with_status(stage_id, feature_id, "DEPLOYMENT_REQUESTED");
+
+        let stage_clone_for_lookup = stage.clone();
+        repository
+            .expect_get_stage_by_id()
+            .with(mockall::predicate::eq(stage_id))
+            .times(1)
+            .returning(move |_| Ok(Some(stage_clone_for_lookup.clone())));
+
+        let stage_clone_for_list = stage.clone();
+        repository
+            .expect_get_feature_stages()
+            .with(mockall::predicate::eq(feature_id))
+            .times(1)
+            .returning(move |_| Ok(vec![stage_clone_for_list.clone()]));
 
         // Mock the feature lookup for stage validation
         repository
             .expect_get_feature_id_by_stage_id()
             .with(mockall::predicate::eq(stage_id))
-            .times(2)
+            .times(1)
             .returning(move |_| Ok(Some(feature_id)));
 
         // Mock the feature retrieval for validation
         repository
             .expect_get_feature_by_id()
             .with(mockall::predicate::eq(feature_id))
-            .times(2)
+            .times(1)
             .returning(move |_| {
                 Ok(create_entity_feature_with_stage_status(
                     feature_id,
@@ -1559,17 +1589,32 @@ mod test {
         let stage_id = Uuid::new_v4();
         let feature_id = Uuid::new_v4();
         let user_id = Uuid::new_v4();
+        let stage = create_pipeline_stage_with_status(stage_id, feature_id, "DEPLOYMENT_REQUESTED");
+
+        let stage_clone_for_lookup = stage.clone();
+        repository
+            .expect_get_stage_by_id()
+            .with(mockall::predicate::eq(stage_id))
+            .times(1)
+            .returning(move |_| Ok(Some(stage_clone_for_lookup.clone())));
+
+        let stage_clone_for_list = stage.clone();
+        repository
+            .expect_get_feature_stages()
+            .with(mockall::predicate::eq(feature_id))
+            .times(1)
+            .returning(move |_| Ok(vec![stage_clone_for_list.clone()]));
 
         repository
             .expect_get_feature_id_by_stage_id()
             .with(mockall::predicate::eq(stage_id))
-            .times(2)
+            .times(1)
             .returning(move |_| Ok(Some(feature_id)));
 
         repository
             .expect_get_feature_by_id()
             .with(mockall::predicate::eq(feature_id))
-            .times(2)
+            .times(1)
             .returning(move |_| {
                 Ok(create_entity_feature_with_stage_status(
                     feature_id,
@@ -1626,17 +1671,32 @@ mod test {
         let stage_id = Uuid::new_v4();
         let feature_id = Uuid::new_v4();
         let user_id = Uuid::new_v4();
+        let stage = create_pipeline_stage_with_status(stage_id, feature_id, "DEPLOYED");
+
+        let stage_clone_for_lookup = stage.clone();
+        repository
+            .expect_get_stage_by_id()
+            .with(mockall::predicate::eq(stage_id))
+            .times(1)
+            .returning(move |_| Ok(Some(stage_clone_for_lookup.clone())));
+
+        let stage_clone_for_list = stage.clone();
+        repository
+            .expect_get_feature_stages()
+            .with(mockall::predicate::eq(feature_id))
+            .times(1)
+            .returning(move |_| Ok(vec![stage_clone_for_list.clone()]));
 
         repository
             .expect_get_feature_id_by_stage_id()
             .with(mockall::predicate::eq(stage_id))
-            .times(2)
+            .times(1)
             .returning(move |_| Ok(Some(feature_id)));
 
         repository
             .expect_get_feature_by_id()
             .with(mockall::predicate::eq(feature_id))
-            .times(2)
+            .times(1)
             .returning(move |_| {
                 Ok(create_entity_feature_with_stage_status(
                     feature_id, stage_id, "DEPLOYED",
@@ -1692,17 +1752,33 @@ mod test {
         let stage_id = Uuid::new_v4();
         let feature_id = Uuid::new_v4();
         let user_id = Uuid::new_v4();
+        let stage =
+            create_pipeline_stage_with_status(stage_id, feature_id, "ROLLBACK_REQUESTED");
+
+        let stage_clone_for_lookup = stage.clone();
+        repository
+            .expect_get_stage_by_id()
+            .with(mockall::predicate::eq(stage_id))
+            .times(1)
+            .returning(move |_| Ok(Some(stage_clone_for_lookup.clone())));
+
+        let stage_clone_for_list = stage.clone();
+        repository
+            .expect_get_feature_stages()
+            .with(mockall::predicate::eq(feature_id))
+            .times(1)
+            .returning(move |_| Ok(vec![stage_clone_for_list.clone()]));
 
         repository
             .expect_get_feature_id_by_stage_id()
             .with(mockall::predicate::eq(stage_id))
-            .times(2)
+            .times(1)
             .returning(move |_| Ok(Some(feature_id)));
 
         repository
             .expect_get_feature_by_id()
             .with(mockall::predicate::eq(feature_id))
-            .times(2)
+            .times(1)
             .returning(move |_| {
                 Ok(create_entity_feature_with_stage_status(
                     feature_id,
@@ -1759,17 +1835,33 @@ mod test {
         let stage_id = Uuid::new_v4();
         let feature_id = Uuid::new_v4();
         let user_id = Uuid::new_v4();
+        let stage =
+            create_pipeline_stage_with_status(stage_id, feature_id, "ROLLBACK_REQUESTED");
+
+        let stage_clone_for_lookup = stage.clone();
+        repository
+            .expect_get_stage_by_id()
+            .with(mockall::predicate::eq(stage_id))
+            .times(1)
+            .returning(move |_| Ok(Some(stage_clone_for_lookup.clone())));
+
+        let stage_clone_for_list = stage.clone();
+        repository
+            .expect_get_feature_stages()
+            .with(mockall::predicate::eq(feature_id))
+            .times(1)
+            .returning(move |_| Ok(vec![stage_clone_for_list.clone()]));
 
         repository
             .expect_get_feature_id_by_stage_id()
             .with(mockall::predicate::eq(stage_id))
-            .times(2)
+            .times(1)
             .returning(move |_| Ok(Some(feature_id)));
 
         repository
             .expect_get_feature_by_id()
             .with(mockall::predicate::eq(feature_id))
-            .times(2)
+            .times(1)
             .returning(move |_| {
                 Ok(create_entity_feature_with_stage_status(
                     feature_id,
@@ -1826,25 +1918,24 @@ mod test {
         let stage_id = Uuid::new_v4();
         let feature_id = Uuid::new_v4();
         let user_id = Uuid::new_v4();
+        let stage = create_pipeline_stage_with_status(stage_id, feature_id, "NOT_DEPLOYED");
+
+        let stage_clone_for_lookup = stage.clone();
+        repository
+            .expect_get_stage_by_id()
+            .with(mockall::predicate::eq(stage_id))
+            .times(1)
+            .returning(move |_| Ok(Some(stage_clone_for_lookup.clone())));
 
         repository
             .expect_get_feature_id_by_stage_id()
             .with(mockall::predicate::eq(stage_id))
-            .times(1)
-            .returning(move |_| Ok(Some(feature_id)));
+            .never();
 
         repository
             .expect_get_feature_by_id()
             .with(mockall::predicate::eq(feature_id))
-            .times(1)
-            .returning(move |_| {
-                // Current status is NOT_DEPLOYED, trying to transition to DEPLOYED (should fail)
-                Ok(create_entity_feature_with_stage_status(
-                    feature_id,
-                    stage_id,
-                    "NOT_DEPLOYED",
-                ))
-            });
+            .never();
 
         let logic = feature_logic(
             Box::new(repository),
@@ -1878,10 +1969,15 @@ mod test {
         let user_id = Uuid::new_v4();
 
         repository
-            .expect_get_feature_id_by_stage_id()
+            .expect_get_stage_by_id()
             .with(mockall::predicate::eq(stage_id))
             .times(1)
-            .returning(|_| Ok(None)); // Stage not found
+            .returning(|_| Ok(None));
+
+        repository
+            .expect_get_feature_id_by_stage_id()
+            .with(mockall::predicate::eq(stage_id))
+            .never(); // Stage not found should short-circuit before feature lookup
 
         let logic = feature_logic(
             Box::new(repository),
@@ -1914,24 +2010,24 @@ mod test {
         let stage_id = Uuid::new_v4();
         let feature_id = Uuid::new_v4();
         let user_id = Uuid::new_v4();
+        let stage = create_pipeline_stage_with_status(stage_id, feature_id, "NOT_DEPLOYED");
+
+        let stage_clone_for_lookup = stage.clone();
+        repository
+            .expect_get_stage_by_id()
+            .with(mockall::predicate::eq(stage_id))
+            .times(1)
+            .returning(move |_| Ok(Some(stage_clone_for_lookup.clone())));
 
         repository
             .expect_get_feature_id_by_stage_id()
             .with(mockall::predicate::eq(stage_id))
-            .times(1) // Only called once because the operation fails
-            .returning(move |_| Ok(Some(feature_id)));
+            .never();
 
         repository
             .expect_get_feature_by_id()
             .with(mockall::predicate::eq(feature_id))
-            .times(1)
-            .returning(move |_| {
-                Ok(create_entity_feature_with_stage_status(
-                    feature_id,
-                    stage_id,
-                    "NOT_DEPLOYED",
-                ))
-            });
+            .never();
 
         repository
             .expect_request_stage_change()
@@ -2012,7 +2108,7 @@ mod test {
     // Helper function to create entity feature with stage status for testing
     fn create_entity_feature_with_stage_status(
         feature_id: Uuid,
-        stage_id: Uuid,
+        _stage_id: Uuid,
         status: &str,
     ) -> crate::database::entity::Feature {
         crate::database::entity::Feature {
@@ -2025,8 +2121,28 @@ mod test {
             active: true,
             kill_switch_enabled: true,
             kill_switch_activated_at: None,
-            rollback_scheduled_at: None,
+            rollback_scheduled_at: Some(
+                chrono::Utc::now() + chrono::Duration::minutes(30),
+            ),
             dependencies: vec![],
+        }
+    }
+
+    fn create_pipeline_stage_with_status(
+        stage_id: Uuid,
+        feature_id: Uuid,
+        status: &str,
+    ) -> FeaturePipelineStage {
+        FeaturePipelineStage {
+            id: stage_id,
+            feature_id,
+            environment_id: Uuid::parse_str("3eef17bc-9e06-411d-b5f4-7a786e68bb96").unwrap(),
+            order_index: 0,
+            parent_stage_id: None,
+            position: "{ \"x\": 0, \"y\": 0 }".to_string(),
+            enabled: true,
+            bucketing_key: None,
+            status: status.to_string(),
         }
     }
 
@@ -2047,7 +2163,7 @@ mod test {
                 team_id,
                 active: true,
                 created_at: chrono::Utc::now(),
-                kill_switch_enabled: false,
+                kill_switch_enabled: true,
                 kill_switch_activated_at: None,
                 rollback_scheduled_at: None,
                 dependencies: vec![],

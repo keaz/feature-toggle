@@ -25,6 +25,8 @@ use async_graphql::{Context, ID, Object, Result as GqlResult};
 use log::info;
 
 #[cfg(test)]
+use chrono::Utc;
+#[cfg(test)]
 use uuid::Uuid;
 
 #[derive(async_graphql::Enum, Copy, Clone, Eq, PartialEq, Debug)]
@@ -185,19 +187,18 @@ impl MutationRoot {
         let feature = logic.update_feature(id.clone(), input, actor).await?;
 
         // After successful update, publish to gRPC streaming subscribers
-        if let (Ok(pool), Ok(updates_tx)) = (
-            ctx.data::<sqlx::PgPool>(),
-            ctx.data::<tokio::sync::broadcast::Sender<crate::grpc::pb::FeatureUpdate>>(),
-        ) {
+        if let Ok(updates_tx) =
+            ctx.data::<tokio::sync::broadcast::Sender<crate::grpc::pb::FeatureUpdate>>()
+        {
             // Try to load the updated feature from DB and broadcast an UPSERT
-            let feature_repository =
-                ctx.data::<Box<dyn crate::database::feature::FeatureRepository>>()?;
+            let feature_repository = ctx.data::<Arc<Box<dyn FeatureRepository>>>()?;
             if let Ok(fid) = uuid::Uuid::try_from(id.clone())
                 && let Ok(db_feature) = feature_repository.get_feature_by_id(fid).await
             {
                 // Map db_feature -> pb::FeatureFull
                 if let Ok(full) =
-                    map_db_feature_to_full_for_broadcast(&**feature_repository, db_feature).await
+                    map_db_feature_to_full_for_broadcast(&**feature_repository.as_ref(), db_feature)
+                        .await
                 {
                     let _ = updates_tx.send(crate::grpc::pb::FeatureUpdate {
                         message_id: uuid::Uuid::new_v4().to_string(),
@@ -940,6 +941,7 @@ mod tests {
     use super::*;
     use crate::graphql::query::Query as GqlQuery;
     use crate::logic::context::MockContextLogic;
+    use crate::database::feature::MockFeatureRepository;
     use async_graphql::{EmptySubscription, Request, Schema};
 
     #[tokio::test]
@@ -1029,8 +1031,13 @@ mod tests {
             .withf(move |sid, ids| sid == &stage_id_clone && ids == &ids_for_match)
             .return_once(move |_, _| Ok(expected.clone()));
 
+        let feature_repo = MockFeatureRepository::new();
+
         let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
             .data::<Box<dyn crate::logic::feature::FeatureLogic>>(Box::new(mock))
+            .data::<Box<dyn crate::database::feature::FeatureRepository>>(Box::new(
+                feature_repo,
+            ))
             .finish();
 
         let gql = r#"
@@ -1094,10 +1101,14 @@ mod tests {
         "#;
         let mut req = Request::new(gql);
         let cid = ID::from(Uuid::new_v4());
-        req = req.variables(async_graphql::Variables::from_json(serde_json::json!({
-            "sid": stage_id.to_string(),
-            "cid": cid.to_string()
-        })));
+        req = req
+            .variables(async_graphql::Variables::from_json(serde_json::json!({
+                "sid": stage_id.to_string(),
+                "cid": cid.to_string()
+            })))
+            .data::<Box<dyn crate::database::feature::FeatureRepository>>(Box::new(
+                MockFeatureRepository::new(),
+            ));
         let resp = schema.execute(req).await;
         assert!(
             resp.errors.is_empty(),
@@ -1112,10 +1123,14 @@ mod tests {
             }
         "#;
         let mut req_bad = Request::new(gql_bad);
-        req_bad = req_bad.variables(async_graphql::Variables::from_json(serde_json::json!({
-            "sid": stage_id.to_string(),
-            "cid": cid.to_string()
-        })));
+        req_bad = req_bad
+            .variables(async_graphql::Variables::from_json(serde_json::json!({
+                "sid": stage_id.to_string(),
+                "cid": cid.to_string()
+            })))
+            .data::<Box<dyn crate::database::feature::FeatureRepository>>(Box::new(
+                MockFeatureRepository::new(),
+            ));
         let resp_bad = schema.execute(req_bad).await;
         assert!(!resp_bad.errors.is_empty());
     }
@@ -1126,8 +1141,12 @@ mod more_mutation_tests {
     use super::*;
     use crate::graphql::query::Query as GqlQuery;
     use crate::logic::context::MockContextLogic;
+    use crate::database::entity::FeaturePipelineStage;
+    use crate::database::feature::MockFeatureRepository;
+    use crate::logic::environment::MockEnvironmentLogic;
     use async_graphql::{EmptySubscription, Request, Schema};
     use uuid::Uuid;
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn test_update_context_mutation_calls_logic() {
@@ -1274,6 +1293,8 @@ mod more_mutation_tests {
                 requestStageChange(stageId: $stageId, request: $request) {
                     id
                     key
+                    killSwitchEnabled
+                    rollbackScheduledAt
                 }
             }
         "#;
@@ -1308,6 +1329,8 @@ mod more_mutation_tests {
                 requestStageChange(stageId: $stageId, request: $request) {
                     id
                     key
+                    killSwitchEnabled
+                    rollbackScheduledAt
                 }
             }
         "#;
@@ -1355,6 +1378,8 @@ mod more_mutation_tests {
                 requestStageChange(stageId: $stageId, request: $request) {
                     id
                     key
+                    killSwitchEnabled
+                    rollbackScheduledAt
                 }
             }
         "#;
@@ -1389,6 +1414,8 @@ mod more_mutation_tests {
                 requestStageChange(stageId: $stageId, request: $request) {
                     id
                     key
+                    killSwitchEnabled
+                    rollbackScheduledAt
                 }
             }
         "#;
@@ -1437,6 +1464,8 @@ mod more_mutation_tests {
                 requestStageChange(stageId: $stageId, request: $request) {
                     id
                     key
+                    killSwitchEnabled
+                    rollbackScheduledAt
                 }
             }
         "#;
@@ -1468,7 +1497,6 @@ mod more_mutation_tests {
         let stage_id = Uuid::new_v4();
         let user_id = Uuid::new_v4();
 
-        // Mock expects DEPLOYMENT_REQUESTED request
         mock.expect_request_stage_change()
             .times(1)
             .withf(move |sid, req, uid| {
@@ -1479,11 +1507,7 @@ mod more_mutation_tests {
                     )
                     && *uid == user_id
             })
-            .returning(move |_, _, _| {
-                Ok(create_mock_feature_with_stage_status(
-                    "DEPLOYMENT_REQUESTED",
-                ))
-            });
+            .returning(move |_, _, _| Ok(create_mock_feature()));
 
         let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
             .data::<Box<dyn crate::logic::feature::FeatureLogic>>(Box::new(mock))
@@ -1501,9 +1525,8 @@ mod more_mutation_tests {
                 requestStageChange(stageId: $stageId, request: $request) {
                     id
                     key
-                    stages {
-                        status
-                    }
+                    killSwitchEnabled
+                    rollbackScheduledAt
                 }
             }
         "#;
@@ -1514,14 +1537,19 @@ mod more_mutation_tests {
         })));
 
         let resp = schema.execute(req).await;
-        assert!(
-            resp.errors.is_empty(),
-            "Expected no errors, but got: {}",
-            serde_json::to_string(&resp.errors).unwrap()
-        );
-
+        assert!(resp.errors.is_empty());
         let data = resp.data.into_json().unwrap();
         assert_eq!(data["requestStageChange"]["key"], "test_feature");
+        assert!(
+            data["requestStageChange"]["killSwitchEnabled"]
+                .as_bool()
+                .unwrap(),
+            "Expected killSwitchEnabled to be true"
+        );
+        assert!(
+            data["requestStageChange"]["rollbackScheduledAt"].is_string(),
+            "Expected rollbackScheduledAt to be a timestamp string"
+        );
     }
 
     #[tokio::test]
@@ -1542,9 +1570,7 @@ mod more_mutation_tests {
                     )
                     && *uid == user_id
             })
-            .returning(move |_, _, _| {
-                Ok(create_mock_feature_with_stage_status("DEPLOYMENT_REJECTED"))
-            });
+            .returning(move |_, _, _| Ok(create_mock_feature()));
 
         let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
             .data::<Box<dyn crate::logic::feature::FeatureLogic>>(Box::new(mock))
@@ -1562,6 +1588,8 @@ mod more_mutation_tests {
                 requestStageChange(stageId: $stageId, request: $request) {
                     id
                     key
+                    killSwitchEnabled
+                    rollbackScheduledAt
                 }
             }
         "#;
@@ -1590,7 +1618,7 @@ mod more_mutation_tests {
                     && matches!(req, crate::logic::feature::StageChangeRequestType::Deployed)
                     && *uid == user_id
             })
-            .returning(move |_, _, _| Ok(create_mock_feature_with_stage_status("DEPLOYED")));
+            .returning(move |_, _, _| Ok(create_mock_feature()));
 
         let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
             .data::<Box<dyn crate::logic::feature::FeatureLogic>>(Box::new(mock))
@@ -1608,6 +1636,8 @@ mod more_mutation_tests {
                 requestStageChange(stageId: $stageId, request: $request) {
                     id
                     key
+                    killSwitchEnabled
+                    rollbackScheduledAt
                 }
             }
         "#;
@@ -1639,9 +1669,7 @@ mod more_mutation_tests {
                     )
                     && *uid == user_id
             })
-            .returning(move |_, _, _| {
-                Ok(create_mock_feature_with_stage_status("ROLLBACK_REQUESTED"))
-            });
+            .returning(move |_, _, _| Ok(create_mock_feature()));
 
         let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
             .data::<Box<dyn crate::logic::feature::FeatureLogic>>(Box::new(mock))
@@ -1659,6 +1687,8 @@ mod more_mutation_tests {
                 requestStageChange(stageId: $stageId, request: $request) {
                     id
                     key
+                    killSwitchEnabled
+                    rollbackScheduledAt
                 }
             }
         "#;
@@ -1690,9 +1720,7 @@ mod more_mutation_tests {
                     )
                     && *uid == user_id
             })
-            .returning(move |_, _, _| {
-                Ok(create_mock_feature_with_stage_status("ROLLBACK_REJECTED"))
-            });
+            .returning(move |_, _, _| Ok(create_mock_feature()));
 
         let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
             .data::<Box<dyn crate::logic::feature::FeatureLogic>>(Box::new(mock))
@@ -1710,6 +1738,8 @@ mod more_mutation_tests {
                 requestStageChange(stageId: $stageId, request: $request) {
                     id
                     key
+                    killSwitchEnabled
+                    rollbackScheduledAt
                 }
             }
         "#;
@@ -1741,7 +1771,7 @@ mod more_mutation_tests {
                     )
                     && *uid == user_id
             })
-            .returning(move |_, _, _| Ok(create_mock_feature_with_stage_status("ROLLBACKED")));
+            .returning(move |_, _, _| Ok(create_mock_feature()));
 
         let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
             .data::<Box<dyn crate::logic::feature::FeatureLogic>>(Box::new(mock))
@@ -1759,6 +1789,8 @@ mod more_mutation_tests {
                 requestStageChange(stageId: $stageId, request: $request) {
                     id
                     key
+                    killSwitchEnabled
+                    rollbackScheduledAt
                 }
             }
         "#;
@@ -1788,6 +1820,8 @@ mod more_mutation_tests {
                 requestStageChange(stageId: $stageId, request: $request) {
                     id
                     key
+                    killSwitchEnabled
+                    rollbackScheduledAt
                 }
             }
         "#;
@@ -1873,16 +1907,10 @@ mod more_mutation_tests {
             enabled: true,
             kill_switch_enabled: true,
             kill_switch_activated_at: None,
-            rollback_scheduled_at: None,
+            rollback_scheduled_at: Some(Utc::now()),
             dependencies: vec![],
             team_id: async_graphql::ID::from(Uuid::new_v4().to_string()),
         }
-    }
-
-    // Helper function to create a mock feature with a specific stage status
-    fn create_mock_feature_with_stage_status(status: &str) -> crate::graphql::schema::Feature {
-        let mut feature = create_mock_feature();
-        feature
     }
 
     #[tokio::test]

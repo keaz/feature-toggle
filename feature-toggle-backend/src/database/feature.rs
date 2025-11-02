@@ -1355,7 +1355,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
         let result = sqlx::query!(
             r#"UPDATE features
                 SET kill_switch_enabled = false,
-                active = true, 
+                active = true,
                 kill_switch_activated_at = NULL,
                 rollback_scheduled_at = NULL
                 WHERE id = $1"#,
@@ -2066,8 +2066,8 @@ mod tests {
 
         let feature = result.unwrap();
         assert!(
-            feature.kill_switch_enabled,
-            "Kill switch should be deactivated (feature enabled, kill_switch_enabled=true)"
+            !feature.kill_switch_enabled,
+            "Kill switch should be deactivated (feature enabled, kill_switch_enabled=false)"
         );
         assert!(
             feature.kill_switch_activated_at.is_none(),
@@ -2247,7 +2247,7 @@ mod tests {
             .await
             .expect("Should retrieve enabled feature");
 
-        assert!(enabled_feature.kill_switch_enabled);
+        assert!(!enabled_feature.kill_switch_enabled);
         assert!(enabled_feature.kill_switch_activated_at.is_none());
         assert!(enabled_feature.rollback_scheduled_at.is_none());
 

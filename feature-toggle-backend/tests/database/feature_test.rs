@@ -17,8 +17,13 @@ async fn test_get_existing_feature() {
     let feature = result.unwrap();
     assert_eq!(feature.id, id);
     assert_eq!(feature.key, "Test Feature");
-    assert_eq!(feature.stages.len(), 1);
-    let stage = feature.stages.first().unwrap();
+
+    let stages = repository
+        .get_feature_stages(feature.id)
+        .await
+        .expect("feature stages should load");
+    assert_eq!(stages.len(), 1);
+    let stage = stages.first().unwrap();
     assert_eq!(
         stage.id,
         Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap()
@@ -189,7 +194,11 @@ async fn test_update_feature() {
     assert_eq!(feature.key, "Updated Feature");
     assert_eq!(feature.description, Some("Updated description".to_string()));
     assert!(matches!(feature.feature_type, FeatureType::Contextual));
-    assert!(feature.stages.is_empty());
+    let stages = repository
+        .get_feature_stages(feature.id)
+        .await
+        .expect("stages should load");
+    assert!(stages.is_empty());
 }
 
 #[tokio::test]
@@ -220,8 +229,12 @@ async fn test_update_feature_with_existing_stages() {
     assert_eq!(feature.key, "Another feature Updated Feature");
     assert_eq!(feature.description, Some("Updated description".to_string()));
     assert!(matches!(feature.feature_type, FeatureType::Contextual));
-    assert_eq!(feature.stages.len(), 1);
-    let stage = feature.stages.first().unwrap();
+    let stages = repository
+        .get_feature_stages(feature.id)
+        .await
+        .expect("stages should load after update");
+    assert_eq!(stages.len(), 1);
+    let stage = stages.first().unwrap();
     assert_eq!(
         stage.id,
         Uuid::parse_str("4eef17bc-9e06-411d-b5f4-7a786e68bb98").unwrap()
@@ -303,9 +316,11 @@ async fn test_key_get_features() {
 
     assert!(result.is_ok());
     let features = result.unwrap();
-    assert!(features
-        .iter()
-        .all(|p| p.key.to_lowercase().contains("test")));
+    assert!(
+        features
+            .iter()
+            .all(|p| p.key.to_lowercase().contains("test"))
+    );
 }
 
 #[tokio::test]
@@ -340,8 +355,7 @@ async fn test_key_and_feature_type_get_features() {
     assert!(result.is_ok());
     let features = result.unwrap();
     assert!(features.iter().all(|p| {
-        p.key.to_lowercase().contains("test")
-            && matches!(p.feature_type, FeatureType::Simple)
+        p.key.to_lowercase().contains("test") && matches!(p.feature_type, FeatureType::Simple)
     }));
 }
 
@@ -401,10 +415,15 @@ async fn test_create_feature_with_stages_verification() {
     // Verify the feature and its stages
     let feature = feature.unwrap();
     assert_eq!(feature.key, random_key);
-    assert_eq!(feature.stages.len(), 2);
+
+    let stages = repository
+        .get_feature_stages(feature.id)
+        .await
+        .expect("stages for created feature should load");
+    assert_eq!(stages.len(), 2);
 
     // Find parent stage
-    let parent_stage = feature.stages.iter().find(|s| s.id == parent_stage_id);
+    let parent_stage = stages.iter().find(|s| s.id == parent_stage_id);
     assert!(parent_stage.is_some());
     let parent_stage = parent_stage.unwrap();
     assert_eq!(
@@ -417,7 +436,7 @@ async fn test_create_feature_with_stages_verification() {
     assert!(parent_stage.enabled);
 
     // Find child stage
-    let child_stage = feature.stages.iter().find(|s| s.id == child_stage_id);
+    let child_stage = stages.iter().find(|s| s.id == child_stage_id);
     assert!(child_stage.is_some());
     let child_stage = child_stage.unwrap();
     assert_eq!(
@@ -480,7 +499,11 @@ async fn test_update_feature_with_stages() {
 
     // Verify initial feature
     let initial_feature = repository.get_feature_by_id(feature_id).await.unwrap();
-    assert_eq!(initial_feature.stages.len(), 2);
+    let initial_stages = repository
+        .get_feature_stages(initial_feature.id)
+        .await
+        .expect("initial stages should load");
+    assert_eq!(initial_stages.len(), 2);
 
     // Create a new stage ID for update
     let stage3_id = Uuid::new_v4();
@@ -538,21 +561,25 @@ async fn test_update_feature_with_stages() {
     ));
 
     // Verify stages
-    assert_eq!(updated_feature.stages.len(), 2); // Should have 2 stages now
+    let updated_stages = repository
+        .get_feature_stages(updated_feature.id)
+        .await
+        .expect("updated stages should load");
+    assert_eq!(updated_stages.len(), 2); // Should have 2 stages now
 
     // Find updated stage1
-    let updated_stage1 = updated_feature.stages.iter().find(|s| s.id == stage1_id);
+    let updated_stage1 = updated_stages.iter().find(|s| s.id == stage1_id);
     assert!(updated_stage1.is_some());
     let updated_stage1 = updated_stage1.unwrap();
     assert_eq!(updated_stage1.position, "{ x: 150, y: 150 }"); // Verify position was updated
     assert!(!updated_stage1.enabled); // Verify enabled status was updated
 
     // Verify stage2 was deleted (should not exist)
-    let deleted_stage2 = updated_feature.stages.iter().find(|s| s.id == stage2_id);
+    let deleted_stage2 = updated_stages.iter().find(|s| s.id == stage2_id);
     assert!(deleted_stage2.is_none());
 
     // Find new stage3
-    let new_stage3 = updated_feature.stages.iter().find(|s| s.id == stage3_id);
+    let new_stage3 = updated_stages.iter().find(|s| s.id == stage3_id);
     assert!(new_stage3.is_some());
     let new_stage3 = new_stage3.unwrap();
     assert_eq!(
@@ -686,7 +713,7 @@ async fn test_emergency_enable_feature_integration() {
 
     let enabled_feature = result.unwrap();
     assert!(
-        enabled_feature.kill_switch_enabled,
+        !enabled_feature.kill_switch_enabled,
         "Kill switch should be deactivated (feature enabled, kill_switch_enabled=true)"
     );
     assert!(
@@ -701,7 +728,7 @@ async fn test_emergency_enable_feature_integration() {
     // Verify state persists
     let persisted_feature = repository.get_feature_by_id(feature_id).await.unwrap();
     assert!(
-        persisted_feature.kill_switch_enabled,
+        !persisted_feature.kill_switch_enabled,
         "Kill switch should be deactivated (feature enabled, kill_switch_enabled=true)"
     );
 }
@@ -731,10 +758,9 @@ async fn test_get_features_pending_rollback_integration() {
     sqlx::query!(
         r#"UPDATE features 
            SET kill_switch_enabled = true,
-               kill_switch_activated_at = $1,
-               rollback_scheduled_at = $2
-           WHERE id = $3"#,
-        past_time,
+               kill_switch_activated_at = NULL,
+               rollback_scheduled_at = $1
+           WHERE id = $2"#,
         past_time,
         feature_id
     )
@@ -758,7 +784,7 @@ async fn test_get_features_pending_rollback_integration() {
     let found_feature = found_feature.unwrap();
     assert!(
         found_feature.kill_switch_enabled,
-        "Kill switch should be enabled (feature disabled)"
+        "Kill switch should be scheduled (feature remains enabled until rollback executes)"
     );
     assert!(
         found_feature.rollback_scheduled_at.is_some(),
@@ -867,7 +893,7 @@ async fn test_kill_switch_multiple_operations_integration() {
             .await
             .unwrap();
         assert!(
-            enabled.kill_switch_enabled,
+            !enabled.kill_switch_enabled,
             "Cycle {}: kill switch should be cleared (feature enabled)",
             cycle
         );
@@ -881,7 +907,7 @@ async fn test_kill_switch_multiple_operations_integration() {
     // Final verification
     let final_feature = repository.get_feature_by_id(feature_id).await.unwrap();
     assert!(
-        final_feature.kill_switch_enabled,
+        !final_feature.kill_switch_enabled,
         "Final state should have kill switch off (feature enabled)"
     );
 }

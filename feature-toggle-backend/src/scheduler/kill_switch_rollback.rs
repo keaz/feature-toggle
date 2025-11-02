@@ -194,16 +194,31 @@ mod tests {
 
     const FEATURE_ID: &str = "11111111-1111-1111-1111-111111111111";
 
-    fn sample_feature() -> GraphQLFeature {
+    fn sample_feature_pending_rollback() -> GraphQLFeature {
         GraphQLFeature {
             id: ID::from(FEATURE_ID),
             key: "scheduled-kill".to_string(),
             description: None,
             feature_type: GraphQLFeatureType::Simple,
-            enabled: true,
-            kill_switch_enabled: true,
-            kill_switch_activated_at: None,
-            rollback_scheduled_at: Some(Utc::now() - chrono::Duration::minutes(5)),
+            enabled: true, // Feature is still enabled
+            kill_switch_enabled: true, // Kill switch is enabled (not activated yet)
+            kill_switch_activated_at: None, // Not activated yet
+            rollback_scheduled_at: Some(Utc::now() - chrono::Duration::minutes(5)), // Scheduled in the past
+            dependencies: vec![],
+            team_id: ID::from("22222222-2222-2222-2222-222222222222"),
+        }
+    }
+
+    fn sample_feature_after_disable() -> GraphQLFeature {
+        GraphQLFeature {
+            id: ID::from(FEATURE_ID),
+            key: "scheduled-kill".to_string(),
+            description: None,
+            feature_type: GraphQLFeatureType::Simple,
+            enabled: false, // Feature is now disabled (active = false)
+            kill_switch_enabled: false, // Kill switch is now activated (disabled)
+            kill_switch_activated_at: Some(Utc::now()), // Activation timestamp set
+            rollback_scheduled_at: None, // Cleared after execution
             dependencies: vec![],
             team_id: ID::from("22222222-2222-2222-2222-222222222222"),
         }
@@ -215,12 +230,12 @@ mod tests {
         logic
             .expect_get_features_pending_rollback()
             .times(1)
-            .returning(|| Ok(vec![sample_feature()]));
+            .returning(|| Ok(vec![sample_feature_pending_rollback()]));
         logic
             .expect_execute_scheduled_disable()
             .times(1)
             .withf(|id, actor| id == &ID::from(FEATURE_ID) && actor.is_none())
-            .returning(|_, _| Ok(sample_feature()));
+            .returning(|_, _| Ok(sample_feature_after_disable()));
 
         let mut repo = MockFeatureRepository::new();
         repo.expect_get_feature_by_id()
@@ -236,5 +251,52 @@ mod tests {
             .await
             .expect("scheduler should succeed");
         assert_eq!(processed, 1);
+    }
+
+    #[tokio::test]
+    async fn scheduler_handles_no_pending_rollbacks() {
+        let mut logic = MockFeatureLogic::new();
+        logic
+            .expect_get_features_pending_rollback()
+            .times(1)
+            .returning(|| Ok(vec![]));
+
+        let mut repo = MockFeatureRepository::new();
+        let pool = sqlx::PgPool::connect_lazy("postgres://unused").unwrap();
+        let (tx, _rx) = tokio::sync::broadcast::channel(4);
+
+        let scheduler = KillSwitchRollbackScheduler::new(Box::new(logic), Box::new(repo), pool, tx);
+
+        let processed = scheduler
+            .check_and_process_rollbacks()
+            .await
+            .expect("scheduler should succeed");
+        assert_eq!(processed, 0, "No features should be processed when none are pending");
+    }
+
+    #[tokio::test]
+    async fn scheduler_handles_execute_disable_error() {
+        let mut logic = MockFeatureLogic::new();
+        logic
+            .expect_get_features_pending_rollback()
+            .times(1)
+            .returning(|| Ok(vec![sample_feature_pending_rollback()]));
+        logic
+            .expect_execute_scheduled_disable()
+            .times(1)
+            .withf(|id, actor| id == &ID::from(FEATURE_ID) && actor.is_none())
+            .returning(|_, _| Err(crate::Error::NotFound(uuid::Uuid::new_v4())));
+
+        let mut repo = MockFeatureRepository::new();
+        let pool = sqlx::PgPool::connect_lazy("postgres://unused").unwrap();
+        let (tx, _rx) = tokio::sync::broadcast::channel(4);
+
+        let scheduler = KillSwitchRollbackScheduler::new(Box::new(logic), Box::new(repo), pool, tx);
+
+        let processed = scheduler
+            .check_and_process_rollbacks()
+            .await
+            .expect("scheduler should not fail on individual feature errors");
+        assert_eq!(processed, 0, "Failed disable should not be counted as processed");
     }
 }

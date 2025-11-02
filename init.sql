@@ -624,12 +624,21 @@ ON CONFLICT (id) DO NOTHING;
 
 -- Kill Switch Test Data
 -- Add kill switch specific test features for comprehensive testing
--- NOTE: kill_switch_enabled semantics:
---   true  = feature is ENABLED (kill switch is OFF/not activated)
---   false = feature is DISABLED (kill switch is ON/activated)
--- NOTE: rollback_scheduled_at is used to schedule a future disable
---   When the scheduler runs, it picks up features where rollback_scheduled_at <= now()
---   and then executes execute_scheduled_disable to actually disable them
+-- CORRECTED SEMANTICS (as of latest implementation):
+-- kill_switch_enabled:
+--   true  = feature is ENABLED (kill switch is NOT activated, feature operates normally)
+--   false = feature is DISABLED (kill switch IS activated, feature is emergency disabled)
+-- rollback_scheduled_at:
+--   NULL = no scheduled disable
+--   <timestamp> = scheduled disable time
+--   When scheduler runs, it picks up features where:
+--     - kill_switch_enabled = true (feature still enabled)
+--     - rollback_scheduled_at <= now() (scheduled time has passed)
+--   Then scheduler executes execute_scheduled_disable which:
+--     - Sets kill_switch_enabled = false (activates kill switch)
+--     - Sets kill_switch_activated_at = now()
+--     - Sets rollback_scheduled_at = NULL
+--     - Sets active = false (disables the feature)
 INSERT INTO
     public.features (
         id,

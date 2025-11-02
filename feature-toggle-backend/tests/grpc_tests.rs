@@ -53,7 +53,7 @@ fn valid_env_id() -> String {
 
 #[tokio::test]
 async fn evaluate_validation_errors() {
-    use chrono::Utc;
+    use chrono::{Duration as ChronoDuration, Utc};
     let (cid, sec) = client_ids();
     let valid_client_id = Uuid::parse_str(&cid).unwrap();
     let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
@@ -81,34 +81,43 @@ async fn evaluate_validation_errors() {
 
     // Mock feature repository: minimal behavior
     let mut feature_mock = MockFeatureRepository::new();
+    let feature_id = Uuid::new_v4();
+    let stage_id = Uuid::new_v4();
+    feature_mock
+        .expect_get_feature_stages()
+        .returning(move |fid| {
+            if fid == feature_id {
+                Ok(vec![db::FeaturePipelineStage {
+                    id: stage_id,
+                    feature_id,
+                    environment_id: env_id,
+                    order_index: 0,
+                    parent_stage_id: None,
+                    position: "Start".into(),
+                    enabled: true,
+                    bucketing_key: None,
+                    status: "NOT_DEPLOYED".into(),
+                }])
+            } else {
+                Ok(vec![])
+            }
+        });
     feature_mock
         .expect_get_features()
         .returning(move |_team, key, _ftype| {
             let res: Result<Vec<db::Feature>, Error> = match key.as_deref() {
                 Some("Test Feature") => {
-                    let fid = Uuid::new_v4();
-                    let stage = db::FeaturePipelineStage {
-                        id: Uuid::new_v4(),
-                        feature_id: fid,
-                        environment_id: env_id,
-                        order_index: 0,
-                        parent_stage_id: None,
-                        position: "Start".into(),
-                        enabled: true,
-                        bucketing_key: None,
-                        status: "NOT_DEPLOYED".into(),
-                    };
                     Ok(vec![db::Feature {
-                        id: fid,
+                        id: feature_id,
                         key: "Test Feature".into(),
                         description: Some(String::new()),
                         feature_type: db::FeatureType::Simple,
                         team_id,
+                        active: true,
                         created_at: Utc::now(),
                         kill_switch_enabled: true,
                         kill_switch_activated_at: None,
-                        rollback_scheduled_at: None,
-                        stages: vec![stage],
+                        rollback_scheduled_at: Some(Utc::now() + ChronoDuration::minutes(30)),
                         dependencies: vec![],
                     }])
                 }
@@ -190,7 +199,7 @@ async fn evaluate_validation_errors() {
 
 #[tokio::test]
 async fn evaluate_auth_and_success() {
-    use chrono::Utc;
+    use chrono::{Duration as ChronoDuration, Utc};
     let (cid, sec) = client_ids();
     let valid_client_id = Uuid::parse_str(&cid).unwrap();
     let disabled_id = Uuid::new_v4();
@@ -231,34 +240,43 @@ async fn evaluate_auth_and_success() {
 
     // Feature mock
     let mut feature_mock = MockFeatureRepository::new();
+    let feature_id = Uuid::new_v4();
+    let stage_id = Uuid::new_v4();
+    feature_mock
+        .expect_get_feature_stages()
+        .returning(move |fid| {
+            if fid == feature_id {
+                Ok(vec![db::FeaturePipelineStage {
+                    id: stage_id,
+                    feature_id,
+                    environment_id: env_id,
+                    order_index: 0,
+                    parent_stage_id: None,
+                    position: "Start".into(),
+                    enabled: true,
+                    bucketing_key: None,
+                    status: "NOT_DEPLOYED".into(),
+                }])
+            } else {
+                Ok(vec![])
+            }
+        });
     feature_mock
         .expect_get_features()
         .returning(move |_team, key, _ftype| {
             let res: Result<Vec<db::Feature>, Error> = match key.as_deref() {
                 Some("Test Feature") => {
-                    let fid = Uuid::new_v4();
-                    let stage = db::FeaturePipelineStage {
-                        id: Uuid::new_v4(),
-                        feature_id: fid,
-                        environment_id: env_id,
-                        order_index: 0,
-                        parent_stage_id: None,
-                        position: "Start".into(),
-                        enabled: true,
-                        bucketing_key: None,
-                        status: "NOT_DEPLOYED".into(),
-                    };
                     Ok(vec![db::Feature {
-                        id: fid,
+                        id: feature_id,
                         key: "Test Feature".into(),
                         description: Some(String::new()),
                         feature_type: db::FeatureType::Simple,
                         team_id,
+                        active: true,
                         created_at: Utc::now(),
                         kill_switch_enabled: true,
                         kill_switch_activated_at: None,
-                        rollback_scheduled_at: None,
-                        stages: vec![stage],
+                        rollback_scheduled_at: Some(Utc::now() + ChronoDuration::minutes(45)),
                         dependencies: vec![],
                     }])
                 }
@@ -327,7 +345,7 @@ async fn evaluate_auth_and_success() {
 
 #[tokio::test]
 async fn get_feature_by_key_and_stream_branches() {
-    use chrono::Utc;
+    use chrono::{Duration as ChronoDuration, Utc};
     // Create a tiny buffer to induce lag
     let (updates_tx, _updates_rx) = broadcast::channel::<pb::FeatureUpdate>(1);
 
@@ -358,34 +376,43 @@ async fn get_feature_by_key_and_stream_branches() {
     });
 
     let mut feature_mock = MockFeatureRepository::new();
+    let feature_id = Uuid::new_v4();
+    let stage_id = Uuid::new_v4();
+    feature_mock
+        .expect_get_feature_stages()
+        .returning(move |fid| {
+            if fid == feature_id {
+                Ok(vec![db::FeaturePipelineStage {
+                    id: stage_id,
+                    feature_id,
+                    environment_id: env_id,
+                    order_index: 0,
+                    parent_stage_id: None,
+                    position: "Start".into(),
+                    enabled: true,
+                    bucketing_key: None,
+                    status: "NOT_DEPLOYED".into(),
+                }])
+            } else {
+                Ok(vec![])
+            }
+        });
     feature_mock
         .expect_get_features()
         .returning(move |_team, key, _ftype| {
             let res: Result<Vec<db::Feature>, Error> = match key.as_deref() {
                 Some("Test Feature") => {
-                    let fid = Uuid::new_v4();
-                    let stage = db::FeaturePipelineStage {
-                        id: Uuid::new_v4(),
-                        feature_id: fid,
-                        environment_id: env_id,
-                        order_index: 0,
-                        parent_stage_id: None,
-                        position: "Start".into(),
-                        enabled: true,
-                        bucketing_key: None,
-                        status: "NOT_DEPLOYED".into(),
-                    };
                     Ok(vec![db::Feature {
-                        id: fid,
+                        id: feature_id,
                         key: "Test Feature".into(),
                         description: Some(String::new()),
                         feature_type: db::FeatureType::Simple,
                         team_id,
+                        active: true,
                         created_at: Utc::now(),
                         kill_switch_enabled: true,
                         kill_switch_activated_at: None,
-                        rollback_scheduled_at: None,
-                        stages: vec![stage],
+                        rollback_scheduled_at: Some(Utc::now() + ChronoDuration::minutes(15)),
                         dependencies: vec![],
                     }])
                 }
@@ -684,9 +711,10 @@ async fn get_feature_by_key_and_stream_branches() {
             feature_type: "Simple".into(),
             team_id: "51ecc366-f1cd-4d3d-ab73-fa60bad98f27".into(),
             created_at: chrono::Utc::now().to_rfc3339(),
+            active: true,
             kill_switch_enabled: true,
             kill_switch_activated_at: String::new(),
-            rollback_scheduled_at: String::new(),
+            rollback_scheduled_at: chrono::Utc::now().to_rfc3339(),
             stages: vec![],
             dependencies: vec![],
         }),
@@ -706,9 +734,10 @@ async fn get_feature_by_key_and_stream_branches() {
             feature_type: "Simple".into(),
             team_id: "51ecc366-f1cd-4d3d-ab73-fa60bad98f27".into(),
             created_at: chrono::Utc::now().to_rfc3339(),
+            active: true,
             kill_switch_enabled: true,
             kill_switch_activated_at: String::new(),
-            rollback_scheduled_at: String::new(),
+            rollback_scheduled_at: chrono::Utc::now().to_rfc3339(),
             stages: vec![],
             dependencies: vec![],
         }),
@@ -740,12 +769,13 @@ async fn get_feature_by_key_and_stream_branches() {
                 id: uuid::Uuid::new_v4().to_string(),
                 key: "Test Feature".into(),
                 description: String::new(),
-                feature_type: "Simple".into(),
-                team_id: "51ecc366-f1cd-4d3d-ab73-fa60bad98f27".into(),
-                created_at: chrono::Utc::now().to_rfc3339(),
-                kill_switch_enabled: true,
+            feature_type: "Simple".into(),
+            team_id: "51ecc366-f1cd-4d3d-ab73-fa60bad98f27".into(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            active: true,
+            kill_switch_enabled: true,
                 kill_switch_activated_at: String::new(),
-                rollback_scheduled_at: String::new(),
+                rollback_scheduled_at: chrono::Utc::now().to_rfc3339(),
                 stages: vec![],
                 dependencies: vec![],
             }),
