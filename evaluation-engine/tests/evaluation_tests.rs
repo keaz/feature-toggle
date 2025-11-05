@@ -1,19 +1,23 @@
-use chrono::{Duration, Utc};
 use evaluation_engine::{
-    Context, Feature, FeatureEvaluationContext, FeatureStage, StageContext, StageCriterion,
+    ContextObject, ErrorCode, EvaluationReason, Feature, FeatureEvaluationContext, FeatureStage,
+    FeatureVariant, StageContext, StageCriterion,
 };
+use serde_json::json;
+use std::collections::HashMap;
 
-fn mk_ctx(feature: &str, env: &str, pairs: &[(&str, &str)]) -> FeatureEvaluationContext {
+fn mk_ctx(flag_key: &str, env: &str, bucketing_key: &str, attrs: &[(&str, &str)]) -> FeatureEvaluationContext {
+    let mut attributes = HashMap::new();
+    for (k, v) in attrs {
+        attributes.insert((*k).to_string(), json!(*v));
+    }
+
     FeatureEvaluationContext {
-        feature: feature.to_string(),
-        environment_id: env.to_string(),
-        context: pairs
-            .iter()
-            .map(|(k, v)| Context {
-                key: (*k).into(),
-                value: (*v).into(),
-            })
-            .collect(),
+        flag_key: flag_key.to_string(),
+        context: ContextObject {
+            bucketing_key: bucketing_key.to_string(),
+            environment_id: env.to_string(),
+            attributes,
+        },
     }
 }
 
@@ -31,7 +35,7 @@ fn stage(
     }
 }
 
-fn criterion(context_key: &str, allowed: &[&str], pct: i32) -> StageCriterion {
+fn criterion(context_key: &str, allowed: &[&str], pct: i32, serve: Option<&str>) -> StageCriterion {
     StageCriterion {
         context_key: context_key.to_string(),
         context: StageContext {
@@ -39,265 +43,259 @@ fn criterion(context_key: &str, allowed: &[&str], pct: i32) -> StageCriterion {
             entries: allowed.iter().map(|s| (*s).into()).collect(),
         },
         rollout_percentage: pct,
+        serve: serve.map(|s| s.to_string()),
     }
 }
 
 #[test]
 fn evaluate_returns_false_when_feature_disabled() {
-    let ctx = mk_ctx("feat", "env-a", &[]);
+    let ctx = mk_ctx("feat", "env-a", "user123", &[]);
     let feature = Feature {
         enabled: false,
-        kill_switch_enabled: true,
-        rollback_scheduled_at: None,
         dependencies: vec![],
         stages: vec![],
+        variants: vec![],
     };
-    assert!(!evaluation_engine::evaluate(ctx, feature));
+    let result = evaluation_engine::evaluate(ctx, feature);
+    assert_eq!(result.value, json!(false));
+    assert_eq!(result.reason, EvaluationReason::Static);
 }
 
 #[test]
 fn evaluate_requires_matching_environment_stage() {
-    let ctx = mk_ctx("feat", "env-a", &[]);
+    let ctx = mk_ctx("feat", "env-a", "user123", &[]);
     let stg = stage("env-b", true, None, vec![]);
     let feature = Feature {
         enabled: true,
-        kill_switch_enabled: true,
-        rollback_scheduled_at: None,
         dependencies: vec![],
         stages: vec![stg],
+        variants: vec![],
     };
-    assert!(!evaluation_engine::evaluate(ctx, feature));
+    let result = evaluation_engine::evaluate(ctx, feature);
+    assert_eq!(result.value, json!(false));
+    assert_eq!(result.reason, EvaluationReason::Default);
+    assert_eq!(result.error_code, Some(ErrorCode::EnvironmentNotFound));
 }
 
 #[test]
 fn evaluate_requires_stage_enabled() {
-    let ctx = mk_ctx("feat", "env-a", &[]);
+    let ctx = mk_ctx("feat", "env-a", "user123", &[]);
     let stg = stage("env-a", false, None, vec![]);
     let feature = Feature {
         enabled: true,
-        kill_switch_enabled: true,
-        rollback_scheduled_at: None,
         dependencies: vec![],
         stages: vec![stg],
+        variants: vec![],
     };
-    assert!(!evaluation_engine::evaluate(ctx, feature));
+    let result = evaluation_engine::evaluate(ctx, feature);
+    assert_eq!(result.value, json!(false));
+    assert_eq!(result.reason, EvaluationReason::Disabled);
 }
 
 #[test]
 fn evaluate_passes_when_no_criteria_and_enabled_stage() {
-    let ctx = mk_ctx("feat", "env-a", &[]);
+    let ctx = mk_ctx("feat", "env-a", "user123", &[]);
     let stg = stage("env-a", true, None, vec![]);
     let feature = Feature {
         enabled: true,
-        kill_switch_enabled: true,
-        rollback_scheduled_at: None,
         dependencies: vec![],
         stages: vec![stg],
+        variants: vec![],
     };
-    assert!(evaluation_engine::evaluate(ctx, feature));
+    let result = evaluation_engine::evaluate(ctx, feature);
+    assert_eq!(result.value, json!(true));
+    assert_eq!(result.reason, EvaluationReason::Static);
 }
 
 #[test]
-fn evaluate_fails_without_bucketing_identity_when_criteria_present() {
-    // criterias present but no user.id in context; default bucketing key is user.id
-    let ctx = mk_ctx("feat", "env-a", &[("irrelevant", "x")]);
-    let stg = stage(
-        "env-a",
-        true,
-        None,
-        vec![criterion("country", &["US"], 100)],
+fn evaluate_fails_when_user_not_in_allowed_values() {
+    let ctx = mk_ctx("feat", "env-a", "user123", &[("role", "viewer")]);
+    let crit = criterion("role", &["admin", "editor"], 100, None);
+    let stg = stage("env-a", true, None, vec![crit]);
+    let feature = Feature {
+        enabled: true,
+        dependencies: vec![],
+        stages: vec![stg],
+        variants: vec![],
+    };
+    let result = evaluation_engine::evaluate(ctx, feature);
+    assert_eq!(result.value, json!(false));
+    assert_eq!(result.reason, EvaluationReason::Default);
+}
+
+#[test]
+fn evaluate_passes_when_user_in_allowed_and_rollout_100() {
+    let ctx = mk_ctx("feat", "env-a", "user123", &[("role", "admin")]);
+    let crit = criterion("role", &["admin"], 100, None);
+    let stg = stage("env-a", true, None, vec![crit]);
+    let feature = Feature {
+        enabled: true,
+        dependencies: vec![],
+        stages: vec![stg],
+        variants: vec![],
+    };
+    let result = evaluation_engine::evaluate(ctx, feature);
+    assert_eq!(result.value, json!(true));
+    assert_eq!(result.reason, EvaluationReason::TargetingMatch);
+}
+
+#[test]
+fn evaluate_with_variant() {
+    let ctx = mk_ctx("feat", "env-a", "user123", &[("role", "admin")]);
+    let crit = criterion("role", &["admin"], 100, Some("treatment"));
+    let stg = stage("env-a", true, None, vec![crit]);
+    let feature = Feature {
+        enabled: true,
+        dependencies: vec![],
+        stages: vec![stg],
+        variants: vec![
+            FeatureVariant {
+                control: "control".to_string(),
+                value: json!(false),
+            },
+            FeatureVariant {
+                control: "treatment".to_string(),
+                value: json!("Enhanced UI"),
+            },
+        ],
+    };
+    let result = evaluation_engine::evaluate(ctx, feature);
+    assert_eq!(result.value, json!("Enhanced UI"));
+    assert_eq!(result.variant, Some("treatment".to_string()));
+    assert_eq!(result.reason, EvaluationReason::TargetingMatch);
+}
+
+#[test]
+fn evaluate_with_json_variant() {
+    let ctx = mk_ctx("feat", "env-a", "user123", &[("tier", "premium")]);
+    let crit = criterion("tier", &["premium"], 100, Some("premium-config"));
+    let stg = stage("env-a", true, None, vec![crit]);
+    let feature = Feature {
+        enabled: true,
+        dependencies: vec![],
+        stages: vec![stg],
+        variants: vec![
+            FeatureVariant {
+                control: "basic-config".to_string(),
+                value: json!({"theme": "light", "features": ["chat"]}),
+            },
+            FeatureVariant {
+                control: "premium-config".to_string(),
+                value: json!({"theme": "dark", "features": ["chat", "video", "analytics"]}),
+            },
+        ],
+    };
+    let result = evaluation_engine::evaluate(ctx, feature);
+    assert_eq!(
+        result.value,
+        json!({"theme": "dark", "features": ["chat", "video", "analytics"]})
     );
-    let feature = Feature {
-        enabled: true,
-        kill_switch_enabled: true,
-        rollback_scheduled_at: None,
-        dependencies: vec![],
-        stages: vec![stg],
-    };
-    assert!(!evaluation_engine::evaluate(ctx, feature));
+    assert_eq!(result.variant, Some("premium-config".to_string()));
+    assert_eq!(result.reason, EvaluationReason::TargetingMatch);
 }
 
 #[test]
-fn evaluate_respects_custom_bucketing_key() {
-    // Provide custom bucketing key and value in context
-    let ctx = mk_ctx("feat", "env-a", &[("userId", "alice"), ("country", "US")]);
-    let stg = stage(
-        "env-a",
-        true,
-        Some("userId"),
-        vec![criterion("country", &["US"], 100)],
-    );
-    let feature = Feature {
-        enabled: true,
-        kill_switch_enabled: true,
-        rollback_scheduled_at: None,
-        dependencies: vec![],
-        stages: vec![stg],
-    };
-    assert!(evaluation_engine::evaluate(ctx, feature));
-}
-
-#[test]
-fn evaluate_respects_rollout_percentage_thresholds() {
-    // Use a deterministic sticky value so hash bucket is stable; try two identities and assert
-    let mk = |user: &str| mk_ctx("my-feature", "prod", &[("user.id", user), ("segment", "A")]);
-    let stg = |pct: i32| stage("prod", true, None, vec![criterion("segment", &["A"], pct)]);
-
-    // With 0% rollout nobody should pass
-    let f0 = Feature {
-        enabled: true,
-        kill_switch_enabled: true,
-        rollback_scheduled_at: None,
-        dependencies: vec![],
-        stages: vec![stg(0)],
-    };
-    assert!(!evaluation_engine::evaluate(mk("user-1"), f0.clone()));
-    assert!(!evaluation_engine::evaluate(mk("user-2"), f0));
-
-    // With 100% rollout everybody with matching criteria passes
-    let f100 = Feature {
-        enabled: true,
-        kill_switch_enabled: true,
-        rollback_scheduled_at: None,
-        dependencies: vec![],
-        stages: vec![stg(100)],
-    };
-    assert!(evaluation_engine::evaluate(mk("user-1"), f100.clone()));
-    assert!(evaluation_engine::evaluate(mk("user-2"), f100));
-}
-
-#[test]
-fn evaluate_requires_matching_context_value() {
-    let ctx = mk_ctx("feat", "env-a", &[("user.id", "bob"), ("country", "UK")]);
-    let stg = stage(
-        "env-a",
-        true,
-        None,
-        vec![criterion("country", &["US", "CA"], 100)],
-    );
-    let feature = Feature {
-        enabled: true,
-        kill_switch_enabled: true,
-        rollback_scheduled_at: None,
-        dependencies: vec![],
-        stages: vec![stg],
-    };
-    assert!(!evaluation_engine::evaluate(ctx, feature));
-}
-
-#[test]
-fn evaluate_all_dependencies_must_pass() {
-    // Build a dependency tree: root depends on dep1 (true) and dep2 (false) => overall false
-    let ctx = mk_ctx("root", "env", &[("user.id", "u"), ("ctx", "x")]);
-
-    let dep1 = Feature {
-        enabled: true,
-        kill_switch_enabled: true,
-        rollback_scheduled_at: None,
-        dependencies: vec![],
-        stages: vec![stage("env", true, None, vec![])],
-    };
-    let dep2 = Feature {
-        enabled: true,
-        kill_switch_enabled: true,
-        rollback_scheduled_at: None,
-        dependencies: vec![],
-        stages: vec![stage("env", false, None, vec![])],
-    };
-
-    let root = Feature {
-        enabled: true,
-        kill_switch_enabled: true,
-        rollback_scheduled_at: None,
-        dependencies: vec![dep1, dep2],
-        stages: vec![stage("env", true, None, vec![])],
-    };
-
-    assert!(!evaluation_engine::evaluate(ctx, root));
-}
-
-#[test]
-fn evaluate_nested_dependencies_true() {
-    let ctx = mk_ctx("root", "env", &[("user.id", "id1")]);
-    // dep inner chain that all pass
-    let leaf = Feature {
-        enabled: true,
-        kill_switch_enabled: true,
-        rollback_scheduled_at: None,
-        dependencies: vec![],
-        stages: vec![stage("env", true, None, vec![])],
-    };
-    let mid = Feature {
-        enabled: true,
-        kill_switch_enabled: true,
-        rollback_scheduled_at: None,
-        dependencies: vec![leaf],
-        stages: vec![stage("env", true, None, vec![])],
-    };
-    let root = Feature {
-        enabled: true,
-        kill_switch_enabled: true,
-        rollback_scheduled_at: None,
-        dependencies: vec![mid],
-        stages: vec![stage("env", true, None, vec![])],
-    };
-    assert!(evaluation_engine::evaluate(ctx, root));
-}
-
-#[test]
-fn evaluate_returns_false_when_kill_switch_activated() {
-    // Test that kill switch (kill_switch_enabled = false) disables the feature
-    let ctx = mk_ctx("feat", "env-a", &[("user.id", "user1")]);
+fn evaluate_dependency_failed() {
+    let ctx = mk_ctx("feat", "env-a", "user123", &[]);
     let stg = stage("env-a", true, None, vec![]);
+
+    let dependency = Feature {
+        enabled: false,
+        dependencies: vec![],
+        stages: vec![],
+        variants: vec![],
+    };
+
     let feature = Feature {
         enabled: true,
-        kill_switch_enabled: false, // Kill switch is activated
-        rollback_scheduled_at: None,
-        dependencies: vec![],
+        dependencies: vec![dependency],
         stages: vec![stg],
+        variants: vec![],
     };
-    assert!(!evaluation_engine::evaluate(ctx, feature));
+
+    let result = evaluation_engine::evaluate(ctx, feature);
+    assert_eq!(result.value, json!(false));
+    assert_eq!(result.reason, EvaluationReason::DependencyFailed);
 }
 
 #[test]
-fn evaluate_returns_false_when_scheduled_kill_elapsed() {
-    let ctx = mk_ctx("feat", "env-a", &[("user.id", "user42")]);
-    let stg = stage("env-a", true, None, vec![]);
+fn evaluate_with_custom_bucketing_key() {
+    let ctx = mk_ctx("feat", "env-a", "user123", &[("org_id", "org456"), ("role", "admin")]);
+    let crit = criterion("role", &["admin"], 100, None);
+    let stg = stage("env-a", true, Some("org_id"), vec![crit]);
     let feature = Feature {
         enabled: true,
-        kill_switch_enabled: true,
-        rollback_scheduled_at: Some(Utc::now() - Duration::minutes(5)),
         dependencies: vec![],
         stages: vec![stg],
+        variants: vec![],
     };
-    assert!(!evaluation_engine::evaluate(ctx, feature));
+    let result = evaluation_engine::evaluate(ctx, feature);
+    assert_eq!(result.value, json!(true));
+    assert_eq!(result.reason, EvaluationReason::TargetingMatch);
 }
 
 #[test]
-fn evaluate_passes_when_kill_switch_not_activated() {
-    // Test that kill_switch_enabled = true allows normal evaluation
-    let ctx = mk_ctx("feat", "env-a", &[("user.id", "user1")]);
-    let stg = stage("env-a", true, None, vec![]);
+fn evaluate_multiple_criteria_first_match_wins() {
+    let ctx = mk_ctx("feat", "env-a", "user123", &[("role", "admin"), ("tier", "premium")]);
+    let crit1 = criterion("role", &["admin"], 100, Some("admin-variant"));
+    let crit2 = criterion("tier", &["premium"], 100, Some("premium-variant"));
+    let stg = stage("env-a", true, None, vec![crit1, crit2]);
     let feature = Feature {
         enabled: true,
-        kill_switch_enabled: true, // Kill switch is not activated
-        rollback_scheduled_at: None,
         dependencies: vec![],
         stages: vec![stg],
+        variants: vec![
+            FeatureVariant {
+                control: "admin-variant".to_string(),
+                value: json!("Admin Experience"),
+            },
+            FeatureVariant {
+                control: "premium-variant".to_string(),
+                value: json!("Premium Experience"),
+            },
+        ],
     };
-    assert!(evaluation_engine::evaluate(ctx, feature));
+    let result = evaluation_engine::evaluate(ctx, feature);
+    // First matching criterion wins
+    assert_eq!(result.variant, Some("admin-variant".to_string()));
+    assert_eq!(result.value, json!("Admin Experience"));
 }
 
 #[test]
-fn evaluate_passes_when_scheduled_kill_in_future() {
-    let ctx = mk_ctx("feat", "env-a", &[("user.id", "user9")]);
-    let stg = stage("env-a", true, None, vec![]);
+fn evaluate_missing_bucketing_key_attribute() {
+    let ctx = mk_ctx("feat", "env-a", "user123", &[("role", "admin")]);
+    // Stage expects "org_id" but it's not provided
+    let crit = criterion("role", &["admin"], 100, None);
+    let stg = stage("env-a", true, Some("org_id"), vec![crit]);
     let feature = Feature {
         enabled: true,
-        kill_switch_enabled: true,
-        rollback_scheduled_at: Some(Utc::now() + Duration::minutes(5)),
         dependencies: vec![],
         stages: vec![stg],
+        variants: vec![],
     };
-    assert!(evaluation_engine::evaluate(ctx, feature));
+    let result = evaluation_engine::evaluate(ctx, feature);
+    assert_eq!(result.value, json!(false));
+    assert_eq!(result.reason, EvaluationReason::Default);
+}
+
+#[test]
+fn evaluate_variant_not_found_returns_default() {
+    let ctx = mk_ctx("feat", "env-a", "user123", &[("role", "admin")]);
+    let crit = criterion("role", &["admin"], 100, Some("non-existent-variant"));
+    let stg = stage("env-a", true, None, vec![crit]);
+    let feature = Feature {
+        enabled: true,
+        dependencies: vec![],
+        stages: vec![stg],
+        variants: vec![
+            FeatureVariant {
+                control: "control".to_string(),
+                value: json!(false),
+            },
+        ],
+    };
+    let result = evaluation_engine::evaluate(ctx, feature);
+    // When variant not found, returns default true value
+    assert_eq!(result.value, json!(true));
+    assert_eq!(result.variant, Some("non-existent-variant".to_string()));
 }

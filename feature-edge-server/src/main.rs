@@ -16,6 +16,12 @@ mod pb {
     tonic::include_proto!("featuretoggle");
 }
 
+#[derive(Clone, Debug)]
+pub struct CachedAssignment {
+    pub value: serde_json::Value,
+    pub variant: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     cache: Arc<FeatureCache>,
@@ -27,8 +33,8 @@ pub struct AppState {
     client_id: String,
     client_secret: String,
     connected: Arc<std::sync::atomic::AtomicBool>,
-    // Sticky assignments cache and pending flush queue
-    assigned_true: Arc<RwLock<std::collections::HashSet<String>>>,
+    // Sticky assignments cache with variant information and pending flush queue
+    assigned_cache: Arc<RwLock<std::collections::HashMap<String, CachedAssignment>>>,
     pending_assignments: Arc<RwLock<Vec<grpc_client::UserAssignment>>>,
     flush_interval: Duration,
     // Evaluation events tracking
@@ -43,10 +49,11 @@ pub struct EvaluationEvent {
     pub feature_key: String,
     pub environment_id: String,
     pub evaluation_result: bool,
-    pub evaluation_context: Vec<handlers::HttpContext>,
+    pub evaluation_context: handlers::EvaluateContext,
     pub user_context: Option<String>,
     pub evaluated_at: std::time::SystemTime,
     pub prior_assignment: bool,
+    pub variant: Option<String>,
 }
 
 #[derive(Default)]
@@ -90,14 +97,14 @@ impl FeatureCache {
 impl AppState {
     pub async fn purge_assignments_for_feature(&self, feature_id: &str) {
         {
-            let mut set = self.assigned_true.write().await;
-            let keys: Vec<String> = set
-                .iter()
+            let mut cache = self.assigned_cache.write().await;
+            let keys: Vec<String> = cache
+                .keys()
                 .filter(|entry| entry.split('|').nth(1) == Some(feature_id))
                 .cloned()
                 .collect();
             for key in keys {
-                set.remove(&key);
+                cache.remove(&key);
             }
         }
 
@@ -116,7 +123,7 @@ fn setup_logger() -> actix_web::Result<(), Box<dyn std::error::Error>> {
 #[derive(OpenApi)]
 #[openapi(
     paths(handlers::evaluate_handler, handlers::health_handler),
-    components(schemas(handlers::EvaluateHttpRequest, handlers::EvaluateHttpResponse, handlers::HttpContext)),
+    components(schemas(handlers::EvaluateHttpRequest, handlers::EvaluateHttpResponse, handlers::EvaluateContext)),
     tags((name = "edge", description = "Edge evaluation API"))
 )]
 struct ApiDoc;
@@ -159,7 +166,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         client_id: cfg.client_id.clone(),
         client_secret: cfg.client_secret.clone(),
         connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        assigned_true: Arc::new(RwLock::new(std::collections::HashSet::new())),
+        assigned_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
         pending_assignments: Arc::new(RwLock::new(Vec::new())),
         flush_interval: cfg.flush.assignment_flush_interval(),
         pending_evaluation_events: Arc::new(RwLock::new(Vec::new())),
@@ -230,6 +237,7 @@ mod tests {
             rollback_scheduled_at: String::new(),
             stages: vec![],
             dependencies: vec![],
+            variants: vec![],
         };
 
         cache.upsert(f1.clone()).await;
@@ -250,7 +258,7 @@ mod tests {
             client_id: "client".into(),
             client_secret: "secret".into(),
             connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            assigned_true: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            assigned_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
             pending_assignments: Arc::new(RwLock::new(Vec::new())),
             flush_interval: Duration::from_secs(60),
             pending_evaluation_events: Arc::new(RwLock::new(Vec::new())),
@@ -260,10 +268,28 @@ mod tests {
 
         let feature_id = "fea-123";
         {
-            let mut set = state.assigned_true.write().await;
-            set.insert(format!("user-1|{}|env-1", feature_id));
-            set.insert(format!("user-2|{}|env-1", feature_id));
-            set.insert("user-3|other|env".to_string());
+            let mut cache = state.assigned_cache.write().await;
+            cache.insert(
+                format!("user-1|{}|env-1", feature_id),
+                CachedAssignment {
+                    value: serde_json::json!(true),
+                    variant: None,
+                },
+            );
+            cache.insert(
+                format!("user-2|{}|env-1", feature_id),
+                CachedAssignment {
+                    value: serde_json::json!(true),
+                    variant: None,
+                },
+            );
+            cache.insert(
+                "user-3|other|env".to_string(),
+                CachedAssignment {
+                    value: serde_json::json!(true),
+                    variant: None,
+                },
+            );
         }
 
         {
@@ -273,21 +299,23 @@ mod tests {
                 feature_id: feature_id.into(),
                 environment_id: "env-1".into(),
                 assigned: true,
+                variant: None,
             });
             pending.push(crate::grpc_client::UserAssignment {
                 user_id: "user-9".into(),
                 feature_id: "other".into(),
                 environment_id: "env-1".into(),
                 assigned: true,
+                variant: None,
             });
         }
 
         state.purge_assignments_for_feature(feature_id).await;
 
-        let set = state.assigned_true.read().await;
-        assert_eq!(set.len(), 1);
-        assert!(set.iter().all(|entry| !entry.contains(feature_id)));
-        drop(set);
+        let cache = state.assigned_cache.read().await;
+        assert_eq!(cache.len(), 1);
+        assert!(cache.keys().all(|entry| !entry.contains(feature_id)));
+        drop(cache);
 
         let pending = state.pending_assignments.read().await;
         assert_eq!(pending.len(), 1);

@@ -2,7 +2,6 @@ use crate::grpc_client::{assignment_key, fetch_client_info_via_grpc, fetch_featu
 use crate::pb;
 use crate::{AppState, EvaluationEvent};
 use actix_web::{HttpResponse, Responder, web};
-use chrono::{DateTime, Utc};
 use evaluation_engine as engine;
 use serde::{Deserialize, Serialize};
 use tracing::error;
@@ -11,11 +10,10 @@ use utoipa::ToSchema;
 #[derive(Deserialize, ToSchema, Clone)]
 pub struct EvaluateHttpRequest {
     /// The feature key to evaluate
-    pub feature_key: String,
-    /// Environment identifier (e.g., "prod", "staging")
-    pub environment_id: String,
-    /// Context entries used for evaluation (key/value)
-    pub context: Vec<HttpContext>,
+    #[serde(rename = "flagKey")]
+    pub flag_key: String,
+    /// Context object with bucketing_key, environment_id, and dynamic attributes
+    pub context: EvaluateContext,
     /// Optional client credentials overriding server defaults
     pub client_id: Option<String>,
     /// Optional client credentials overriding server defaults
@@ -23,17 +21,34 @@ pub struct EvaluateHttpRequest {
 }
 
 #[derive(Deserialize, ToSchema, Clone, Debug, PartialEq)]
-pub struct HttpContext {
-    /// Context key, e.g., "user.id" or a bucketing key
-    pub key: String,
-    /// Context value as string
-    pub value: String,
+pub struct EvaluateContext {
+    /// Bucketing key for consistent user experience
+    #[serde(rename = "bucketingKey")]
+    pub bucketing_key: String,
+    /// Environment identifier (UUID as string)
+    pub environment_id: String,
+    /// Dynamic attributes (flattened into the context object)
+    #[serde(flatten)]
+    pub attributes: std::collections::HashMap<String, serde_json::Value>,
 }
 
 #[derive(Serialize, ToSchema)]
 pub struct EvaluateHttpResponse {
-    /// Whether the feature is enabled under provided context
-    pub enabled: bool,
+    /// The feature key that was evaluated
+    #[serde(rename = "flagKey")]
+    pub flag_key: String,
+    /// The resolved value (can be boolean, string, number, or JSON object)
+    pub value: serde_json::Value,
+    /// The variant name that was served (if any)
+    pub variant: Option<String>,
+    /// The reason for the evaluation result
+    pub reason: String,
+    /// Error code if evaluation failed
+    #[serde(rename = "errorCode", skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    /// Optional metadata about the evaluation
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// Map protobuf feature to evaluation engine format
@@ -70,35 +85,43 @@ fn map_proto_to_engine(f: &pb::FeatureFull) -> engine::Feature {
                         context_key: c.context_key.clone(),
                         context,
                         rollout_percentage: c.rollout_percentage,
+                        serve: if c.serve.is_empty() { None } else { Some(c.serve.clone()) },
                     }
                 })
                 .collect(),
         })
         .collect();
 
+    // Map proto variants to engine variants
+    let variants = f
+        .variants
+        .iter()
+        .map(|v| engine::FeatureVariant {
+            control: v.control.clone(),
+            value: serde_json::from_str(&v.value).unwrap_or(serde_json::json!(v.value.clone())),
+        })
+        .collect();
+
     engine::Feature {
-        enabled: f.active,    //
+        enabled: f.active,
         dependencies: vec![], // For minimal implementation, ignore dependency recursion
         stages,
+        variants,
     }
 }
 
 /// Map HTTP context to evaluation engine format
 pub fn map_http_context_to_engine(
     feature_key: String,
-    environment_id: String,
-    ctx: Vec<HttpContext>,
+    ctx: EvaluateContext,
 ) -> engine::FeatureEvaluationContext {
     engine::FeatureEvaluationContext {
-        feature: feature_key,
-        environment_id,
-        context: ctx
-            .into_iter()
-            .map(|c| engine::Context {
-                key: c.key,
-                value: c.value,
-            })
-            .collect(),
+        flag_key: feature_key,
+        context: engine::ContextObject {
+            bucketing_key: ctx.bucketing_key,
+            environment_id: ctx.environment_id,
+            attributes: ctx.attributes,
+        },
     }
 }
 
@@ -185,7 +208,7 @@ pub async fn evaluate_handler(
     req: web::Json<EvaluateHttpRequest>,
 ) -> actix_web::Result<web::Json<EvaluateHttpResponse>> {
     let req = req.into_inner();
-    let feature_key = req.feature_key.clone();
+    let feature_key = req.flag_key.clone();
 
     let (client_id, client_secret) = resolve_credentials(&app, &req);
 
@@ -206,71 +229,108 @@ pub async fn evaluate_handler(
     let feature = match get_or_fetch_feature(&app, &feature_key, &client_id, &client_secret).await {
         Some(f) => f,
         None => {
-            // Feature doesn't exist, return false
-            return Ok(web::Json(EvaluateHttpResponse { enabled: false }));
+            // Feature doesn't exist, return default
+            return Ok(web::Json(EvaluateHttpResponse {
+                flag_key: feature_key.clone(),
+                value: serde_json::json!(false),
+                variant: None,
+                reason: "DEFAULT".to_string(),
+                error_code: Some("FLAG_NOT_FOUND".to_string()),
+                metadata: None,
+            }));
         }
     };
 
     // This is kill switch enabled we should disable the feature.
     if !feature.active {
         app.purge_assignments_for_feature(&feature.id).await;
-        return Ok(web::Json(EvaluateHttpResponse { enabled: false }));
+        return Ok(web::Json(EvaluateHttpResponse {
+            flag_key: feature_key.clone(),
+            value: serde_json::json!(false),
+            variant: None,
+            reason: "STATIC".to_string(),
+            error_code: None,
+            metadata: None,
+        }));
     }
 
     let stage = feature
         .stages
         .iter()
-        .find(|s| s.environment_id == req.environment_id);
+        .find(|s| s.environment_id == req.context.environment_id);
 
     if stage.is_none() || !stage.unwrap().enabled {
-        return Ok(web::Json(EvaluateHttpResponse { enabled: false }));
+        return Ok(web::Json(EvaluateHttpResponse {
+            flag_key: feature_key.clone(),
+            value: serde_json::json!(false),
+            variant: None,
+            reason: if stage.is_none() { "DEFAULT" } else { "DISABLED" }.to_string(),
+            error_code: if stage.is_none() { Some("ENVIRONMENT_NOT_FOUND".to_string()) } else { None },
+            metadata: None,
+        }));
     }
 
     let stage = stage.unwrap();
-    let bucketing_key = stage.bucketing_key.clone();
+    let bucketing_key = if stage.bucketing_key.is_empty() {
+        "bucketingKey"
+    } else {
+        &stage.bucketing_key
+    };
 
-    // Extract user.id if present
-    let user_id_opt = req
-        .context
-        .iter()
-        .find(|c| c.key == bucketing_key)
-        .map(|c| c.value.clone());
+    // Extract user_id from bucketing_key attribute or use default bucketing_key
+    let user_id_opt = if bucketing_key == "bucketingKey" {
+        Some(req.context.bucketing_key.clone())
+    } else {
+        req.context.attributes.get(bucketing_key).and_then(|v| {
+            v.as_str().map(|s| s.to_string())
+        })
+    };
 
-    // If we have a prior assignment for this user+feature+env, short-circuit to true
-    let (enabled, prior_assignment) = if let Some(user_id) = &user_id_opt {
-        let key = assignment_key(user_id, &feature.id, &req.environment_id);
-        if app.assigned_true.read().await.contains(&key) {
-            (true, true) // cached assignment
+    // Perform evaluation (check cache first if we have a user_id)
+    let (mut result, prior_assignment) = if let Some(user_id) = &user_id_opt {
+        let key = assignment_key(user_id, &feature.id, &req.context.environment_id);
+        let cached = app.assigned_cache.read().await.get(&key).cloned();
+
+        if let Some(cached_assignment) = cached {
+            // Cached assignment - return cached result with variant
+            (engine::EvaluationResult {
+                flag_key: feature_key.clone(),
+                value: cached_assignment.value,
+                variant: cached_assignment.variant,
+                reason: engine::EvaluationReason::Cached,
+                error_code: None,
+                metadata: None,
+            }, true)
         } else {
             let engine_feature = map_proto_to_engine(&feature);
-            let ec = map_http_context_to_engine(
-                feature_key,
-                req.environment_id.clone(),
-                req.context.clone(),
-            );
-            let enabled = engine::evaluate(ec, engine_feature);
-            (enabled, false) // fresh evaluation
+            let ec = map_http_context_to_engine(feature_key.clone(), req.context.clone());
+            let result = engine::evaluate(ec, engine_feature);
+            (result, false)
         }
     } else {
         let engine_feature = map_proto_to_engine(&feature);
-        let ec = map_http_context_to_engine(
-            feature_key,
-            req.environment_id.clone(),
-            req.context.clone(),
-        );
-        let enabled = engine::evaluate(ec, engine_feature);
-        (enabled, false) // fresh evaluation
+        let ec = map_http_context_to_engine(feature_key.clone(), req.context.clone());
+        let result = engine::evaluate(ec, engine_feature);
+        (result, false)
     };
+
+    // For Simple features, ensure value is always boolean and variant is None
+    if feature.feature_type == "Simple" {
+        let is_enabled = result.value.as_bool().unwrap_or(false);
+        result.value = serde_json::json!(is_enabled);
+        result.variant = None;
+    }
 
     // Record the evaluation event for analytics
     let evaluation_event = EvaluationEvent {
         feature_key: feature.key.clone(),
-        environment_id: req.environment_id.clone(),
-        evaluation_result: enabled,
+        environment_id: req.context.environment_id.clone(),
+        evaluation_result: result.value.as_bool().unwrap_or(false),
         evaluation_context: req.context.clone(),
         user_context: user_id_opt.clone(),
         evaluated_at: std::time::SystemTime::now(),
         prior_assignment,
+        variant: result.variant.clone(),
     };
 
     {
@@ -278,23 +338,47 @@ pub async fn evaluate_handler(
         pending_events.push(evaluation_event);
     }
 
-    // If evaluated true, remember and enqueue for flush
-    if enabled && let Some(user_id) = user_id_opt {
-        let key = assignment_key(&user_id, &feature.id, &req.environment_id);
-        {
-            let mut set = app.assigned_true.write().await;
-            set.insert(key);
+    // If evaluated to true, remember assignment with variant and enqueue for flush
+    let is_enabled = result.value.as_bool().unwrap_or(false);
+    if is_enabled {
+        if let Some(user_id) = user_id_opt {
+            let key = assignment_key(&user_id, &feature.id, &req.context.environment_id);
+            {
+                let mut cache = app.assigned_cache.write().await;
+                cache.insert(
+                    key,
+                    crate::CachedAssignment {
+                        value: result.value.clone(),
+                        variant: result.variant.clone(),
+                    },
+                );
+            }
+            let mut pending = app.pending_assignments.write().await;
+            pending.push(crate::grpc_client::UserAssignment {
+                user_id,
+                feature_id: feature.id.clone(),
+                environment_id: req.context.environment_id.clone(),
+                assigned: true,
+                variant: result.variant.clone(),
+            });
         }
-        let mut pending = app.pending_assignments.write().await;
-        pending.push(crate::grpc_client::UserAssignment {
-            user_id,
-            feature_id: feature.id.clone(),
-            environment_id: req.environment_id,
-            assigned: true,
-        });
     }
 
-    Ok(web::Json(EvaluateHttpResponse { enabled }))
+    // Convert evaluation reason to string
+    let reason = format!("{:?}", result.reason).to_uppercase();
+    let error_code = result.error_code.map(|ec| format!("{:?}", ec).to_uppercase());
+
+    // Convert metadata HashMap to JSON Value
+    let metadata = result.metadata.map(|m| serde_json::to_value(m).unwrap_or(serde_json::json!({})));
+
+    Ok(web::Json(EvaluateHttpResponse {
+        flag_key: result.flag_key,
+        value: result.value,
+        variant: result.variant,
+        reason,
+        error_code,
+        metadata,
+    }))
 }
 
 /// HTTP handler for health check

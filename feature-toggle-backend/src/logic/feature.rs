@@ -319,6 +319,21 @@ impl FeatureLogicImpl {
             .map(|id| id_to_uuid(id))
             .collect::<Result<Vec<_>, _>>()?;
 
+        // Map variants from GraphQL to database format
+        let variants = input.variants.map(|v| {
+            v.into_iter()
+                .map(|variant| {
+                    let value_type = match variant.value_type {
+                        crate::graphql::schema::VariantValueType::String => crate::database::entity::VariantValueType::String,
+                        crate::graphql::schema::VariantValueType::Number => crate::database::entity::VariantValueType::Number,
+                        crate::graphql::schema::VariantValueType::Boolean => crate::database::entity::VariantValueType::Boolean,
+                        crate::graphql::schema::VariantValueType::Json => crate::database::entity::VariantValueType::Json,
+                    };
+                    (variant.control, variant.value.0, value_type, variant.description)
+                })
+                .collect::<Vec<_>>()
+        });
+
         Ok(CreateFeature {
             team_id,
             key: input.key,
@@ -326,6 +341,7 @@ impl FeatureLogicImpl {
             feature_type,
             stages,
             dependencies,
+            variants,
         })
     }
 
@@ -366,6 +382,21 @@ impl FeatureLogicImpl {
             .map(|id| id_to_uuid(id))
             .collect::<Result<Vec<_>, _>>()?;
 
+        // Map variants from GraphQL to database format
+        let variants = input.variants.map(|v| {
+            v.into_iter()
+                .map(|variant| {
+                    let value_type = match variant.value_type {
+                        crate::graphql::schema::VariantValueType::String => crate::database::entity::VariantValueType::String,
+                        crate::graphql::schema::VariantValueType::Number => crate::database::entity::VariantValueType::Number,
+                        crate::graphql::schema::VariantValueType::Boolean => crate::database::entity::VariantValueType::Boolean,
+                        crate::graphql::schema::VariantValueType::Json => crate::database::entity::VariantValueType::Json,
+                    };
+                    (variant.control, variant.value.0, value_type, variant.description)
+                })
+                .collect::<Vec<_>>()
+        });
+
         Ok(UpdateFeature {
             id,
             key: Some(input.key),
@@ -373,6 +404,7 @@ impl FeatureLogicImpl {
             feature_type,
             stages,
             dependencies,
+            variants,
         })
     }
 
@@ -821,6 +853,7 @@ impl StageLogic for FeatureLogicImpl {
                         context_key: c.context_key,
                         context_id: id_to_uuid(c.context_id)?,
                         rollout_percentage: c.rollout_percentage,
+                        serve: c.serve,
                     })
                 },
             )
@@ -1058,6 +1091,7 @@ fn map_db_criterion_to_gql(
         context_key: sc.context_key,
         context: map_db_ctx_to_gql(sc.context),
         rollout_percentage: sc.rollout_percentage,
+        serve: sc.serve,
     }
 }
 
@@ -1243,6 +1277,7 @@ mod test {
             dependencies: vec![],
             relationships: vec![],
             stages: vec![],
+            variants: Some(vec![]),
         };
 
         const ID: &str = "3eef17bc-9e06-411d-b5f4-7a786e68bb96";
@@ -1288,6 +1323,7 @@ mod test {
             dependencies: vec![],
             relationships: vec![],
             stages: vec![],
+            variants: Some(vec![]),
         };
 
         repository

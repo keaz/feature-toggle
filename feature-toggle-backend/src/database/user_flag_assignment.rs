@@ -10,6 +10,7 @@ pub struct UserFlagAssignmentRow {
     pub feature_id: Uuid,
     pub environment_id: Uuid,
     pub assigned: bool,
+    pub variant: Option<String>,
 }
 
 #[automock]
@@ -88,7 +89,7 @@ impl UserFlagAssignmentRepository for UserFlagAssignmentRepositoryImpl {
             (Some(fid), Some(eid)) => {
                 let res = sqlx::query_as!(
                     UserFlagAssignmentRow,
-                    r#"SELECT ufa.user_id, ufa.feature_id, ufa.environment_id, ufa.assigned
+                    r#"SELECT ufa.user_id, ufa.feature_id, ufa.environment_id, ufa.assigned, ufa.variant
                        FROM user_flag_assignments ufa
                        JOIN features f ON f.id = ufa.feature_id
                        WHERE f.team_id = $1 AND ufa.feature_id = $2 AND ufa.environment_id = $3"#,
@@ -103,7 +104,7 @@ impl UserFlagAssignmentRepository for UserFlagAssignmentRepositoryImpl {
             (Some(fid), None) => {
                 let res = sqlx::query_as!(
                     UserFlagAssignmentRow,
-                    r#"SELECT ufa.user_id, ufa.feature_id, ufa.environment_id, ufa.assigned
+                    r#"SELECT ufa.user_id, ufa.feature_id, ufa.environment_id, ufa.assigned, ufa.variant
                        FROM user_flag_assignments ufa
                        JOIN features f ON f.id = ufa.feature_id
                        WHERE f.team_id = $1 AND ufa.feature_id = $2"#,
@@ -117,7 +118,7 @@ impl UserFlagAssignmentRepository for UserFlagAssignmentRepositoryImpl {
             (None, Some(eid)) => {
                 let res = sqlx::query_as!(
                     UserFlagAssignmentRow,
-                    r#"SELECT ufa.user_id, ufa.feature_id, ufa.environment_id, ufa.assigned
+                    r#"SELECT ufa.user_id, ufa.feature_id, ufa.environment_id, ufa.assigned, ufa.variant
                        FROM user_flag_assignments ufa
                        JOIN features f ON f.id = ufa.feature_id
                        WHERE f.team_id = $1 AND EXISTS (
@@ -134,7 +135,7 @@ impl UserFlagAssignmentRepository for UserFlagAssignmentRepositoryImpl {
             (None, None) => {
                 let res = sqlx::query_as!(
                     UserFlagAssignmentRow,
-                    r#"SELECT ufa.user_id, ufa.feature_id, ufa.environment_id, ufa.assigned
+                    r#"SELECT ufa.user_id, ufa.feature_id, ufa.environment_id, ufa.assigned, ufa.variant
                        FROM user_flag_assignments ufa
                        JOIN features f ON f.id = ufa.feature_id
                        WHERE f.team_id = $1"#,

@@ -192,6 +192,7 @@ impl FeatureEvaluationSvc {
                         entries: c.context.entries.into_iter().map(|e| e.value).collect(),
                     },
                     rollout_percentage: c.rollout_percentage,
+                    serve: c.serve,
                 })
                 .collect::<Vec<_>>();
             stages.push(engine::FeatureStage {
@@ -205,10 +206,29 @@ impl FeatureEvaluationSvc {
         // Dependencies: load only as empty for now (requires recursive fetch if needed)
         let deps: Vec<engine::Feature> = vec![];
 
+        // Load variants from database only for Contextual features
+        let variants = if matches!(f.feature_type, db::FeatureType::Contextual) {
+            let db_variants = repo
+                .get_feature_variants(f.id)
+                .await
+                .map_err(|e| Status::internal(format!("db error: {}", e)))?;
+
+            db_variants
+                .into_iter()
+                .map(|v| engine::FeatureVariant {
+                    control: v.control,
+                    value: v.value,
+                })
+                .collect()
+        } else {
+            vec![]
+        };
+
         Ok(engine::Feature {
             enabled: f.active,
             dependencies: deps,
             stages,
+            variants,
         })
     }
 
@@ -240,6 +260,7 @@ impl FeatureEvaluationSvc {
                         entries: c.context.entries.into_iter().map(|e| e.value).collect(),
                     }),
                     rollout_percentage: c.rollout_percentage,
+                    serve: c.serve.unwrap_or_default(),
                 })
                 .collect::<Vec<_>>();
 
@@ -264,6 +285,24 @@ impl FeatureEvaluationSvc {
             })
             .collect::<Vec<_>>();
 
+        // Load variants from database only for Contextual features
+        let variant_msgs = if matches!(f.feature_type, db::FeatureType::Contextual) {
+            let db_variants = repo
+                .get_feature_variants(f.id)
+                .await
+                .map_err(|e| Status::internal(format!("db error: {}", e)))?;
+
+            db_variants
+                .into_iter()
+                .map(|v| pb::FeatureVariant {
+                    control: v.control,
+                    value: serde_json::to_string(&v.value).unwrap_or_default(),
+                })
+                .collect::<Vec<_>>()
+        } else {
+            vec![]
+        };
+
         let feature = pb::FeatureFull {
             id: f.id.to_string(),
             key: f.key,
@@ -283,6 +322,7 @@ impl FeatureEvaluationSvc {
                 .unwrap_or_default(),
             stages: stage_msgs,
             dependencies: deps,
+            variants: variant_msgs,
         };
 
         Ok(feature)
@@ -346,20 +386,31 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
 
         let eng_feature = self.map_db_feature_to_engine(db_feature.clone()).await?;
 
+        // Convert proto context to engine context format
+        let mut attributes = std::collections::HashMap::new();
+        let mut bucketing_key = String::new();
+
+        for c in req.context {
+            if c.key == "bucketingKey" {
+                bucketing_key = c.value;
+            } else {
+                attributes.insert(c.key, serde_json::json!(c.value));
+            }
+        }
+
         let ec = engine::FeatureEvaluationContext {
-            feature: db_feature.key,
-            environment_id: req.environment_id,
-            context: req
-                .context
-                .into_iter()
-                .map(|c| engine::Context {
-                    key: c.key,
-                    value: c.value,
-                })
-                .collect(),
+            flag_key: db_feature.key,
+            context: engine::ContextObject {
+                bucketing_key,
+                environment_id: req.environment_id,
+                attributes,
+            },
         };
 
-        let enabled = engine::evaluate(ec, eng_feature);
+        let result = engine::evaluate(ec, eng_feature);
+
+        // For backward compatibility, return just the boolean value
+        let enabled = result.value.as_bool().unwrap_or(false);
 
         Ok(Response::new(EvaluateResponse { enabled }))
     }
@@ -631,6 +682,7 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
                 assigned: r.assigned,
                 client_id: String::new(),
                 client_secret: String::new(),
+                variant: r.variant.unwrap_or_default(),
             })
             .collect::<Vec<_>>();
 

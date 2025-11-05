@@ -12,6 +12,7 @@ pub struct UserAssignment {
     pub feature_id: String,
     pub environment_id: String,
     pub assigned: bool,
+    pub variant: Option<String>,
 }
 
 /// Fetch a feature by key from the backend via gRPC with retry logic
@@ -112,11 +113,21 @@ pub async fn load_user_assignments(app: &AppState) -> Result<usize, tonic::Statu
     let resp = client.list_user_assignments(req).await?.into_inner();
     let mut count = 0usize;
     {
-        let mut set = app.assigned_true.write().await;
+        let mut cache = app.assigned_cache.write().await;
         for a in resp.assignments.into_iter() {
             if a.assigned {
                 let key = assignment_key(&a.user_id, &a.feature_id, &a.environment_id);
-                set.insert(key);
+                cache.insert(
+                    key,
+                    crate::CachedAssignment {
+                        value: serde_json::json!(true),
+                        variant: if a.variant.is_empty() {
+                            None
+                        } else {
+                            Some(a.variant)
+                        },
+                    },
+                );
                 count += 1;
             }
         }
@@ -307,6 +318,7 @@ pub async fn run_flush_task(app: AppState) {
             assigned: to_send[0].assigned,
             client_id: app.client_id.clone(),
             client_secret: app.client_secret.clone(),
+            variant: to_send[0].variant.clone().unwrap_or_default(),
         };
         // Spawn sender
         tokio::spawn({
@@ -323,6 +335,7 @@ pub async fn run_flush_task(app: AppState) {
                         assigned: a.assigned,
                         client_id: String::new(),
                         client_secret: String::new(),
+                        variant: a.variant.unwrap_or_default(),
                     };
                     let _ = tx_clone.send(assignment).await;
                 }
@@ -386,14 +399,29 @@ pub async fn run_evaluation_flush_task(app: AppState) {
                 .map(|d| d.as_millis() as i64)
                 .unwrap_or(0);
 
-            let proto_context = event
-                .evaluation_context
-                .iter()
-                .map(|ctx| pb::Context {
-                    key: ctx.key.clone(),
-                    value: ctx.value.clone(),
-                })
-                .collect();
+            // Convert EvaluateContext to proto Context entries
+            let mut proto_context = Vec::new();
+
+            // Add bucketing_key as a context entry
+            proto_context.push(pb::Context {
+                key: "bucketingKey".to_string(),
+                value: event.evaluation_context.bucketing_key.clone(),
+            });
+
+            // Add all dynamic attributes as context entries
+            for (key, value) in &event.evaluation_context.attributes {
+                // Convert JSON value to string
+                let value_str = match value {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Number(n) => n.to_string(),
+                    serde_json::Value::Bool(b) => b.to_string(),
+                    _ => value.to_string(),
+                };
+                proto_context.push(pb::Context {
+                    key: key.clone(),
+                    value: value_str,
+                });
+            }
 
             proto_events.push(pb::FeatureEvaluationEvent {
                 feature_key: event.feature_key.clone(),
@@ -405,6 +433,7 @@ pub async fn run_evaluation_flush_task(app: AppState) {
                 user_context: event.user_context.clone().unwrap_or_default(),
                 evaluated_at_unix_ms,
                 prior_assignment: event.prior_assignment,
+                variant: event.variant.clone().unwrap_or_default(),
             });
         }
 

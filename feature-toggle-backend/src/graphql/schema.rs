@@ -18,6 +18,14 @@ pub enum FeatureType {
 }
 
 #[derive(Enum, Copy, Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
+pub enum VariantValueType {
+    String,
+    Number,
+    Boolean,
+    Json,
+}
+
+#[derive(Enum, Copy, Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub enum RuleOperator {
     Equals,
     NotEquals,
@@ -43,6 +51,35 @@ pub struct Feature {
 
 #[ComplexObject]
 impl Feature {
+    async fn variants(&self, ctx: &async_graphql::Context<'_>) -> GqlResult<Vec<FeatureVariant>> {
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        let feature_id = Uuid::try_from(self.id.clone())
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+
+        let db_variants = crate::database::feature::get_feature_variants(pool, feature_id)
+            .await
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+
+        Ok(db_variants
+            .into_iter()
+            .map(|v| FeatureVariant {
+                id: ID::from(v.id.to_string()),
+                feature_id: ID::from(v.feature_id.to_string()),
+                control: v.control,
+                value: async_graphql::types::Json(v.value),
+                value_type: match v.value_type {
+                    crate::database::entity::VariantValueType::String => VariantValueType::String,
+                    crate::database::entity::VariantValueType::Number => VariantValueType::Number,
+                    crate::database::entity::VariantValueType::Boolean => VariantValueType::Boolean,
+                    crate::database::entity::VariantValueType::Json => VariantValueType::Json,
+                },
+                description: v.description,
+                created_at: v.created_at,
+                updated_at: v.updated_at,
+            })
+            .collect())
+    }
+
     async fn stages(&self, ctx: &async_graphql::Context<'_>) -> GqlResult<Vec<FeatureStage>> {
         let repository = ctx.data::<Arc<Box<dyn FeatureRepository>>>().unwrap();
 
@@ -155,6 +192,19 @@ pub struct FeatureStage {
     pub status: String,
 }
 
+// Feature variant GraphQL type
+#[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
+pub struct FeatureVariant {
+    pub id: ID,
+    pub feature_id: ID,
+    pub control: String,
+    pub value: async_graphql::types::Json<serde_json::Value>,
+    pub value_type: VariantValueType,
+    pub description: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
 #[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
 pub struct ContextualType {
     pub id: ID,
@@ -201,6 +251,16 @@ pub struct PipelineStage {
 }
 
 // Input types for mutations
+#[derive(InputObject, Debug, Clone)]
+pub struct CreateFeatureVariantInput {
+    #[graphql(validator(min_length = 1, max_length = 100))]
+    pub control: String,
+    pub value: async_graphql::types::Json<serde_json::Value>,
+    pub value_type: VariantValueType,
+    #[graphql(validator(max_length = 500))]
+    pub description: Option<String>,
+}
+
 #[derive(InputObject, Debug)]
 pub struct CreateFeatureInput {
     #[graphql(validator(min_length = 3, max_length = 40))]
@@ -215,6 +275,8 @@ pub struct CreateFeatureInput {
     pub relationships: Vec<CreateRelationshipInput>,
     #[graphql(validator(min_items = 1))]
     pub stages: Vec<CreateFeatureStageInput>,
+    #[graphql(validator(min_items = 0))]
+    pub variants: Option<Vec<CreateFeatureVariantInput>>,
 }
 
 #[derive(InputObject, Debug)]
@@ -230,6 +292,8 @@ pub struct UpdateFeatureInput {
     pub relationships: Vec<CreateRelationshipInput>,
     #[graphql(validator(min_items = 1))]
     pub stages: Vec<CreateFeatureStageInput>,
+    #[graphql(validator(min_items = 0))]
+    pub variants: Option<Vec<CreateFeatureVariantInput>>,
 }
 
 #[derive(InputObject, Debug, Clone)]
@@ -439,6 +503,7 @@ pub struct StageCriterion {
     pub context_key: String,
     pub context: super::schema::Context,
     pub rollout_percentage: i32,
+    pub serve: Option<String>,
 }
 
 #[derive(InputObject, Debug, Clone)]
@@ -448,6 +513,8 @@ pub struct CreateStageCriterionInput {
     pub context_id: ID,
     #[graphql(validator(minimum = 0, maximum = 100))]
     pub rollout_percentage: i32,
+    #[graphql(validator(max_length = 100))]
+    pub serve: Option<String>,
 }
 
 // Users GraphQL types

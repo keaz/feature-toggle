@@ -66,6 +66,7 @@ async fn test_set_stage_criteria_replaces_existing() {
         context_key: "filter".to_string(),
         context_id: Uuid::parse_str("cb461425-373b-49d9-9634-9a248612d7b7").unwrap(),
         rollout_percentage: 75,
+        serve: None,
     }];
 
     let set_result = repo.set_stage_criteria(stage_id, crit).await;
@@ -92,6 +93,7 @@ async fn test_set_stage_criteria_stage_not_found() {
         context_key: "filter".to_string(),
         context_id: Uuid::parse_str("cb461425-373b-49d9-9634-9a248612d7b7").unwrap(),
         rollout_percentage: 10,
+        serve: None,
     }];
 
     let result = repo.set_stage_criteria(non_existing_stage, crit).await;

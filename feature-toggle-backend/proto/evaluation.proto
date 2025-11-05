@@ -43,6 +43,7 @@ message StageCriterionFull {
   string context_key = 2;
   CriterionContext context = 3;
   int32 rollout_percentage = 4;
+  string serve = 5; // Optional variant control name to serve
 }
 
 message FeatureStageFull {
@@ -60,6 +61,11 @@ message FeatureDependencyFull {
   string depends_on_id = 2;
 }
 
+message FeatureVariant {
+  string control = 1; // Variant name/identifier (e.g., "treatment", "control")
+  string value = 2; // JSON-encoded variant value (can be string, number, bool, or JSON object)
+}
+
 message FeatureFull {
   string id = 1;
   string key = 2;
@@ -73,6 +79,7 @@ message FeatureFull {
   repeated FeatureStageFull stages = 10;
   repeated FeatureDependencyFull dependencies = 11;
   bool active = 12;
+  repeated FeatureVariant variants = 13; // Available variants for this feature
 }
 
 message GetFeatureByKeyResponse {
@@ -117,6 +124,7 @@ message UserFlagAssignment {
   // include client credentials for auth on the stream (ignored in responses)
   string client_id = 5;
   string client_secret = 6;
+  string variant = 7; // Optional variant name that was served
 }
 
 message ListUserFlagAssignmentsRequest {
@@ -142,6 +150,7 @@ message FeatureEvaluationEvent {
   string user_context = 7; // extracted user identifier for easier querying
   int64 evaluated_at_unix_ms = 8; // timestamp when evaluation occurred
   bool prior_assignment = 9; // true if this was a cached/sticky assignment, false for fresh evaluation
+  string variant = 10; // Optional variant name that was served
 }
 
 // Request message for pushing evaluation events

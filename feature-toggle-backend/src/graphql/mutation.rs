@@ -160,6 +160,18 @@ impl MutationRoot {
     ) -> GqlResult<ID> {
         info!("Creating feature with input: {input:?}");
 
+        // Validate that variants are only provided for Contextual features
+        use crate::graphql::schema::FeatureType;
+        if input.feature_type == FeatureType::Simple {
+            if let Some(ref variants) = input.variants {
+                if !variants.is_empty() {
+                    return Err(async_graphql::Error::new(
+                        "Variants can only be defined for Contextual features, not Simple features"
+                    ));
+                }
+            }
+        }
+
         // Extract actor information from JWT token
         let actor = ctx.data_opt::<crate::JwtUser>().map(|jwt_user| {
             crate::logic::ActorContext::new(jwt_user.id, jwt_user.username.clone())
@@ -177,6 +189,18 @@ impl MutationRoot {
         input: UpdateFeatureInput,
     ) -> GqlResult<Feature> {
         info!("Updating feature with input: {input:?}");
+
+        // Validate that variants are only provided for Contextual features
+        use crate::graphql::schema::FeatureType;
+        if input.feature_type == FeatureType::Simple {
+            if let Some(ref variants) = input.variants {
+                if !variants.is_empty() {
+                    return Err(async_graphql::Error::new(
+                        "Variants can only be defined for Contextual features, not Simple features"
+                    ));
+                }
+            }
+        }
 
         // Extract actor information from JWT token
         let actor = ctx.data_opt::<crate::JwtUser>().map(|jwt_user| {
@@ -891,6 +915,7 @@ async fn map_db_feature_to_full_for_broadcast(
                     entries: c.context.entries.into_iter().map(|e| e.value).collect(),
                 }),
                 rollout_percentage: c.rollout_percentage,
+                serve: c.serve.unwrap_or_default(),
             })
             .collect::<Vec<_>>();
 
@@ -914,6 +939,24 @@ async fn map_db_feature_to_full_for_broadcast(
         })
         .collect::<Vec<_>>();
 
+    // Load variants from database only for Contextual features
+    use crate::database::entity::FeatureType as EntityFeatureType;
+    let variant_msgs = if matches!(f.feature_type, EntityFeatureType::Contextual) {
+        let db_variants = feature_repository
+            .get_feature_variants(f.id)
+            .await?;
+
+        db_variants
+            .into_iter()
+            .map(|v| pb::FeatureVariant {
+                control: v.control,
+                value: serde_json::to_string(&v.value).unwrap_or_default(),
+            })
+            .collect::<Vec<_>>()
+    } else {
+        vec![]
+    };
+
     let feature = pb::FeatureFull {
         id: f.id.to_string(),
         key: f.key,
@@ -933,6 +976,7 @@ async fn map_db_feature_to_full_for_broadcast(
             .unwrap_or_default(),
         stages: stage_msgs,
         dependencies: deps,
+        variants: variant_msgs,
     };
     Ok(feature)
 }
@@ -1076,6 +1120,7 @@ mod tests {
                 entries: vec![],
             },
             rollout_percentage: 75,
+            serve: None,
         }];
         let stage_id_clone = stage_id.clone();
         mock.expect_set_stage_criteria()

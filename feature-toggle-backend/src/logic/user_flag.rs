@@ -329,6 +329,7 @@ mod tests {
             feature_id: Uuid::new_v4(),
             environment_id: Uuid::new_v4(),
             assigned: true,
+            variant: None,
         };
         uf_repo
             .expect_list()

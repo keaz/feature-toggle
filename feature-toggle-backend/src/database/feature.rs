@@ -13,6 +13,7 @@ pub struct CreateStageCriterion {
     pub context_key: String,
     pub context_id: Uuid,
     pub rollout_percentage: i32,
+    pub serve: Option<String>,
 }
 
 /// Represents feature growth data at a specific time bucket
@@ -45,6 +46,7 @@ pub struct CreateFeature {
     pub feature_type: FeatureType,
     pub stages: Vec<CreateFeatureStage>,
     pub dependencies: Vec<Uuid>,
+    pub variants: Option<Vec<(String, serde_json::Value, crate::database::entity::VariantValueType, Option<String>)>>,
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +97,7 @@ pub struct UpdateFeature {
     pub feature_type: Option<FeatureType>,
     pub stages: Vec<CreateFeatureStage>,
     pub dependencies: Vec<Uuid>,
+    pub variants: Option<Vec<(String, serde_json::Value, crate::database::entity::VariantValueType, Option<String>)>>,
 }
 
 #[derive(Debug, sqlx::FromRow, Clone)]
@@ -198,6 +201,9 @@ pub trait FeatureRepository: Send + Sync {
     async fn get_stage_by_id(&self, stage_id: Uuid) -> Result<Option<FeaturePipelineStage>, Error>;
     // New: get features referencing a given context id
     async fn get_feature_ids_by_context_id(&self, context_id: Uuid) -> Result<Vec<Uuid>, Error>;
+
+    // Feature variants
+    async fn get_feature_variants(&self, feature_id: Uuid) -> Result<Vec<crate::database::entity::FeatureVariant>, Error>;
 
     // New (deployment workflow): request stage change
     async fn request_stage_change(
@@ -759,7 +765,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
     ) -> Result<Vec<crate::database::entity::StageCriterion>, Error> {
         // load criteria join contexts and entries
         let rows = sqlx::query!(
-            r#"SELECT sc.id, sc.stage_id, sc.context_key, sc.context_id, sc.rollout_percentage,
+            r#"SELECT sc.id, sc.stage_id, sc.context_key, sc.context_id, sc.rollout_percentage, sc.serve,
                       c.team_id, c.key
                FROM feature_stage_criteria sc
                JOIN contexts c ON c.id = sc.context_id
@@ -800,6 +806,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
                 context_key: r.context_key,
                 context,
                 rollout_percentage: r.rollout_percentage,
+                serve: r.serve,
             });
         }
         Ok(out)
@@ -852,10 +859,11 @@ impl FeatureRepository for FeatureRepositoryImpl {
                 criteria.iter().map(|c| c.context_key.clone()).collect();
             let context_ids: Vec<Uuid> = criteria.iter().map(|c| c.context_id).collect();
             let rollouts: Vec<i32> = criteria.iter().map(|c| c.rollout_percentage).collect();
+            let serves: Vec<Option<String>> = criteria.iter().map(|c| c.serve.clone()).collect();
             handle_error(None, sqlx::query!(
-                r#"INSERT INTO feature_stage_criteria(id, stage_id, context_key, context_id, rollout_percentage)
-                   SELECT unnest($1::uuid[]), unnest($2::uuid[]), unnest($3::varchar[]), unnest($4::uuid[]), unnest($5::int[])"#,
-                &ids[..], &stage_ids[..], &context_keys[..], &context_ids[..], &rollouts[..]
+                r#"INSERT INTO feature_stage_criteria(id, stage_id, context_key, context_id, rollout_percentage, serve)
+                   SELECT unnest($1::uuid[]), unnest($2::uuid[]), unnest($3::varchar[]), unnest($4::uuid[]), unnest($5::int[]), unnest($6::varchar[])"#,
+                &ids[..], &stage_ids[..], &context_keys[..], &context_ids[..], &rollouts[..], &serves as _
             ).execute(&mut *tx).await)?;
         }
         tx.commit().await.map_err(Error::DatabaseError)?;
@@ -1055,6 +1063,17 @@ impl FeatureRepository for FeatureRepositoryImpl {
                     return Err(dependencies.err().unwrap());
                 }
 
+                // Create variants if provided
+                if let Some(variants) = input.variants {
+                    if !variants.is_empty() {
+                        let variants_result = self.create_feature_variants(&mut tx, id, variants).await;
+                        if variants_result.is_err() {
+                            let _ = tx.rollback().await;
+                            return Err(variants_result.err().unwrap());
+                        }
+                    }
+                }
+
                 let _ = tx.commit().await;
                 Ok(id)
             }
@@ -1095,6 +1114,25 @@ impl FeatureRepository for FeatureRepositoryImpl {
         if dependencies_result.is_err() {
             let _ = tx.rollback().await;
             return Err(dependencies_result.err().unwrap());
+        }
+
+        // Update variants if provided (replace all)
+        if let Some(variants) = input.variants {
+            // Delete existing variants
+            let delete_result = self.delete_feature_variants(&mut tx, input.id).await;
+            if delete_result.is_err() {
+                let _ = tx.rollback().await;
+                return Err(delete_result.err().unwrap());
+            }
+
+            // Create new variants
+            if !variants.is_empty() {
+                let create_result = self.create_feature_variants(&mut tx, input.id, variants).await;
+                if create_result.is_err() {
+                    let _ = tx.rollback().await;
+                    return Err(create_result.err().unwrap());
+                }
+            }
         }
 
         let _ = tx.commit().await;
@@ -1213,6 +1251,31 @@ impl FeatureRepository for FeatureRepositoryImpl {
         .fetch_all(&self.pool)
         .await;
         handle_error(Some(context_id), rows)
+    }
+
+    // Variant methods
+    async fn get_feature_variants(&self, feature_id: Uuid) -> Result<Vec<crate::database::entity::FeatureVariant>, Error> {
+        let variants = sqlx::query_as!(
+            crate::database::entity::FeatureVariant,
+            r#"
+            SELECT
+                id,
+                feature_id,
+                control,
+                value,
+                value_type AS "value_type: crate::database::entity::VariantValueType",
+                description,
+                created_at,
+                updated_at
+            FROM feature_variants
+            WHERE feature_id = $1
+            ORDER BY created_at
+            "#,
+            feature_id
+        )
+        .fetch_all(&self.pool)
+        .await;
+        handle_error(Some(feature_id), variants)
     }
 
     async fn request_stage_change(
@@ -1914,6 +1977,73 @@ impl FeatureRepository for FeatureRepositoryImpl {
     fn clone_box(&self) -> Box<dyn FeatureRepository> {
         Box::new(self.clone())
     }
+}
+
+// Helper methods for FeatureRepositoryImpl (not part of trait)
+impl FeatureRepositoryImpl {
+    async fn create_feature_variants(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        feature_id: Uuid,
+        variants: Vec<(String, serde_json::Value, crate::database::entity::VariantValueType, Option<String>)>,
+    ) -> Result<Vec<crate::database::entity::FeatureVariant>, Error> {
+        let mut created_variants = Vec::new();
+
+        for (control, value, value_type, description) in variants {
+            let variant = sqlx::query_as!(
+                crate::database::entity::FeatureVariant,
+                r#"
+                INSERT INTO feature_variants (feature_id, control, value, value_type, description)
+                VALUES ($1, $2, $3, $4, $5)
+                RETURNING
+                    id,
+                    feature_id,
+                    control,
+                    value,
+                    value_type AS "value_type: crate::database::entity::VariantValueType",
+                    description,
+                    created_at,
+                    updated_at
+                "#,
+                feature_id,
+                control,
+                value,
+                value_type as crate::database::entity::VariantValueType,
+                description
+            )
+            .fetch_one(&mut **tx)
+            .await;
+
+            created_variants.push(handle_error(Some(feature_id), variant)?);
+        }
+
+        Ok(created_variants)
+    }
+
+    async fn delete_feature_variants(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        feature_id: Uuid,
+    ) -> Result<(), Error> {
+        sqlx::query!(
+            "DELETE FROM feature_variants WHERE feature_id = $1",
+            feature_id
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(Error::DatabaseError)?;
+
+        Ok(())
+    }
+}
+
+// Public wrapper functions for variant operations
+pub async fn get_feature_variants(
+    pool: &PgPool,
+    feature_id: Uuid,
+) -> Result<Vec<crate::database::entity::FeatureVariant>, Error> {
+    let repo = FeatureRepositoryImpl::new(pool.clone());
+    repo.get_feature_variants(feature_id).await
 }
 
 #[cfg(test)]

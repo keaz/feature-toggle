@@ -84,6 +84,7 @@ async fn map_db_feature_to_full_for_broadcast(
                     entries: c.context.entries.into_iter().map(|e| e.value).collect(),
                 }),
                 rollout_percentage: c.rollout_percentage,
+                serve: c.serve.unwrap_or_default(),
             })
             .collect::<Vec<_>>();
 
@@ -107,6 +108,24 @@ async fn map_db_feature_to_full_for_broadcast(
         })
         .collect::<Vec<_>>();
 
+    // Load variants from database only for Contextual features
+    use crate::database::entity::FeatureType as EntityFeatureType;
+    let variant_msgs = if matches!(f.feature_type, EntityFeatureType::Contextual) {
+        let db_variants = repo
+            .get_feature_variants(f.id)
+            .await?;
+
+        db_variants
+            .into_iter()
+            .map(|v| pb::FeatureVariant {
+                control: v.control,
+                value: serde_json::to_string(&v.value).unwrap_or_default(),
+            })
+            .collect::<Vec<_>>()
+    } else {
+        vec![]
+    };
+
     let feature = pb::FeatureFull {
         id: f.id.to_string(),
         key: f.key,
@@ -126,6 +145,7 @@ async fn map_db_feature_to_full_for_broadcast(
             .unwrap_or_default(),
         stages: stage_msgs,
         dependencies: deps,
+        variants: variant_msgs,
     };
     Ok(feature)
 }

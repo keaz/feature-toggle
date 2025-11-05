@@ -1,6 +1,7 @@
 use async_graphql::SimpleObject;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use uuid::Uuid;
 
 pub const SENTINEL_UUID: Uuid = Uuid::nil();
@@ -72,6 +73,29 @@ pub enum FeatureType {
     Contextual,
 }
 
+// Enum for variant value types (maps to Postgres ENUM)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[sqlx(type_name = "variant_value_type", rename_all = "lowercase")]
+pub enum VariantValueType {
+    String,
+    Number,
+    Boolean,
+    Json,
+}
+
+// Feature variant entity
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
+pub struct FeatureVariant {
+    pub id: Uuid,
+    pub feature_id: Uuid,
+    pub control: String,
+    pub value: JsonValue,
+    pub value_type: VariantValueType,
+    pub description: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
 pub struct Team {
     pub id: Uuid,
@@ -118,6 +142,7 @@ pub struct StageCriterion {
     pub context_key: String,
     pub context: Context,
     pub rollout_percentage: i32,
+    pub serve: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
