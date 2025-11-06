@@ -1765,9 +1765,9 @@ impl FeatureRepository for FeatureRepositoryImpl {
         let bottleneck: Option<(String, f64)> = if let Some(team_id) = team_id {
             sqlx::query_as::<_, (String, f64)>(
                 r#"
-                SELECT 
+                SELECT
                     e.name as environment_name,
-                    AVG(EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - fps.requested_time)) / 3600) as avg_wait_hours
+                    ROUND(CAST(AVG(EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - fps.requested_time)) / 3600) AS numeric), 2)::float8 as avg_wait_hours
                 FROM features_pipeline_stages fps
                 JOIN environments e ON e.id = fps.environment_id
                 JOIN features f ON f.id = fps.feature_id
@@ -1786,9 +1786,9 @@ impl FeatureRepository for FeatureRepositoryImpl {
         } else {
             sqlx::query_as::<_, (String, f64)>(
                 r#"
-                SELECT 
+                SELECT
                     e.name as environment_name,
-                    AVG(EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - fps.requested_time)) / 3600) as avg_wait_hours
+                    ROUND(CAST(AVG(EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - fps.requested_time)) / 3600) AS numeric), 2)::float8 as avg_wait_hours
                 FROM features_pipeline_stages fps
                 JOIN environments e ON e.id = fps.environment_id
                 JOIN features f ON f.id = fps.feature_id
@@ -1848,9 +1848,9 @@ impl FeatureRepository for FeatureRepositoryImpl {
 
         // Query features with pending approvals (with stages joined)
         let mut query_builder = sqlx::QueryBuilder::new(
-            r#"SELECT DISTINCT ON (f.id) f.id as feature_id, f.key as feature_key, f.description, 
-               f.feature_type, f.team_id, f.created_at, f.kill_switch_enabled, 
-               f.kill_switch_activated_at, f.rollback_scheduled_at,
+            r#"SELECT DISTINCT ON (f.id) f.id as feature_id, f.key as feature_key, f.description,
+               f.feature_type, f.team_id, f.created_at, f.kill_switch_enabled,
+               f.kill_switch_activated_at, f.rollback_scheduled_at, f.active as feature_enabled,
                s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
                s.parent_stage_id, s.position, s.bucketing_key, s.status, s.enabled
                FROM features f
@@ -1931,7 +1931,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
         let mut query_builder = sqlx::QueryBuilder::new(
             r#"SELECT DISTINCT ON (f.id) f.id as feature_id, f.key as feature_key, f.description,
                f.feature_type, f.team_id, f.created_at, f.kill_switch_enabled,
-               f.kill_switch_activated_at, f.rollback_scheduled_at,
+               f.kill_switch_activated_at, f.rollback_scheduled_at, f.active as feature_enabled,
                s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
                s.parent_stage_id, s.position, s.bucketing_key, s.status, s.enabled
                FROM features f

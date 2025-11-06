@@ -199,11 +199,12 @@ async fn handle_feature_update(app: &AppState, update: pb::FeatureUpdate) {
         x if x == Action::Upsert as i32 || x == Action::Snapshot as i32 => {
             if let Some(f) = update.feature {
                 let feature_id = f.id.clone();
-                let should_purge = !f.active;
+                
                 app.cache.upsert(f).await;
-                if should_purge {
-                    app.purge_assignments_for_feature(&feature_id).await;
-                }
+                // We are purging assignments for feature in evenry feature update 
+                // so that we can make sure 
+                app.purge_assignments_for_feature(&feature_id).await;
+
             }
         }
         x if x == Action::Delete as i32 => {

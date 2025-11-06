@@ -35,6 +35,7 @@ impl crate::logic::user_flag::UserFlagLogic for NoopUserFlagLogic {
         _feature_id: &str,
         _environment_id: &str,
         _assigned: bool,
+        _variant: Option<String>,
     ) -> Result<(), crate::logic::user_flag::UserFlagLogicError> {
         Ok(())
     }
@@ -572,6 +573,11 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
         }
 
         // Process the first payload then the rest via logic
+        let variant = if first_msg.variant.is_empty() {
+            None
+        } else {
+            Some(first_msg.variant)
+        };
         if let Err(e) = self
             .user_flag_logic
             .upsert_after_auth(
@@ -579,6 +585,7 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
                 &first_msg.feature_id,
                 &first_msg.environment_id,
                 first_msg.assigned,
+                variant,
             )
             .await
         {
@@ -596,9 +603,14 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
         while let Some(msg) = stream.next().await {
             match msg {
                 Ok(m) => {
+                    let variant = if m.variant.is_empty() {
+                        None
+                    } else {
+                        Some(m.variant)
+                    };
                     if let Err(e) = self
                         .user_flag_logic
-                        .upsert_after_auth(&m.user_id, &m.feature_id, &m.environment_id, m.assigned)
+                        .upsert_after_auth(&m.user_id, &m.feature_id, &m.environment_id, m.assigned, variant)
                         .await
                     {
                         return Err(match e {

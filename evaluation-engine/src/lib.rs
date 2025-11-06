@@ -38,13 +38,13 @@ pub struct EvaluationResult {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum EvaluationReason {
-    Static,            // Feature is statically enabled/disabled (kill switch)
-    Default,           // Default value returned (feature not found, stage not found, etc.)
-    TargetingMatch,    // Criteria matched for this user
-    Split,             // User is in rollout percentage
-    Cached,            // Value returned from cache
-    DependencyFailed,  // Feature disabled due to dependency failure
-    Disabled,          // Stage or feature is disabled
+    Static,           // Feature is statically enabled/disabled (kill switch)
+    Default,          // Default value returned (feature not found, stage not found, etc.)
+    TargetingMatch,   // Criteria matched for this user
+    Split,            // User is in rollout percentage
+    Cached,           // Value returned from cache
+    DependencyFailed, // Feature disabled due to dependency failure
+    Disabled,         // Stage or feature is disabled
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -122,7 +122,10 @@ struct CriteriaEvaluationResult {
     reason: EvaluationReason,
 }
 
-fn passes_stage_criteria(ec: &FeatureEvaluationContext, stage: &FeatureStage) -> CriteriaEvaluationResult {
+fn passes_stage_criteria(
+    ec: &FeatureEvaluationContext,
+    stage: &FeatureStage,
+) -> CriteriaEvaluationResult {
     // If no criteria defined, treat as pass-through (stage gating only)
     if stage.criterias.is_empty() {
         return CriteriaEvaluationResult {
@@ -180,6 +183,12 @@ fn passes_stage_criteria(ec: &FeatureEvaluationContext, stage: &FeatureStage) ->
                         variant: crit.serve.clone(),
                         reason: EvaluationReason::TargetingMatch,
                     };
+                } else {
+                    return CriteriaEvaluationResult {
+                        matched: true,
+                        variant: None,
+                        reason: EvaluationReason::TargetingMatch,
+                    };
                 }
             }
         }
@@ -203,7 +212,10 @@ fn get_variant_value(feature: &Feature, variant_control: Option<String>) -> Json
     JsonValue::Bool(true)
 }
 
-pub fn evaluate(evaluation_context: FeatureEvaluationContext, feature: Feature) -> EvaluationResult {
+pub fn evaluate(
+    evaluation_context: FeatureEvaluationContext,
+    feature: Feature,
+) -> EvaluationResult {
     let flag_key = evaluation_context.flag_key.clone();
 
     // Kill switch check: if enabled is false, feature is disabled

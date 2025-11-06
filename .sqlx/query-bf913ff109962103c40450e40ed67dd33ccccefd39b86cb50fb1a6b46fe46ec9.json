@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT sc.id, sc.stage_id, sc.context_key, sc.context_id, sc.rollout_percentage, sc.serve,\n                      c.team_id, c.key\n               FROM feature_stage_criteria sc\n               JOIN contexts c ON c.id = sc.context_id\n               WHERE sc.stage_id = $1\n               ORDER BY sc.context_key, c.key",
+  "query": "SELECT sc.id, sc.stage_id, sc.context_key, sc.context_id, sc.rollout_percentage, sc.serve, sc.priority,\n                      c.team_id, c.key\n               FROM feature_stage_criteria sc\n               JOIN contexts c ON c.id = sc.context_id\n               WHERE sc.stage_id = $1\n               ORDER BY sc.priority ASC, sc.id",
   "describe": {
     "columns": [
       {
@@ -35,11 +35,16 @@
       },
       {
         "ordinal": 6,
+        "name": "priority",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
         "name": "team_id",
         "type_info": "Uuid"
       },
       {
-        "ordinal": 7,
+        "ordinal": 8,
         "name": "key",
         "type_info": "Varchar"
       }
@@ -57,8 +62,9 @@
       false,
       true,
       false,
+      false,
       false
     ]
   },
-  "hash": "73026586badbebd2ea54796211ff1253f22ebaf66cacb38bd16f72014cf33235"
+  "hash": "bf913ff109962103c40450e40ed67dd33ccccefd39b86cb50fb1a6b46fe46ec9"
 }

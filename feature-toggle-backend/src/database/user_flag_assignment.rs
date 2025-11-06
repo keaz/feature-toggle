@@ -22,6 +22,7 @@ pub trait UserFlagAssignmentRepository: Send + Sync {
         feature_id: Uuid,
         environment_id: Uuid,
         assigned: bool,
+        variant: Option<String>,
     ) -> Result<(), Error>;
 
     async fn list(
@@ -62,17 +63,19 @@ impl UserFlagAssignmentRepository for UserFlagAssignmentRepositoryImpl {
         feature_id: Uuid,
         environment_id: Uuid,
         assigned: bool,
+        variant: Option<String>,
     ) -> Result<(), Error> {
         let res = sqlx::query(
-            r#"INSERT INTO user_flag_assignments (user_id, feature_id, environment_id, assigned)
-               VALUES ($1, $2, $3, $4)
+            r#"INSERT INTO user_flag_assignments (user_id, feature_id, environment_id, assigned, variant)
+               VALUES ($1, $2, $3, $4, $5)
                ON CONFLICT (user_id, feature_id, environment_id)
-               DO UPDATE SET assigned = EXCLUDED.assigned, assigned_at = now()"#,
+               DO UPDATE SET assigned = EXCLUDED.assigned, variant = EXCLUDED.variant, assigned_at = now()"#,
         )
         .bind(user_id)
         .bind(feature_id)
         .bind(environment_id)
         .bind(assigned)
+        .bind(variant.as_deref())
         .execute(&self.pool)
         .await;
 

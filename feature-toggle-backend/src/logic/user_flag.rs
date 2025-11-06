@@ -35,6 +35,7 @@ pub trait UserFlagLogic: Send + Sync {
         feature_id: &str,
         environment_id: &str,
         assigned: bool,
+        variant: Option<String>,
     ) -> Result<(), UserFlagLogicError>;
 
     // List assignments scoped by client's team; feature/environment ids are optional strings
@@ -123,6 +124,7 @@ impl UserFlagLogic for UserFlagLogicImpl {
         feature_id: &str,
         environment_id: &str,
         assigned: bool,
+        variant: Option<String>,
     ) -> Result<(), UserFlagLogicError> {
         if user_id.is_empty() || feature_id.is_empty() || environment_id.is_empty() {
             // no-op consistent with gRPC code that simply skipped empty ones
@@ -131,7 +133,7 @@ impl UserFlagLogic for UserFlagLogicImpl {
         let fid = Self::parse_uuid("feature_id", feature_id)?;
         let eid = Self::parse_uuid("environment_id", environment_id)?;
         self.user_flag_repo
-            .upsert(user_id, fid, eid, assigned)
+            .upsert(user_id, fid, eid, assigned, variant)
             .await
             .map_err(UserFlagLogicError::DatabaseError)
     }
@@ -277,11 +279,11 @@ mod tests {
     async fn upsert_after_auth_happy_path() {
         let mock_client = MockClientRepository::new();
         let mut uf_repo = MockUserFlagAssignmentRepository::new();
-        uf_repo.expect_upsert().returning(|_, _, _, _| Ok(()));
+        uf_repo.expect_upsert().returning(|_, _, _, _, _| Ok(()));
         let logic = UserFlagLogicImpl::new(Box::new(mock_client), Box::new(uf_repo));
         let fid = Uuid::new_v4().to_string();
         let eid = Uuid::new_v4().to_string();
-        let res = logic.upsert_after_auth("user", &fid, &eid, true).await;
+        let res = logic.upsert_after_auth("user", &fid, &eid, true, Some("variant-a".into())).await;
         assert!(res.is_ok());
     }
 
@@ -291,7 +293,7 @@ mod tests {
         let uf_repo = MockUserFlagAssignmentRepository::new();
         let logic = UserFlagLogicImpl::new(Box::new(mock_client), Box::new(uf_repo));
         let err = logic
-            .upsert_after_auth("user", "bad", &Uuid::new_v4().to_string(), true)
+            .upsert_after_auth("user", "bad", &Uuid::new_v4().to_string(), true, None)
             .await
             .err()
             .unwrap();
@@ -304,7 +306,7 @@ mod tests {
         let mut uf_repo = MockUserFlagAssignmentRepository::new();
         uf_repo
             .expect_upsert()
-            .returning(|_, _, _, _| Err(Error::InvalidInput("x".into())));
+            .returning(|_, _, _, _, _| Err(Error::InvalidInput("x".into())));
         let logic = UserFlagLogicImpl::new(Box::new(mock_client), Box::new(uf_repo));
         let err = logic
             .upsert_after_auth(
@@ -312,6 +314,7 @@ mod tests {
                 &Uuid::new_v4().to_string(),
                 &Uuid::new_v4().to_string(),
                 true,
+                None,
             )
             .await
             .err()

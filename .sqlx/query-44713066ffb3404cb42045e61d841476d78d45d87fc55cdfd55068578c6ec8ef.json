@@ -1,0 +1,48 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT ufa.user_id, ufa.feature_id, ufa.environment_id, ufa.assigned, ufa.variant\n                       FROM user_flag_assignments ufa\n                       JOIN features f ON f.id = ufa.feature_id\n                       WHERE f.team_id = $1 AND ufa.feature_id = $2 AND ufa.environment_id = $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "feature_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "environment_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "assigned",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 4,
+        "name": "variant",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "44713066ffb3404cb42045e61d841476d78d45d87fc55cdfd55068578c6ec8ef"
+}

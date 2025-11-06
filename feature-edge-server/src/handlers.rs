@@ -287,7 +287,7 @@ pub async fn evaluate_handler(
     };
 
     // Perform evaluation (check cache first if we have a user_id)
-    let (mut result, prior_assignment) = if let Some(user_id) = &user_id_opt {
+    let (mut result, prior_assignment) = if let Some(user_id) =     &user_id_opt {
         let key = assignment_key(user_id, &feature.id, &req.context.environment_id);
         let cached = app.assigned_cache.read().await.get(&key).cloned();
 
