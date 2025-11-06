@@ -504,6 +504,7 @@ pub struct StageCriterion {
     pub context: super::schema::Context,
     pub rollout_percentage: i32,
     pub serve: Option<String>,
+    pub priority: i32,
 }
 
 #[derive(InputObject, Debug, Clone)]
@@ -515,6 +516,8 @@ pub struct CreateStageCriterionInput {
     pub rollout_percentage: i32,
     #[graphql(validator(max_length = 100))]
     pub serve: Option<String>,
+    #[graphql(default = 0)]
+    pub priority: i32,
 }
 
 // Users GraphQL types

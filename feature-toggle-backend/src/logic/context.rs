@@ -85,6 +85,7 @@ async fn map_db_feature_to_full_for_broadcast(
                 }),
                 rollout_percentage: c.rollout_percentage,
                 serve: c.serve.unwrap_or_default(),
+                priority: c.priority,
             })
             .collect::<Vec<_>>();
 

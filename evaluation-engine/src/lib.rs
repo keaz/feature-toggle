@@ -165,6 +165,8 @@ fn passes_stage_criteria(ec: &FeatureEvaluationContext, stage: &FeatureStage) ->
     let digest = hasher.finalize();
     let user_bucket = hash_to_percentage(&digest); // 0..100
 
+    // Evaluate criteria in order (by priority, lowest first)
+    // Note: Criteria should be pre-sorted by the caller (database query sorts by priority ASC)
     for crit in &stage.criterias {
         // Find provided value for the actual context key
         let ctx_key = &crit.context_key;

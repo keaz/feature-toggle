@@ -322,10 +322,15 @@ pub async fn evaluate_handler(
     }
 
     // Record the evaluation event for analytics
+    // For analytics, consider the feature "enabled" if:
+    // - A variant was resolved (Contextual features), OR
+    // - The value is boolean true (Simple features or Contextual without variants)
+    let evaluation_result = result.variant.is_some() || result.value.as_bool().unwrap_or(false);
+
     let evaluation_event = EvaluationEvent {
         feature_key: feature.key.clone(),
         environment_id: req.context.environment_id.clone(),
-        evaluation_result: result.value.as_bool().unwrap_or(false),
+        evaluation_result,
         evaluation_context: req.context.clone(),
         user_context: user_id_opt.clone(),
         evaluated_at: std::time::SystemTime::now(),
@@ -338,9 +343,11 @@ pub async fn evaluate_handler(
         pending_events.push(evaluation_event);
     }
 
-    // If evaluated to true, remember assignment with variant and enqueue for flush
-    let is_enabled = result.value.as_bool().unwrap_or(false);
-    if is_enabled {
+    // Determine if we should cache this assignment:
+    // - For features with variants: cache if a variant was resolved
+    // - For simple features (no variant): cache if value is true
+    let should_cache_assignment = result.variant.is_some() || result.value.as_bool().unwrap_or(false);
+    if should_cache_assignment {
         if let Some(user_id) = user_id_opt {
             let key = assignment_key(&user_id, &feature.id, &req.context.environment_id);
             {

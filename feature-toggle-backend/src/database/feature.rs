@@ -14,6 +14,8 @@ pub struct CreateStageCriterion {
     pub context_id: Uuid,
     pub rollout_percentage: i32,
     pub serve: Option<String>,
+    #[serde(default)]
+    pub priority: i32,
 }
 
 /// Represents feature growth data at a specific time bucket
@@ -765,12 +767,12 @@ impl FeatureRepository for FeatureRepositoryImpl {
     ) -> Result<Vec<crate::database::entity::StageCriterion>, Error> {
         // load criteria join contexts and entries
         let rows = sqlx::query!(
-            r#"SELECT sc.id, sc.stage_id, sc.context_key, sc.context_id, sc.rollout_percentage, sc.serve,
+            r#"SELECT sc.id, sc.stage_id, sc.context_key, sc.context_id, sc.rollout_percentage, sc.serve, sc.priority,
                       c.team_id, c.key
                FROM feature_stage_criteria sc
                JOIN contexts c ON c.id = sc.context_id
                WHERE sc.stage_id = $1
-               ORDER BY sc.context_key, c.key"#,
+               ORDER BY sc.priority ASC, sc.id"#,
             stage_id
         )
         .fetch_all(&self.pool)
@@ -807,6 +809,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
                 context,
                 rollout_percentage: r.rollout_percentage,
                 serve: r.serve,
+                priority: r.priority,
             });
         }
         Ok(out)
@@ -860,10 +863,11 @@ impl FeatureRepository for FeatureRepositoryImpl {
             let context_ids: Vec<Uuid> = criteria.iter().map(|c| c.context_id).collect();
             let rollouts: Vec<i32> = criteria.iter().map(|c| c.rollout_percentage).collect();
             let serves: Vec<Option<String>> = criteria.iter().map(|c| c.serve.clone()).collect();
+            let priorities: Vec<i32> = criteria.iter().map(|c| c.priority).collect();
             handle_error(None, sqlx::query!(
-                r#"INSERT INTO feature_stage_criteria(id, stage_id, context_key, context_id, rollout_percentage, serve)
-                   SELECT unnest($1::uuid[]), unnest($2::uuid[]), unnest($3::varchar[]), unnest($4::uuid[]), unnest($5::int[]), unnest($6::varchar[])"#,
-                &ids[..], &stage_ids[..], &context_keys[..], &context_ids[..], &rollouts[..], &serves as _
+                r#"INSERT INTO feature_stage_criteria(id, stage_id, context_key, context_id, rollout_percentage, serve, priority)
+                   SELECT unnest($1::uuid[]), unnest($2::uuid[]), unnest($3::varchar[]), unnest($4::uuid[]), unnest($5::int[]), unnest($6::varchar[]), unnest($7::int[])"#,
+                &ids[..], &stage_ids[..], &context_keys[..], &context_ids[..], &rollouts[..], &serves as _, &priorities[..]
             ).execute(&mut *tx).await)?;
         }
         tx.commit().await.map_err(Error::DatabaseError)?;

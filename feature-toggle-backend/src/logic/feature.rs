@@ -854,6 +854,7 @@ impl StageLogic for FeatureLogicImpl {
                         context_id: id_to_uuid(c.context_id)?,
                         rollout_percentage: c.rollout_percentage,
                         serve: c.serve,
+                        priority: c.priority,
                     })
                 },
             )
@@ -1092,6 +1093,7 @@ fn map_db_criterion_to_gql(
         context: map_db_ctx_to_gql(sc.context),
         rollout_percentage: sc.rollout_percentage,
         serve: sc.serve,
+        priority: sc.priority,
     }
 }
 

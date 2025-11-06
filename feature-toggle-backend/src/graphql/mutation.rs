@@ -916,6 +916,7 @@ async fn map_db_feature_to_full_for_broadcast(
                 }),
                 rollout_percentage: c.rollout_percentage,
                 serve: c.serve.unwrap_or_default(),
+                priority: c.priority,
             })
             .collect::<Vec<_>>();
 
@@ -1121,6 +1122,7 @@ mod tests {
             },
             rollout_percentage: 75,
             serve: None,
+            priority: 0,
         }];
         let stage_id_clone = stage_id.clone();
         mock.expect_set_stage_criteria()
