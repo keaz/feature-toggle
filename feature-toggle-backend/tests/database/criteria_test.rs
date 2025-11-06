@@ -59,14 +59,36 @@ async fn test_set_stage_criteria_replaces_existing() {
     let pool = init_pg_pool().await;
     let repo = feature::feature_repository(pool);
 
-    let stage_id = Uuid::parse_str("3eef17bc-9e06-411d-b5f4-7a786e68bb96").unwrap();
+    // Use a different stage that doesn't interfere with variant tests
+    let stage_id = Uuid::parse_str("1ab6ca79-a4fc-44ba-87e2-12884edf17f7").unwrap();
 
-    // Prepare a new set of criteria (will replace seeded ones)
+    // First set some initial criteria
+    let initial_crit = vec![
+        CreateStageCriterion {
+            context_key: "filter".to_string(),
+            context_id: Uuid::parse_str("cb461425-373b-49d9-9634-9a248612d7b7").unwrap(),
+            rollout_percentage: 50,
+            serve: None,
+            priority: 0,
+        },
+        CreateStageCriterion {
+            context_key: "filter".to_string(),
+            context_id: Uuid::parse_str("fcc0dfca-07b0-44ad-8d9a-21f2cd450d10").unwrap(),
+            rollout_percentage: 30,
+            serve: None,
+            priority: 1,
+        },
+    ];
+
+    let _ = repo.set_stage_criteria(stage_id, initial_crit).await;
+
+    // Now replace them with a single criterion
     let crit = vec![CreateStageCriterion {
         context_key: "filter".to_string(),
         context_id: Uuid::parse_str("cb461425-373b-49d9-9634-9a248612d7b7").unwrap(),
         rollout_percentage: 75,
         serve: None,
+        priority: 0,
     }];
 
     let set_result = repo.set_stage_criteria(stage_id, crit).await;
@@ -94,6 +116,7 @@ async fn test_set_stage_criteria_stage_not_found() {
         context_id: Uuid::parse_str("cb461425-373b-49d9-9634-9a248612d7b7").unwrap(),
         rollout_percentage: 10,
         serve: None,
+        priority: 0,
     }];
 
     let result = repo.set_stage_criteria(non_existing_stage, crit).await;

@@ -186,12 +186,14 @@ async fn test_set_stage_criteria_with_serve() {
             context_key: "filter".to_string(),
             rollout_percentage: 50,
             serve: Some("blue".to_string()),
+            priority: 0,
         },
         CreateStageCriterion {
             context_id,
             context_key: "filter2".to_string(),
             rollout_percentage: 30,
             serve: Some("green".to_string()),
+            priority: 1,
         },
     ];
 
@@ -209,7 +211,7 @@ async fn test_set_stage_criteria_with_serve() {
 }
 
 #[tokio::test]
-async fn test_stage_criteria_serve_references_variant() {
+async fn test_a_stage_criteria_serve_references_variant() {
     let pool = init_pg_pool().await;
 
     // Query the test data to verify serve field references correct variants
