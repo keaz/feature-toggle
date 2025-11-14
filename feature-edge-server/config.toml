@@ -44,3 +44,10 @@ max_attempts = 3
 stream_initial_delay_secs = 1
 # Maximum delay for stream reconnection in seconds
 stream_max_delay_secs = 30
+
+# Cache settings
+[cache]
+# Maximum number of features to cache (LRU eviction when exceeded)
+# Default: 10000
+# Set based on your memory constraints and feature count
+max_capacity = 10000

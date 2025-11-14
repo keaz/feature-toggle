@@ -62,6 +62,10 @@ stream_initial_delay_secs = 1
 
 # Maximum delay for stream reconnection in seconds
 stream_max_delay_secs = 30
+
+[cache]
+# Maximum number of features to cache (LRU eviction when exceeded)
+max_capacity = 10000
 ```
 
 ## Environment Variable Overrides
@@ -95,6 +99,9 @@ export EDGE_FLUSH_EVALUATION_FLUSH_SECS=60
 # Override retry settings
 export EDGE_RETRY_MAX_ATTEMPTS=5
 export EDGE_RETRY_BASE_DELAY_MS=1000
+
+# Override cache settings
+export EDGE_CACHE_MAX_CAPACITY=50000
 ```
 
 ## Configuration Precedence
@@ -134,6 +141,7 @@ services:
       EDGE_CLIENT_SECRET: "${CLIENT_SECRET}"
       EDGE_GRPC_TIMEOUT_SECS: "15"
       EDGE_FLUSH_ASSIGNMENT_FLUSH_SECS: "5"
+      EDGE_CACHE_MAX_CAPACITY: "20000"
     ports:
       - "8081:8081"
 ```
@@ -169,14 +177,17 @@ data:
   config.toml: |
     backend_grpc = "http://feature-toggle-backend:50051"
     http_addr = "0.0.0.0:8081"
-    
+
     [grpc]
     timeout_secs = 15
     concurrency_limit = 512
-    
+
     [flush]
     assignment_flush_secs = 5
     evaluation_flush_secs = 60
+
+    [cache]
+    max_capacity = 20000
 ```
 
 ### Secret for Credentials
@@ -274,6 +285,23 @@ spec:
 | `stream_initial_delay_secs` | u64 | 1 | Initial delay for stream reconnection in seconds |
 | `stream_max_delay_secs` | u64 | 30 | Maximum delay for stream reconnection in seconds |
 
+### Cache Settings (`[cache]`)
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `max_capacity` | u64 | 10000 | Maximum number of features to cache (LRU eviction when exceeded) |
+
+**Cache Capacity Recommendations:**
+
+- **Small deployment** (< 100 features): `max_capacity = 1000`
+- **Medium deployment** (100-1000 features): `max_capacity = 5000`
+- **Large deployment** (1000-10000 features): `max_capacity = 10000` (default)
+- **Very large deployment** (> 10000 features): `max_capacity = 50000` or higher
+
+Memory usage estimate: Each feature uses approximately 1-5 KB depending on configuration complexity. A cache of 10,000 features typically uses 10-50 MB of memory.
+
+**LRU Eviction:** When the cache reaches `max_capacity`, the least recently used features are automatically evicted to make room for new ones. This prevents unbounded memory growth while maintaining performance for frequently accessed features.
+
 ## Troubleshooting
 
 ### Configuration Not Loading
@@ -308,6 +336,22 @@ spec:
 2. **Check timeouts**: Increase `connect_timeout_secs` and `timeout_secs` if needed.
 
 3. **Verify client credentials**: Ensure `client_id` and `client_secret` are correct.
+
+### Cache Issues
+
+1. **High memory usage**: If the edge server is consuming too much memory, reduce `max_capacity`:
+   ```toml
+   [cache]
+   max_capacity = 5000  # Reduce from default 10000
+   ```
+
+2. **Frequent backend requests**: If you see many gRPC calls to fetch features, your cache may be too small. Increase `max_capacity`:
+   ```toml
+   [cache]
+   max_capacity = 20000  # Increase from default 10000
+   ```
+
+3. **Check cache statistics**: Monitor the edge server logs for cache eviction messages. If you see frequent evictions, consider increasing capacity.
 
 ## Migration from Environment Variables
 
