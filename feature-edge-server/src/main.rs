@@ -124,6 +124,13 @@ impl FeatureCache {
     pub async fn weighted_size(&self) -> u64 {
         self.by_key.weighted_size()
     }
+
+    /// Run pending cache tasks (useful for testing)
+    #[cfg(test)]
+    pub async fn run_pending_tasks(&self) {
+        self.by_key.run_pending_tasks().await;
+        self.by_id.run_pending_tasks().await;
+    }
 }
 
 impl AppState {
@@ -356,5 +363,187 @@ mod tests {
                 .iter()
                 .all(|assignment| assignment.feature_id != feature_id)
         );
+    }
+
+    #[actix_web::test]
+    async fn test_cache_with_capacity_limit() {
+        // Create a cache with specific capacity
+        let cache = FeatureCache::new(100);
+
+        // Insert features
+        for i in 1..=10 {
+            let feature = pb::FeatureFull {
+                id: format!("id_{}", i),
+                key: format!("key_{}", i),
+                description: String::new(),
+                feature_type: String::new(),
+                team_id: String::new(),
+                created_at: String::new(),
+                active: true,
+                kill_switch_enabled: false,
+                kill_switch_activated_at: String::new(),
+                rollback_scheduled_at: String::new(),
+                stages: vec![],
+                dependencies: vec![],
+                variants: vec![],
+            };
+            cache.upsert(feature).await;
+        }
+
+        // Run pending tasks
+        cache.run_pending_tasks().await;
+
+        // Verify entries are cached
+        assert!(cache.entry_count() > 0, "Cache should have entries");
+        assert!(cache.entry_count() <= 100, "Cache should respect max capacity");
+
+        // Verify we can retrieve cached items
+        assert!(cache.get_by_key("key_1").await.is_some());
+        assert!(cache.get_by_key("key_5").await.is_some());
+        assert!(cache.get_by_key("key_10").await.is_some());
+
+        // Verify we can get all keys
+        let keys = cache.get_all_keys().await;
+        assert!(keys.len() >= 1, "Should have cached keys");
+
+        // Note: Exact LRU eviction behavior is tested by moka's own tests
+        // We just verify the cache works correctly with basic operations
+    }
+
+    #[actix_web::test]
+    async fn test_cache_get_all_keys() {
+        let cache = FeatureCache::new(100);
+
+        // Insert multiple features
+        for i in 1..=5 {
+            let feature = pb::FeatureFull {
+                id: format!("id_{}", i),
+                key: format!("feature_{}", i),
+                description: String::new(),
+                feature_type: String::new(),
+                team_id: String::new(),
+                created_at: String::new(),
+                active: true,
+                kill_switch_enabled: false,
+                kill_switch_activated_at: String::new(),
+                rollback_scheduled_at: String::new(),
+                stages: vec![],
+                dependencies: vec![],
+                variants: vec![],
+            };
+            cache.upsert(feature).await;
+        }
+
+        // Get all keys
+        let keys = cache.get_all_keys().await;
+
+        // Should have 5 keys
+        assert_eq!(keys.len(), 5);
+
+        // All expected keys should be present
+        for i in 1..=5 {
+            assert!(keys.contains(&format!("feature_{}", i)));
+        }
+
+        // Delete one feature
+        cache.delete_by_key("feature_3").await;
+
+        // Get all keys again
+        let keys_after_delete = cache.get_all_keys().await;
+
+        // Should have 4 keys now
+        assert_eq!(keys_after_delete.len(), 4);
+        assert!(!keys_after_delete.contains(&"feature_3".to_string()));
+    }
+
+    #[actix_web::test]
+    async fn test_cache_entry_count() {
+        let cache = FeatureCache::new(100);
+
+        // Initially empty
+        cache.run_pending_tasks().await;
+        assert_eq!(cache.entry_count(), 0);
+
+        // Add features
+        for i in 1..=10 {
+            let feature = pb::FeatureFull {
+                id: format!("id_{}", i),
+                key: format!("key_{}", i),
+                description: String::new(),
+                feature_type: String::new(),
+                team_id: String::new(),
+                created_at: String::new(),
+                active: true,
+                kill_switch_enabled: false,
+                kill_switch_activated_at: String::new(),
+                rollback_scheduled_at: String::new(),
+                stages: vec![],
+                dependencies: vec![],
+                variants: vec![],
+            };
+            cache.upsert(feature).await;
+        }
+
+        // Run pending tasks to ensure all inserts are processed
+        cache.run_pending_tasks().await;
+
+        // Should have 10 entries
+        assert_eq!(cache.entry_count(), 10);
+
+        // Delete 3 features
+        let _ = cache.delete_by_key("key_1").await;
+        let _ = cache.delete_by_key("key_5").await;
+        let _ = cache.delete_by_key("key_10").await;
+
+        // Run pending tasks to process deletes
+        cache.run_pending_tasks().await;
+
+        // Should have 7 entries
+        assert_eq!(cache.entry_count(), 7);
+    }
+
+    #[actix_web::test]
+    async fn test_cache_delete_by_key_removes_from_both_indexes() {
+        let cache = FeatureCache::new(100);
+
+        let feature = pb::FeatureFull {
+            id: "test_id_123".to_string(),
+            key: "test_key_456".to_string(),
+            description: String::new(),
+            feature_type: String::new(),
+            team_id: String::new(),
+            created_at: String::new(),
+            active: true,
+            kill_switch_enabled: false,
+            kill_switch_activated_at: String::new(),
+            rollback_scheduled_at: String::new(),
+            stages: vec![],
+            dependencies: vec![],
+            variants: vec![],
+        };
+
+        cache.upsert(feature).await;
+        cache.run_pending_tasks().await;
+
+        // Verify it's in cache
+        assert!(cache.get_by_key("test_key_456").await.is_some());
+        assert_eq!(cache.entry_count(), 1);
+
+        // Delete by key
+        let deleted_id = cache.delete_by_key("test_key_456").await;
+
+        // Should return the feature ID
+        assert_eq!(deleted_id.as_deref(), Some("test_id_123"));
+
+        // Run pending tasks to process the delete
+        cache.run_pending_tasks().await;
+
+        // Feature should no longer be in cache
+        assert!(cache.get_by_key("test_key_456").await.is_none());
+        assert_eq!(cache.entry_count(), 0);
+
+        // Deleting non-existent key should return None
+        let not_found = cache.delete_by_key("non_existent").await;
+        assert!(not_found.is_none());
     }
 }

@@ -241,3 +241,73 @@ pub fn load_config() -> Result<EdgeConfig, config::ConfigError> {
 
     settings.try_deserialize()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cache_config_default_values() {
+        let config = CacheConfig::default();
+        assert_eq!(config.max_capacity, 10000);
+    }
+
+    #[test]
+    fn test_cache_config_custom_values() {
+        let config = CacheConfig {
+            max_capacity: 5000,
+        };
+        assert_eq!(config.max_capacity, 5000);
+    }
+
+    #[test]
+    fn test_grpc_config_defaults() {
+        let config = GrpcConfig::default();
+        assert_eq!(config.connect_timeout_secs, 5);
+        assert_eq!(config.timeout_secs, 10);
+        assert_eq!(config.tcp_keepalive_secs, 30);
+        assert_eq!(config.http2_keepalive_secs, 20);
+        assert!(config.keep_alive_while_idle);
+        assert_eq!(config.concurrency_limit, 256);
+        assert!(config.tcp_nodelay);
+    }
+
+    #[test]
+    fn test_flush_config_defaults() {
+        let config = FlushConfig::default();
+        assert_eq!(config.assignment_flush_secs, 10);
+        assert_eq!(config.evaluation_flush_secs, 30);
+    }
+
+    #[test]
+    fn test_retry_config_defaults() {
+        let config = RetryConfig::default();
+        assert_eq!(config.base_delay_ms, 500);
+        assert_eq!(config.max_attempts, 3);
+        assert_eq!(config.stream_initial_delay_secs, 1);
+        assert_eq!(config.stream_max_delay_secs, 30);
+    }
+
+    #[test]
+    fn test_retry_config_duration_conversions() {
+        let config = RetryConfig::default();
+        assert_eq!(config.stream_initial_delay(), Duration::from_secs(1));
+        assert_eq!(config.stream_max_delay(), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_grpc_config_duration_conversions() {
+        let config = GrpcConfig::default();
+        assert_eq!(config.connect_timeout(), Duration::from_secs(5));
+        assert_eq!(config.timeout(), Duration::from_secs(10));
+        assert_eq!(config.tcp_keepalive(), Some(Duration::from_secs(30)));
+        assert_eq!(config.http2_keepalive(), Duration::from_secs(20));
+    }
+
+    #[test]
+    fn test_flush_config_duration_conversions() {
+        let config = FlushConfig::default();
+        assert_eq!(config.assignment_flush_interval(), Duration::from_secs(10));
+        assert_eq!(config.evaluation_flush_interval(), Duration::from_secs(30));
+    }
+}

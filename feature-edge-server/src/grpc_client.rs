@@ -486,3 +486,137 @@ pub async fn run_evaluation_flush_task(app: AppState) {
 pub fn assignment_key(user_id: &str, feature_id: &str, environment_id: &str) -> String {
     format!("{}|{}|{}", user_id, feature_id, environment_id)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::FeatureCache;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+    use tonic::transport::Endpoint;
+
+    #[tokio::test]
+    async fn test_send_initial_subscribe_with_cached_keys() {
+        // Create a cache and populate it with features
+        let cache = Arc::new(FeatureCache::new(100));
+
+        // Add some features to the cache
+        for i in 1..=5 {
+            let feature = crate::pb::FeatureFull {
+                id: format!("id_{}", i),
+                key: format!("feature_key_{}", i),
+                description: String::new(),
+                feature_type: String::new(),
+                team_id: String::new(),
+                created_at: String::new(),
+                active: true,
+                kill_switch_enabled: false,
+                kill_switch_activated_at: String::new(),
+                rollback_scheduled_at: String::new(),
+                stages: vec![],
+                dependencies: vec![],
+                variants: vec![],
+            };
+            cache.upsert(feature).await;
+        }
+
+        // Create AppState with the populated cache
+        let channel = Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
+        let grpc_client = crate::pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
+
+        let app_state = crate::AppState {
+            cache,
+            grpc: Arc::new(tokio::sync::Mutex::new(grpc_client)),
+            client_id: "test-client-id".to_string(),
+            client_secret: "test-secret".to_string(),
+            connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            assigned_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            pending_assignments: Arc::new(RwLock::new(Vec::new())),
+            flush_interval: std::time::Duration::from_secs(10),
+            pending_evaluation_events: Arc::new(RwLock::new(Vec::new())),
+            evaluation_flush_interval: std::time::Duration::from_secs(30),
+            retry_config: crate::config::RetryConfig::default(),
+        };
+
+        // Create a channel to send the subscribe request
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::pb::StreamRequest>(10);
+
+        // Call send_initial_subscribe
+        send_initial_subscribe(&tx, &app_state).await;
+
+        // Receive the message
+        let received = rx.recv().await;
+        assert!(received.is_some());
+
+        let stream_request = received.unwrap();
+        assert!(stream_request.payload.is_some());
+
+        // Extract the subscribe request
+        match stream_request.payload.unwrap() {
+            crate::pb::stream_request::Payload::Subscribe(subscribe) => {
+                // Verify client credentials
+                assert_eq!(subscribe.client_id, "test-client-id");
+                assert_eq!(subscribe.client_secret, "test-secret");
+
+                // Verify that cached feature keys were sent
+                assert_eq!(subscribe.feature_keys.len(), 5);
+
+                // Verify all feature keys are present
+                for i in 1..=5 {
+                    let expected_key = format!("feature_key_{}", i);
+                    assert!(
+                        subscribe.feature_keys.contains(&expected_key),
+                        "Expected to find {} in feature_keys",
+                        expected_key
+                    );
+                }
+            }
+            _ => panic!("Expected Subscribe payload"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_send_initial_subscribe_with_empty_cache() {
+        // Create an empty cache
+        let cache = Arc::new(FeatureCache::new(100));
+
+        let channel = Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
+        let grpc_client = crate::pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
+
+        let app_state = crate::AppState {
+            cache,
+            grpc: Arc::new(tokio::sync::Mutex::new(grpc_client)),
+            client_id: "test-client-id".to_string(),
+            client_secret: "test-secret".to_string(),
+            connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            assigned_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            pending_assignments: Arc::new(RwLock::new(Vec::new())),
+            flush_interval: std::time::Duration::from_secs(10),
+            pending_evaluation_events: Arc::new(RwLock::new(Vec::new())),
+            evaluation_flush_interval: std::time::Duration::from_secs(30),
+            retry_config: crate::config::RetryConfig::default(),
+        };
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::pb::StreamRequest>(10);
+
+        send_initial_subscribe(&tx, &app_state).await;
+
+        let received = rx.recv().await;
+        assert!(received.is_some());
+
+        let stream_request = received.unwrap();
+        match stream_request.payload.unwrap() {
+            crate::pb::stream_request::Payload::Subscribe(subscribe) => {
+                // Empty cache should send empty feature_keys array
+                assert_eq!(subscribe.feature_keys.len(), 0);
+            }
+            _ => panic!("Expected Subscribe payload"),
+        }
+    }
+
+    #[test]
+    fn test_assignment_key_format() {
+        let key = assignment_key("user-123", "feature-456", "env-789");
+        assert_eq!(key, "user-123|feature-456|env-789");
+    }
+}
