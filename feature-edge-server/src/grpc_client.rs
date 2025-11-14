@@ -150,10 +150,16 @@ pub fn build_endpoint(grpc_addr: &str) -> Endpoint {
 
 /// Send initial subscribe message to the streaming connection
 async fn send_initial_subscribe(tx: &tokio::sync::mpsc::Sender<pb::StreamRequest>, app: &AppState) {
+    // Collect all cached feature keys to send to backend
+    // This allows backend to rebuild its memory of which features this client is interested in
+    let cached_keys = app.cache.get_all_keys().await;
+
+    tracing::info!("Subscribing with {} cached feature keys", cached_keys.len());
+
     let subscribe = pb::SubscribeRequest {
         client_id: app.client_id.clone(),
         client_secret: app.client_secret.clone(),
-        feature_keys: vec![],
+        feature_keys: cached_keys,
         environment_id: "".into(),
     };
     let initial = pb::StreamRequest {

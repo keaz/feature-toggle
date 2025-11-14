@@ -774,6 +774,19 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
             }
         }
 
+        // Update the requested_keys map with the merged subscription keys
+        // This rebuilds backend's memory of which features this client is interested in
+        // This is crucial when backend restarts and edge reconnects with cached keys
+        if !subscribe_all && !subscription_keys.is_empty() {
+            let mut map = self.requested_keys.write().await;
+            map.insert(client_id, subscription_keys.clone());
+            log::info!(
+                "gRPC: Updated requested_keys for client {} with {} feature keys",
+                client_id,
+                subscription_keys.len()
+            );
+        }
+
         // Send initial snapshot for tracked keys
         {
             let feature_repo = &self.feature_repo;

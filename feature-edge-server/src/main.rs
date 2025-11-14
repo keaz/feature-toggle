@@ -92,6 +92,12 @@ impl FeatureCache {
         let by_key = self.by_key.read().await;
         by_key.get(key).cloned()
     }
+
+    /// Get all cached feature keys
+    pub async fn get_all_keys(&self) -> Vec<String> {
+        let by_key = self.by_key.read().await;
+        by_key.keys().cloned().collect()
+    }
 }
 
 impl AppState {
