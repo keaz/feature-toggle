@@ -1,5 +1,5 @@
 use actix_web::{App, HttpServer, web};
-use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 use tonic::transport::Endpoint;
 use tracing::{error, info};
@@ -56,32 +56,41 @@ pub struct EvaluationEvent {
     pub variant: Option<String>,
 }
 
-#[derive(Default)]
 pub struct FeatureCache {
-    by_key: RwLock<HashMap<String, pb::FeatureFull>>, // key -> feature
-    by_id: RwLock<HashMap<String, String>>,           // id -> key
+    // LRU cache with configurable max capacity
+    by_key: moka::future::Cache<String, pb::FeatureFull>,
+    // Secondary index for looking up by ID (also LRU)
+    by_id: moka::future::Cache<String, String>,
 }
 
 impl FeatureCache {
-    pub async fn upsert(&self, f: pb::FeatureFull) {
-        let key = f.key.clone();
-        let id = f.id.clone();
-        {
-            let mut by_key = self.by_key.write().await;
-            by_key.insert(key.clone(), f);
-        }
-        {
-            let mut by_id = self.by_id.write().await;
-            by_id.insert(id, key);
+    /// Create a new FeatureCache with the specified maximum capacity
+    /// When capacity is exceeded, least recently used items are evicted
+    pub fn new(max_capacity: u64) -> Self {
+        tracing::info!("Initializing FeatureCache with max_capacity={}", max_capacity);
+        Self {
+            by_key: moka::future::Cache::new(max_capacity),
+            by_id: moka::future::Cache::new(max_capacity),
         }
     }
 
+    pub async fn upsert(&self, f: pb::FeatureFull) {
+        let key = f.key.clone();
+        let id = f.id.clone();
+
+        // Insert into both caches
+        self.by_key.insert(key.clone(), f).await;
+        self.by_id.insert(id, key).await;
+    }
+
     pub async fn delete_by_key(&self, key: &str) -> Option<String> {
-        let mut by_key = self.by_key.write().await;
-        if let Some(f) = by_key.remove(key) {
+        if let Some(f) = self.by_key.get(key).await {
             let feature_id = f.id.clone();
-            let mut by_id = self.by_id.write().await;
-            by_id.remove(&f.id);
+
+            // Remove from both caches
+            self.by_key.invalidate(key).await;
+            self.by_id.invalidate(&feature_id).await;
+
             Some(feature_id)
         } else {
             None
@@ -89,14 +98,31 @@ impl FeatureCache {
     }
 
     pub async fn get_by_key(&self, key: &str) -> Option<pb::FeatureFull> {
-        let by_key = self.by_key.read().await;
-        by_key.get(key).cloned()
+        self.by_key.get(key).await
     }
 
     /// Get all cached feature keys
+    /// Note: This iterates over all cached entries, use sparingly
     pub async fn get_all_keys(&self) -> Vec<String> {
-        let by_key = self.by_key.read().await;
-        by_key.keys().cloned().collect()
+        // Run a sync operation to collect all keys
+        self.by_key.run_pending_tasks().await;
+
+        // Iterate over cache entries
+        let mut keys = Vec::new();
+        self.by_key.iter().for_each(|(key, _)| {
+            keys.push(key.as_ref().clone());
+        });
+        keys
+    }
+
+    /// Get current cache size (number of entries)
+    pub fn entry_count(&self) -> u64 {
+        self.by_key.entry_count()
+    }
+
+    /// Get cache statistics
+    pub async fn weighted_size(&self) -> u64 {
+        self.by_key.weighted_size()
     }
 }
 
@@ -167,7 +193,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let grpc_client = pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
 
     let state = AppState {
-        cache: Arc::new(FeatureCache::default()),
+        cache: Arc::new(FeatureCache::new(cfg.cache.max_capacity)),
         grpc: Arc::new(tokio::sync::Mutex::new(grpc_client)),
         client_id: cfg.client_id.clone(),
         client_secret: cfg.client_secret.clone(),
@@ -229,7 +255,7 @@ mod tests {
 
     #[actix_web::test]
     async fn test_feature_cache_ops() {
-        let cache = FeatureCache::default();
+        let cache = FeatureCache::new(1000);
         let f1 = pb::FeatureFull {
             id: "test_id".to_string(),
             key: "test_key".to_string(),
@@ -255,7 +281,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_purge_assignments_for_feature() {
-        let cache = Arc::new(FeatureCache::default());
+        let cache = Arc::new(FeatureCache::new(1000));
         let channel = Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
         let grpc_client = pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
         let state = AppState {

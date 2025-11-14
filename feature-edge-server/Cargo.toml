@@ -25,6 +25,8 @@ tokio-retry = "0.3"
 # Configuration management
 config = "0.14"
 toml = "0.8"
+# LRU cache with size-based eviction
+moka = { version = "0.12", features = ["future"] }
 
 [build-dependencies]
 tonic-build = { version = "0.12" }

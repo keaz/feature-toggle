@@ -26,6 +26,10 @@ pub struct EdgeConfig {
     /// Retry settings
     #[serde(default)]
     pub retry: RetryConfig,
+
+    /// Cache settings
+    #[serde(default)]
+    pub cache: CacheConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +91,17 @@ pub struct RetryConfig {
     /// Maximum delay for stream reconnection in seconds
     #[serde(default = "default_stream_max_delay")]
     pub stream_max_delay_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheConfig {
+    /// Maximum number of features to cache (LRU eviction when exceeded)
+    #[serde(default = "default_max_capacity")]
+    pub max_capacity: u64,
+}
+
+fn default_max_capacity() -> u64 {
+    10000
 }
 
 // Default value functions
@@ -157,6 +172,14 @@ impl Default for RetryConfig {
             max_attempts: default_max_attempts(),
             stream_initial_delay_secs: default_stream_initial_delay(),
             stream_max_delay_secs: default_stream_max_delay(),
+        }
+    }
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            max_capacity: default_max_capacity(),
         }
     }
 }
