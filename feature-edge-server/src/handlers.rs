@@ -328,7 +328,7 @@ pub async fn evaluate_handler(
     // Perform evaluation (check cache first if we have a user_id)
     let (mut result, prior_assignment) = if let Some(user_id) = &user_id_opt {
         let key = assignment_key(user_id, &feature.id, &req.context.environment_id);
-        let cached = app.assigned_cache.read().await.get(&key).cloned();
+        let cached = app.assigned_cache.get(&key).map(|entry| entry.value().clone());
 
         if let Some(cached_assignment) = cached {
             // Cached assignment - return cached result with variant
@@ -375,10 +375,8 @@ pub async fn evaluate_handler(
         variant: result.variant.clone(),
     };
 
-    {
-        let mut pending_events = app.pending_evaluation_events.write().await;
-        pending_events.push(evaluation_event);
-    }
+    // Non-blocking send - if channel is full, this will fail silently (unbounded so shouldn't happen)
+    let _ = app.evaluation_event_tx.send(evaluation_event);
 
     // Determine if we should cache this assignment:
     // - For features with variants: cache if a variant was resolved
@@ -387,17 +385,14 @@ pub async fn evaluate_handler(
     if should_cache_assignment {
         if let Some(user_id) = user_id_opt {
             let key = assignment_key(&user_id, &feature.id, &req.context.environment_id);
-            {
-                let mut cache = app.assigned_cache.write().await;
-                cache.insert(
-                    key,
-                    crate::CachedAssignment {
-                        value: result.value.clone(),
-                        variant: result.variant.clone(),
-                    },
-                );
-            }
-            let mut pending = app.pending_assignments.write().await;
+            app.assigned_cache.insert(
+                key,
+                crate::CachedAssignment {
+                    value: result.value.clone(),
+                    variant: result.variant.clone(),
+                },
+            );
+            let mut pending = app.pending_assignments.lock().await;
             pending.push(crate::grpc_client::UserAssignment {
                 user_id,
                 feature_id: feature.id.clone(),

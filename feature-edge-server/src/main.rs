@@ -1,6 +1,5 @@
 use actix_web::{App, HttpServer, web};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
-use tokio::sync::RwLock;
 use tonic::transport::Endpoint;
 use tracing::{error, info};
 use utoipa::OpenApi;
@@ -71,11 +70,11 @@ pub struct AppState {
     client_secret: String,
     connected: Arc<std::sync::atomic::AtomicBool>,
     // Sticky assignments cache with variant information and pending flush queue
-    assigned_cache: Arc<RwLock<std::collections::HashMap<String, CachedAssignment>>>,
-    pending_assignments: Arc<RwLock<Vec<grpc_client::UserAssignment>>>,
+    assigned_cache: Arc<dashmap::DashMap<String, CachedAssignment>>,
+    pending_assignments: Arc<tokio::sync::Mutex<Vec<grpc_client::UserAssignment>>>,
     flush_interval: Duration,
-    // Evaluation events tracking
-    pending_evaluation_events: Arc<RwLock<Vec<EvaluationEvent>>>,
+    // Evaluation events tracking (using channel for lock-free writes)
+    evaluation_event_tx: tokio::sync::mpsc::UnboundedSender<EvaluationEvent>,
     evaluation_flush_interval: Duration,
     // Retry configuration
     retry_config: config::RetryConfig,
@@ -199,24 +198,23 @@ impl MappedFeatureCache {
     pub fn entry_count(&self) -> u64 {
         self.cache.entry_count()
     }
+
+    /// Run pending cache tasks (useful for testing)
+    #[cfg(test)]
+    pub async fn run_pending_tasks(&self) {
+        self.cache.run_pending_tasks().await;
+    }
 }
 
 impl AppState {
     pub async fn purge_assignments_for_feature(&self, feature_id: &str) {
-        {
-            let mut cache = self.assigned_cache.write().await;
-            let keys: Vec<String> = cache
-                .keys()
-                .filter(|entry| entry.split('|').nth(1) == Some(feature_id))
-                .cloned()
-                .collect();
-            for key in keys {
-                cache.remove(&key);
-            }
-        }
+        // DashMap allows concurrent iteration and removal
+        self.assigned_cache.retain(|key, _| {
+            key.split('|').nth(1) != Some(feature_id)
+        });
 
         {
-            let mut pending = self.pending_assignments.write().await;
+            let mut pending = self.pending_assignments.lock().await;
             pending.retain(|assignment| assignment.feature_id != feature_id);
         }
     }
@@ -267,6 +265,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let channel = endpoint.connect().await?;
     let grpc_client = pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
 
+    // Create unbounded channel for evaluation events
+    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+
     let state = AppState {
         cache: Arc::new(FeatureCache::new(cfg.cache.max_capacity)),
         mapped_cache: Arc::new(MappedFeatureCache::new(cfg.cache.max_capacity)),
@@ -275,10 +276,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         client_id: cfg.client_id.clone(),
         client_secret: cfg.client_secret.clone(),
         connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        assigned_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
-        pending_assignments: Arc::new(RwLock::new(Vec::new())),
+        assigned_cache: Arc::new(dashmap::DashMap::new()),
+        pending_assignments: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         flush_interval: cfg.flush.assignment_flush_interval(),
-        pending_evaluation_events: Arc::new(RwLock::new(Vec::new())),
+        evaluation_event_tx: event_tx,
         evaluation_flush_interval: cfg.flush.evaluation_flush_interval(),
         retry_config: cfg.retry.clone(),
     };
@@ -301,7 +302,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Start periodic evaluation events flush task
     let evaluation_flush_state = state.clone();
     tokio::spawn(
-        async move { grpc_client::run_evaluation_flush_task(evaluation_flush_state).await },
+        async move { grpc_client::run_evaluation_flush_task(evaluation_flush_state, event_rx).await },
     );
 
     info!(
@@ -363,6 +364,7 @@ mod tests {
         let client_info_cache = Arc::new(ClientInfoCache::new(Duration::from_secs(300)));
         let channel = Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
         let grpc_client = pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
         let state = AppState {
             cache,
             mapped_cache,
@@ -371,42 +373,39 @@ mod tests {
             client_id: "client".into(),
             client_secret: "secret".into(),
             connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            assigned_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            pending_assignments: Arc::new(RwLock::new(Vec::new())),
+            assigned_cache: Arc::new(dashmap::DashMap::new()),
+            pending_assignments: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             flush_interval: Duration::from_secs(60),
-            pending_evaluation_events: Arc::new(RwLock::new(Vec::new())),
+            evaluation_event_tx: event_tx,
             evaluation_flush_interval: Duration::from_secs(60),
             retry_config: config::RetryConfig::default(),
         };
 
         let feature_id = "fea-123";
-        {
-            let mut cache = state.assigned_cache.write().await;
-            cache.insert(
-                format!("user-1|{}|env-1", feature_id),
-                CachedAssignment {
-                    value: serde_json::json!(true),
-                    variant: None,
-                },
-            );
-            cache.insert(
-                format!("user-2|{}|env-1", feature_id),
-                CachedAssignment {
-                    value: serde_json::json!(true),
-                    variant: None,
-                },
-            );
-            cache.insert(
-                "user-3|other|env".to_string(),
-                CachedAssignment {
-                    value: serde_json::json!(true),
-                    variant: None,
-                },
-            );
-        }
+        state.assigned_cache.insert(
+            format!("user-1|{}|env-1", feature_id),
+            CachedAssignment {
+                value: serde_json::json!(true),
+                variant: None,
+            },
+        );
+        state.assigned_cache.insert(
+            format!("user-2|{}|env-1", feature_id),
+            CachedAssignment {
+                value: serde_json::json!(true),
+                variant: None,
+            },
+        );
+        state.assigned_cache.insert(
+            "user-3|other|env".to_string(),
+            CachedAssignment {
+                value: serde_json::json!(true),
+                variant: None,
+            },
+        );
 
         {
-            let mut pending = state.pending_assignments.write().await;
+            let mut pending = state.pending_assignments.lock().await;
             pending.push(crate::grpc_client::UserAssignment {
                 user_id: "user-1".into(),
                 feature_id: feature_id.into(),
@@ -425,12 +424,10 @@ mod tests {
 
         state.purge_assignments_for_feature(feature_id).await;
 
-        let cache = state.assigned_cache.read().await;
-        assert_eq!(cache.len(), 1);
-        assert!(cache.keys().all(|entry| !entry.contains(feature_id)));
-        drop(cache);
+        assert_eq!(state.assigned_cache.len(), 1);
+        assert!(state.assigned_cache.iter().all(|entry| !entry.key().contains(feature_id)));
 
-        let pending = state.pending_assignments.read().await;
+        let pending = state.pending_assignments.lock().await;
         assert_eq!(pending.len(), 1);
         assert!(
             pending
@@ -574,6 +571,41 @@ mod tests {
 
         // Should have 7 entries
         assert_eq!(cache.entry_count(), 7);
+    }
+
+    #[actix_web::test]
+    async fn test_mapped_feature_cache_operations() {
+        let mapped_cache = MappedFeatureCache::new(100);
+
+        // Create a sample engine feature
+        let engine_feature = Arc::new(evaluation_engine::Feature {
+            enabled: true,
+            dependencies: vec![],
+            stages: vec![],
+            variants: vec![],
+        });
+
+        // Test insert and get
+        mapped_cache.insert("test_key".to_string(), engine_feature.clone()).await;
+        mapped_cache.run_pending_tasks().await;
+        assert_eq!(mapped_cache.entry_count(), 1);
+
+        let retrieved = mapped_cache.get("test_key").await;
+        assert!(retrieved.is_some());
+        let retrieved_feature = retrieved.unwrap();
+        assert_eq!(retrieved_feature.enabled, true);
+
+        // Test cache hit (should return the same Arc)
+        let retrieved_again = mapped_cache.get("test_key").await.unwrap();
+        assert!(Arc::ptr_eq(&retrieved_feature, &retrieved_again));
+
+        // Test invalidate
+        mapped_cache.invalidate("test_key").await;
+        mapped_cache.run_pending_tasks().await;
+        assert!(mapped_cache.get("test_key").await.is_none());
+
+        // Test non-existent key
+        assert!(mapped_cache.get("non_existent").await.is_none());
     }
 
     #[actix_web::test]

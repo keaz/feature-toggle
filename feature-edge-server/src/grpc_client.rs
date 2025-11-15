@@ -134,24 +134,21 @@ pub async fn load_user_assignments(app: &AppState) -> Result<usize, tonic::Statu
     let mut client = app.grpc.lock().await.clone();
     let resp = client.list_user_assignments(req).await?.into_inner();
     let mut count = 0usize;
-    {
-        let mut cache = app.assigned_cache.write().await;
-        for a in resp.assignments.into_iter() {
-            if a.assigned {
-                let key = assignment_key(&a.user_id, &a.feature_id, &a.environment_id);
-                cache.insert(
-                    key,
-                    crate::CachedAssignment {
-                        value: serde_json::json!(true),
-                        variant: if a.variant.is_empty() {
-                            None
-                        } else {
-                            Some(a.variant)
-                        },
+    for a in resp.assignments.into_iter() {
+        if a.assigned {
+            let key = assignment_key(&a.user_id, &a.feature_id, &a.environment_id);
+            app.assigned_cache.insert(
+                key,
+                crate::CachedAssignment {
+                    value: serde_json::json!(true),
+                    variant: if a.variant.is_empty() {
+                        None
+                    } else {
+                        Some(a.variant)
                     },
-                );
-                count += 1;
-            }
+                },
+            );
+            count += 1;
         }
     }
     Ok(count)
@@ -329,7 +326,7 @@ pub async fn run_flush_task(app: AppState) {
         tokio::time::sleep(app.flush_interval).await;
         // Drain pending assignments
         let to_send: Vec<UserAssignment> = {
-            let mut lock = app.pending_assignments.write().await;
+            let mut lock = app.pending_assignments.lock().await;
             if lock.is_empty() {
                 Vec::new()
             } else {
@@ -395,7 +392,7 @@ pub async fn run_flush_task(app: AppState) {
                     app.flush_interval.as_secs()
                 );
                 // requeue for next flush attempt
-                let mut lock = app.pending_assignments.write().await;
+                let mut lock = app.pending_assignments.lock().await;
                 lock.extend(to_send);
             }
         }
@@ -403,24 +400,26 @@ pub async fn run_flush_task(app: AppState) {
 }
 
 /// Background task to periodically flush evaluation events to backend
-pub async fn run_evaluation_flush_task(app: AppState) {
+pub async fn run_evaluation_flush_task(
+    app: AppState,
+    mut event_rx: tokio::sync::mpsc::UnboundedReceiver<crate::EvaluationEvent>
+) {
+    let mut buffer = Vec::new();
+    let flush_interval = app.evaluation_flush_interval;
+
     loop {
-        tokio::time::sleep(app.evaluation_flush_interval).await;
+        tokio::time::sleep(flush_interval).await;
 
-        // Drain pending evaluation events
-        let to_send: Vec<crate::EvaluationEvent> = {
-            let mut lock = app.pending_evaluation_events.write().await;
-            if lock.is_empty() {
-                Vec::new()
-            } else {
-                let v = lock.drain(..).collect::<Vec<_>>();
-                v
-            }
-        };
+        // Drain all available events from channel
+        while let Ok(event) = event_rx.try_recv() {
+            buffer.push(event);
+        }
 
-        if to_send.is_empty() {
+        if buffer.is_empty() {
             continue;
         }
+
+        let to_send = std::mem::take(&mut buffer);
 
         // Convert to proto format
         let mut proto_events = Vec::new();
@@ -497,11 +496,10 @@ pub async fn run_evaluation_flush_task(app: AppState) {
                 error!("Failed to push evaluation events after retries: {}", e);
                 warn!(
                     "Will retry on next flush cycle ({}s)",
-                    app.evaluation_flush_interval.as_secs()
+                    flush_interval.as_secs()
                 );
-                // Requeue the events on failure
-                let mut lock = app.pending_evaluation_events.write().await;
-                lock.extend(to_send);
+                // Requeue the events on failure by putting them back in the buffer
+                buffer.extend(to_send);
             }
         }
     }
@@ -517,7 +515,6 @@ mod tests {
     use super::*;
     use crate::FeatureCache;
     use std::sync::Arc;
-    use tokio::sync::RwLock;
     use tonic::transport::Endpoint;
 
     #[tokio::test]
@@ -551,6 +548,7 @@ mod tests {
 
         let mapped_cache = Arc::new(crate::MappedFeatureCache::new(100));
         let client_info_cache = Arc::new(crate::ClientInfoCache::new(std::time::Duration::from_secs(300)));
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let app_state = crate::AppState {
             cache,
@@ -560,10 +558,10 @@ mod tests {
             client_id: "test-client-id".to_string(),
             client_secret: "test-secret".to_string(),
             connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            assigned_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            pending_assignments: Arc::new(RwLock::new(Vec::new())),
+            assigned_cache: Arc::new(dashmap::DashMap::new()),
+            pending_assignments: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             flush_interval: std::time::Duration::from_secs(10),
-            pending_evaluation_events: Arc::new(RwLock::new(Vec::new())),
+            evaluation_event_tx: event_tx,
             evaluation_flush_interval: std::time::Duration::from_secs(30),
             retry_config: crate::config::RetryConfig::default(),
         };
@@ -615,6 +613,7 @@ mod tests {
 
         let mapped_cache = Arc::new(crate::MappedFeatureCache::new(100));
         let client_info_cache = Arc::new(crate::ClientInfoCache::new(std::time::Duration::from_secs(300)));
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let app_state = crate::AppState {
             cache,
@@ -624,10 +623,10 @@ mod tests {
             client_id: "test-client-id".to_string(),
             client_secret: "test-secret".to_string(),
             connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            assigned_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            pending_assignments: Arc::new(RwLock::new(Vec::new())),
+            assigned_cache: Arc::new(dashmap::DashMap::new()),
+            pending_assignments: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             flush_interval: std::time::Duration::from_secs(10),
-            pending_evaluation_events: Arc::new(RwLock::new(Vec::new())),
+            evaluation_event_tx: event_tx,
             evaluation_flush_interval: std::time::Duration::from_secs(30),
             retry_config: crate::config::RetryConfig::default(),
         };
