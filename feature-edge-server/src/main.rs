@@ -60,6 +60,7 @@ impl ClientInfoCache {
 #[derive(Clone)]
 pub struct AppState {
     cache: Arc<FeatureCache>,
+    mapped_cache: Arc<MappedFeatureCache>,
     client_info_cache: Arc<ClientInfoCache>,
     grpc: Arc<
         tokio::sync::Mutex<
@@ -169,6 +170,37 @@ impl FeatureCache {
     }
 }
 
+/// Cache for pre-mapped engine::Feature to avoid repeated allocations
+pub struct MappedFeatureCache {
+    // Cache with Arc for zero-cost cloning
+    cache: moka::future::Cache<String, Arc<evaluation_engine::Feature>>,
+}
+
+impl MappedFeatureCache {
+    pub fn new(max_capacity: u64) -> Self {
+        tracing::info!("Initializing MappedFeatureCache with max_capacity={}", max_capacity);
+        Self {
+            cache: moka::future::Cache::new(max_capacity),
+        }
+    }
+
+    pub async fn get(&self, key: &str) -> Option<Arc<evaluation_engine::Feature>> {
+        self.cache.get(key).await
+    }
+
+    pub async fn insert(&self, key: String, feature: Arc<evaluation_engine::Feature>) {
+        self.cache.insert(key, feature).await;
+    }
+
+    pub async fn invalidate(&self, key: &str) {
+        self.cache.invalidate(key).await;
+    }
+
+    pub fn entry_count(&self) -> u64 {
+        self.cache.entry_count()
+    }
+}
+
 impl AppState {
     pub async fn purge_assignments_for_feature(&self, feature_id: &str) {
         {
@@ -237,6 +269,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let state = AppState {
         cache: Arc::new(FeatureCache::new(cfg.cache.max_capacity)),
+        mapped_cache: Arc::new(MappedFeatureCache::new(cfg.cache.max_capacity)),
         client_info_cache: Arc::new(ClientInfoCache::new(cfg.cache.client_ttl())),
         grpc: Arc::new(tokio::sync::Mutex::new(grpc_client)),
         client_id: cfg.client_id.clone(),
@@ -326,11 +359,13 @@ mod tests {
     #[tokio::test]
     async fn test_purge_assignments_for_feature() {
         let cache = Arc::new(FeatureCache::new(1000));
+        let mapped_cache = Arc::new(MappedFeatureCache::new(1000));
         let client_info_cache = Arc::new(ClientInfoCache::new(Duration::from_secs(300)));
         let channel = Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
         let grpc_client = pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
         let state = AppState {
             cache,
+            mapped_cache,
             client_info_cache,
             grpc: Arc::new(tokio::sync::Mutex::new(grpc_client)),
             client_id: "client".into(),

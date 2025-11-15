@@ -190,6 +190,30 @@ async fn get_or_fetch_feature(
     Some(feature)
 }
 
+/// Get pre-mapped feature from cache or map and cache it
+async fn get_or_map_feature(
+    app: &AppState,
+    feature_key: &str,
+    client_id: &str,
+    client_secret: &str,
+) -> Option<std::sync::Arc<engine::Feature>> {
+    // Check mapped cache first
+    if let Some(mapped) = app.mapped_cache.get(feature_key).await {
+        return Some(mapped);
+    }
+
+    // Get protobuf feature from cache or backend
+    let pb_feature = get_or_fetch_feature(app, feature_key, client_id, client_secret).await?;
+
+    // Map to engine format
+    let engine_feature = std::sync::Arc::new(map_proto_to_engine(&pb_feature));
+
+    // Cache the mapped version
+    app.mapped_cache.insert(feature_key.to_string(), engine_feature.clone()).await;
+
+    Some(engine_feature)
+}
+
 /// HTTP handler for feature evaluation
 #[utoipa::path(
     post,
@@ -286,8 +310,23 @@ pub async fn evaluate_handler(
         })
     };
 
+    // Get pre-mapped feature once (this is the key optimization!)
+    let mapped_feature = match get_or_map_feature(&app, &feature_key, &client_id, &client_secret).await {
+        Some(f) => f,
+        None => {
+            return Ok(web::Json(EvaluateHttpResponse {
+                flag_key: feature_key.clone(),
+                value: serde_json::json!(false),
+                variant: None,
+                reason: "DEFAULT".to_string(),
+                error_code: Some("FLAG_NOT_FOUND".to_string()),
+                metadata: None,
+            }));
+        }
+    };
+
     // Perform evaluation (check cache first if we have a user_id)
-    let (mut result, prior_assignment) = if let Some(user_id) =     &user_id_opt {
+    let (mut result, prior_assignment) = if let Some(user_id) = &user_id_opt {
         let key = assignment_key(user_id, &feature.id, &req.context.environment_id);
         let cached = app.assigned_cache.read().await.get(&key).cloned();
 
@@ -302,15 +341,13 @@ pub async fn evaluate_handler(
                 metadata: None,
             }, true)
         } else {
-            let engine_feature = map_proto_to_engine(&feature);
             let ec = map_http_context_to_engine(feature_key.clone(), req.context.clone());
-            let result = engine::evaluate(ec, engine_feature);
+            let result = engine::evaluate(ec, (*mapped_feature).clone());
             (result, false)
         }
     } else {
-        let engine_feature = map_proto_to_engine(&feature);
         let ec = map_http_context_to_engine(feature_key.clone(), req.context.clone());
-        let result = engine::evaluate(ec, engine_feature);
+        let result = engine::evaluate(ec, (*mapped_feature).clone());
         (result, false)
     };
 

@@ -227,16 +227,19 @@ async fn handle_feature_update(app: &AppState, update: pb::FeatureUpdate) {
         x if x == Action::Upsert as i32 || x == Action::Snapshot as i32 => {
             if let Some(f) = update.feature {
                 let feature_id = f.id.clone();
-                
+                let feature_key = f.key.clone();
+
                 app.cache.upsert(f).await;
-                // We are purging assignments for feature in evenry feature update 
-                // so that we can make sure 
+                app.mapped_cache.invalidate(&feature_key).await;
+                // We are purging assignments for feature in evenry feature update
+                // so that we can make sure
                 app.purge_assignments_for_feature(&feature_id).await;
 
             }
         }
         x if x == Action::Delete as i32 => {
             if !update.feature_key.is_empty() {
+                app.mapped_cache.invalidate(&update.feature_key).await;
                 if let Some(feature_id) = app.cache.delete_by_key(&update.feature_key).await {
                     app.purge_assignments_for_feature(&feature_id).await;
                 }
@@ -546,10 +549,12 @@ mod tests {
         let channel = Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
         let grpc_client = crate::pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
 
+        let mapped_cache = Arc::new(crate::MappedFeatureCache::new(100));
         let client_info_cache = Arc::new(crate::ClientInfoCache::new(std::time::Duration::from_secs(300)));
 
         let app_state = crate::AppState {
             cache,
+            mapped_cache,
             client_info_cache,
             grpc: Arc::new(tokio::sync::Mutex::new(grpc_client)),
             client_id: "test-client-id".to_string(),
@@ -608,10 +613,12 @@ mod tests {
         let channel = Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
         let grpc_client = crate::pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
 
+        let mapped_cache = Arc::new(crate::MappedFeatureCache::new(100));
         let client_info_cache = Arc::new(crate::ClientInfoCache::new(std::time::Duration::from_secs(300)));
 
         let app_state = crate::AppState {
             cache,
+            mapped_cache,
             client_info_cache,
             grpc: Arc::new(tokio::sync::Mutex::new(grpc_client)),
             client_id: "test-client-id".to_string(),
