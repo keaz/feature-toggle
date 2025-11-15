@@ -185,10 +185,14 @@ impl FeatureEvaluationLogic for FeatureEvaluationLogicImpl {
             environment_id,
             client_id,
             evaluated_at,
+            #[allow(deprecated)]
             evaluation_result,
             evaluation_context,
             user_context,
             prior_assignment,
+            evaluation_success: true, // Legacy method assumes success
+            evaluation_value: Some(serde_json::json!(evaluation_result)),
+            variant: None, // Legacy method doesn't support variants
         };
 
         let result = self.repository.create_evaluation(evaluation).await?;
@@ -437,10 +441,14 @@ mod tests {
             environment_id: "env-123".to_string(),
             client_id: Uuid::new_v4(),
             evaluated_at: Utc::now(),
+            #[allow(deprecated)]
             evaluation_result: true,
             evaluation_context: Some(json!({"user": "test-user"})),
             user_context: Some("user123".to_string()),
             prior_assignment: false,
+            evaluation_success: true,
+            evaluation_value: Some(json!(true)),
+            variant: None,
         }
     }
 
@@ -452,11 +460,15 @@ mod tests {
             environment_id: eval.environment_id,
             client_id: eval.client_id,
             evaluated_at: eval.evaluated_at,
+            #[allow(deprecated)]
             evaluation_result: eval.evaluation_result,
             evaluation_context: eval.evaluation_context,
             user_context: eval.user_context,
             prior_assignment: eval.prior_assignment,
             created_at: Utc::now(),
+            evaluation_success: eval.evaluation_success,
+            evaluation_value: eval.evaluation_value,
+            variant: eval.variant,
         }
     }
 

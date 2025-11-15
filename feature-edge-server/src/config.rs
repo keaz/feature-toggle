@@ -98,10 +98,18 @@ pub struct CacheConfig {
     /// Maximum number of features to cache (LRU eviction when exceeded)
     #[serde(default = "default_max_capacity")]
     pub max_capacity: u64,
+
+    /// Client info cache TTL in seconds
+    #[serde(default = "default_client_ttl")]
+    pub client_ttl_secs: u64,
 }
 
 fn default_max_capacity() -> u64 {
     10000
+}
+
+fn default_client_ttl() -> u64 {
+    300 // 5 minutes
 }
 
 // Default value functions
@@ -180,7 +188,14 @@ impl Default for CacheConfig {
     fn default() -> Self {
         Self {
             max_capacity: default_max_capacity(),
+            client_ttl_secs: default_client_ttl(),
         }
+    }
+}
+
+impl CacheConfig {
+    pub fn client_ttl(&self) -> Duration {
+        Duration::from_secs(self.client_ttl_secs)
     }
 }
 
@@ -250,14 +265,23 @@ mod tests {
     fn test_cache_config_default_values() {
         let config = CacheConfig::default();
         assert_eq!(config.max_capacity, 10000);
+        assert_eq!(config.client_ttl_secs, 300);
     }
 
     #[test]
     fn test_cache_config_custom_values() {
         let config = CacheConfig {
             max_capacity: 5000,
+            client_ttl_secs: 600,
         };
         assert_eq!(config.max_capacity, 5000);
+        assert_eq!(config.client_ttl_secs, 600);
+    }
+
+    #[test]
+    fn test_cache_config_duration_conversions() {
+        let config = CacheConfig::default();
+        assert_eq!(config.client_ttl(), Duration::from_secs(300));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use crate::grpc_client::{assignment_key, fetch_client_info_via_grpc, fetch_feature_via_grpc};
+use crate::grpc_client::{assignment_key, get_or_fetch_client_info, fetch_feature_via_grpc};
 use crate::pb;
 use crate::{AppState, EvaluationEvent};
 use actix_web::{HttpResponse, Responder, web};
@@ -212,8 +212,8 @@ pub async fn evaluate_handler(
 
     let (client_id, client_secret) = resolve_credentials(&app, &req);
 
-    // Fetch client information for origin validation
-    let client_info = fetch_client_info_via_grpc(&app, &client_id, &client_secret).await;
+    // Fetch client information for origin validation (uses cache with 5min TTL)
+    let client_info = get_or_fetch_client_info(&app, &client_id, &client_secret).await;
 
     // Validate web origin for web clients (if client info is available)
     if let Some(ref client_info) = client_info

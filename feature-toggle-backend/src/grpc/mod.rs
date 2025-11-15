@@ -969,16 +969,42 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
                 Some(event.user_context)
             };
 
+            let variant = if event.variant.is_empty() {
+                None
+            } else {
+                Some(event.variant.clone())
+            };
+
+            // For evaluation_value, we need to parse from the variant or use the boolean result
+            // If there's a variant, try to parse it as JSON, otherwise use the boolean
+            let evaluation_value = if let Some(ref v) = variant {
+                // Try to parse variant value as JSON, fallback to string
+                serde_json::from_str::<serde_json::Value>(v)
+                    .ok()
+                    .or_else(|| Some(serde_json::json!(v)))
+            } else {
+                Some(serde_json::json!(event.evaluation_result))
+            };
+
+            // evaluation_success is true if evaluation didn't fail
+            // For now, we consider all evaluations successful (edge server only sends successful ones)
+            // In the future, we should add an explicit success field to the proto
+            let evaluation_success = true;
+
             evaluations.push(
                 crate::database::feature_evaluation::CreateFeatureEvaluation {
                     feature_key: event.feature_key,
                     environment_id: event.environment_id,
                     client_id,
                     evaluated_at,
+                    #[allow(deprecated)]
                     evaluation_result: event.evaluation_result,
                     evaluation_context,
                     user_context,
                     prior_assignment: event.prior_assignment,
+                    evaluation_success,
+                    evaluation_value,
+                    variant,
                 },
             );
         }

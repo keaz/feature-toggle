@@ -22,10 +22,14 @@ async fn test_create_evaluation() {
         environment_id: "env-123".to_string(),
         client_id: seeded_client_id,
         evaluated_at: Utc::now(),
+        #[allow(deprecated)]
         evaluation_result: true,
         evaluation_context: Some(json!({"user": "test-user"})),
         user_context: Some("user123".to_string()),
         prior_assignment: false,
+        evaluation_success: true,
+        evaluation_value: Some(json!(true)),
+        variant: None,
     };
     let created = repo.create_evaluation(eval.clone()).await.unwrap();
     assert_eq!(created.feature_key, eval.feature_key);
@@ -45,20 +49,28 @@ async fn test_bulk_create_evaluations() {
             environment_id: "env-123".to_string(),
             client_id: seeded_client_id,
             evaluated_at: Utc::now(),
+            #[allow(deprecated)]
             evaluation_result: true,
             evaluation_context: None,
             user_context: Some("userA".to_string()),
             prior_assignment: false,
+            evaluation_success: true,
+            evaluation_value: Some(json!(true)),
+            variant: None,
         },
         CreateFeatureEvaluation {
             feature_key: key2.clone(),
             environment_id: "env-123".to_string(),
             client_id: seeded_client_id,
             evaluated_at: Utc::now(),
+            #[allow(deprecated)]
             evaluation_result: false,
             evaluation_context: None,
             user_context: Some("userB".to_string()),
             prior_assignment: true,
+            evaluation_success: true,
+            evaluation_value: Some(json!(false)),
+            variant: None,
         },
     ];
     let created = repo.bulk_create_evaluations(evals.clone()).await.unwrap();

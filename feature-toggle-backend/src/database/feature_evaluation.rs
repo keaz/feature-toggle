@@ -9,11 +9,18 @@ pub struct FeatureEvaluationRow {
     pub environment_id: String,
     pub client_id: Uuid,
     pub evaluated_at: DateTime<Utc>,
+    #[deprecated(note = "Use evaluation_success for success tracking and evaluation_value for the actual value")]
     pub evaluation_result: bool,
     pub evaluation_context: Option<serde_json::Value>,
     pub user_context: Option<String>,
     pub prior_assignment: bool,
     pub created_at: DateTime<Utc>,
+    /// Indicates whether the evaluation succeeded (true) or failed (false)
+    pub evaluation_success: bool,
+    /// The actual resolved value (can be boolean, string, number, or JSON object)
+    pub evaluation_value: Option<serde_json::Value>,
+    /// The variant name that was served (if applicable)
+    pub variant: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,10 +29,17 @@ pub struct CreateFeatureEvaluation {
     pub environment_id: String,
     pub client_id: Uuid,
     pub evaluated_at: DateTime<Utc>,
+    #[deprecated(note = "Use evaluation_success for success tracking and evaluation_value for the actual value")]
     pub evaluation_result: bool,
     pub evaluation_context: Option<serde_json::Value>,
     pub user_context: Option<String>,
     pub prior_assignment: bool,
+    /// Indicates whether the evaluation succeeded (true) or failed (false)
+    pub evaluation_success: bool,
+    /// The actual resolved value (can be boolean, string, number, or JSON object)
+    pub evaluation_value: Option<serde_json::Value>,
+    /// The variant name that was served (if applicable)
+    pub variant: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,21 +196,25 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
         let row = sqlx::query_as::<_, FeatureEvaluationRow>(
             r#"
             INSERT INTO feature_evaluations (
-                feature_key, environment_id, client_id, evaluated_at, 
-                evaluation_result, evaluation_context, user_context, prior_assignment
+                feature_key, environment_id, client_id, evaluated_at,
+                evaluation_result, evaluation_context, user_context, prior_assignment,
+                evaluation_success, evaluation_value, variant
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             RETURNING *
             "#,
         )
-        .bind(evaluation.feature_key)
-        .bind(evaluation.environment_id)
+        .bind(&evaluation.feature_key)
+        .bind(&evaluation.environment_id)
         .bind(evaluation.client_id)
         .bind(evaluation.evaluated_at)
-        .bind(evaluation.evaluation_result)
-        .bind(evaluation.evaluation_context)
-        .bind(evaluation.user_context)
+        .bind(evaluation.evaluation_result) // Keep for backward compatibility
+        .bind(&evaluation.evaluation_context)
+        .bind(&evaluation.user_context)
         .bind(evaluation.prior_assignment)
+        .bind(evaluation.evaluation_success)
+        .bind(&evaluation.evaluation_value)
+        .bind(&evaluation.variant)
         .fetch_one(&self.pool)
         .await?;
 
@@ -214,21 +232,22 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
         let mut query = String::from(
             r#"
             INSERT INTO feature_evaluations (
-                feature_key, environment_id, client_id, evaluated_at, 
-                evaluation_result, evaluation_context, user_context, prior_assignment
+                feature_key, environment_id, client_id, evaluated_at,
+                evaluation_result, evaluation_context, user_context, prior_assignment,
+                evaluation_success, evaluation_value, variant
             )
             VALUES
             "#,
         );
 
-        // Build the VALUES clause dynamically
+        // Build the VALUES clause dynamically - now 11 parameters per evaluation
         for (i, _) in evaluations.iter().enumerate() {
             if i > 0 {
                 query.push_str(", ");
             }
-            let base = i * 8;
+            let base = i * 11;
             query.push_str(&format!(
-                "(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
+                "(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
                 base + 1,
                 base + 2,
                 base + 3,
@@ -236,7 +255,10 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
                 base + 5,
                 base + 6,
                 base + 7,
-                base + 8
+                base + 8,
+                base + 9,
+                base + 10,
+                base + 11
             ));
         }
         query.push_str(" RETURNING *");
@@ -250,10 +272,13 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
                 .bind(evaluation.environment_id)
                 .bind(evaluation.client_id)
                 .bind(evaluation.evaluated_at)
-                .bind(evaluation.evaluation_result)
+                .bind(evaluation.evaluation_result) // Keep for backward compatibility
                 .bind(evaluation.evaluation_context)
                 .bind(evaluation.user_context)
-                .bind(evaluation.prior_assignment);
+                .bind(evaluation.prior_assignment)
+                .bind(evaluation.evaluation_success)
+                .bind(evaluation.evaluation_value)
+                .bind(evaluation.variant);
         }
 
         let rows = sql_query.fetch_all(&self.pool).await?;
@@ -422,13 +447,13 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
     ) -> Result<Vec<EvaluationRatePoint>, sqlx::Error> {
         let mut query = format!(
             r#"
-            SELECT 
-                date_trunc('minute', evaluated_at) + 
+            SELECT
+                date_trunc('minute', evaluated_at) +
                 INTERVAL '{} minutes' * floor(extract(minute from evaluated_at) / {}) as time_bucket,
                 COUNT(*) as evaluation_count,
-                COUNT(*) FILTER (WHERE evaluation_result = true) as success_count,
+                COUNT(*) FILTER (WHERE evaluation_success = true) as success_count,
                 COUNT(*) FILTER (WHERE prior_assignment = true) as prior_assignment_count
-            FROM feature_evaluations 
+            FROM feature_evaluations
             WHERE evaluated_at >= $1 AND evaluated_at <= $2
             "#,
             interval_minutes, interval_minutes
@@ -483,20 +508,20 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
     ) -> Result<EvaluationSummary, sqlx::Error> {
         let mut query = String::from(
             r#"
-            SELECT 
+            SELECT
                 COUNT(*) as total_evaluations,
-                COUNT(*) FILTER (WHERE evaluation_result = true) as successful_evaluations,
+                COUNT(*) FILTER (WHERE evaluation_success = true) as successful_evaluations,
                 COUNT(*) FILTER (WHERE prior_assignment = true) as cached_evaluations,
                 COUNT(DISTINCT user_context) FILTER (WHERE user_context IS NOT NULL) as unique_users,
-                CASE 
-                    WHEN COUNT(*) > 0 THEN (COUNT(*) FILTER (WHERE evaluation_result = true) * 100.0 / COUNT(*))::FLOAT8
+                CASE
+                    WHEN COUNT(*) > 0 THEN (COUNT(*) FILTER (WHERE evaluation_success = true) * 100.0 / COUNT(*))::FLOAT8
                     ELSE 0.0::FLOAT8
                 END as success_rate,
-                CASE 
+                CASE
                     WHEN COUNT(*) > 0 THEN (COUNT(*) FILTER (WHERE prior_assignment = true) * 100.0 / COUNT(*))::FLOAT8
                     ELSE 0.0::FLOAT8
                 END as cache_hit_rate
-            FROM feature_evaluations 
+            FROM feature_evaluations
             WHERE evaluated_at >= $1 AND evaluated_at <= $2
             "#,
         );
@@ -602,14 +627,14 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
     ) -> Result<Vec<EvaluationByFeature>, sqlx::Error> {
         let mut query = String::from(
             r#"
-            SELECT 
+            SELECT
                 feature_key,
                 COUNT(*) as total_evaluations,
-                COUNT(*) FILTER (WHERE evaluation_result = true) as successful_evaluations,
+                COUNT(*) FILTER (WHERE evaluation_success = true) as successful_evaluations,
                 COUNT(*) FILTER (WHERE prior_assignment = true) as cached_evaluations,
                 COUNT(DISTINCT user_context) FILTER (WHERE user_context IS NOT NULL) as unique_users,
                 MAX(evaluated_at) as last_evaluated_at
-            FROM feature_evaluations 
+            FROM feature_evaluations
             WHERE evaluated_at >= $1 AND evaluated_at <= $2
             "#,
         );
@@ -682,10 +707,14 @@ mod tests {
             environment_id: "env-123".to_string(),
             client_id: Uuid::new_v4(),
             evaluated_at: Utc::now(),
+            #[allow(deprecated)]
             evaluation_result: true,
             evaluation_context: Some(json!({"user": "test-user"})),
             user_context: Some("user123".to_string()),
             prior_assignment: false,
+            evaluation_success: true,
+            evaluation_value: Some(json!(true)),
+            variant: None,
         }
     }
 

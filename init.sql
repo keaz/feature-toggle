@@ -569,7 +569,10 @@ INSERT INTO
         evaluation_context,
         user_context,
         prior_assignment,
-        created_at
+        created_at,
+        evaluation_success,
+        evaluation_value,
+        variant
     )
 VALUES (
         'e1111111-1111-4111-8111-111111111111',
@@ -578,12 +581,13 @@ VALUES (
         'a1b2c3d4-0000-4000-8000-000000000001',
         now() - interval '1 day',
         true,
-        '{
-    "user": "user123"
-  }',
+        '{"user": "user123"}',
         'user123',
         false,
-        now() - interval '1 day'
+        now() - interval '1 day',
+        true,
+        'true'::jsonb,
+        NULL
     ),
     (
         'e2222222-2222-4222-8222-222222222222',
@@ -592,12 +596,13 @@ VALUES (
         'a1b2c3d4-0000-4000-8000-000000000002',
         now(),
         false,
-        '{
-         "user": "user456"
-       }',
+        '{"user": "user456"}',
         'user456',
         true,
-        now()
+        now(),
+        true,
+        'false'::jsonb,
+        NULL
     ),
     (
         'e3333333-3333-4333-8333-333333333333',
@@ -609,7 +614,10 @@ VALUES (
         NULL,
         'userA',
         false,
-        now()
+        now(),
+        true,
+        'true'::jsonb,
+        NULL
     ),
     (
         'e4444444-4444-4444-8444-444444444444',
@@ -621,7 +629,10 @@ VALUES (
         NULL,
         'userB',
         true,
-        now()
+        now(),
+        true,
+        'false'::jsonb,
+        NULL
     )
 ON CONFLICT (id) DO NOTHING;
 
@@ -952,7 +963,10 @@ INSERT INTO
         evaluation_context,
         user_context,
         prior_assignment,
-        created_at
+        created_at,
+        evaluation_success,
+        evaluation_value,
+        variant
     )
 VALUES
     -- Evaluations for normal feature (before kill switch)
@@ -963,12 +977,13 @@ VALUES
         'a1b2c3d4-0000-4000-8000-000000000001',
         now() - interval '2 hours',
         true,
-        '{
-      "user": "user1"
-    }',
+        '{"user": "user1"}',
         'user1',
         false,
-        now() - interval '2 hours'
+        now() - interval '2 hours',
+        true,
+        'true'::jsonb,
+        NULL
     ),
     (
         '7009be03-2b51-4da6-83e3-4a6b805c0af4',
@@ -977,74 +992,75 @@ VALUES
         'a1b2c3d4-0000-4000-8000-000000000002',
         now() - interval '1 hour',
         true,
-        '{
-      "user": "user2"
-    }',
+        '{"user": "user2"}',
         'user2',
         false,
-        now() - interval '1 hour'
+        now() - interval '1 hour',
+        true,
+        'true'::jsonb,
+        NULL
     ),
-
--- Evaluations for disabled feature (should show impact of kill switch)
-(
-    'f0015567-aa85-49b5-afd6-b8a78071723c',
-    'disabled-feature',
-    '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
-    'a1b2c3d4-0000-4000-8000-000000000001',
-    now() - interval '30 minutes',
-    false,
-    '{
-      "user": "user3"
-    }',
-    'user3',
-    true,
-    now() - interval '30 minutes'
-),
-
--- Evaluations for past rollback feature
-(
-    '414daddc-7bdf-4e92-83ec-a47a2b6d8f95',
-    'past-rollback-feature',
-    '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
-    'a1b2c3d4-0000-4000-8000-000000000002',
-    now() - interval '3 hours',
-    true,
-    '{
-      "user": "user4"
-    }',
-    'user4',
-    false,
-    now() - interval '3 hours'
-),
-(
-    '95512a8a-19d5-410c-966b-97a5a3307851',
-    'past-rollback-feature',
-    '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
-    'a1b2c3d4-0000-4000-8000-000000000001',
-    now() - interval '15 minutes',
-    false,
-    '{
-      "user": "user5"
-    }',
-    'user5',
-    true,
-    now() - interval '15 minutes'
-),
-
--- Evaluations for contextual kill switch feature
-(
-    '8ee439d0-281d-48ee-8a70-26f33d97d097',
-    'contextual-kill-switch-feature',
-    '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
-    'a1b2c3d4-0000-4000-8000-000000000001',
-    now() - interval '45 minutes',
-    true,
-    '{
-      "user": "user6",
-      "filter": "X"
-    }',
-    'user6',
-    false,
-    now() - interval '45 minutes'
-)
+    -- Evaluations for disabled feature (should show impact of kill switch)
+    (
+        'f0015567-aa85-49b5-afd6-b8a78071723c',
+        'disabled-feature',
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+        'a1b2c3d4-0000-4000-8000-000000000001',
+        now() - interval '30 minutes',
+        false,
+        '{"user": "user3"}',
+        'user3',
+        true,
+        now() - interval '30 minutes',
+        true,
+        'false'::jsonb,
+        NULL
+    ),
+    -- Evaluations for past rollback feature
+    (
+        '414daddc-7bdf-4e92-83ec-a47a2b6d8f95',
+        'past-rollback-feature',
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+        'a1b2c3d4-0000-4000-8000-000000000002',
+        now() - interval '3 hours',
+        true,
+        '{"user": "user4"}',
+        'user4',
+        false,
+        now() - interval '3 hours',
+        true,
+        'true'::jsonb,
+        NULL
+    ),
+    (
+        '95512a8a-19d5-410c-966b-97a5a3307851',
+        'past-rollback-feature',
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+        'a1b2c3d4-0000-4000-8000-000000000001',
+        now() - interval '15 minutes',
+        false,
+        '{"user": "user5"}',
+        'user5',
+        true,
+        now() - interval '15 minutes',
+        true,
+        'false'::jsonb,
+        NULL
+    ),
+    -- Evaluations for contextual kill switch feature
+    (
+        '8ee439d0-281d-48ee-8a70-26f33d97d097',
+        'contextual-kill-switch-feature',
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+        'a1b2c3d4-0000-4000-8000-000000000001',
+        now() - interval '45 minutes',
+        true,
+        '{"user": "user6", "filter": "X"}',
+        'user6',
+        false,
+        now() - interval '45 minutes',
+        true,
+        'true'::jsonb,
+        NULL
+    )
 ON CONFLICT (id) DO NOTHING;

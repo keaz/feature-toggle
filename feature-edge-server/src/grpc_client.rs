@@ -62,7 +62,8 @@ pub async fn fetch_feature_via_grpc(
 }
 
 /// Fetch client information from the backend via gRPC with retry logic
-pub async fn fetch_client_info_via_grpc(
+/// This is the low-level function that always fetches from backend
+async fn fetch_client_info_via_grpc_uncached(
     app: &AppState,
     client_id: &str,
     client_secret: &str,
@@ -99,6 +100,27 @@ pub async fn fetch_client_info_via_grpc(
             None
         }
     }
+}
+
+/// Get client info from cache or fetch from backend
+/// This is the high-level function that uses caching
+pub async fn get_or_fetch_client_info(
+    app: &AppState,
+    client_id: &str,
+    client_secret: &str,
+) -> Option<pb::GetClientInfoResponse> {
+    // Check cache first
+    if let Some(cached) = app.client_info_cache.get(client_id).await {
+        return Some(cached);
+    }
+
+    // Cache miss - fetch from backend
+    let client_info = fetch_client_info_via_grpc_uncached(app, client_id, client_secret).await?;
+
+    // Store in cache for future requests
+    app.client_info_cache.insert(client_id.to_string(), client_info.clone()).await;
+
+    Some(client_info)
 }
 
 /// Load user assignments from backend on startup
@@ -524,8 +546,11 @@ mod tests {
         let channel = Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
         let grpc_client = crate::pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
 
+        let client_info_cache = Arc::new(crate::ClientInfoCache::new(std::time::Duration::from_secs(300)));
+
         let app_state = crate::AppState {
             cache,
+            client_info_cache,
             grpc: Arc::new(tokio::sync::Mutex::new(grpc_client)),
             client_id: "test-client-id".to_string(),
             client_secret: "test-secret".to_string(),
@@ -583,8 +608,11 @@ mod tests {
         let channel = Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
         let grpc_client = crate::pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
 
+        let client_info_cache = Arc::new(crate::ClientInfoCache::new(std::time::Duration::from_secs(300)));
+
         let app_state = crate::AppState {
             cache,
+            client_info_cache,
             grpc: Arc::new(tokio::sync::Mutex::new(grpc_client)),
             client_id: "test-client-id".to_string(),
             client_secret: "test-secret".to_string(),
