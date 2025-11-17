@@ -849,12 +849,14 @@ impl StageLogic for FeatureLogicImpl {
             .into_iter()
             .map(
                 |c| -> Result<crate::database::feature::CreateStageCriterion, Error> {
+                    let operator_str = c.operator.map(|op| format!("{:?}", op).to_uppercase());
                     Ok(crate::database::feature::CreateStageCriterion {
                         context_key: c.context_key,
                         context_id: id_to_uuid(c.context_id)?,
                         rollout_percentage: c.rollout_percentage,
                         serve: c.serve,
                         priority: c.priority,
+                        operator: operator_str,
                     })
                 },
             )
@@ -1086,6 +1088,26 @@ fn map_db_ctx_to_gql(c: crate::database::entity::Context) -> crate::graphql::sch
 fn map_db_criterion_to_gql(
     sc: crate::database::entity::StageCriterion,
 ) -> crate::graphql::schema::StageCriterion {
+    use crate::graphql::schema::RuleOperator;
+
+    let operator = match sc.operator.to_uppercase().as_str() {
+        "EQUALS" => RuleOperator::Equals,
+        "NOTEQUALS" | "NOT_EQUALS" => RuleOperator::NotEquals,
+        "GREATERTHAN" | "GREATER_THAN" => RuleOperator::GreaterThan,
+        "LESSTHAN" | "LESS_THAN" => RuleOperator::LessThan,
+        "GREATERTHANOREQUAL" | "GREATER_THAN_OR_EQUAL" => RuleOperator::GreaterThanOrEqual,
+        "LESSTHANOREQUAL" | "LESS_THAN_OR_EQUAL" => RuleOperator::LessThanOrEqual,
+        "CONTAINS" => RuleOperator::Contains,
+        "STARTSWITH" | "STARTS_WITH" => RuleOperator::StartsWith,
+        "ENDSWITH" | "ENDS_WITH" => RuleOperator::EndsWith,
+        "REGEX" => RuleOperator::Regex,
+        "IN" => RuleOperator::In,
+        "NOTIN" | "NOT_IN" => RuleOperator::NotIn,
+        "SEMVERGREATERTHAN" | "SEMVER_GREATER_THAN" => RuleOperator::SemverGreaterThan,
+        "SEMVERLESSTHAN" | "SEMVER_LESS_THAN" => RuleOperator::SemverLessThan,
+        _ => RuleOperator::In, // Default fallback
+    };
+
     crate::graphql::schema::StageCriterion {
         id: ID::from(sc.id),
         stage_id: ID::from(sc.stage_id),
@@ -1094,6 +1116,7 @@ fn map_db_criterion_to_gql(
         rollout_percentage: sc.rollout_percentage,
         serve: sc.serve,
         priority: sc.priority,
+        operator,
     }
 }
 

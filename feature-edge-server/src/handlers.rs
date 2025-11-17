@@ -82,6 +82,25 @@ pub fn map_proto_to_engine(f: &pb::FeatureFull) -> engine::Feature {
                         }
                     };
 
+                    // Parse operator from protobuf string
+                    let operator = match c.operator.to_uppercase().as_str() {
+                        "EQUALS" => engine::Operator::Equals,
+                        "NOTEQUALS" | "NOT_EQUALS" => engine::Operator::NotEquals,
+                        "GREATERTHAN" | "GREATER_THAN" => engine::Operator::GreaterThan,
+                        "LESSTHAN" | "LESS_THAN" => engine::Operator::LessThan,
+                        "GREATERTHANOREQUAL" | "GREATER_THAN_OR_EQUAL" => engine::Operator::GreaterThanOrEqual,
+                        "LESSTHANOREQUAL" | "LESS_THAN_OR_EQUAL" => engine::Operator::LessThanOrEqual,
+                        "CONTAINS" => engine::Operator::Contains,
+                        "STARTSWITH" | "STARTS_WITH" => engine::Operator::StartsWith,
+                        "ENDSWITH" | "ENDS_WITH" => engine::Operator::EndsWith,
+                        "REGEX" => engine::Operator::Regex,
+                        "IN" => engine::Operator::In,
+                        "NOTIN" | "NOT_IN" => engine::Operator::NotIn,
+                        "SEMVERGREATERTHAN" | "SEMVER_GREATER_THAN" => engine::Operator::SemverGreaterThan,
+                        "SEMVERLESSTHAN" | "SEMVER_LESS_THAN" => engine::Operator::SemverLessThan,
+                        _ => engine::Operator::In, // Default to IN for unknown operators
+                    };
+
                     engine::StageCriterion {
                         context_key: c.context_key.clone(),
                         context,
@@ -91,6 +110,7 @@ pub fn map_proto_to_engine(f: &pb::FeatureFull) -> engine::Feature {
                         } else {
                             Some(c.serve.clone())
                         },
+                        operator,
                     }
                 })
                 .collect(),

@@ -29,9 +29,24 @@ pub enum VariantValueType {
 pub enum RuleOperator {
     Equals,
     NotEquals,
-    Contains,
     GreaterThan,
     LessThan,
+    GreaterThanOrEqual,
+    LessThanOrEqual,
+    Contains,
+    StartsWith,
+    EndsWith,
+    Regex,
+    In,
+    NotIn,
+    SemverGreaterThan,
+    SemverLessThan,
+}
+
+impl Default for RuleOperator {
+    fn default() -> Self {
+        RuleOperator::In
+    }
 }
 
 #[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
@@ -505,6 +520,7 @@ pub struct StageCriterion {
     pub rollout_percentage: i32,
     pub serve: Option<String>,
     pub priority: i32,
+    pub operator: RuleOperator,
 }
 
 #[derive(InputObject, Debug, Clone)]
@@ -518,6 +534,8 @@ pub struct CreateStageCriterionInput {
     pub serve: Option<String>,
     #[graphql(default = 0)]
     pub priority: i32,
+    #[graphql(default)]
+    pub operator: Option<RuleOperator>,
 }
 
 // Users GraphQL types

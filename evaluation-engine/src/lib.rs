@@ -1,3 +1,5 @@
+use regex::Regex;
+use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
@@ -91,12 +93,39 @@ pub struct StageContext {
     pub entries: Vec<String>,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum Operator {
+    Equals,
+    NotEquals,
+    GreaterThan,
+    LessThan,
+    GreaterThanOrEqual,
+    LessThanOrEqual,
+    Contains,
+    StartsWith,
+    EndsWith,
+    Regex,
+    In,
+    NotIn,
+    SemverGreaterThan,
+    SemverLessThan,
+}
+
+impl Default for Operator {
+    fn default() -> Self {
+        Operator::In
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct StageCriterion {
     pub context_key: String,
     pub context: StageContext,
     pub rollout_percentage: i32,
     pub serve: Option<String>,
+    #[serde(default)]
+    pub operator: Operator,
 }
 
 fn get_context_attribute(ctx: &ContextObject, key: &str) -> Option<String> {
@@ -124,6 +153,107 @@ struct CriteriaEvaluationResult {
     matched: bool,
     variant: Option<String>,
     reason: EvaluationReason,
+}
+
+/// Evaluates a value against a criterion using the specified operator
+fn matches_operator(operator: &Operator, provided: &str, allowed_values: &[String]) -> bool {
+    match operator {
+        Operator::In => allowed_values.iter().any(|v| v == provided),
+
+        Operator::NotIn => !allowed_values.iter().any(|v| v == provided),
+
+        Operator::Equals => {
+            allowed_values.first().map_or(false, |v| v == provided)
+        }
+
+        Operator::NotEquals => {
+            allowed_values.first().map_or(false, |v| v != provided)
+        }
+
+        Operator::GreaterThan => {
+            if let (Ok(provided_num), Some(Ok(allowed_num))) = (
+                provided.parse::<f64>(),
+                allowed_values.first().map(|v| v.parse::<f64>()),
+            ) {
+                provided_num > allowed_num
+            } else {
+                false
+            }
+        }
+
+        Operator::LessThan => {
+            if let (Ok(provided_num), Some(Ok(allowed_num))) = (
+                provided.parse::<f64>(),
+                allowed_values.first().map(|v| v.parse::<f64>()),
+            ) {
+                provided_num < allowed_num
+            } else {
+                false
+            }
+        }
+
+        Operator::GreaterThanOrEqual => {
+            if let (Ok(provided_num), Some(Ok(allowed_num))) = (
+                provided.parse::<f64>(),
+                allowed_values.first().map(|v| v.parse::<f64>()),
+            ) {
+                provided_num >= allowed_num
+            } else {
+                false
+            }
+        }
+
+        Operator::LessThanOrEqual => {
+            if let (Ok(provided_num), Some(Ok(allowed_num))) = (
+                provided.parse::<f64>(),
+                allowed_values.first().map(|v| v.parse::<f64>()),
+            ) {
+                provided_num <= allowed_num
+            } else {
+                false
+            }
+        }
+
+        Operator::Contains => {
+            allowed_values.first().map_or(false, |v| provided.contains(v))
+        }
+
+        Operator::StartsWith => {
+            allowed_values.first().map_or(false, |v| provided.starts_with(v))
+        }
+
+        Operator::EndsWith => {
+            allowed_values.first().map_or(false, |v| provided.ends_with(v))
+        }
+
+        Operator::Regex => {
+            allowed_values.first().and_then(|pattern| {
+                Regex::new(pattern).ok().map(|re| re.is_match(provided))
+            }).unwrap_or(false)
+        }
+
+        Operator::SemverGreaterThan => {
+            if let (Ok(provided_ver), Some(allowed_ver)) = (
+                Version::parse(provided),
+                allowed_values.first().and_then(|v| Version::parse(v).ok()),
+            ) {
+                provided_ver > allowed_ver
+            } else {
+                false
+            }
+        }
+
+        Operator::SemverLessThan => {
+            if let (Ok(provided_ver), Some(allowed_ver)) = (
+                Version::parse(provided),
+                allowed_values.first().and_then(|v| Version::parse(v).ok()),
+            ) {
+                provided_ver < allowed_ver
+            } else {
+                false
+            }
+        }
+    }
 }
 
 fn passes_stage_criteria(
@@ -178,8 +308,8 @@ fn passes_stage_criteria(
         // Find provided value for the actual context key
         let ctx_key = &crit.context_key;
         if let Some(provided) = get_context_attribute(&ec.context, ctx_key) {
-            // Check allowed values
-            if crit.context.entries.iter().any(|v| v == &provided) {
+            // Check using operator-based matching
+            if matches_operator(&crit.operator, &provided, &crit.context.entries) {
                 let pct = crit.rollout_percentage.clamp(0, 100) as f32;
                 if user_bucket < pct {
                     return CriteriaEvaluationResult {
@@ -346,6 +476,7 @@ mod tests {
                     },
                     rollout_percentage: 100,
                     serve: Some("treatment".to_string()),
+                    operator: Operator::In,
                 }],
             }],
             variants: vec![
@@ -392,5 +523,397 @@ mod tests {
         let result = evaluate(context, feature);
         assert_eq!(result.value, json!(false));
         assert_eq!(result.reason, EvaluationReason::Static);
+    }
+
+    // ============================================
+    // Operator Tests
+    // ============================================
+
+    #[test]
+    fn test_operator_in() {
+        assert!(matches_operator(
+            &Operator::In,
+            "admin",
+            &vec!["admin".to_string(), "user".to_string()]
+        ));
+        assert!(!matches_operator(
+            &Operator::In,
+            "guest",
+            &vec!["admin".to_string(), "user".to_string()]
+        ));
+    }
+
+    #[test]
+    fn test_operator_not_in() {
+        assert!(matches_operator(
+            &Operator::NotIn,
+            "guest",
+            &vec!["admin".to_string(), "user".to_string()]
+        ));
+        assert!(!matches_operator(
+            &Operator::NotIn,
+            "admin",
+            &vec!["admin".to_string(), "user".to_string()]
+        ));
+    }
+
+    #[test]
+    fn test_operator_equals() {
+        assert!(matches_operator(
+            &Operator::Equals,
+            "admin",
+            &vec!["admin".to_string()]
+        ));
+        assert!(!matches_operator(
+            &Operator::Equals,
+            "user",
+            &vec!["admin".to_string()]
+        ));
+    }
+
+    #[test]
+    fn test_operator_not_equals() {
+        assert!(matches_operator(
+            &Operator::NotEquals,
+            "user",
+            &vec!["admin".to_string()]
+        ));
+        assert!(!matches_operator(
+            &Operator::NotEquals,
+            "admin",
+            &vec!["admin".to_string()]
+        ));
+    }
+
+    #[test]
+    fn test_operator_greater_than() {
+        assert!(matches_operator(
+            &Operator::GreaterThan,
+            "100",
+            &vec!["50".to_string()]
+        ));
+        assert!(!matches_operator(
+            &Operator::GreaterThan,
+            "30",
+            &vec!["50".to_string()]
+        ));
+        assert!(!matches_operator(
+            &Operator::GreaterThan,
+            "50",
+            &vec!["50".to_string()]
+        ));
+        // Test with decimals
+        assert!(matches_operator(
+            &Operator::GreaterThan,
+            "10.5",
+            &vec!["10.2".to_string()]
+        ));
+    }
+
+    #[test]
+    fn test_operator_less_than() {
+        assert!(matches_operator(
+            &Operator::LessThan,
+            "30",
+            &vec!["50".to_string()]
+        ));
+        assert!(!matches_operator(
+            &Operator::LessThan,
+            "100",
+            &vec!["50".to_string()]
+        ));
+        assert!(!matches_operator(
+            &Operator::LessThan,
+            "50",
+            &vec!["50".to_string()]
+        ));
+    }
+
+    #[test]
+    fn test_operator_greater_than_or_equal() {
+        assert!(matches_operator(
+            &Operator::GreaterThanOrEqual,
+            "100",
+            &vec!["50".to_string()]
+        ));
+        assert!(matches_operator(
+            &Operator::GreaterThanOrEqual,
+            "50",
+            &vec!["50".to_string()]
+        ));
+        assert!(!matches_operator(
+            &Operator::GreaterThanOrEqual,
+            "30",
+            &vec!["50".to_string()]
+        ));
+    }
+
+    #[test]
+    fn test_operator_less_than_or_equal() {
+        assert!(matches_operator(
+            &Operator::LessThanOrEqual,
+            "30",
+            &vec!["50".to_string()]
+        ));
+        assert!(matches_operator(
+            &Operator::LessThanOrEqual,
+            "50",
+            &vec!["50".to_string()]
+        ));
+        assert!(!matches_operator(
+            &Operator::LessThanOrEqual,
+            "100",
+            &vec!["50".to_string()]
+        ));
+    }
+
+    #[test]
+    fn test_operator_contains() {
+        assert!(matches_operator(
+            &Operator::Contains,
+            "admin@example.com",
+            &vec!["@example.com".to_string()]
+        ));
+        assert!(matches_operator(
+            &Operator::Contains,
+            "hello world test",
+            &vec!["world".to_string()]
+        ));
+        assert!(!matches_operator(
+            &Operator::Contains,
+            "user@test.com",
+            &vec!["@example.com".to_string()]
+        ));
+    }
+
+    #[test]
+    fn test_operator_starts_with() {
+        assert!(matches_operator(
+            &Operator::StartsWith,
+            "admin@example.com",
+            &vec!["admin".to_string()]
+        ));
+        assert!(!matches_operator(
+            &Operator::StartsWith,
+            "user@example.com",
+            &vec!["admin".to_string()]
+        ));
+    }
+
+    #[test]
+    fn test_operator_ends_with() {
+        assert!(matches_operator(
+            &Operator::EndsWith,
+            "admin@example.com",
+            &vec![".com".to_string()]
+        ));
+        assert!(!matches_operator(
+            &Operator::EndsWith,
+            "admin@example.org",
+            &vec![".com".to_string()]
+        ));
+    }
+
+    #[test]
+    fn test_operator_regex() {
+        // Match email pattern
+        assert!(matches_operator(
+            &Operator::Regex,
+            "test@example.com",
+            &vec![r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$".to_string()]
+        ));
+        assert!(!matches_operator(
+            &Operator::Regex,
+            "invalid-email",
+            &vec![r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$".to_string()]
+        ));
+
+        // Match phone number pattern
+        assert!(matches_operator(
+            &Operator::Regex,
+            "+1-555-123-4567",
+            &vec![r"^\+\d{1,3}-\d{3}-\d{3}-\d{4}$".to_string()]
+        ));
+    }
+
+    #[test]
+    fn test_operator_regex_invalid_pattern() {
+        // Invalid regex pattern should return false
+        assert!(!matches_operator(
+            &Operator::Regex,
+            "test",
+            &vec!["[invalid(".to_string()]
+        ));
+    }
+
+    #[test]
+    fn test_operator_semver_greater_than() {
+        assert!(matches_operator(
+            &Operator::SemverGreaterThan,
+            "2.0.0",
+            &vec!["1.5.0".to_string()]
+        ));
+        assert!(matches_operator(
+            &Operator::SemverGreaterThan,
+            "1.6.0",
+            &vec!["1.5.0".to_string()]
+        ));
+        assert!(!matches_operator(
+            &Operator::SemverGreaterThan,
+            "1.4.0",
+            &vec!["1.5.0".to_string()]
+        ));
+        assert!(!matches_operator(
+            &Operator::SemverGreaterThan,
+            "1.5.0",
+            &vec!["1.5.0".to_string()]
+        ));
+    }
+
+    #[test]
+    fn test_operator_semver_less_than() {
+        assert!(matches_operator(
+            &Operator::SemverLessThan,
+            "1.4.0",
+            &vec!["1.5.0".to_string()]
+        ));
+        assert!(matches_operator(
+            &Operator::SemverLessThan,
+            "0.9.0",
+            &vec!["1.5.0".to_string()]
+        ));
+        assert!(!matches_operator(
+            &Operator::SemverLessThan,
+            "2.0.0",
+            &vec!["1.5.0".to_string()]
+        ));
+        assert!(!matches_operator(
+            &Operator::SemverLessThan,
+            "1.5.0",
+            &vec!["1.5.0".to_string()]
+        ));
+    }
+
+    #[test]
+    fn test_operator_semver_invalid() {
+        // Invalid semver should return false
+        assert!(!matches_operator(
+            &Operator::SemverGreaterThan,
+            "invalid",
+            &vec!["1.5.0".to_string()]
+        ));
+        assert!(!matches_operator(
+            &Operator::SemverGreaterThan,
+            "1.5.0",
+            &vec!["invalid".to_string()]
+        ));
+    }
+
+    #[test]
+    fn test_evaluation_with_operator_greater_than() {
+        let mut context_attrs = HashMap::new();
+        context_attrs.insert("age".to_string(), json!("25"));
+
+        let context = FeatureEvaluationContext {
+            flag_key: "age-restricted-feature".to_string(),
+            context: ContextObject {
+                bucketing_key: "user456".to_string(),
+                environment_id: "env1".to_string(),
+                attributes: context_attrs,
+            },
+        };
+
+        let feature = Feature {
+            id: "test-id".to_string(),
+            key: "age-restricted-feature".to_string(),
+            feature_type: "Contextual".to_string(),
+            active: true,
+            enabled: true,
+            dependencies: vec![],
+            stages: vec![FeatureStage {
+                environment_id: "env1".to_string(),
+                enabled: true,
+                bucketing_key: None,
+                criterias: vec![StageCriterion {
+                    context_key: "age".to_string(),
+                    context: StageContext {
+                        key: "age".to_string(),
+                        entries: vec!["18".to_string()],
+                    },
+                    rollout_percentage: 100,
+                    serve: Some("adult-content".to_string()),
+                    operator: Operator::GreaterThanOrEqual,
+                }],
+            }],
+            variants: vec![
+                FeatureVariant {
+                    control: "control".to_string(),
+                    value: json!(false),
+                },
+                FeatureVariant {
+                    control: "adult-content".to_string(),
+                    value: json!("Access granted"),
+                },
+            ],
+        };
+
+        let result = evaluate(context, feature);
+        assert_eq!(result.variant, Some("adult-content".to_string()));
+        assert_eq!(result.value, json!("Access granted"));
+        assert_eq!(result.reason, EvaluationReason::TargetingMatch);
+    }
+
+    #[test]
+    fn test_evaluation_with_operator_regex() {
+        let mut context_attrs = HashMap::new();
+        context_attrs.insert("email".to_string(), json!("admin@company.com"));
+
+        let context = FeatureEvaluationContext {
+            flag_key: "corporate-feature".to_string(),
+            context: ContextObject {
+                bucketing_key: "user789".to_string(),
+                environment_id: "env1".to_string(),
+                attributes: context_attrs,
+            },
+        };
+
+        let feature = Feature {
+            id: "test-id".to_string(),
+            key: "corporate-feature".to_string(),
+            feature_type: "Contextual".to_string(),
+            active: true,
+            enabled: true,
+            dependencies: vec![],
+            stages: vec![FeatureStage {
+                environment_id: "env1".to_string(),
+                enabled: true,
+                bucketing_key: None,
+                criterias: vec![StageCriterion {
+                    context_key: "email".to_string(),
+                    context: StageContext {
+                        key: "email".to_string(),
+                        entries: vec![r".*@company\.com$".to_string()],
+                    },
+                    rollout_percentage: 100,
+                    serve: Some("corporate-variant".to_string()),
+                    operator: Operator::Regex,
+                }],
+            }],
+            variants: vec![
+                FeatureVariant {
+                    control: "control".to_string(),
+                    value: json!(false),
+                },
+                FeatureVariant {
+                    control: "corporate-variant".to_string(),
+                    value: json!("Corporate feature enabled"),
+                },
+            ],
+        };
+
+        let result = evaluate(context, feature);
+        assert_eq!(result.variant, Some("corporate-variant".to_string()));
+        assert_eq!(result.value, json!("Corporate feature enabled"));
+        assert_eq!(result.reason, EvaluationReason::TargetingMatch);
     }
 }

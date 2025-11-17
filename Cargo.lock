@@ -1164,6 +1164,8 @@ name = "evaluation-engine"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "regex",
+ "semver",
  "serde",
  "serde_json",
  "sha2",

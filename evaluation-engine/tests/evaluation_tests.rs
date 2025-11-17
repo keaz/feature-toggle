@@ -49,6 +49,7 @@ fn criterion(context_key: &str, allowed: &[&str], pct: i32, serve: Option<&str>)
         },
         rollout_percentage: pct,
         serve: serve.map(|s| s.to_string()),
+        operator: Operator::In,
     }
 }
 

@@ -16,6 +16,8 @@ pub struct CreateStageCriterion {
     pub serve: Option<String>,
     #[serde(default)]
     pub priority: i32,
+    #[serde(default)]
+    pub operator: Option<String>,
 }
 
 /// Represents feature growth data at a specific time bucket
@@ -48,7 +50,14 @@ pub struct CreateFeature {
     pub feature_type: FeatureType,
     pub stages: Vec<CreateFeatureStage>,
     pub dependencies: Vec<Uuid>,
-    pub variants: Option<Vec<(String, serde_json::Value, crate::database::entity::VariantValueType, Option<String>)>>,
+    pub variants: Option<
+        Vec<(
+            String,
+            serde_json::Value,
+            crate::database::entity::VariantValueType,
+            Option<String>,
+        )>,
+    >,
 }
 
 #[derive(Debug, Clone)]
@@ -99,7 +108,14 @@ pub struct UpdateFeature {
     pub feature_type: Option<FeatureType>,
     pub stages: Vec<CreateFeatureStage>,
     pub dependencies: Vec<Uuid>,
-    pub variants: Option<Vec<(String, serde_json::Value, crate::database::entity::VariantValueType, Option<String>)>>,
+    pub variants: Option<
+        Vec<(
+            String,
+            serde_json::Value,
+            crate::database::entity::VariantValueType,
+            Option<String>,
+        )>,
+    >,
 }
 
 #[derive(Debug, sqlx::FromRow, Clone)]
@@ -205,7 +221,10 @@ pub trait FeatureRepository: Send + Sync {
     async fn get_feature_ids_by_context_id(&self, context_id: Uuid) -> Result<Vec<Uuid>, Error>;
 
     // Feature variants
-    async fn get_feature_variants(&self, feature_id: Uuid) -> Result<Vec<crate::database::entity::FeatureVariant>, Error>;
+    async fn get_feature_variants(
+        &self,
+        feature_id: Uuid,
+    ) -> Result<Vec<crate::database::entity::FeatureVariant>, Error>;
 
     // New (deployment workflow): request stage change
     async fn request_stage_change(
@@ -491,7 +510,7 @@ impl FeatureRepositoryImpl {
     ) -> Result<PgQueryResult, Error> {
         for stage in updates {
             let parent_stage_id = stage.parent_stage.as_ref().map(|p| p.id);
-
+            // We should not update the stage's enabled status here; it is managed separately
             let result = sqlx::query(
                 r#"UPDATE features_pipeline_stages
                    SET environment_id = $1,
@@ -499,7 +518,6 @@ impl FeatureRepositoryImpl {
                        parent_stage_id = $3,
                        position = $4,
                        bucketing_key = $5,
-                       enabled = $6
                    WHERE id = $7"#,
             )
             .bind(stage.environment_id)
@@ -507,7 +525,6 @@ impl FeatureRepositoryImpl {
             .bind(parent_stage_id)
             .bind(&stage.position)
             .bind(stage.bucketing_key.clone())
-            .bind(stage.enabled)
             .bind(stage.id)
             .execute(&mut *tx)
             .await;
@@ -769,7 +786,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
     ) -> Result<Vec<crate::database::entity::StageCriterion>, Error> {
         // load criteria join contexts and entries
         let rows = sqlx::query!(
-            r#"SELECT sc.id, sc.stage_id, sc.context_key, sc.context_id, sc.rollout_percentage, sc.serve, sc.priority,
+            r#"SELECT sc.id, sc.stage_id, sc.context_key, sc.context_id, sc.rollout_percentage, sc.serve, sc.priority, sc.operator,
                       c.team_id, c.key
                FROM feature_stage_criteria sc
                JOIN contexts c ON c.id = sc.context_id
@@ -812,6 +829,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
                 rollout_percentage: r.rollout_percentage,
                 serve: r.serve,
                 priority: r.priority,
+                operator: r.operator.unwrap_or_else(|| "IN".to_string()),
             });
         }
         Ok(out)
@@ -866,10 +884,14 @@ impl FeatureRepository for FeatureRepositoryImpl {
             let rollouts: Vec<i32> = criteria.iter().map(|c| c.rollout_percentage).collect();
             let serves: Vec<Option<String>> = criteria.iter().map(|c| c.serve.clone()).collect();
             let priorities: Vec<i32> = criteria.iter().map(|c| c.priority).collect();
+            let operators: Vec<String> = criteria
+                .iter()
+                .map(|c| c.operator.clone().unwrap_or_else(|| "IN".to_string()))
+                .collect();
             handle_error(None, sqlx::query!(
-                r#"INSERT INTO feature_stage_criteria(id, stage_id, context_key, context_id, rollout_percentage, serve, priority)
-                   SELECT unnest($1::uuid[]), unnest($2::uuid[]), unnest($3::varchar[]), unnest($4::uuid[]), unnest($5::int[]), unnest($6::varchar[]), unnest($7::int[])"#,
-                &ids[..], &stage_ids[..], &context_keys[..], &context_ids[..], &rollouts[..], &serves as _, &priorities[..]
+                r#"INSERT INTO feature_stage_criteria(id, stage_id, context_key, context_id, rollout_percentage, serve, priority, operator)
+                   SELECT unnest($1::uuid[]), unnest($2::uuid[]), unnest($3::varchar[]), unnest($4::uuid[]), unnest($5::int[]), unnest($6::varchar[]), unnest($7::int[]), unnest($8::varchar[])"#,
+                &ids[..], &stage_ids[..], &context_keys[..], &context_ids[..], &rollouts[..], &serves as _, &priorities[..], &operators[..]
             ).execute(&mut *tx).await)?;
         }
         tx.commit().await.map_err(Error::DatabaseError)?;
@@ -1072,7 +1094,8 @@ impl FeatureRepository for FeatureRepositoryImpl {
                 // Create variants if provided
                 if let Some(variants) = input.variants {
                     if !variants.is_empty() {
-                        let variants_result = self.create_feature_variants(&mut tx, id, variants).await;
+                        let variants_result =
+                            self.create_feature_variants(&mut tx, id, variants).await;
                         if variants_result.is_err() {
                             let _ = tx.rollback().await;
                             return Err(variants_result.err().unwrap());
@@ -1133,7 +1156,9 @@ impl FeatureRepository for FeatureRepositoryImpl {
 
             // Create new variants
             if !variants.is_empty() {
-                let create_result = self.create_feature_variants(&mut tx, input.id, variants).await;
+                let create_result = self
+                    .create_feature_variants(&mut tx, input.id, variants)
+                    .await;
                 if create_result.is_err() {
                     let _ = tx.rollback().await;
                     return Err(create_result.err().unwrap());
@@ -1260,7 +1285,10 @@ impl FeatureRepository for FeatureRepositoryImpl {
     }
 
     // Variant methods
-    async fn get_feature_variants(&self, feature_id: Uuid) -> Result<Vec<crate::database::entity::FeatureVariant>, Error> {
+    async fn get_feature_variants(
+        &self,
+        feature_id: Uuid,
+    ) -> Result<Vec<crate::database::entity::FeatureVariant>, Error> {
         let variants = sqlx::query_as!(
             crate::database::entity::FeatureVariant,
             r#"
@@ -1991,7 +2019,12 @@ impl FeatureRepositoryImpl {
         &self,
         tx: &mut Transaction<'_, Postgres>,
         feature_id: Uuid,
-        variants: Vec<(String, serde_json::Value, crate::database::entity::VariantValueType, Option<String>)>,
+        variants: Vec<(
+            String,
+            serde_json::Value,
+            crate::database::entity::VariantValueType,
+            Option<String>,
+        )>,
     ) -> Result<Vec<crate::database::entity::FeatureVariant>, Error> {
         let mut created_variants = Vec::new();
 

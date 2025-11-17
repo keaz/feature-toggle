@@ -138,6 +138,7 @@ impl KillSwitchRollbackScheduler {
                     rollout_percentage: c.rollout_percentage,
                     serve: c.serve.unwrap_or_default(),
                     priority: c.priority,
+                    operator: c.operator,
                 })
                 .collect::<Vec<_>>();
 

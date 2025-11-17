@@ -241,14 +241,36 @@ impl FeatureEvaluationSvc {
                 .map_err(|e| Status::internal(format!("db error: {}", e)))?;
             let mapped_criteria = crits
                 .into_iter()
-                .map(|c| engine::StageCriterion {
-                    context_key: c.context_key,
-                    context: engine::StageContext {
-                        key: c.context.key,
-                        entries: c.context.entries.into_iter().map(|e| e.value).collect(),
-                    },
-                    rollout_percentage: c.rollout_percentage,
-                    serve: c.serve,
+                .map(|c| {
+                    // Parse operator from database string
+                    let operator = match c.operator.to_uppercase().as_str() {
+                        "EQUALS" => engine::Operator::Equals,
+                        "NOTEQUALS" | "NOT_EQUALS" => engine::Operator::NotEquals,
+                        "GREATERTHAN" | "GREATER_THAN" => engine::Operator::GreaterThan,
+                        "LESSTHAN" | "LESS_THAN" => engine::Operator::LessThan,
+                        "GREATERTHANOREQUAL" | "GREATER_THAN_OR_EQUAL" => engine::Operator::GreaterThanOrEqual,
+                        "LESSTHANOREQUAL" | "LESS_THAN_OR_EQUAL" => engine::Operator::LessThanOrEqual,
+                        "CONTAINS" => engine::Operator::Contains,
+                        "STARTSWITH" | "STARTS_WITH" => engine::Operator::StartsWith,
+                        "ENDSWITH" | "ENDS_WITH" => engine::Operator::EndsWith,
+                        "REGEX" => engine::Operator::Regex,
+                        "IN" => engine::Operator::In,
+                        "NOTIN" | "NOT_IN" => engine::Operator::NotIn,
+                        "SEMVERGREATERTHAN" | "SEMVER_GREATER_THAN" => engine::Operator::SemverGreaterThan,
+                        "SEMVERLESSTHAN" | "SEMVER_LESS_THAN" => engine::Operator::SemverLessThan,
+                        _ => engine::Operator::In, // Default fallback
+                    };
+
+                    engine::StageCriterion {
+                        context_key: c.context_key,
+                        context: engine::StageContext {
+                            key: c.context.key,
+                            entries: c.context.entries.into_iter().map(|e| e.value).collect(),
+                        },
+                        rollout_percentage: c.rollout_percentage,
+                        serve: c.serve,
+                        operator,
+                    }
                 })
                 .collect::<Vec<_>>();
             stages.push(engine::FeatureStage {
@@ -322,6 +344,7 @@ impl FeatureEvaluationSvc {
                     rollout_percentage: c.rollout_percentage,
                     serve: c.serve.unwrap_or_default(),
                     priority: c.priority,
+                    operator: c.operator,
                 })
                 .collect::<Vec<_>>();
 

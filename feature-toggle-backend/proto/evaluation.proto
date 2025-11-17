@@ -45,6 +45,7 @@ message StageCriterionFull {
   int32 rollout_percentage = 4;
   string serve = 5; // Optional variant control name to serve
   int32 priority = 6; // Evaluation priority (lower values evaluated first)
+  string operator = 7; // Comparison operator (EQUALS, IN, GREATER_THAN, etc.)
 }
 
 message FeatureStageFull {

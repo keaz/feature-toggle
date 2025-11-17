@@ -144,6 +144,7 @@ pub struct StageCriterion {
     pub rollout_percentage: i32,
     pub serve: Option<String>,
     pub priority: i32,
+    pub operator: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
