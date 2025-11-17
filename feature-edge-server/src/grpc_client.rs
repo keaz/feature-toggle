@@ -118,7 +118,9 @@ pub async fn get_or_fetch_client_info(
     let client_info = fetch_client_info_via_grpc_uncached(app, client_id, client_secret).await?;
 
     // Store in cache for future requests
-    app.client_info_cache.insert(client_id.to_string(), client_info.clone()).await;
+    app.client_info_cache
+        .insert(client_id.to_string(), client_info.clone())
+        .await;
 
     Some(client_info)
 }
@@ -171,7 +173,7 @@ pub fn build_endpoint(grpc_addr: &str) -> Endpoint {
 async fn send_initial_subscribe(tx: &tokio::sync::mpsc::Sender<pb::StreamRequest>, app: &AppState) {
     // Collect all cached feature keys to send to backend
     // This allows backend to rebuild its memory of which features this client is interested in
-    let cached_keys = app.cache.get_all_keys().await;
+    let cached_keys = app.mapped_cache.get_all_keys().await;
 
     tracing::info!("Subscribing with {} cached feature keys", cached_keys.len());
 
@@ -224,20 +226,18 @@ async fn handle_feature_update(app: &AppState, update: pb::FeatureUpdate) {
         x if x == Action::Upsert as i32 || x == Action::Snapshot as i32 => {
             if let Some(f) = update.feature {
                 let feature_id = f.id.clone();
-                let feature_key = f.key.clone();
 
-                app.cache.upsert(f).await;
-                app.mapped_cache.invalidate(&feature_key).await;
-                // We are purging assignments for feature in evenry feature update
-                // so that we can make sure
+                // Map protobuf to engine format and cache
+                let engine_feature = std::sync::Arc::new(crate::handlers::map_proto_to_engine(&f));
+                app.mapped_cache.insert(engine_feature).await;
+
+                // Purge assignments for feature on every feature update
                 app.purge_assignments_for_feature(&feature_id).await;
-
             }
         }
         x if x == Action::Delete as i32 => {
             if !update.feature_key.is_empty() {
-                app.mapped_cache.invalidate(&update.feature_key).await;
-                if let Some(feature_id) = app.cache.delete_by_key(&update.feature_key).await {
+                if let Some(feature_id) = app.mapped_cache.delete_by_key(&update.feature_key).await {
                     app.purge_assignments_for_feature(&feature_id).await;
                 }
             }
@@ -324,16 +324,13 @@ pub async fn run_stream_task(app: AppState, grpc_addr: String) {
 pub async fn run_flush_task(app: AppState) {
     loop {
         tokio::time::sleep(app.flush_interval).await;
-        // Drain pending assignments
-        let to_send: Vec<UserAssignment> = {
-            let mut lock = app.pending_assignments.lock().await;
-            if lock.is_empty() {
-                Vec::new()
-            } else {
-                let v = lock.drain(..).collect::<Vec<_>>();
-                v
-            }
-        };
+
+        // Drain pending assignments from lock-free queue
+        let mut to_send = Vec::new();
+        while let Some(assignment) = app.pending_assignments.pop() {
+            to_send.push(assignment);
+        }
+
         if to_send.is_empty() {
             continue;
         }
@@ -391,9 +388,10 @@ pub async fn run_flush_task(app: AppState) {
                     "Will retry on next flush cycle ({}s)",
                     app.flush_interval.as_secs()
                 );
-                // requeue for next flush attempt
-                let mut lock = app.pending_assignments.lock().await;
-                lock.extend(to_send);
+                // Requeue for next flush attempt (lock-free!)
+                for assignment in to_send {
+                    app.pending_assignments.push(assignment);
+                }
             }
         }
     }
@@ -402,7 +400,7 @@ pub async fn run_flush_task(app: AppState) {
 /// Background task to periodically flush evaluation events to backend
 pub async fn run_evaluation_flush_task(
     app: AppState,
-    mut event_rx: tokio::sync::mpsc::UnboundedReceiver<crate::EvaluationEvent>
+    mut event_rx: tokio::sync::mpsc::UnboundedReceiver<crate::EvaluationEvent>,
 ) {
     let mut buffer = Vec::new();
     let flush_interval = app.evaluation_flush_interval;
@@ -513,45 +511,40 @@ pub fn assignment_key(user_id: &str, feature_id: &str, environment_id: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::FeatureCache;
     use std::sync::Arc;
     use tonic::transport::Endpoint;
 
     #[tokio::test]
     async fn test_send_initial_subscribe_with_cached_keys() {
         // Create a cache and populate it with features
-        let cache = Arc::new(FeatureCache::new(100));
+        let mapped_cache = Arc::new(crate::MappedFeatureCache::new(100));
 
         // Add some features to the cache
         for i in 1..=5 {
-            let feature = crate::pb::FeatureFull {
+            let feature = Arc::new(evaluation_engine::Feature {
                 id: format!("id_{}", i),
                 key: format!("feature_key_{}", i),
-                description: String::new(),
-                feature_type: String::new(),
-                team_id: String::new(),
-                created_at: String::new(),
+                feature_type: "Simple".to_string(),
                 active: true,
-                kill_switch_enabled: false,
-                kill_switch_activated_at: String::new(),
-                rollback_scheduled_at: String::new(),
-                stages: vec![],
+                enabled: true,
                 dependencies: vec![],
+                stages: vec![],
                 variants: vec![],
-            };
-            cache.upsert(feature).await;
+            });
+            mapped_cache.insert(feature).await;
         }
 
         // Create AppState with the populated cache
         let channel = Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
-        let grpc_client = crate::pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
+        let grpc_client =
+            crate::pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
 
-        let mapped_cache = Arc::new(crate::MappedFeatureCache::new(100));
-        let client_info_cache = Arc::new(crate::ClientInfoCache::new(std::time::Duration::from_secs(300)));
+        let client_info_cache = Arc::new(crate::ClientInfoCache::new(
+            std::time::Duration::from_secs(300),
+        ));
         let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let app_state = crate::AppState {
-            cache,
             mapped_cache,
             client_info_cache,
             grpc: Arc::new(tokio::sync::Mutex::new(grpc_client)),
@@ -559,7 +552,7 @@ mod tests {
             client_secret: "test-secret".to_string(),
             connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             assigned_cache: Arc::new(dashmap::DashMap::new()),
-            pending_assignments: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            pending_assignments: Arc::new(crossbeam::queue::SegQueue::new()),
             flush_interval: std::time::Duration::from_secs(10),
             evaluation_event_tx: event_tx,
             evaluation_flush_interval: std::time::Duration::from_secs(30),
@@ -606,17 +599,18 @@ mod tests {
     #[tokio::test]
     async fn test_send_initial_subscribe_with_empty_cache() {
         // Create an empty cache
-        let cache = Arc::new(FeatureCache::new(100));
+        let mapped_cache = Arc::new(crate::MappedFeatureCache::new(100));
 
         let channel = Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
-        let grpc_client = crate::pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
+        let grpc_client =
+            crate::pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
 
-        let mapped_cache = Arc::new(crate::MappedFeatureCache::new(100));
-        let client_info_cache = Arc::new(crate::ClientInfoCache::new(std::time::Duration::from_secs(300)));
+        let client_info_cache = Arc::new(crate::ClientInfoCache::new(
+            std::time::Duration::from_secs(300),
+        ));
         let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let app_state = crate::AppState {
-            cache,
             mapped_cache,
             client_info_cache,
             grpc: Arc::new(tokio::sync::Mutex::new(grpc_client)),
@@ -624,7 +618,7 @@ mod tests {
             client_secret: "test-secret".to_string(),
             connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             assigned_cache: Arc::new(dashmap::DashMap::new()),
-            pending_assignments: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            pending_assignments: Arc::new(crossbeam::queue::SegQueue::new()),
             flush_interval: std::time::Duration::from_secs(10),
             evaluation_event_tx: event_tx,
             evaluation_flush_interval: std::time::Duration::from_secs(30),
@@ -652,5 +646,70 @@ mod tests {
     fn test_assignment_key_format() {
         let key = assignment_key("user-123", "feature-456", "env-789");
         assert_eq!(key, "user-123|feature-456|env-789");
+    }
+
+    #[tokio::test]
+    async fn test_handle_feature_update_populates_cache() {
+        // Create test AppState
+        let mapped_cache = Arc::new(crate::MappedFeatureCache::new(100));
+        let client_info_cache = Arc::new(crate::ClientInfoCache::new(
+            std::time::Duration::from_secs(300),
+        ));
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let channel = Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
+        let grpc_client =
+            crate::pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
+
+        let app_state = crate::AppState {
+            mapped_cache: mapped_cache.clone(),
+            client_info_cache,
+            grpc: Arc::new(tokio::sync::Mutex::new(grpc_client)),
+            client_id: "test-client-id".to_string(),
+            client_secret: "test-secret".to_string(),
+            connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            assigned_cache: Arc::new(dashmap::DashMap::new()),
+            pending_assignments: Arc::new(crossbeam::queue::SegQueue::new()),
+            flush_interval: std::time::Duration::from_secs(10),
+            evaluation_event_tx: event_tx,
+            evaluation_flush_interval: std::time::Duration::from_secs(30),
+            retry_config: crate::config::RetryConfig::default(),
+        };
+
+        // Create a test feature
+        let test_feature = crate::pb::FeatureFull {
+            id: "feature-id-123".to_string(),
+            key: "test_feature_key".to_string(),
+            description: "Test feature".to_string(),
+            feature_type: "Simple".to_string(),
+            team_id: "team-1".to_string(),
+            created_at: "2024-01-01".to_string(),
+            active: true,
+            kill_switch_enabled: false,
+            kill_switch_activated_at: String::new(),
+            rollback_scheduled_at: String::new(),
+            stages: vec![],
+            dependencies: vec![],
+            variants: vec![],
+        };
+
+        // Create an UPSERT update
+        let update = crate::pb::FeatureUpdate {
+            action: crate::pb::feature_update::Action::Upsert as i32,
+            feature: Some(test_feature.clone()),
+            feature_key: test_feature.key.clone(),
+            error: String::new(),
+            message_id: String::new(),
+        };
+
+        // Handle the update
+        handle_feature_update(&app_state, update).await;
+
+        // Verify mapped cache is populated
+        let cached_mapped = mapped_cache.get("test_feature_key").await;
+        assert!(
+            cached_mapped.is_some(),
+            "Mapped cache should contain the feature"
+        );
+        assert_eq!(cached_mapped.unwrap().id, "feature-id-123");
     }
 }

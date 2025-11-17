@@ -29,6 +29,8 @@ toml = "0.8"
 moka = { version = "0.12", features = ["future"] }
 # Lock-free concurrent hashmap
 dashmap = "6.1"
+# Lock-free concurrent queue
+crossbeam = "0.8"
 
 [build-dependencies]
 tonic-build = { version = "0.12" }

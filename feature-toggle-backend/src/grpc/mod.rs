@@ -55,6 +55,9 @@ impl crate::logic::user_flag::UserFlagLogic for NoopUserFlagLogic {
     }
 }
 
+// Message type for async database writer
+type EvaluationBatch = Vec<crate::database::feature_evaluation::CreateFeatureEvaluation>;
+
 pub struct FeatureEvaluationSvc {
     pool: sqlx::PgPool,
     feature_repo: Box<dyn crate::database::feature::FeatureRepository>,
@@ -63,6 +66,8 @@ pub struct FeatureEvaluationSvc {
     user_flag_logic: Box<dyn crate::logic::user_flag::UserFlagLogic>,
     feature_evaluation_logic: Box<dyn crate::logic::feature_evaluation::FeatureEvaluationLogic>,
     updates_tx: tokio::sync::broadcast::Sender<pb::FeatureUpdate>,
+    // Async database writer channel - sends evaluation batches to background task
+    evaluation_writer_tx: tokio::sync::mpsc::UnboundedSender<EvaluationBatch>,
     // Tracks, per client_id, the set of feature keys that the client explicitly requested via GetFeatureByKeyRequest
     requested_keys: std::sync::Arc<
         tokio::sync::RwLock<
@@ -81,6 +86,7 @@ impl Clone for FeatureEvaluationSvc {
             user_flag_logic: self.user_flag_logic.clone_box(),
             feature_evaluation_logic: self.feature_evaluation_logic.clone_box(),
             updates_tx: self.updates_tx.clone(),
+            evaluation_writer_tx: self.evaluation_writer_tx.clone(),
             requested_keys: self.requested_keys.clone(),
         }
     }
@@ -108,6 +114,17 @@ impl FeatureEvaluationSvc {
                 feature_evaluation_repo,
                 evaluation_events_tx.clone(),
             );
+
+        // Create mpsc channel for async database writes
+        let (evaluation_writer_tx, evaluation_writer_rx) =
+            tokio::sync::mpsc::unbounded_channel::<EvaluationBatch>();
+
+        // Spawn background task to handle database writes
+        let logic_clone = feature_evaluation_logic.clone_box();
+        tokio::spawn(async move {
+            Self::run_evaluation_writer(logic_clone, evaluation_writer_rx).await;
+        });
+
         Self {
             pool,
             feature_repo,
@@ -116,10 +133,36 @@ impl FeatureEvaluationSvc {
             user_flag_logic,
             feature_evaluation_logic,
             updates_tx,
+            evaluation_writer_tx,
             requested_keys: std::sync::Arc::new(tokio::sync::RwLock::new(
                 std::collections::HashMap::new(),
             )),
         }
+    }
+
+    /// Background task that processes evaluation batches asynchronously
+    /// This prevents database writes from blocking the gRPC stream
+    async fn run_evaluation_writer(
+        logic: Box<dyn crate::logic::feature_evaluation::FeatureEvaluationLogic>,
+        mut rx: tokio::sync::mpsc::UnboundedReceiver<EvaluationBatch>,
+    ) {
+        log::info!("Starting async evaluation writer task");
+        while let Some(evaluations) = rx.recv().await {
+            let count = evaluations.len();
+            match logic.record_evaluations_bulk(evaluations).await {
+                Ok(stored) => {
+                    log::debug!(
+                        "Async writer stored {} evaluations (received {})",
+                        stored.len(),
+                        count
+                    );
+                }
+                Err(e) => {
+                    log::error!("Async writer failed to store {} evaluations: {}", count, e);
+                }
+            }
+        }
+        log::warn!("Evaluation writer task shutting down");
     }
 
     // test-friendly constructor to inject mocks
@@ -147,6 +190,17 @@ impl FeatureEvaluationSvc {
                 feature_evaluation_repo,
                 evaluation_events_tx.clone(),
             );
+
+        // Create mpsc channel for async database writes (test mode)
+        let (evaluation_writer_tx, evaluation_writer_rx) =
+            tokio::sync::mpsc::unbounded_channel::<EvaluationBatch>();
+
+        // Spawn background task to handle database writes
+        let logic_clone = feature_evaluation_logic.clone_box();
+        tokio::spawn(async move {
+            Self::run_evaluation_writer(logic_clone, evaluation_writer_rx).await;
+        });
+
         Self {
             pool,
             feature_repo,
@@ -155,6 +209,7 @@ impl FeatureEvaluationSvc {
             user_flag_logic,
             feature_evaluation_logic,
             updates_tx,
+            evaluation_writer_tx,
             requested_keys: std::sync::Arc::new(tokio::sync::RwLock::new(
                 std::collections::HashMap::new(),
             )),
@@ -226,6 +281,10 @@ impl FeatureEvaluationSvc {
         };
 
         Ok(engine::Feature {
+            id: f.id.to_string(),
+            key: f.key,
+            feature_type: format!("{:?}", f.feature_type),
+            active: f.active,
             enabled: f.active,
             dependencies: deps,
             stages,
@@ -610,7 +669,13 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
                     };
                     if let Err(e) = self
                         .user_flag_logic
-                        .upsert_after_auth(&m.user_id, &m.feature_id, &m.environment_id, m.assigned, variant)
+                        .upsert_after_auth(
+                            &m.user_id,
+                            &m.feature_id,
+                            &m.environment_id,
+                            m.assigned,
+                            variant,
+                        )
                         .await
                     {
                         return Err(match e {
@@ -750,21 +815,10 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
         // - If subscribe.feature_keys is non-empty, use those specific keys
         // - If subscribe.feature_keys is empty, subscribe to ALL features for this client
         //   (useful for edge servers that want to receive all updates)
-        let subscribe_all = subscribe.feature_keys.is_empty();
-
-        log::info!(
-            "gRPC: Client {} subscribing to feature updates (subscribe_all={}, requested_feature_keys={:?})",
-            client_id,
-            subscribe_all,
-            subscribe.feature_keys
-        );
 
         // Merge subscription keys with previously requested keys from GetFeatureByKeyRequest
-        let mut subscription_keys: std::collections::HashSet<String> = if subscribe_all {
-            std::collections::HashSet::new() // Will match all keys
-        } else {
-            subscribe.feature_keys.iter().cloned().collect()
-        };
+        let mut subscription_keys: std::collections::HashSet<String> =
+            subscribe.feature_keys.iter().cloned().collect();
 
         // Add any keys that were previously requested via GetFeatureByKeyRequest
         {
@@ -774,49 +828,65 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
             }
         }
 
-        // Update the requested_keys map with the merged subscription keys
-        // This rebuilds backend's memory of which features this client is interested in
-        // This is crucial when backend restarts and edge reconnects with cached keys
-        if !subscribe_all && !subscription_keys.is_empty() {
-            let mut map = self.requested_keys.write().await;
-            map.insert(client_id, subscription_keys.clone());
-            log::info!(
-                "gRPC: Updated requested_keys for client {} with {} feature keys",
-                client_id,
-                subscription_keys.len()
-            );
-        }
+        let mut map = self.requested_keys.write().await;
+        map.insert(client_id, subscription_keys.clone());
+        log::info!(
+            "gRPC: Updated requested_keys for client {} with {} feature keys",
+            client_id,
+            subscription_keys.len()
+        );
 
-        // Send initial snapshot for tracked keys
+        // Send initial snapshot
         {
             let feature_repo = &self.feature_repo;
-            let keys_snapshot: Vec<String> = subscription_keys.iter().cloned().collect();
 
-            for k in keys_snapshot {
-                let mut features = feature_repo
-                    .get_features(team_id, Some(k.clone()), None)
-                    .await
-                    .map_err(|e| Status::internal(format!("db error: {}", e)))?;
-                if let Some(f) = features.pop() {
-                    let full = self.map_db_feature_to_full(f).await?;
-                    let _ = out_tx
-                        .send(Ok(pb::FeatureUpdate {
-                            message_id: uuid::Uuid::new_v4().to_string(),
-                            action: pb::feature_update::Action::Snapshot as i32,
-                            feature: Some(full),
-                            feature_key: String::new(),
-                            error: String::new(),
-                        }))
-                        .await;
+            // If subscription_keys is non-empty, fetch those specific features
+            // Otherwise, don't send any snapshot (empty subscribe)
+            let features_to_send = if subscription_keys.is_empty() {
+                vec![]
+            } else {
+                log::info!(
+                    "gRPC: Sending snapshot of {} specific features",
+                    subscription_keys.len()
+                );
+                let mut all_features = Vec::new();
+                for k in subscription_keys.iter() {
+                    let features = feature_repo
+                        .get_features(team_id, Some(k.clone()), None)
+                        .await
+                        .map_err(|e| Status::internal(format!("db error: {}", e)))?;
+                    all_features.extend(features);
                 }
+                all_features
+            };
+
+            log::info!(
+                "gRPC: Snapshot contains {} features",
+                features_to_send.len()
+            );
+
+            // Send each feature as a snapshot update
+            for f in features_to_send {
+                let full = self.map_db_feature_to_full(f).await?;
+                let _ = out_tx
+                    .send(Ok(pb::FeatureUpdate {
+                        message_id: uuid::Uuid::new_v4().to_string(),
+                        action: pb::feature_update::Action::Snapshot as i32,
+                        feature: Some(full),
+                        feature_key: String::new(),
+                        error: String::new(),
+                    }))
+                    .await;
             }
+
+            log::info!("gRPC: Snapshot sent successfully");
         }
 
         // Subscribe to shared broadcaster for live updates
         let mut rx = self.updates_tx.subscribe();
         let out_tx_clone = out_tx.clone();
         let subscription_keys_for_filter = subscription_keys.clone();
-        let subscribe_all_for_filter = subscribe_all;
+
         tokio::spawn(async move {
             loop {
                 match rx.recv().await {
@@ -831,15 +901,13 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
                         // Determine if we should send this update:
                         // - If subscribe_all is true, send everything (edge servers)
                         // - Otherwise, check if the key is in the subscription set
-                        let should_send = subscribe_all_for_filter
-                            || subscription_keys_for_filter.contains(&key_for_update);
+                        let should_send = subscription_keys_for_filter.contains(&key_for_update);
 
                         if should_send {
                             log::info!(
-                                "gRPC: Sending feature update message_id={} key='{}' to edge client (subscribe_all={})",
+                                "gRPC: Sending feature update message_id={} key='{}' to edge client",
                                 update.message_id,
-                                key_for_update,
-                                subscribe_all_for_filter
+                                key_for_update
                             );
                             if out_tx_clone.send(Ok(update)).await.is_err() {
                                 log::warn!("gRPC: Client stream closed, stopping update task");
@@ -1009,19 +1077,19 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
             );
         }
 
-        // Store evaluations in bulk
-        match self
-            .feature_evaluation_logic
-            .record_evaluations_bulk(evaluations)
-            .await
-        {
-            Ok(stored) => Ok(Response::new(pb::PushEvaluationEventsResponse {
-                message_id: uuid::Uuid::new_v4().to_string(),
-                processed_count: stored.len() as i32,
-            })),
+        // Send evaluations to async writer (non-blocking)
+        let count = evaluations.len();
+        match self.evaluation_writer_tx.send(evaluations) {
+            Ok(_) => {
+                log::debug!("Queued {} evaluation events for async storage", count);
+                Ok(Response::new(pb::PushEvaluationEventsResponse {
+                    message_id: uuid::Uuid::new_v4().to_string(),
+                    processed_count: count as i32,
+                }))
+            }
             Err(e) => {
-                log::error!("Failed to store evaluation events: {}", e);
-                Err(Status::internal("failed to store evaluation events"))
+                log::error!("Failed to queue evaluation events: {}", e);
+                Err(Status::internal("failed to queue evaluation events"))
             }
         }
     }

@@ -185,6 +185,72 @@ impl PgFeatureEvaluationRepository {
     pub fn new(pool: sqlx::PgPool) -> Self {
         Self { pool }
     }
+
+    /// Insert a single batch of evaluations (max 1000 items)
+    /// Private helper method for bulk_create_evaluations
+    async fn insert_evaluation_batch(
+        &self,
+        evaluations: &[CreateFeatureEvaluation],
+    ) -> Result<Vec<FeatureEvaluationRow>, sqlx::Error> {
+        if evaluations.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let mut query = String::from(
+            r#"
+            INSERT INTO feature_evaluations (
+                feature_key, environment_id, client_id, evaluated_at,
+                evaluation_result, evaluation_context, user_context, prior_assignment,
+                evaluation_success, evaluation_value, variant
+            )
+            VALUES
+            "#,
+        );
+
+        // Build the VALUES clause dynamically - 11 parameters per evaluation
+        for (i, _) in evaluations.iter().enumerate() {
+            if i > 0 {
+                query.push_str(", ");
+            }
+            let base = i * 11;
+            query.push_str(&format!(
+                "(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
+                base + 1,
+                base + 2,
+                base + 3,
+                base + 4,
+                base + 5,
+                base + 6,
+                base + 7,
+                base + 8,
+                base + 9,
+                base + 10,
+                base + 11
+            ));
+        }
+        query.push_str(" RETURNING *");
+
+        let mut sql_query = sqlx::query_as::<_, FeatureEvaluationRow>(&query);
+
+        // Bind all parameters
+        for evaluation in evaluations {
+            sql_query = sql_query
+                .bind(&evaluation.feature_key)
+                .bind(&evaluation.environment_id)
+                .bind(evaluation.client_id)
+                .bind(evaluation.evaluated_at)
+                .bind(&evaluation.evaluation_result)
+                .bind(&evaluation.evaluation_context)
+                .bind(&evaluation.user_context)
+                .bind(evaluation.prior_assignment)
+                .bind(evaluation.evaluation_success)
+                .bind(&evaluation.evaluation_value)
+                .bind(&evaluation.variant);
+        }
+
+        let rows = sql_query.fetch_all(&self.pool).await?;
+        Ok(rows)
+    }
 }
 
 #[async_trait::async_trait]
@@ -229,60 +295,20 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
             return Ok(vec![]);
         }
 
-        let mut query = String::from(
-            r#"
-            INSERT INTO feature_evaluations (
-                feature_key, environment_id, client_id, evaluated_at,
-                evaluation_result, evaluation_context, user_context, prior_assignment,
-                evaluation_success, evaluation_value, variant
-            )
-            VALUES
-            "#,
-        );
+        // PostgreSQL has a limit of ~65,535 parameters per query
+        // With 11 parameters per evaluation, we can safely batch ~5,000 at a time
+        // Using 1000 as a conservative batch size for better performance
+        const BATCH_SIZE: usize = 1000;
 
-        // Build the VALUES clause dynamically - now 11 parameters per evaluation
-        for (i, _) in evaluations.iter().enumerate() {
-            if i > 0 {
-                query.push_str(", ");
-            }
-            let base = i * 11;
-            query.push_str(&format!(
-                "(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
-                base + 1,
-                base + 2,
-                base + 3,
-                base + 4,
-                base + 5,
-                base + 6,
-                base + 7,
-                base + 8,
-                base + 9,
-                base + 10,
-                base + 11
-            ));
-        }
-        query.push_str(" RETURNING *");
+        let mut all_rows = Vec::new();
 
-        let mut sql_query = sqlx::query_as::<_, FeatureEvaluationRow>(&query);
-
-        // Bind all parameters
-        for evaluation in evaluations {
-            sql_query = sql_query
-                .bind(evaluation.feature_key)
-                .bind(evaluation.environment_id)
-                .bind(evaluation.client_id)
-                .bind(evaluation.evaluated_at)
-                .bind(evaluation.evaluation_result) // Keep for backward compatibility
-                .bind(evaluation.evaluation_context)
-                .bind(evaluation.user_context)
-                .bind(evaluation.prior_assignment)
-                .bind(evaluation.evaluation_success)
-                .bind(evaluation.evaluation_value)
-                .bind(evaluation.variant);
+        // Process evaluations in batches
+        for batch in evaluations.chunks(BATCH_SIZE) {
+            let rows = self.insert_evaluation_batch(batch).await?;
+            all_rows.extend(rows);
         }
 
-        let rows = sql_query.fetch_all(&self.pool).await?;
-        Ok(rows)
+        Ok(all_rows)
     }
 
     async fn get_evaluations(

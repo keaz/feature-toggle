@@ -1,10 +1,11 @@
-use crate::grpc_client::{assignment_key, get_or_fetch_client_info, fetch_feature_via_grpc};
+use crate::grpc_client::{assignment_key, fetch_feature_via_grpc, get_or_fetch_client_info};
 use crate::pb;
 use crate::{AppState, EvaluationEvent};
 use actix_web::{HttpResponse, Responder, web};
 use evaluation_engine as engine;
 use serde::{Deserialize, Serialize};
 use tracing::error;
+use tracing::info as info_log;
 use utoipa::ToSchema;
 
 #[derive(Deserialize, ToSchema, Clone)]
@@ -52,7 +53,7 @@ pub struct EvaluateHttpResponse {
 }
 
 /// Map protobuf feature to evaluation engine format
-fn map_proto_to_engine(f: &pb::FeatureFull) -> engine::Feature {
+pub fn map_proto_to_engine(f: &pb::FeatureFull) -> engine::Feature {
     let stages = f
         .stages
         .iter()
@@ -85,7 +86,11 @@ fn map_proto_to_engine(f: &pb::FeatureFull) -> engine::Feature {
                         context_key: c.context_key.clone(),
                         context,
                         rollout_percentage: c.rollout_percentage,
-                        serve: if c.serve.is_empty() { None } else { Some(c.serve.clone()) },
+                        serve: if c.serve.is_empty() {
+                            None
+                        } else {
+                            Some(c.serve.clone())
+                        },
                     }
                 })
                 .collect(),
@@ -103,6 +108,10 @@ fn map_proto_to_engine(f: &pb::FeatureFull) -> engine::Feature {
         .collect();
 
     engine::Feature {
+        id: f.id.clone(),
+        key: f.key.clone(),
+        feature_type: f.feature_type.clone(),
+        active: f.active,
         enabled: f.active,
         dependencies: vec![], // For minimal implementation, ignore dependency recursion
         stages,
@@ -175,23 +184,8 @@ fn validate_web_origin(
     allowed
 }
 
-/// Get feature from cache or fetch from backend
+/// Get feature from cache or fetch from backend (returns mapped engine::Feature)
 async fn get_or_fetch_feature(
-    app: &AppState,
-    feature_key: &str,
-    client_id: &str,
-    client_secret: &str,
-) -> Option<pb::FeatureFull> {
-    if let Some(f) = app.cache.get_by_key(feature_key).await {
-        return Some(f);
-    }
-    let feature = fetch_feature_via_grpc(app, feature_key, client_id, client_secret).await?;
-    app.cache.upsert(feature.clone()).await;
-    Some(feature)
-}
-
-/// Get pre-mapped feature from cache or map and cache it
-async fn get_or_map_feature(
     app: &AppState,
     feature_key: &str,
     client_id: &str,
@@ -199,17 +193,20 @@ async fn get_or_map_feature(
 ) -> Option<std::sync::Arc<engine::Feature>> {
     // Check mapped cache first
     if let Some(mapped) = app.mapped_cache.get(feature_key).await {
+        info_log!("Feature '{}' found in mapped cache", feature_key);
         return Some(mapped);
     }
 
-    // Get protobuf feature from cache or backend
-    let pb_feature = get_or_fetch_feature(app, feature_key, client_id, client_secret).await?;
+    // Cache miss - fetch protobuf from backend and map it
+    info_log!("Feature '{}' NOT in cache, fetching from backend via gRPC", feature_key);
+    let pb_feature = fetch_feature_via_grpc(app, feature_key, client_id, client_secret).await?;
 
     // Map to engine format
     let engine_feature = std::sync::Arc::new(map_proto_to_engine(&pb_feature));
 
     // Cache the mapped version
-    app.mapped_cache.insert(feature_key.to_string(), engine_feature.clone()).await;
+    app.mapped_cache.insert(engine_feature.clone()).await;
+    info_log!("Feature '{}' successfully cached in mapped cache", feature_key);
 
     Some(engine_feature)
 }
@@ -288,66 +285,67 @@ pub async fn evaluate_handler(
             flag_key: feature_key.clone(),
             value: serde_json::json!(false),
             variant: None,
-            reason: if stage.is_none() { "DEFAULT" } else { "DISABLED" }.to_string(),
-            error_code: if stage.is_none() { Some("ENVIRONMENT_NOT_FOUND".to_string()) } else { None },
+            reason: if stage.is_none() {
+                "DEFAULT"
+            } else {
+                "DISABLED"
+            }
+            .to_string(),
+            error_code: if stage.is_none() {
+                Some("ENVIRONMENT_NOT_FOUND".to_string())
+            } else {
+                None
+            },
             metadata: None,
         }));
     }
 
     let stage = stage.unwrap();
-    let bucketing_key = if stage.bucketing_key.is_empty() {
-        "bucketingKey"
+    let bucketing_key = if stage.bucketing_key.is_some() {
+        stage.bucketing_key.as_ref().unwrap().as_str()
     } else {
-        &stage.bucketing_key
+        "bucketingKey"
     };
 
     // Extract user_id from bucketing_key attribute or use default bucketing_key
     let user_id_opt = if bucketing_key == "bucketingKey" {
         Some(req.context.bucketing_key.clone())
     } else {
-        req.context.attributes.get(bucketing_key).and_then(|v| {
-            v.as_str().map(|s| s.to_string())
-        })
-    };
-
-    // Get pre-mapped feature once (this is the key optimization!)
-    let mapped_feature = match get_or_map_feature(&app, &feature_key, &client_id, &client_secret).await {
-        Some(f) => f,
-        None => {
-            return Ok(web::Json(EvaluateHttpResponse {
-                flag_key: feature_key.clone(),
-                value: serde_json::json!(false),
-                variant: None,
-                reason: "DEFAULT".to_string(),
-                error_code: Some("FLAG_NOT_FOUND".to_string()),
-                metadata: None,
-            }));
-        }
+        req.context
+            .attributes
+            .get(bucketing_key)
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
     };
 
     // Perform evaluation (check cache first if we have a user_id)
     let (mut result, prior_assignment) = if let Some(user_id) = &user_id_opt {
         let key = assignment_key(user_id, &feature.id, &req.context.environment_id);
-        let cached = app.assigned_cache.get(&key).map(|entry| entry.value().clone());
+        let cached = app
+            .assigned_cache
+            .get(&key)
+            .map(|entry| entry.value().clone());
 
         if let Some(cached_assignment) = cached {
             // Cached assignment - return cached result with variant
-            (engine::EvaluationResult {
-                flag_key: feature_key.clone(),
-                value: cached_assignment.value,
-                variant: cached_assignment.variant,
-                reason: engine::EvaluationReason::Cached,
-                error_code: None,
-                metadata: None,
-            }, true)
+            (
+                engine::EvaluationResult {
+                    flag_key: feature_key.clone(),
+                    value: cached_assignment.value,
+                    variant: cached_assignment.variant,
+                    reason: engine::EvaluationReason::Cached,
+                    error_code: None,
+                    metadata: None,
+                },
+                true,
+            )
         } else {
             let ec = map_http_context_to_engine(feature_key.clone(), req.context.clone());
-            let result = engine::evaluate(ec, (*mapped_feature).clone());
+            let result = engine::evaluate(ec, (*feature).clone());
             (result, false)
         }
     } else {
         let ec = map_http_context_to_engine(feature_key.clone(), req.context.clone());
-        let result = engine::evaluate(ec, (*mapped_feature).clone());
+        let result = engine::evaluate(ec, (*feature).clone());
         (result, false)
     };
 
@@ -381,7 +379,8 @@ pub async fn evaluate_handler(
     // Determine if we should cache this assignment:
     // - For features with variants: cache if a variant was resolved
     // - For simple features (no variant): cache if value is true
-    let should_cache_assignment = result.variant.is_some() || result.value.as_bool().unwrap_or(false);
+    let should_cache_assignment =
+        result.variant.is_some() || result.value.as_bool().unwrap_or(false);
     if should_cache_assignment {
         if let Some(user_id) = user_id_opt {
             let key = assignment_key(&user_id, &feature.id, &req.context.environment_id);
@@ -392,23 +391,28 @@ pub async fn evaluate_handler(
                     variant: result.variant.clone(),
                 },
             );
-            let mut pending = app.pending_assignments.lock().await;
-            pending.push(crate::grpc_client::UserAssignment {
-                user_id,
-                feature_id: feature.id.clone(),
-                environment_id: req.context.environment_id.clone(),
-                assigned: true,
-                variant: result.variant.clone(),
-            });
+            // Lock-free push - no await needed!
+            app.pending_assignments
+                .push(crate::grpc_client::UserAssignment {
+                    user_id,
+                    feature_id: feature.id.clone(),
+                    environment_id: req.context.environment_id.clone(),
+                    assigned: true,
+                    variant: result.variant.clone(),
+                });
         }
     }
 
     // Convert evaluation reason to string
     let reason = format!("{:?}", result.reason).to_uppercase();
-    let error_code = result.error_code.map(|ec| format!("{:?}", ec).to_uppercase());
+    let error_code = result
+        .error_code
+        .map(|ec| format!("{:?}", ec).to_uppercase());
 
     // Convert metadata HashMap to JSON Value
-    let metadata = result.metadata.map(|m| serde_json::to_value(m).unwrap_or(serde_json::json!({})));
+    let metadata = result
+        .metadata
+        .map(|m| serde_json::to_value(m).unwrap_or(serde_json::json!({})));
 
     Ok(web::Json(EvaluateHttpResponse {
         flag_key: result.flag_key,

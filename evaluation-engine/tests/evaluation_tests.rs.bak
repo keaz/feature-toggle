@@ -5,12 +5,7 @@ use evaluation_engine::{
 use serde_json::json;
 use std::collections::HashMap;
 
-fn mk_ctx(
-    flag_key: &str,
-    env: &str,
-    bucketing_key: &str,
-    attrs: &[(&str, &str)],
-) -> FeatureEvaluationContext {
+fn mk_ctx(flag_key: &str, env: &str, bucketing_key: &str, attrs: &[(&str, &str)]) -> FeatureEvaluationContext {
     let mut attributes = HashMap::new();
     for (k, v) in attrs {
         attributes.insert((*k).to_string(), json!(*v));
@@ -87,10 +82,6 @@ fn evaluate_requires_matching_environment_stage() {
     let ctx = mk_ctx("feat", "env-a", "user123", &[]);
     let stg = stage("env-b", true, None, vec![]);
     let feature = Feature {
-        id: "test-id".to_string(),
-        key: "test-key".to_string(),
-        feature_type: "Contextual".to_string(),
-        active: true,
         enabled: true,
         dependencies: vec![],
         stages: vec![stg],
@@ -107,10 +98,6 @@ fn evaluate_requires_stage_enabled() {
     let ctx = mk_ctx("feat", "env-a", "user123", &[]);
     let stg = stage("env-a", false, None, vec![]);
     let feature = Feature {
-        id: "test-id".to_string(),
-        key: "test-key".to_string(),
-        feature_type: "Contextual".to_string(),
-        active: true,
         enabled: true,
         dependencies: vec![],
         stages: vec![stg],
@@ -126,10 +113,6 @@ fn evaluate_passes_when_no_criteria_and_enabled_stage() {
     let ctx = mk_ctx("feat", "env-a", "user123", &[]);
     let stg = stage("env-a", true, None, vec![]);
     let feature = Feature {
-        id: "test-id".to_string(),
-        key: "test-key".to_string(),
-        feature_type: "Contextual".to_string(),
-        active: true,
         enabled: true,
         dependencies: vec![],
         stages: vec![stg],
@@ -146,10 +129,6 @@ fn evaluate_fails_when_user_not_in_allowed_values() {
     let crit = criterion("role", &["admin", "editor"], 100, None);
     let stg = stage("env-a", true, None, vec![crit]);
     let feature = Feature {
-        id: "test-id".to_string(),
-        key: "test-key".to_string(),
-        feature_type: "Contextual".to_string(),
-        active: true,
         enabled: true,
         dependencies: vec![],
         stages: vec![stg],
@@ -166,10 +145,6 @@ fn evaluate_passes_when_user_in_allowed_and_rollout_100() {
     let crit = criterion("role", &["admin"], 100, None);
     let stg = stage("env-a", true, None, vec![crit]);
     let feature = Feature {
-        id: "test-id".to_string(),
-        key: "test-key".to_string(),
-        feature_type: "Contextual".to_string(),
-        active: true,
         enabled: true,
         dependencies: vec![],
         stages: vec![stg],
@@ -186,10 +161,6 @@ fn evaluate_with_variant() {
     let crit = criterion("role", &["admin"], 100, Some("treatment"));
     let stg = stage("env-a", true, None, vec![crit]);
     let feature = Feature {
-        id: "test-id".to_string(),
-        key: "test-key".to_string(),
-        feature_type: "Contextual".to_string(),
-        active: true,
         enabled: true,
         dependencies: vec![],
         stages: vec![stg],
@@ -216,10 +187,6 @@ fn evaluate_with_json_variant() {
     let crit = criterion("tier", &["premium"], 100, Some("premium-config"));
     let stg = stage("env-a", true, None, vec![crit]);
     let feature = Feature {
-        id: "test-id".to_string(),
-        key: "test-key".to_string(),
-        feature_type: "Contextual".to_string(),
-        active: true,
         enabled: true,
         dependencies: vec![],
         stages: vec![stg],
@@ -249,10 +216,6 @@ fn evaluate_dependency_failed() {
     let stg = stage("env-a", true, None, vec![]);
 
     let dependency = Feature {
-        id: "dep-id".to_string(),
-        key: "dep-key".to_string(),
-        feature_type: "Simple".to_string(),
-        active: true,
         enabled: false,
         dependencies: vec![],
         stages: vec![],
@@ -260,10 +223,6 @@ fn evaluate_dependency_failed() {
     };
 
     let feature = Feature {
-        id: "test-id".to_string(),
-        key: "test-key".to_string(),
-        feature_type: "Contextual".to_string(),
-        active: true,
         enabled: true,
         dependencies: vec![dependency],
         stages: vec![stg],
@@ -277,19 +236,10 @@ fn evaluate_dependency_failed() {
 
 #[test]
 fn evaluate_with_custom_bucketing_key() {
-    let ctx = mk_ctx(
-        "feat",
-        "env-a",
-        "user123",
-        &[("org_id", "org456"), ("role", "admin")],
-    );
+    let ctx = mk_ctx("feat", "env-a", "user123", &[("org_id", "org456"), ("role", "admin")]);
     let crit = criterion("role", &["admin"], 100, None);
     let stg = stage("env-a", true, Some("org_id"), vec![crit]);
     let feature = Feature {
-        id: "test-id".to_string(),
-        key: "test-key".to_string(),
-        feature_type: "Contextual".to_string(),
-        active: true,
         enabled: true,
         dependencies: vec![],
         stages: vec![stg],
@@ -302,20 +252,11 @@ fn evaluate_with_custom_bucketing_key() {
 
 #[test]
 fn evaluate_multiple_criteria_first_match_wins() {
-    let ctx = mk_ctx(
-        "feat",
-        "env-a",
-        "user123",
-        &[("role", "admin"), ("tier", "premium")],
-    );
+    let ctx = mk_ctx("feat", "env-a", "user123", &[("role", "admin"), ("tier", "premium")]);
     let crit1 = criterion("role", &["admin"], 100, Some("admin-variant"));
     let crit2 = criterion("tier", &["premium"], 100, Some("premium-variant"));
     let stg = stage("env-a", true, None, vec![crit1, crit2]);
     let feature = Feature {
-        id: "test-id".to_string(),
-        key: "test-key".to_string(),
-        feature_type: "Contextual".to_string(),
-        active: true,
         enabled: true,
         dependencies: vec![],
         stages: vec![stg],
@@ -343,10 +284,6 @@ fn evaluate_missing_bucketing_key_attribute() {
     let crit = criterion("role", &["admin"], 100, None);
     let stg = stage("env-a", true, Some("org_id"), vec![crit]);
     let feature = Feature {
-        id: "test-id".to_string(),
-        key: "test-key".to_string(),
-        feature_type: "Contextual".to_string(),
-        active: true,
         enabled: true,
         dependencies: vec![],
         stages: vec![stg],
@@ -363,17 +300,15 @@ fn evaluate_variant_not_found_returns_default() {
     let crit = criterion("role", &["admin"], 100, Some("non-existent-variant"));
     let stg = stage("env-a", true, None, vec![crit]);
     let feature = Feature {
-        id: "test-id".to_string(),
-        key: "test-key".to_string(),
-        feature_type: "Contextual".to_string(),
-        active: true,
         enabled: true,
         dependencies: vec![],
         stages: vec![stg],
-        variants: vec![FeatureVariant {
-            control: "control".to_string(),
-            value: json!(false),
-        }],
+        variants: vec![
+            FeatureVariant {
+                control: "control".to_string(),
+                value: json!(false),
+            },
+        ],
     };
     let result = evaluation_engine::evaluate(ctx, feature);
     // When variant not found, returns default true value

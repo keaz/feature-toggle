@@ -61,6 +61,10 @@ pub enum ErrorCode {
 // Feature data structures
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct Feature {
+    pub id: String,
+    pub key: String,
+    pub feature_type: String,
+    pub active: bool,
     pub enabled: bool,
     pub dependencies: Vec<Feature>,
     pub stages: Vec<FeatureStage>,
@@ -324,6 +328,10 @@ mod tests {
         };
 
         let feature = Feature {
+            id: "test-id".to_string(),
+            key: "test-feature".to_string(),
+            feature_type: "Contextual".to_string(),
+            active: true,
             enabled: true,
             dependencies: vec![],
             stages: vec![FeatureStage {
@@ -371,6 +379,10 @@ mod tests {
         };
 
         let feature = Feature {
+            id: "test-id".to_string(),
+            key: "test-feature".to_string(),
+            feature_type: "Simple".to_string(),
+            active: true,
             enabled: false,
             dependencies: vec![],
             stages: vec![],
