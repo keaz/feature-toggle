@@ -1,5 +1,6 @@
 pub mod activity_log;
 pub mod client;
+pub mod compound_rules;
 pub mod context;
 pub mod entity;
 pub mod environment;

@@ -462,6 +462,170 @@ impl MutationRoot {
         Ok(result)
     }
 
+    // Compound rules mutations
+    async fn create_rule_group(
+        &self,
+        ctx: &Context<'_>,
+        input: crate::graphql::schema::CreateRuleGroupInput,
+    ) -> GqlResult<crate::graphql::schema::CompoundRuleGroup> {
+        info!("Creating rule group for criteria: {:?}", input.criteria_id);
+
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        let repo = crate::database::compound_rules::compound_rules_repository(pool.clone());
+
+        let criteria_id = uuid::Uuid::try_from(input.criteria_id.clone())
+            .map_err(|e| async_graphql::Error::new(format!("Invalid criteria ID: {}", e)))?;
+
+        let db_input = crate::database::compound_rules::CreateRuleGroupInput {
+            criteria_id,
+            logic_operator: match input.logic_operator {
+                crate::graphql::schema::LogicOperator::And => crate::database::entity::LogicOperator::And,
+                crate::graphql::schema::LogicOperator::Or => crate::database::entity::LogicOperator::Or,
+            },
+            conditions: input.conditions.into_iter().map(|c| {
+                crate::database::compound_rules::CreateRuleConditionInput {
+                    context_key: c.context_key,
+                    operator: c.operator.to_db_string(),
+                    value: c.value.0,
+                    order_index: c.order_index,
+                }
+            }).collect(),
+        };
+
+        let rule_group = repo.create_rule_group(db_input).await
+            .map_err(|e| async_graphql::Error::new(format!("Failed to create rule group: {}", e)))?;
+
+        // Get conditions for the created group
+        let conditions = repo.get_rule_conditions(rule_group.id).await
+            .map_err(|e| async_graphql::Error::new(format!("Failed to get rule conditions: {}", e)))?;
+
+        Ok(crate::graphql::schema::CompoundRuleGroup {
+            id: ID::from(rule_group.id),
+            logic_operator: match rule_group.logic_operator {
+                crate::database::entity::LogicOperator::And => crate::graphql::schema::LogicOperator::And,
+                crate::database::entity::LogicOperator::Or => crate::graphql::schema::LogicOperator::Or,
+            },
+            conditions: conditions.into_iter().map(|c| {
+                let operator = match c.operator.to_uppercase().as_str() {
+                    "EQUALS" => crate::graphql::schema::RuleOperator::Equals,
+                    "NOTEQUALS" | "NOT_EQUALS" => crate::graphql::schema::RuleOperator::NotEquals,
+                    "GREATERTHAN" | "GREATER_THAN" => crate::graphql::schema::RuleOperator::GreaterThan,
+                    "LESSTHAN" | "LESS_THAN" => crate::graphql::schema::RuleOperator::LessThan,
+                    "GREATERTHANOREQUAL" | "GREATER_THAN_OR_EQUAL" => crate::graphql::schema::RuleOperator::GreaterThanOrEqual,
+                    "LESSTHANOREQUAL" | "LESS_THAN_OR_EQUAL" => crate::graphql::schema::RuleOperator::LessThanOrEqual,
+                    "CONTAINS" => crate::graphql::schema::RuleOperator::Contains,
+                    "STARTSWITH" | "STARTS_WITH" => crate::graphql::schema::RuleOperator::StartsWith,
+                    "ENDSWITH" | "ENDS_WITH" => crate::graphql::schema::RuleOperator::EndsWith,
+                    "REGEX" => crate::graphql::schema::RuleOperator::Regex,
+                    "IN" => crate::graphql::schema::RuleOperator::In,
+                    "NOTIN" | "NOT_IN" => crate::graphql::schema::RuleOperator::NotIn,
+                    "SEMVERGREATERTHAN" | "SEMVER_GREATER_THAN" => crate::graphql::schema::RuleOperator::SemverGreaterThan,
+                    "SEMVERLESSTHAN" | "SEMVER_LESS_THAN" => crate::graphql::schema::RuleOperator::SemverLessThan,
+                    _ => crate::graphql::schema::RuleOperator::In,
+                };
+                crate::graphql::schema::CompoundRuleCondition {
+                    id: ID::from(c.id),
+                    context_key: c.context_key,
+                    operator,
+                    value: async_graphql::Json(c.value),
+                    order_index: c.order_index,
+                }
+            }).collect(),
+        })
+    }
+
+    async fn update_rule_group(
+        &self,
+        ctx: &Context<'_>,
+        group_id: ID,
+        input: crate::graphql::schema::UpdateRuleGroupInput,
+    ) -> GqlResult<crate::graphql::schema::CompoundRuleGroup> {
+        info!("Updating rule group: {:?}", group_id);
+
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        let repo = crate::database::compound_rules::compound_rules_repository(pool.clone());
+
+        let group_uuid = uuid::Uuid::try_from(group_id.clone())
+            .map_err(|e| async_graphql::Error::new(format!("Invalid group ID: {}", e)))?;
+
+        let db_input = crate::database::compound_rules::UpdateRuleGroupInput {
+            logic_operator: input.logic_operator.map(|op| match op {
+                crate::graphql::schema::LogicOperator::And => crate::database::entity::LogicOperator::And,
+                crate::graphql::schema::LogicOperator::Or => crate::database::entity::LogicOperator::Or,
+            }),
+            conditions: input.conditions.map(|conds| {
+                conds.into_iter().map(|c| {
+                    crate::database::compound_rules::CreateRuleConditionInput {
+                        context_key: c.context_key,
+                        operator: c.operator.to_db_string(),
+                        value: c.value.0,
+                        order_index: c.order_index,
+                    }
+                }).collect()
+            }),
+        };
+
+        let rule_group = repo.update_rule_group(group_uuid, db_input).await
+            .map_err(|e| async_graphql::Error::new(format!("Failed to update rule group: {}", e)))?;
+
+        // Get conditions for the updated group
+        let conditions = repo.get_rule_conditions(rule_group.id).await
+            .map_err(|e| async_graphql::Error::new(format!("Failed to get rule conditions: {}", e)))?;
+
+        Ok(crate::graphql::schema::CompoundRuleGroup {
+            id: ID::from(rule_group.id),
+            logic_operator: match rule_group.logic_operator {
+                crate::database::entity::LogicOperator::And => crate::graphql::schema::LogicOperator::And,
+                crate::database::entity::LogicOperator::Or => crate::graphql::schema::LogicOperator::Or,
+            },
+            conditions: conditions.into_iter().map(|c| {
+                let operator = match c.operator.to_uppercase().as_str() {
+                    "EQUALS" => crate::graphql::schema::RuleOperator::Equals,
+                    "NOTEQUALS" | "NOT_EQUALS" => crate::graphql::schema::RuleOperator::NotEquals,
+                    "GREATERTHAN" | "GREATER_THAN" => crate::graphql::schema::RuleOperator::GreaterThan,
+                    "LESSTHAN" | "LESS_THAN" => crate::graphql::schema::RuleOperator::LessThan,
+                    "GREATERTHANOREQUAL" | "GREATER_THAN_OR_EQUAL" => crate::graphql::schema::RuleOperator::GreaterThanOrEqual,
+                    "LESSTHANOREQUAL" | "LESS_THAN_OR_EQUAL" => crate::graphql::schema::RuleOperator::LessThanOrEqual,
+                    "CONTAINS" => crate::graphql::schema::RuleOperator::Contains,
+                    "STARTSWITH" | "STARTS_WITH" => crate::graphql::schema::RuleOperator::StartsWith,
+                    "ENDSWITH" | "ENDS_WITH" => crate::graphql::schema::RuleOperator::EndsWith,
+                    "REGEX" => crate::graphql::schema::RuleOperator::Regex,
+                    "IN" => crate::graphql::schema::RuleOperator::In,
+                    "NOTIN" | "NOT_IN" => crate::graphql::schema::RuleOperator::NotIn,
+                    "SEMVERGREATERTHAN" | "SEMVER_GREATER_THAN" => crate::graphql::schema::RuleOperator::SemverGreaterThan,
+                    "SEMVERLESSTHAN" | "SEMVER_LESS_THAN" => crate::graphql::schema::RuleOperator::SemverLessThan,
+                    _ => crate::graphql::schema::RuleOperator::In,
+                };
+                crate::graphql::schema::CompoundRuleCondition {
+                    id: ID::from(c.id),
+                    context_key: c.context_key,
+                    operator,
+                    value: async_graphql::Json(c.value),
+                    order_index: c.order_index,
+                }
+            }).collect(),
+        })
+    }
+
+    async fn delete_rule_group(
+        &self,
+        ctx: &Context<'_>,
+        group_id: ID,
+    ) -> GqlResult<bool> {
+        info!("Deleting rule group: {:?}", group_id);
+
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        let repo = crate::database::compound_rules::compound_rules_repository(pool.clone());
+
+        let group_uuid = uuid::Uuid::try_from(group_id)
+            .map_err(|e| async_graphql::Error::new(format!("Invalid group ID: {}", e)))?;
+
+        repo.delete_rule_group(group_uuid).await
+            .map_err(|e| async_graphql::Error::new(format!("Failed to delete rule group: {}", e)))?;
+
+        Ok(true)
+    }
+
     // Deployment workflow: request stage change
     async fn request_stage_change(
         &self,
@@ -907,17 +1071,40 @@ async fn map_db_feature_to_full_for_broadcast(
         let crits = feature_repository.get_stage_criteria(s.id).await?;
         let criterias = crits
             .into_iter()
-            .map(|c| pb::StageCriterionFull {
-                id: c.id.to_string(),
-                context_key: c.context_key,
-                context: Some(pb::CriterionContext {
-                    key: c.context.key,
-                    entries: c.context.entries.into_iter().map(|e| e.value).collect(),
-                }),
-                rollout_percentage: c.rollout_percentage,
-                serve: c.serve.unwrap_or_default(),
-                priority: c.priority,
-                operator: c.operator,
+            .map(|c| {
+                // Map rule groups
+                let rule_groups = c.rule_groups.into_iter().map(|group| {
+                    crate::grpc::pb::RuleGroup {
+                        id: group.id.to_string(),
+                        logic_operator: match group.logic_operator {
+                            crate::database::entity::LogicOperator::And => "AND".to_string(),
+                            crate::database::entity::LogicOperator::Or => "OR".to_string(),
+                        },
+                        conditions: group.conditions.into_iter().map(|cond| {
+                            crate::grpc::pb::RuleCondition {
+                                id: cond.id.to_string(),
+                                context_key: cond.context_key,
+                                operator: cond.operator,
+                                value: cond.value.to_string(),
+                                order_index: cond.order_index,
+                            }
+                        }).collect(),
+                    }
+                }).collect();
+
+                pb::StageCriterionFull {
+                    id: c.id.to_string(),
+                    context_key: c.context_key,
+                    context: Some(pb::CriterionContext {
+                        key: c.context.key,
+                        entries: c.context.entries.into_iter().map(|e| e.value).collect(),
+                    }),
+                    rollout_percentage: c.rollout_percentage,
+                    serve: c.serve.unwrap_or_default(),
+                    priority: c.priority,
+                    operator: c.operator,
+                    rule_groups,
+                }
             })
             .collect::<Vec<_>>();
 
@@ -1125,6 +1312,7 @@ mod tests {
             serve: None,
             priority: 0,
             operator: crate::graphql::schema::RuleOperator::In,
+            rule_groups: vec![],
         }];
         let stage_id_clone = stage_id.clone();
         mock.expect_set_stage_criteria()

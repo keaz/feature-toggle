@@ -1,6 +1,6 @@
 use evaluation_engine::{
     ContextObject, ErrorCode, EvaluationReason, Feature, FeatureEvaluationContext, FeatureStage,
-    FeatureVariant, StageContext, StageCriterion,
+    FeatureVariant, Operator, StageContext, StageCriterion,
 };
 use serde_json::json;
 use std::collections::HashMap;
@@ -50,6 +50,7 @@ fn criterion(context_key: &str, allowed: &[&str], pct: i32, serve: Option<&str>)
         rollout_percentage: pct,
         serve: serve.map(|s| s.to_string()),
         operator: Operator::In,
+        rule_groups: vec![],
     }
 }
 

@@ -101,6 +101,46 @@ pub fn map_proto_to_engine(f: &pb::FeatureFull) -> engine::Feature {
                         _ => engine::Operator::In, // Default to IN for unknown operators
                     };
 
+                    // Parse compound rules from protobuf
+                    let rule_groups = c.rule_groups.iter().map(|group| {
+                        let logic_operator = match group.logic_operator.to_uppercase().as_str() {
+                            "OR" => engine::LogicOperator::Or,
+                            _ => engine::LogicOperator::And, // Default to AND
+                        };
+
+                        let conditions = group.conditions.iter().map(|cond| {
+                            let cond_operator = match cond.operator.to_uppercase().as_str() {
+                                "EQUALS" => engine::Operator::Equals,
+                                "NOTEQUALS" | "NOT_EQUALS" => engine::Operator::NotEquals,
+                                "GREATERTHAN" | "GREATER_THAN" => engine::Operator::GreaterThan,
+                                "LESSTHAN" | "LESS_THAN" => engine::Operator::LessThan,
+                                "GREATERTHANOREQUAL" | "GREATER_THAN_OR_EQUAL" => engine::Operator::GreaterThanOrEqual,
+                                "LESSTHANOREQUAL" | "LESS_THAN_OR_EQUAL" => engine::Operator::LessThanOrEqual,
+                                "CONTAINS" => engine::Operator::Contains,
+                                "STARTSWITH" | "STARTS_WITH" => engine::Operator::StartsWith,
+                                "ENDSWITH" | "ENDS_WITH" => engine::Operator::EndsWith,
+                                "REGEX" => engine::Operator::Regex,
+                                "IN" => engine::Operator::In,
+                                "NOTIN" | "NOT_IN" => engine::Operator::NotIn,
+                                "SEMVERGREATERTHAN" | "SEMVER_GREATER_THAN" => engine::Operator::SemverGreaterThan,
+                                "SEMVERLESSTHAN" | "SEMVER_LESS_THAN" => engine::Operator::SemverLessThan,
+                                _ => engine::Operator::In,
+                            };
+
+                            engine::RuleCondition {
+                                context_key: cond.context_key.clone(),
+                                operator: cond_operator,
+                                value: serde_json::from_str(&cond.value)
+                                    .unwrap_or(serde_json::json!(cond.value.clone())),
+                            }
+                        }).collect();
+
+                        engine::RuleGroup {
+                            logic_operator,
+                            conditions,
+                        }
+                    }).collect();
+
                     engine::StageCriterion {
                         context_key: c.context_key.clone(),
                         context,
@@ -111,6 +151,7 @@ pub fn map_proto_to_engine(f: &pb::FeatureFull) -> engine::Feature {
                             Some(c.serve.clone())
                         },
                         operator,
+                        rule_groups,
                     }
                 })
                 .collect(),

@@ -49,6 +49,28 @@ impl Default for RuleOperator {
     }
 }
 
+impl RuleOperator {
+    /// Convert to database format (SCREAMING_SNAKE_CASE)
+    pub fn to_db_string(&self) -> String {
+        match self {
+            RuleOperator::Equals => "EQUALS".to_string(),
+            RuleOperator::NotEquals => "NOT_EQUALS".to_string(),
+            RuleOperator::GreaterThan => "GREATER_THAN".to_string(),
+            RuleOperator::LessThan => "LESS_THAN".to_string(),
+            RuleOperator::GreaterThanOrEqual => "GREATER_THAN_OR_EQUAL".to_string(),
+            RuleOperator::LessThanOrEqual => "LESS_THAN_OR_EQUAL".to_string(),
+            RuleOperator::Contains => "CONTAINS".to_string(),
+            RuleOperator::StartsWith => "STARTS_WITH".to_string(),
+            RuleOperator::EndsWith => "ENDS_WITH".to_string(),
+            RuleOperator::Regex => "REGEX".to_string(),
+            RuleOperator::In => "IN".to_string(),
+            RuleOperator::NotIn => "NOT_IN".to_string(),
+            RuleOperator::SemverGreaterThan => "SEMVER_GREATER_THAN".to_string(),
+            RuleOperator::SemverLessThan => "SEMVER_LESS_THAN".to_string(),
+        }
+    }
+}
+
 #[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
 #[graphql(complex)]
 pub struct Feature {
@@ -521,6 +543,7 @@ pub struct StageCriterion {
     pub serve: Option<String>,
     pub priority: i32,
     pub operator: RuleOperator,
+    pub rule_groups: Vec<CompoundRuleGroup>,
 }
 
 #[derive(InputObject, Debug, Clone)]
@@ -536,6 +559,54 @@ pub struct CreateStageCriterionInput {
     pub priority: i32,
     #[graphql(default)]
     pub operator: Option<RuleOperator>,
+}
+
+// Compound rules GraphQL types
+#[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
+pub struct CompoundRuleGroup {
+    pub id: ID,
+    pub logic_operator: LogicOperator,
+    pub conditions: Vec<CompoundRuleCondition>,
+}
+
+#[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
+pub struct CompoundRuleCondition {
+    pub id: ID,
+    pub context_key: String,
+    pub operator: RuleOperator,
+    pub value: async_graphql::Json<serde_json::Value>,
+    pub order_index: i32,
+}
+
+#[derive(Enum, Copy, Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
+pub enum LogicOperator {
+    #[graphql(name = "AND")]
+    And,
+    #[graphql(name = "OR")]
+    Or,
+}
+
+#[derive(InputObject, Debug, Clone)]
+pub struct CreateRuleGroupInput {
+    pub criteria_id: ID,
+    pub logic_operator: LogicOperator,
+    pub conditions: Vec<CreateRuleConditionInput>,
+}
+
+#[derive(InputObject, Debug, Clone)]
+pub struct CreateRuleConditionInput {
+    #[graphql(validator(min_length = 1, max_length = 100))]
+    pub context_key: String,
+    pub operator: RuleOperator,
+    pub value: async_graphql::Json<serde_json::Value>,
+    #[graphql(default = 0)]
+    pub order_index: i32,
+}
+
+#[derive(InputObject, Debug, Clone)]
+pub struct UpdateRuleGroupInput {
+    pub logic_operator: Option<LogicOperator>,
+    pub conditions: Option<Vec<CreateRuleConditionInput>>,
 }
 
 // Users GraphQL types

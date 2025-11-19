@@ -126,6 +126,29 @@ pub struct StageCriterion {
     pub serve: Option<String>,
     #[serde(default)]
     pub operator: Operator,
+    #[serde(default)]
+    pub rule_groups: Vec<RuleGroup>,
+}
+
+// Compound rule structures for AND/OR logic
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum LogicOperator {
+    And,
+    Or,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct RuleGroup {
+    pub logic_operator: LogicOperator,
+    pub conditions: Vec<RuleCondition>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct RuleCondition {
+    pub context_key: String,
+    pub operator: Operator,
+    pub value: JsonValue, // Can be string, array, etc.
 }
 
 fn get_context_attribute(ctx: &ContextObject, key: &str) -> Option<String> {
@@ -256,6 +279,62 @@ fn matches_operator(operator: &Operator, provided: &str, allowed_values: &[Strin
     }
 }
 
+/// Evaluates a single rule condition
+fn evaluate_rule_condition(condition: &RuleCondition, ctx: &ContextObject) -> bool {
+    let provided = match get_context_attribute(ctx, &condition.context_key) {
+        Some(v) => v,
+        None => return false,
+    };
+
+    // Convert JsonValue to Vec<String> for operator matching
+    let allowed_values: Vec<String> = match &condition.value {
+        JsonValue::String(s) => vec![s.clone()],
+        JsonValue::Number(n) => vec![n.to_string()],
+        JsonValue::Bool(b) => vec![b.to_string()],
+        JsonValue::Array(arr) => arr
+            .iter()
+            .filter_map(|v| match v {
+                JsonValue::String(s) => Some(s.clone()),
+                JsonValue::Number(n) => Some(n.to_string()),
+                JsonValue::Bool(b) => Some(b.to_string()),
+                _ => None,
+            })
+            .collect(),
+        _ => return false,
+    };
+
+    matches_operator(&condition.operator, &provided, &allowed_values)
+}
+
+/// Evaluates a rule group with AND/OR logic
+fn evaluate_rule_group(group: &RuleGroup, ctx: &ContextObject) -> bool {
+    if group.conditions.is_empty() {
+        return false; // Empty group is considered false
+    }
+
+    let results: Vec<bool> = group
+        .conditions
+        .iter()
+        .map(|c| evaluate_rule_condition(c, ctx))
+        .collect();
+
+    match group.logic_operator {
+        LogicOperator::And => results.iter().all(|&r| r),
+        LogicOperator::Or => results.iter().any(|&r| r),
+    }
+}
+
+/// Evaluates all rule groups for a criterion (groups are OR'd together)
+fn evaluate_compound_rules(rule_groups: &[RuleGroup], ctx: &ContextObject) -> bool {
+    if rule_groups.is_empty() {
+        return false; // No compound rules defined
+    }
+
+    // Multiple rule groups are OR'd together
+    // e.g., (country=US AND tier=premium) OR (beta_user=true)
+    rule_groups.iter().any(|group| evaluate_rule_group(group, ctx))
+}
+
 fn passes_stage_criteria(
     ec: &FeatureEvaluationContext,
     stage: &FeatureStage,
@@ -305,25 +384,34 @@ fn passes_stage_criteria(
     // Evaluate criteria in order (by priority, lowest first)
     // Note: Criteria should be pre-sorted by the caller (database query sorts by priority ASC)
     for crit in &stage.criterias {
-        // Find provided value for the actual context key
-        let ctx_key = &crit.context_key;
-        if let Some(provided) = get_context_attribute(&ec.context, ctx_key) {
-            // Check using operator-based matching
-            if matches_operator(&crit.operator, &provided, &crit.context.entries) {
-                let pct = crit.rollout_percentage.clamp(0, 100) as f32;
-                if user_bucket < pct {
-                    return CriteriaEvaluationResult {
-                        matched: true,
-                        variant: crit.serve.clone(),
-                        reason: EvaluationReason::TargetingMatch,
-                    };
-                } else {
-                    return CriteriaEvaluationResult {
-                        matched: true,
-                        variant: None,
-                        reason: EvaluationReason::TargetingMatch,
-                    };
-                }
+        let matches = if !crit.rule_groups.is_empty() {
+            // Use compound rules if defined
+            evaluate_compound_rules(&crit.rule_groups, &ec.context)
+        } else {
+            // Fallback to legacy single-condition evaluation
+            let ctx_key = &crit.context_key;
+            if let Some(provided) = get_context_attribute(&ec.context, ctx_key) {
+                // Check using operator-based matching
+                matches_operator(&crit.operator, &provided, &crit.context.entries)
+            } else {
+                false
+            }
+        };
+
+        if matches {
+            let pct = crit.rollout_percentage.clamp(0, 100) as f32;
+            if user_bucket < pct {
+                return CriteriaEvaluationResult {
+                    matched: true,
+                    variant: crit.serve.clone(),
+                    reason: EvaluationReason::TargetingMatch,
+                };
+            } else {
+                return CriteriaEvaluationResult {
+                    matched: true,
+                    variant: None,
+                    reason: EvaluationReason::TargetingMatch,
+                };
             }
         }
     }
@@ -477,6 +565,7 @@ mod tests {
                     rollout_percentage: 100,
                     serve: Some("treatment".to_string()),
                     operator: Operator::In,
+                    rule_groups: vec![],
                 }],
             }],
             variants: vec![
@@ -843,6 +932,7 @@ mod tests {
                     rollout_percentage: 100,
                     serve: Some("adult-content".to_string()),
                     operator: Operator::GreaterThanOrEqual,
+                    rule_groups: vec![],
                 }],
             }],
             variants: vec![
@@ -897,6 +987,7 @@ mod tests {
                     rollout_percentage: 100,
                     serve: Some("corporate-variant".to_string()),
                     operator: Operator::Regex,
+                    rule_groups: vec![],
                 }],
             }],
             variants: vec![
@@ -916,4 +1007,382 @@ mod tests {
         assert_eq!(result.value, json!("Corporate feature enabled"));
         assert_eq!(result.reason, EvaluationReason::TargetingMatch);
     }
+
+    // Compound rule tests
+    #[test]
+    fn test_compound_rule_and_logic_all_match() {
+        let mut attrs = HashMap::new();
+        attrs.insert("country".to_string(), json!("US"));
+        attrs.insert("tier".to_string(), json!("premium"));
+
+        let ctx = ContextObject {
+            bucketing_key: "user123".to_string(),
+            environment_id: "env1".to_string(),
+            attributes: attrs,
+        };
+
+        let group = RuleGroup {
+            logic_operator: LogicOperator::And,
+            conditions: vec![
+                RuleCondition {
+                    context_key: "country".to_string(),
+                    operator: Operator::Equals,
+                    value: json!("US"),
+                },
+                RuleCondition {
+                    context_key: "tier".to_string(),
+                    operator: Operator::Equals,
+                    value: json!("premium"),
+                },
+            ],
+        };
+
+        assert!(evaluate_rule_group(&group, &ctx));
+    }
+
+    #[test]
+    fn test_compound_rule_and_logic_partial_match() {
+        let mut attrs = HashMap::new();
+        attrs.insert("country".to_string(), json!("US"));
+        attrs.insert("tier".to_string(), json!("free"));
+
+        let ctx = ContextObject {
+            bucketing_key: "user123".to_string(),
+            environment_id: "env1".to_string(),
+            attributes: attrs,
+        };
+
+        let group = RuleGroup {
+            logic_operator: LogicOperator::And,
+            conditions: vec![
+                RuleCondition {
+                    context_key: "country".to_string(),
+                    operator: Operator::Equals,
+                    value: json!("US"),
+                },
+                RuleCondition {
+                    context_key: "tier".to_string(),
+                    operator: Operator::Equals,
+                    value: json!("premium"),
+                },
+            ],
+        };
+
+        assert!(!evaluate_rule_group(&group, &ctx)); // Should fail - not all conditions match
+    }
+
+    #[test]
+    fn test_compound_rule_or_logic_any_match() {
+        let mut attrs = HashMap::new();
+        attrs.insert("country".to_string(), json!("UK"));
+        attrs.insert("beta_user".to_string(), json!("true"));
+
+        let ctx = ContextObject {
+            bucketing_key: "user123".to_string(),
+            environment_id: "env1".to_string(),
+            attributes: attrs,
+        };
+
+        let group = RuleGroup {
+            logic_operator: LogicOperator::Or,
+            conditions: vec![
+                RuleCondition {
+                    context_key: "country".to_string(),
+                    operator: Operator::Equals,
+                    value: json!("US"),
+                },
+                RuleCondition {
+                    context_key: "beta_user".to_string(),
+                    operator: Operator::Equals,
+                    value: json!("true"),
+                },
+            ],
+        };
+
+        assert!(evaluate_rule_group(&group, &ctx)); // Should pass - at least one condition matches
+    }
+
+    #[test]
+    fn test_compound_rule_or_logic_no_match() {
+        let mut attrs = HashMap::new();
+        attrs.insert("country".to_string(), json!("UK"));
+        attrs.insert("beta_user".to_string(), json!("false"));
+
+        let ctx = ContextObject {
+            bucketing_key: "user123".to_string(),
+            environment_id: "env1".to_string(),
+            attributes: attrs,
+        };
+
+        let group = RuleGroup {
+            logic_operator: LogicOperator::Or,
+            conditions: vec![
+                RuleCondition {
+                    context_key: "country".to_string(),
+                    operator: Operator::Equals,
+                    value: json!("US"),
+                },
+                RuleCondition {
+                    context_key: "beta_user".to_string(),
+                    operator: Operator::Equals,
+                    value: json!("true"),
+                },
+            ],
+        };
+
+        assert!(!evaluate_rule_group(&group, &ctx)); // Should fail - no conditions match
+    }
+
+    #[test]
+    fn test_compound_rule_with_numeric_operators() {
+        let mut attrs = HashMap::new();
+        attrs.insert("age".to_string(), json!("25"));
+        attrs.insert("account_value".to_string(), json!("5000"));
+
+        let ctx = ContextObject {
+            bucketing_key: "user123".to_string(),
+            environment_id: "env1".to_string(),
+            attributes: attrs,
+        };
+
+        let group = RuleGroup {
+            logic_operator: LogicOperator::And,
+            conditions: vec![
+                RuleCondition {
+                    context_key: "age".to_string(),
+                    operator: Operator::GreaterThanOrEqual,
+                    value: json!("18"),
+                },
+                RuleCondition {
+                    context_key: "account_value".to_string(),
+                    operator: Operator::GreaterThan,
+                    value: json!("1000"),
+                },
+            ],
+        };
+
+        assert!(evaluate_rule_group(&group, &ctx));
+    }
+
+    #[test]
+    fn test_compound_rule_with_in_operator() {
+        let mut attrs = HashMap::new();
+        attrs.insert("country".to_string(), json!("CA"));
+
+        let ctx = ContextObject {
+            bucketing_key: "user123".to_string(),
+            environment_id: "env1".to_string(),
+            attributes: attrs,
+        };
+
+        let group = RuleGroup {
+            logic_operator: LogicOperator::And,
+            conditions: vec![RuleCondition {
+                context_key: "country".to_string(),
+                operator: Operator::In,
+                value: json!(["US", "CA", "UK"]),
+            }],
+        };
+
+        assert!(evaluate_rule_group(&group, &ctx));
+    }
+
+    #[test]
+    fn test_compound_rule_with_string_operators() {
+        let mut attrs = HashMap::new();
+        attrs.insert("email".to_string(), json!("user@example.com"));
+        attrs.insert("plan".to_string(), json!("enterprise"));
+
+        let ctx = ContextObject {
+            bucketing_key: "user123".to_string(),
+            environment_id: "env1".to_string(),
+            attributes: attrs,
+        };
+
+        let group = RuleGroup {
+            logic_operator: LogicOperator::And,
+            conditions: vec![
+                RuleCondition {
+                    context_key: "email".to_string(),
+                    operator: Operator::EndsWith,
+                    value: json!("@example.com"),
+                },
+                RuleCondition {
+                    context_key: "plan".to_string(),
+                    operator: Operator::Contains,
+                    value: json!("enterprise"),
+                },
+            ],
+        };
+
+        assert!(evaluate_rule_group(&group, &ctx));
+    }
+
+    #[test]
+    fn test_multiple_rule_groups_or_behavior() {
+        let mut attrs = HashMap::new();
+        attrs.insert("country".to_string(), json!("FR"));
+        attrs.insert("beta_user".to_string(), json!("true"));
+
+        let ctx = ContextObject {
+            bucketing_key: "user123".to_string(),
+            environment_id: "env1".to_string(),
+            attributes: attrs,
+        };
+
+        let rule_groups = vec![
+            // First group: (country=US AND tier=premium) - Won't match
+            RuleGroup {
+                logic_operator: LogicOperator::And,
+                conditions: vec![
+                    RuleCondition {
+                        context_key: "country".to_string(),
+                        operator: Operator::Equals,
+                        value: json!("US"),
+                    },
+                    RuleCondition {
+                        context_key: "tier".to_string(),
+                        operator: Operator::Equals,
+                        value: json!("premium"),
+                    },
+                ],
+            },
+            // Second group: beta_user=true - Will match
+            RuleGroup {
+                logic_operator: LogicOperator::And,
+                conditions: vec![RuleCondition {
+                    context_key: "beta_user".to_string(),
+                    operator: Operator::Equals,
+                    value: json!("true"),
+                }],
+            },
+        ];
+
+        assert!(evaluate_compound_rules(&rule_groups, &ctx)); // Should pass - second group matches
+    }
+
+    #[test]
+    fn test_empty_rule_group() {
+        let ctx = ContextObject {
+            bucketing_key: "user123".to_string(),
+            environment_id: "env1".to_string(),
+            attributes: HashMap::new(),
+        };
+
+        let group = RuleGroup {
+            logic_operator: LogicOperator::And,
+            conditions: vec![],
+        };
+
+        assert!(!evaluate_rule_group(&group, &ctx)); // Empty group should return false
+    }
+
+    #[test]
+    fn test_empty_rule_groups_array() {
+        let ctx = ContextObject {
+            bucketing_key: "user123".to_string(),
+            environment_id: "env1".to_string(),
+            attributes: HashMap::new(),
+        };
+
+        assert!(!evaluate_compound_rules(&[], &ctx)); // No groups should return false
+    }
+
+    #[test]
+    fn test_compound_rule_missing_context_attribute() {
+        let mut attrs = HashMap::new();
+        attrs.insert("country".to_string(), json!("US"));
+        // tier attribute is missing
+
+        let ctx = ContextObject {
+            bucketing_key: "user123".to_string(),
+            environment_id: "env1".to_string(),
+            attributes: attrs,
+        };
+
+        let group = RuleGroup {
+            logic_operator: LogicOperator::And,
+            conditions: vec![
+                RuleCondition {
+                    context_key: "country".to_string(),
+                    operator: Operator::Equals,
+                    value: json!("US"),
+                },
+                RuleCondition {
+                    context_key: "tier".to_string(), // This will be missing
+                    operator: Operator::Equals,
+                    value: json!("premium"),
+                },
+            ],
+        };
+
+        assert!(!evaluate_rule_group(&group, &ctx)); // Should fail - missing attribute
+    }
+
+    #[test]
+    fn test_full_evaluation_with_compound_rules() {
+        let mut attrs = HashMap::new();
+        attrs.insert("country".to_string(), json!("US"));
+        attrs.insert("tier".to_string(), json!("premium"));
+
+        let context = FeatureEvaluationContext {
+            flag_key: "premium-feature".to_string(),
+            context: ContextObject {
+                bucketing_key: "user123".to_string(),
+                environment_id: "env1".to_string(),
+                attributes: attrs,
+            },
+        };
+
+        let feature = Feature {
+            id: "f1".to_string(),
+            key: "premium-feature".to_string(),
+            feature_type: "CONTEXTUAL".to_string(),
+            active: true,
+            enabled: true,
+            dependencies: vec![],
+            stages: vec![FeatureStage {
+                environment_id: "env1".to_string(),
+                enabled: true,
+                bucketing_key: None,
+                criterias: vec![StageCriterion {
+                    context_key: "country".to_string(), // Legacy field (not used when rule_groups present)
+                    context: StageContext {
+                        key: "country".to_string(),
+                        entries: vec![],
+                    },
+                    rollout_percentage: 100,
+                    serve: Some("premium-variant".to_string()),
+                    operator: Operator::In,
+                    rule_groups: vec![RuleGroup {
+                        logic_operator: LogicOperator::And,
+                        conditions: vec![
+                            RuleCondition {
+                                context_key: "country".to_string(),
+                                operator: Operator::Equals,
+                                value: json!("US"),
+                            },
+                            RuleCondition {
+                                context_key: "tier".to_string(),
+                                operator: Operator::Equals,
+                                value: json!("premium"),
+                            },
+                        ],
+                    }],
+                }],
+            }],
+            variants: vec![
+                FeatureVariant {
+                    control: "premium-variant".to_string(),
+                    value: json!("Premium features unlocked"),
+                },
+            ],
+        };
+
+        let result = evaluate(context, feature);
+        assert_eq!(result.variant, Some("premium-variant".to_string()));
+        assert_eq!(result.value, json!("Premium features unlocked"));
+        assert_eq!(result.reason, EvaluationReason::TargetingMatch);
+    }
 }
+

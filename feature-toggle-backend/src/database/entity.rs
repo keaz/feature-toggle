@@ -145,6 +145,55 @@ pub struct StageCriterion {
     pub serve: Option<String>,
     pub priority: i32,
     pub operator: String,
+    #[serde(default)]
+    pub rule_groups: Vec<CompoundRuleGroup>,
+}
+
+/// Compound rule group with conditions for StageCriterion
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CompoundRuleGroup {
+    pub id: Uuid,
+    pub logic_operator: LogicOperator,
+    pub conditions: Vec<CompoundRuleCondition>,
+}
+
+/// Individual condition within a compound rule group
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CompoundRuleCondition {
+    pub id: Uuid,
+    pub context_key: String,
+    pub operator: String,
+    pub value: JsonValue,
+    pub order_index: i32,
+}
+
+// Compound rule entities for AND/OR logic
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
+pub struct RuleGroup {
+    pub id: Uuid,
+    pub criteria_id: Uuid,
+    pub logic_operator: LogicOperator,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, sqlx::Type)]
+#[sqlx(type_name = "varchar", rename_all = "UPPERCASE")]
+pub enum LogicOperator {
+    And,
+    Or,
+}
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
+pub struct RuleCondition {
+    pub id: Uuid,
+    pub group_id: Uuid,
+    pub context_key: String,
+    pub operator: String,
+    pub value: JsonValue,
+    pub order_index: i32,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]

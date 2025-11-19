@@ -1,4 +1,5 @@
 mod client_integration;
+mod compound_rules_test;
 mod context_test;
 mod criteria_test;
 mod environment_test;

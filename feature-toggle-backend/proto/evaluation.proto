@@ -38,6 +38,22 @@ message CriterionContext {
   repeated string entries = 2;
 }
 
+// Compound rule condition within a rule group
+message RuleCondition {
+  string id = 1;
+  string context_key = 2;
+  string operator = 3; // Comparison operator (EQUALS, IN, GREATER_THAN, etc.)
+  string value = 4; // JSON-encoded value to compare against
+  int32 order_index = 5; // Display order within the group
+}
+
+// Rule group combining multiple conditions with AND/OR logic
+message RuleGroup {
+  string id = 1;
+  string logic_operator = 2; // "AND" or "OR"
+  repeated RuleCondition conditions = 3;
+}
+
 message StageCriterionFull {
   string id = 1;
   string context_key = 2;
@@ -46,6 +62,7 @@ message StageCriterionFull {
   string serve = 5; // Optional variant control name to serve
   int32 priority = 6; // Evaluation priority (lower values evaluated first)
   string operator = 7; // Comparison operator (EQUALS, IN, GREATER_THAN, etc.)
+  repeated RuleGroup rule_groups = 8; // Compound rules for advanced targeting
 }
 
 message FeatureStageFull {

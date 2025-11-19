@@ -145,6 +145,49 @@ VALUES (
         'For Stage 2 Environment',
         true,
         '51ecc366-f1cd-4d3d-ab73-fa60bad98f27'
+    ),
+    -- Dedicated environments for compound rules tests
+    (
+        'aaaaaaaa-1111-1111-1111-111111111111',
+        'Compound Rules Test Env 1',
+        true,
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27'
+    ),
+    (
+        'bbbbbbbb-2222-2222-2222-222222222222',
+        'Compound Rules Test Env 2',
+        true,
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27'
+    ),
+    (
+        'cccccccc-3333-3333-3333-333333333333',
+        'Compound Rules Test Env 3',
+        true,
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27'
+    ),
+    (
+        'dddddddd-4444-4444-4444-444444444444',
+        'Compound Rules Test Env 4',
+        true,
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27'
+    ),
+    (
+        'eeeeeeee-5555-5555-5555-555555555555',
+        'Compound Rules Test Env 5',
+        true,
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27'
+    ),
+    (
+        'ffffffff-6666-6666-6666-666666666666',
+        'Compound Rules Test Env 6',
+        true,
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27'
+    ),
+    (
+        '11111111-7777-7777-7777-777777777777',
+        'Compound Rules Test Env 7',
+        true,
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27'
     )
 ON CONFLICT (id) DO NOTHING;
 
@@ -342,6 +385,63 @@ VALUES (
         'Simple',
         '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
         now()
+    ),
+    -- Dedicated features for compound rules tests
+    (
+        'aaaaaaaa-1111-1111-1111-111111111111',
+        'Compound Rules Test 1',
+        'Feature for test_create_rule_group_with_conditions',
+        'Contextual',
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+        now()
+    ),
+    (
+        'bbbbbbbb-2222-2222-2222-222222222222',
+        'Compound Rules Test 2',
+        'Feature for test_get_rule_groups_by_criteria',
+        'Contextual',
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+        now()
+    ),
+    (
+        'cccccccc-3333-3333-3333-333333333333',
+        'Compound Rules Test 3',
+        'Feature for test_update_rule_group',
+        'Contextual',
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+        now()
+    ),
+    (
+        'dddddddd-4444-4444-4444-444444444444',
+        'Compound Rules Test 4',
+        'Feature for test_delete_rule_group',
+        'Contextual',
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+        now()
+    ),
+    (
+        'eeeeeeee-5555-5555-5555-555555555555',
+        'Compound Rules Test 5',
+        'Feature for test_all_operators',
+        'Contextual',
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+        now()
+    ),
+    (
+        'ffffffff-6666-6666-6666-666666666666',
+        'Compound Rules Test 6',
+        'Feature for test_complex_compound_rules',
+        'Contextual',
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+        now()
+    ),
+    (
+        '11111111-7777-7777-7777-777777777777',
+        'Compound Rules Test 7',
+        'Feature for test_cascade_delete_rule_groups_with_criteria',
+        'Contextual',
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+        now()
     )
 ON CONFLICT (id) DO NOTHING;
 
@@ -385,6 +485,72 @@ VALUES (
         NULL,
         0,
         '{ "x": 250, "y": 250 }'
+    ),
+    -- Dedicated stages for compound_rules_test.rs to ensure test isolation
+    (
+        'aaaaaaaa-1111-4111-8111-111111111111',
+        'aaaaaaaa-1111-1111-1111-111111111111',
+        'aaaaaaaa-1111-1111-1111-111111111111',
+        NULL,
+        0,
+        '{ "x": 100, "y": 100 }'
+    ),
+    (
+        'bbbbbbbb-2222-4222-8222-222222222222',
+        'bbbbbbbb-2222-2222-2222-222222222222',
+        'bbbbbbbb-2222-2222-2222-222222222222',
+        NULL,
+        0,
+        '{ "x": 100, "y": 150 }'
+    ),
+    (
+        'cccccccc-3333-4333-8333-333333333333',
+        'cccccccc-3333-3333-3333-333333333333',
+        'cccccccc-3333-3333-3333-333333333333',
+        NULL,
+        0,
+        '{ "x": 100, "y": 200 }'
+    ),
+    (
+        'dddddddd-4444-4444-8444-444444444444',
+        'dddddddd-4444-4444-4444-444444444444',
+        'dddddddd-4444-4444-4444-444444444444',
+        NULL,
+        0,
+        '{ "x": 100, "y": 250 }'
+    ),
+    (
+        'eeeeeeee-5555-4555-8555-555555555555',
+        'eeeeeeee-5555-5555-5555-555555555555',
+        'eeeeeeee-5555-5555-5555-555555555555',
+        NULL,
+        0,
+        '{ "x": 100, "y": 300 }'
+    ),
+    (
+        'ffffffff-6666-4666-8666-666666666666',
+        'ffffffff-6666-6666-6666-666666666666',
+        'ffffffff-6666-6666-6666-666666666666',
+        NULL,
+        0,
+        '{ "x": 100, "y": 350 }'
+    ),
+    (
+        '11111111-7777-4777-8777-777777777777',
+        '11111111-7777-7777-7777-777777777777',
+        '11111111-7777-7777-7777-777777777777',
+        NULL,
+        0,
+        '{ "x": 100, "y": 400 }'
+    ),
+    -- Dedicated stage for operator testing (to avoid interfering with criteria_test.rs)
+    (
+        '99999999-9999-4999-8999-999999999999',
+        '5eef17bc-9e06-411d-b5f4-7a786e68bb99',
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+        NULL,
+        1,
+        '{ "x": 100, "y": 500 }'
     )
 ON CONFLICT (id) DO NOTHING;
 
@@ -592,7 +758,7 @@ INSERT INTO
     )
 VALUES (
         '33333333-3333-4333-8333-333333333333',
-        '3eef17bc-9e06-411d-b5f4-7a786e68bb96',
+        '99999999-9999-4999-8999-999999999999',
         'age',
         'aaaaaaaa-aaaa-4aaa-8aaa-111111111111',
         100,
@@ -635,7 +801,7 @@ INSERT INTO
     )
 VALUES (
         '44444444-4444-4444-8444-444444444444',
-        '3eef17bc-9e06-411d-b5f4-7a786e68bb96',
+        '99999999-9999-4999-8999-999999999999',
         'email',
         'cccccccc-cccc-4ccc-8ccc-111111111111',
         100,

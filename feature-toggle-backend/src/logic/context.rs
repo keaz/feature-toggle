@@ -76,17 +76,40 @@ async fn map_db_feature_to_full_for_broadcast(
         let crits = repo.get_stage_criteria(s.id).await?;
         let criterias = crits
             .into_iter()
-            .map(|c| pb::StageCriterionFull {
-                id: c.id.to_string(),
-                context_key: c.context_key,
-                context: Some(pb::CriterionContext {
-                    key: c.context.key,
-                    entries: c.context.entries.into_iter().map(|e| e.value).collect(),
-                }),
-                rollout_percentage: c.rollout_percentage,
-                serve: c.serve.unwrap_or_default(),
-                priority: c.priority,
-                operator: c.operator,
+            .map(|c| {
+                // Map rule groups
+                let rule_groups = c.rule_groups.into_iter().map(|group| {
+                    pb::RuleGroup {
+                        id: group.id.to_string(),
+                        logic_operator: match group.logic_operator {
+                            crate::database::entity::LogicOperator::And => "AND".to_string(),
+                            crate::database::entity::LogicOperator::Or => "OR".to_string(),
+                        },
+                        conditions: group.conditions.into_iter().map(|cond| {
+                            pb::RuleCondition {
+                                id: cond.id.to_string(),
+                                context_key: cond.context_key,
+                                operator: cond.operator,
+                                value: cond.value.to_string(),
+                                order_index: cond.order_index,
+                            }
+                        }).collect(),
+                    }
+                }).collect();
+
+                pb::StageCriterionFull {
+                    id: c.id.to_string(),
+                    context_key: c.context_key,
+                    context: Some(pb::CriterionContext {
+                        key: c.context.key,
+                        entries: c.context.entries.into_iter().map(|e| e.value).collect(),
+                    }),
+                    rollout_percentage: c.rollout_percentage,
+                    serve: c.serve.unwrap_or_default(),
+                    priority: c.priority,
+                    operator: c.operator,
+                    rule_groups,
+                }
             })
             .collect::<Vec<_>>();
 

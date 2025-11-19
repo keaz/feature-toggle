@@ -518,7 +518,8 @@ impl FeatureRepositoryImpl {
                        parent_stage_id = $3,
                        position = $4,
                        bucketing_key = $5,
-                   WHERE id = $7"#,
+                       enabled = $7
+                   WHERE id = $6"#,
             )
             .bind(stage.environment_id)
             .bind(stage.order_index)
@@ -526,6 +527,7 @@ impl FeatureRepositoryImpl {
             .bind(&stage.position)
             .bind(stage.bucketing_key.clone())
             .bind(stage.id)
+            .bind(stage.enabled)
             .execute(&mut *tx)
             .await;
 
@@ -821,6 +823,67 @@ impl FeatureRepository for FeatureRepositoryImpl {
                 key: r.key,
                 entries,
             };
+
+            // Load rule groups with conditions for this criterion
+            let rule_groups_data = sqlx::query!(
+                r#"SELECT rg.id as group_id, rg.logic_operator,
+                          rc.id as "condition_id?", rc.context_key as "context_key?",
+                          rc.operator as "operator?", rc.value as "value?",
+                          rc.order_index as "order_index?"
+                   FROM rule_groups rg
+                   LEFT JOIN rule_conditions rc ON rc.group_id = rg.id
+                   WHERE rg.criteria_id = $1
+                   ORDER BY rg.created_at, rc.order_index"#,
+                r.id
+            )
+            .fetch_all(&self.pool)
+            .await;
+
+            let rule_groups_data = handle_error(None, rule_groups_data)?;
+
+            // Group conditions by rule group ID
+            let mut rule_groups_map: std::collections::HashMap<
+                Uuid,
+                (String, Vec<crate::database::entity::CompoundRuleCondition>),
+            > = std::collections::HashMap::new();
+
+            for row in rule_groups_data {
+                let entry = rule_groups_map.entry(row.group_id).or_insert_with(|| {
+                    (row.logic_operator.clone(), Vec::new())
+                });
+
+                // Only add condition if it exists (LEFT JOIN may return null for condition fields)
+                if let Some(condition_id) = row.condition_id {
+                    if let (Some(context_key), Some(operator), Some(value), Some(order_index)) =
+                        (row.context_key, row.operator, row.value, row.order_index)
+                    {
+                        entry.1.push(crate::database::entity::CompoundRuleCondition {
+                            id: condition_id,
+                            context_key,
+                            operator,
+                            value,
+                            order_index,
+                        });
+                    }
+                }
+            }
+
+            // Convert to CompoundRuleGroup vec
+            let rule_groups = rule_groups_map
+                .into_iter()
+                .map(|(group_id, (logic_op, conditions))| {
+                    let logic_operator = match logic_op.to_uppercase().as_str() {
+                        "OR" => crate::database::entity::LogicOperator::Or,
+                        _ => crate::database::entity::LogicOperator::And,
+                    };
+                    crate::database::entity::CompoundRuleGroup {
+                        id: group_id,
+                        logic_operator,
+                        conditions,
+                    }
+                })
+                .collect();
+
             out.push(crate::database::entity::StageCriterion {
                 id: r.id,
                 stage_id: r.stage_id,
@@ -830,6 +893,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
                 serve: r.serve,
                 priority: r.priority,
                 operator: r.operator.unwrap_or_else(|| "IN".to_string()),
+                rule_groups,
             });
         }
         Ok(out)

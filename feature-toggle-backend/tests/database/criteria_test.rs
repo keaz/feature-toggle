@@ -70,6 +70,7 @@ async fn test_set_stage_criteria_replaces_existing() {
             rollout_percentage: 50,
             serve: None,
             priority: 0,
+            operator: Some("IN".to_string()),
         },
         CreateStageCriterion {
             context_key: "filter".to_string(),
@@ -77,6 +78,7 @@ async fn test_set_stage_criteria_replaces_existing() {
             rollout_percentage: 30,
             serve: None,
             priority: 1,
+            operator: Some("IN".to_string()),
         },
     ];
 
@@ -89,6 +91,7 @@ async fn test_set_stage_criteria_replaces_existing() {
         rollout_percentage: 75,
         serve: None,
         priority: 0,
+        operator: Some("IN".to_string()),
     }];
 
     let set_result = repo.set_stage_criteria(stage_id, crit).await;
@@ -117,6 +120,7 @@ async fn test_set_stage_criteria_stage_not_found() {
         rollout_percentage: 10,
         serve: None,
         priority: 0,
+        operator: Some("IN".to_string()),
     }];
 
     let result = repo.set_stage_criteria(non_existing_stage, crit).await;

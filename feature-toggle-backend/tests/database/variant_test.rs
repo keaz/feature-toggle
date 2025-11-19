@@ -187,6 +187,7 @@ async fn test_set_stage_criteria_with_serve() {
             rollout_percentage: 50,
             serve: Some("blue".to_string()),
             priority: 0,
+            operator: Some("IN".to_string()),
         },
         CreateStageCriterion {
             context_id,
@@ -194,6 +195,7 @@ async fn test_set_stage_criteria_with_serve() {
             rollout_percentage: 30,
             serve: Some("green".to_string()),
             priority: 1,
+            operator: Some("IN".to_string()),
         },
     ];
 

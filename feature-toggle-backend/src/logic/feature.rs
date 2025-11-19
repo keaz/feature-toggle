@@ -1108,6 +1108,43 @@ fn map_db_criterion_to_gql(
         _ => RuleOperator::In, // Default fallback
     };
 
+    // Map compound rule groups
+    let rule_groups = sc.rule_groups.into_iter().map(|group| {
+        crate::graphql::schema::CompoundRuleGroup {
+            id: ID::from(group.id),
+            logic_operator: match group.logic_operator {
+                crate::database::entity::LogicOperator::And => crate::graphql::schema::LogicOperator::And,
+                crate::database::entity::LogicOperator::Or => crate::graphql::schema::LogicOperator::Or,
+            },
+            conditions: group.conditions.into_iter().map(|cond| {
+                let cond_operator = match cond.operator.to_uppercase().as_str() {
+                    "EQUALS" => RuleOperator::Equals,
+                    "NOTEQUALS" | "NOT_EQUALS" => RuleOperator::NotEquals,
+                    "GREATERTHAN" | "GREATER_THAN" => RuleOperator::GreaterThan,
+                    "LESSTHAN" | "LESS_THAN" => RuleOperator::LessThan,
+                    "GREATERTHANOREQUAL" | "GREATER_THAN_OR_EQUAL" => RuleOperator::GreaterThanOrEqual,
+                    "LESSTHANOREQUAL" | "LESS_THAN_OR_EQUAL" => RuleOperator::LessThanOrEqual,
+                    "CONTAINS" => RuleOperator::Contains,
+                    "STARTSWITH" | "STARTS_WITH" => RuleOperator::StartsWith,
+                    "ENDSWITH" | "ENDS_WITH" => RuleOperator::EndsWith,
+                    "REGEX" => RuleOperator::Regex,
+                    "IN" => RuleOperator::In,
+                    "NOTIN" | "NOT_IN" => RuleOperator::NotIn,
+                    "SEMVERGREATERTHAN" | "SEMVER_GREATER_THAN" => RuleOperator::SemverGreaterThan,
+                    "SEMVERLESSTHAN" | "SEMVER_LESS_THAN" => RuleOperator::SemverLessThan,
+                    _ => RuleOperator::In,
+                };
+                crate::graphql::schema::CompoundRuleCondition {
+                    id: ID::from(cond.id),
+                    context_key: cond.context_key,
+                    operator: cond_operator,
+                    value: async_graphql::Json(cond.value),
+                    order_index: cond.order_index,
+                }
+            }).collect(),
+        }
+    }).collect();
+
     crate::graphql::schema::StageCriterion {
         id: ID::from(sc.id),
         stage_id: ID::from(sc.stage_id),
@@ -1117,6 +1154,7 @@ fn map_db_criterion_to_gql(
         serve: sc.serve,
         priority: sc.priority,
         operator,
+        rule_groups,
     }
 }
 
