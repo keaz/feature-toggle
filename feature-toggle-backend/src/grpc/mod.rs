@@ -271,6 +271,12 @@ impl FeatureEvaluationSvc {
                         serve: c.serve,
                         operator,
                         rule_groups: vec![], // TODO: Map CompoundRuleGroup from database to engine
+                        variant_allocations: c.variant_allocations.into_iter().map(|alloc| {
+                            engine::VariantAllocation {
+                                variant_control: alloc.variant_control,
+                                weight: alloc.weight,
+                            }
+                        }).collect(),
                     }
                 })
                 .collect::<Vec<_>>();
@@ -356,6 +362,14 @@ impl FeatureEvaluationSvc {
                         }
                     }).collect();
 
+                    // Map variant allocations
+                    let variant_allocations = c.variant_allocations.into_iter().map(|alloc| {
+                        pb::VariantAllocation {
+                            variant_control: alloc.variant_control,
+                            weight: alloc.weight,
+                        }
+                    }).collect();
+
                     pb::StageCriterionFull {
                         id: c.id.to_string(),
                         context_key: c.context_key,
@@ -368,6 +382,7 @@ impl FeatureEvaluationSvc {
                         priority: c.priority,
                         operator: c.operator,
                         rule_groups,
+                        variant_allocations,
                     }
                 })
                 .collect::<Vec<_>>();

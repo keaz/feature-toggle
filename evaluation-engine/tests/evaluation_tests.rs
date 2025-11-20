@@ -51,6 +51,7 @@ fn criterion(context_key: &str, allowed: &[&str], pct: i32, serve: Option<&str>)
         serve: serve.map(|s| s.to_string()),
         operator: Operator::In,
         rule_groups: vec![],
+        variant_allocations: vec![],
     }
 }
 

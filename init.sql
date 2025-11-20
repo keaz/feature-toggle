@@ -1113,6 +1113,66 @@ VALUES
     )
 ON CONFLICT (id) DO NOTHING;
 
+-- ========================================
+-- Variant Allocations for Weighted Traffic Splits
+-- ========================================
+-- This demonstrates multi-variant weighted distribution:
+-- - For Test Contextual Feature: control=25%, treatment-a=25%, treatment-b=50%
+-- - Assumes there's a criteria to allocate these variants
+-- Note: In production, these would be created via GraphQL mutations after criteria exist
+
+INSERT INTO
+    public.variant_allocations (
+        id,
+        criteria_id,
+        variant_control,
+        weight,
+        created_at,
+        updated_at
+    )
+VALUES
+    (
+        '0a111111-1111-4111-8111-111111111111',
+        '11111111-1111-4111-8111-111111111111',
+        'control',
+        25,
+        now(),
+        now()
+    ),
+    (
+        '0a222222-2222-4222-8222-222222222222',
+        '11111111-1111-4111-8111-111111111111',
+        'treatment-a',
+        25,
+        now(),
+        now()
+    ),
+    (
+        '0a333333-3333-4333-8333-333333333333',
+        '11111111-1111-4111-8111-111111111111',
+        'treatment-b',
+        50,
+        now(),
+        now()
+    ),
+    (
+        '0a444444-4444-4444-8444-444444444444',
+        '22222222-2222-4222-8222-222222222222',
+        'control',
+        60,
+        now(),
+        now()
+    ),
+    (
+        '0a555555-5555-4555-8555-555555555555',
+        '22222222-2222-4222-8222-222222222222',
+        'treatment-b',
+        40,
+        now(),
+        now()
+    )
+ON CONFLICT (id) DO NOTHING;
+
 -- Add pipeline stages for kill switch test features
 INSERT INTO
     public.features_pipeline_stages (

@@ -1145,6 +1145,16 @@ fn map_db_criterion_to_gql(
         }
     }).collect();
 
+    // Map variant allocations
+    let variant_allocations = sc.variant_allocations.into_iter().map(|alloc| {
+        crate::graphql::schema::VariantAllocation {
+            id: ID::from(uuid::Uuid::new_v4()), // Generate ID for GraphQL (not stored in simple version)
+            criteria_id: ID::from(sc.id),
+            variant_control: alloc.variant_control,
+            weight: alloc.weight,
+        }
+    }).collect();
+
     crate::graphql::schema::StageCriterion {
         id: ID::from(sc.id),
         stage_id: ID::from(sc.stage_id),
@@ -1155,6 +1165,7 @@ fn map_db_criterion_to_gql(
         priority: sc.priority,
         operator,
         rule_groups,
+        variant_allocations,
     }
 }
 

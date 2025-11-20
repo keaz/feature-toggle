@@ -544,6 +544,9 @@ pub struct StageCriterion {
     pub priority: i32,
     pub operator: RuleOperator,
     pub rule_groups: Vec<CompoundRuleGroup>,
+    /// Weighted variant allocations for multi-variant traffic splits
+    /// If present, overrides the simple serve field with weighted distribution
+    pub variant_allocations: Vec<VariantAllocation>,
 }
 
 #[derive(InputObject, Debug, Clone)]
@@ -607,6 +610,30 @@ pub struct CreateRuleConditionInput {
 pub struct UpdateRuleGroupInput {
     pub logic_operator: Option<LogicOperator>,
     pub conditions: Option<Vec<CreateRuleConditionInput>>,
+}
+
+// Variant allocations GraphQL types (for weighted traffic splits)
+#[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
+pub struct VariantAllocation {
+    pub id: ID,
+    pub criteria_id: ID,
+    pub variant_control: String,
+    #[graphql(validator(minimum = 0, maximum = 100))]
+    pub weight: i32,
+}
+
+#[derive(InputObject, Debug, Clone)]
+pub struct CreateVariantAllocationInput {
+    #[graphql(validator(min_length = 1, max_length = 100))]
+    pub variant_control: String,
+    #[graphql(validator(minimum = 0, maximum = 100))]
+    pub weight: i32,
+}
+
+#[derive(InputObject, Debug, Clone)]
+pub struct UpdateVariantAllocationInput {
+    #[graphql(validator(minimum = 0, maximum = 100))]
+    pub weight: i32,
 }
 
 // Users GraphQL types

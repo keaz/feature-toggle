@@ -147,6 +147,10 @@ pub struct StageCriterion {
     pub operator: String,
     #[serde(default)]
     pub rule_groups: Vec<CompoundRuleGroup>,
+    /// Variant allocations for weighted traffic splits
+    /// Loaded separately and populated when criteria are fetched
+    #[serde(default)]
+    pub variant_allocations: Vec<VariantAllocationSimple>,
 }
 
 /// Compound rule group with conditions for StageCriterion
@@ -194,6 +198,25 @@ pub struct RuleCondition {
     pub order_index: i32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Variant allocation for multi-variant weighted traffic splits
+/// Stores the weight distribution for a specific variant within a criterion
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
+pub struct VariantAllocation {
+    pub id: Uuid,
+    pub criteria_id: Uuid,
+    pub variant_control: String,
+    pub weight: i32, // 0-100 percentage
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Simplified variant allocation for embedding in StageCriterion
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct VariantAllocationSimple {
+    pub variant_control: String,
+    pub weight: i32,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]

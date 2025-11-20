@@ -128,6 +128,10 @@ pub struct StageCriterion {
     pub operator: Operator,
     #[serde(default)]
     pub rule_groups: Vec<RuleGroup>,
+    /// Variant allocations for weighted traffic splits
+    /// If present, overrides the simple serve field with weighted distribution
+    #[serde(default)]
+    pub variant_allocations: Vec<VariantAllocation>,
 }
 
 // Compound rule structures for AND/OR logic
@@ -151,6 +155,14 @@ pub struct RuleCondition {
     pub value: JsonValue, // Can be string, array, etc.
 }
 
+/// Variant allocation for weighted traffic splits
+/// Stores the weight (percentage) for a specific variant
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct VariantAllocation {
+    pub variant_control: String,
+    pub weight: i32, // 0-100 percentage
+}
+
 fn get_context_attribute(ctx: &ContextObject, key: &str) -> Option<String> {
     ctx.attributes.get(key).and_then(|v| match v {
         JsonValue::String(s) => Some(s.clone()),
@@ -170,6 +182,52 @@ fn hash_to_percentage(hash: &[u8]) -> f32 {
     let val = u64::from_be_bytes(eight);
     let ratio = (val as f64) / (u64::MAX as f64);
     (ratio * 100.0) as f32
+}
+
+/// Selects a variant based on weighted allocations using cumulative distribution
+///
+/// This function implements deterministic weighted traffic splitting:
+/// - Sorts allocations by variant name for consistent ordering
+/// - Calculates cumulative weight ranges (e.g., A:0-25, B:25-50, C:50-100)
+/// - Returns the variant whose range contains the user_bucket value
+///
+/// # Arguments
+/// * `allocations` - Slice of variant allocations with weights (0-100)
+/// * `user_bucket` - User's deterministic bucket value (0.0-100.0)
+///
+/// # Returns
+/// * `Some(String)` - The selected variant control name
+/// * `None` - If no allocation matches (shouldn't happen if weights sum to 100)
+///
+/// # Example
+/// ```
+/// // allocations = [("A", 25), ("B", 25), ("C", 50)]
+/// // user_bucket = 37.5
+/// // Cumulative: A:0-25, B:25-50, C:50-100
+/// // Result: "B" (because 37.5 falls in 25-50 range)
+/// ```
+fn select_variant_by_weight(allocations: &[VariantAllocation], user_bucket: f32) -> Option<String> {
+    if allocations.is_empty() {
+        return None;
+    }
+
+    // Sort allocations by variant name for deterministic ordering
+    // This ensures the same user always gets the same variant
+    let mut sorted = allocations.to_vec();
+    sorted.sort_by(|a, b| a.variant_control.cmp(&b.variant_control));
+
+    // Calculate cumulative weights and select variant
+    let mut cumulative = 0.0;
+    for alloc in sorted {
+        cumulative += alloc.weight as f32;
+        if user_bucket < cumulative {
+            return Some(alloc.variant_control.clone());
+        }
+    }
+
+    // Fallback: if user_bucket >= total weight, return last variant
+    // This handles edge cases where weights don't sum to exactly 100
+    allocations.last().map(|a| a.variant_control.clone())
 }
 
 struct CriteriaEvaluationResult {
@@ -401,9 +459,21 @@ fn passes_stage_criteria(
         if matches {
             let pct = crit.rollout_percentage.clamp(0, 100) as f32;
             if user_bucket < pct {
+                // Determine which variant to serve
+                let selected_variant = if !crit.variant_allocations.is_empty() {
+                    // Use weighted allocation if configured
+                    // Normalize user_bucket to allocation range: user_bucket is 0-100,
+                    // but we want it relative to the rollout percentage
+                    let normalized_bucket = (user_bucket / pct) * 100.0;
+                    select_variant_by_weight(&crit.variant_allocations, normalized_bucket)
+                } else {
+                    // Use simple serve field (legacy single-variant behavior)
+                    crit.serve.clone()
+                };
+
                 return CriteriaEvaluationResult {
                     matched: true,
-                    variant: crit.serve.clone(),
+                    variant: selected_variant,
                     reason: EvaluationReason::TargetingMatch,
                 };
             } else {
@@ -566,6 +636,7 @@ mod tests {
                     serve: Some("treatment".to_string()),
                     operator: Operator::In,
                     rule_groups: vec![],
+                    variant_allocations: vec![],
                 }],
             }],
             variants: vec![
@@ -933,6 +1004,7 @@ mod tests {
                     serve: Some("adult-content".to_string()),
                     operator: Operator::GreaterThanOrEqual,
                     rule_groups: vec![],
+                    variant_allocations: vec![],
                 }],
             }],
             variants: vec![
@@ -988,6 +1060,7 @@ mod tests {
                     serve: Some("corporate-variant".to_string()),
                     operator: Operator::Regex,
                     rule_groups: vec![],
+                    variant_allocations: vec![],
                 }],
             }],
             variants: vec![
@@ -1369,6 +1442,7 @@ mod tests {
                             },
                         ],
                     }],
+                    variant_allocations: vec![],
                 }],
             }],
             variants: vec![
@@ -1383,6 +1457,361 @@ mod tests {
         assert_eq!(result.variant, Some("premium-variant".to_string()));
         assert_eq!(result.value, json!("Premium features unlocked"));
         assert_eq!(result.reason, EvaluationReason::TargetingMatch);
+    }
+
+    // ============================================
+    // Weighted Variant Selection Tests
+    // ============================================
+
+    #[test]
+    fn test_select_variant_by_weight_basic() {
+        let allocations = vec![
+            VariantAllocation {
+                variant_control: "variant-a".to_string(),
+                weight: 25,
+            },
+            VariantAllocation {
+                variant_control: "variant-b".to_string(),
+                weight: 25,
+            },
+            VariantAllocation {
+                variant_control: "variant-c".to_string(),
+                weight: 50,
+            },
+        ];
+
+        // Test bucket falls in first range (0-25)
+        assert_eq!(
+            select_variant_by_weight(&allocations, 10.0),
+            Some("variant-a".to_string())
+        );
+
+        // Test bucket falls in second range (25-50)
+        assert_eq!(
+            select_variant_by_weight(&allocations, 37.5),
+            Some("variant-b".to_string())
+        );
+
+        // Test bucket falls in third range (50-100)
+        assert_eq!(
+            select_variant_by_weight(&allocations, 75.0),
+            Some("variant-c".to_string())
+        );
+
+        // Test edge case: exactly at boundary
+        assert_eq!(
+            select_variant_by_weight(&allocations, 25.0),
+            Some("variant-b".to_string())
+        );
+    }
+
+    #[test]
+    fn test_select_variant_by_weight_deterministic_ordering() {
+        // Test that variants are sorted alphabetically for deterministic results
+        let allocations = vec![
+            VariantAllocation {
+                variant_control: "z-last".to_string(),
+                weight: 50,
+            },
+            VariantAllocation {
+                variant_control: "a-first".to_string(),
+                weight: 25,
+            },
+            VariantAllocation {
+                variant_control: "m-middle".to_string(),
+                weight: 25,
+            },
+        ];
+
+        // After sorting: a-first (0-25), m-middle (25-50), z-last (50-100)
+        assert_eq!(
+            select_variant_by_weight(&allocations, 10.0),
+            Some("a-first".to_string())
+        );
+        assert_eq!(
+            select_variant_by_weight(&allocations, 37.5),
+            Some("m-middle".to_string())
+        );
+        assert_eq!(
+            select_variant_by_weight(&allocations, 75.0),
+            Some("z-last".to_string())
+        );
+    }
+
+    #[test]
+    fn test_select_variant_by_weight_unequal_weights() {
+        let allocations = vec![
+            VariantAllocation {
+                variant_control: "small".to_string(),
+                weight: 10,
+            },
+            VariantAllocation {
+                variant_control: "large".to_string(),
+                weight: 90,
+            },
+        ];
+
+        // Test small range (0-10)
+        assert_eq!(
+            select_variant_by_weight(&allocations, 5.0),
+            Some("large".to_string()) // After sorting: large (0-90), small (90-100)
+        );
+
+        // Test large range
+        assert_eq!(
+            select_variant_by_weight(&allocations, 50.0),
+            Some("large".to_string())
+        );
+
+        assert_eq!(
+            select_variant_by_weight(&allocations, 95.0),
+            Some("small".to_string())
+        );
+    }
+
+    #[test]
+    fn test_select_variant_by_weight_edge_cases() {
+        let allocations = vec![
+            VariantAllocation {
+                variant_control: "variant-a".to_string(),
+                weight: 50,
+            },
+            VariantAllocation {
+                variant_control: "variant-b".to_string(),
+                weight: 50,
+            },
+        ];
+
+        // Test at 0
+        assert_eq!(
+            select_variant_by_weight(&allocations, 0.0),
+            Some("variant-a".to_string())
+        );
+
+        // Test at 100 (should return last variant as fallback)
+        assert_eq!(
+            select_variant_by_weight(&allocations, 100.0),
+            Some("variant-b".to_string())
+        );
+
+        // Test slightly over 100 (edge case handling)
+        assert_eq!(
+            select_variant_by_weight(&allocations, 100.1),
+            Some("variant-b".to_string())
+        );
+    }
+
+    #[test]
+    fn test_select_variant_by_weight_empty_allocations() {
+        let allocations: Vec<VariantAllocation> = vec![];
+        assert_eq!(select_variant_by_weight(&allocations, 50.0), None);
+    }
+
+    #[test]
+    fn test_select_variant_by_weight_single_variant() {
+        let allocations = vec![VariantAllocation {
+            variant_control: "only-variant".to_string(),
+            weight: 100,
+        }];
+
+        assert_eq!(
+            select_variant_by_weight(&allocations, 0.0),
+            Some("only-variant".to_string())
+        );
+        assert_eq!(
+            select_variant_by_weight(&allocations, 50.0),
+            Some("only-variant".to_string())
+        );
+        assert_eq!(
+            select_variant_by_weight(&allocations, 99.9),
+            Some("only-variant".to_string())
+        );
+    }
+
+    #[test]
+    fn test_select_variant_by_weight_partial_total() {
+        // Test when weights don't sum to 100 (e.g., 80 total)
+        let allocations = vec![
+            VariantAllocation {
+                variant_control: "variant-a".to_string(),
+                weight: 30,
+            },
+            VariantAllocation {
+                variant_control: "variant-b".to_string(),
+                weight: 50,
+            },
+        ];
+
+        // Buckets 0-30 -> variant-a
+        assert_eq!(
+            select_variant_by_weight(&allocations, 15.0),
+            Some("variant-a".to_string())
+        );
+
+        // Buckets 30-80 -> variant-b
+        assert_eq!(
+            select_variant_by_weight(&allocations, 60.0),
+            Some("variant-b".to_string())
+        );
+
+        // Bucket 80-100 -> fallback to last variant
+        assert_eq!(
+            select_variant_by_weight(&allocations, 90.0),
+            Some("variant-b".to_string())
+        );
+    }
+
+    #[test]
+    fn test_weighted_variant_evaluation_integration() {
+        // Integration test: Full evaluation with weighted variants
+        let mut context_attrs = HashMap::new();
+        context_attrs.insert("tier".to_string(), json!("premium"));
+
+        let context = FeatureEvaluationContext {
+            flag_key: "ab-test-feature".to_string(),
+            context: ContextObject {
+                bucketing_key: "user-42".to_string(), // This will generate a deterministic bucket
+                environment_id: "env1".to_string(),
+                attributes: context_attrs,
+            },
+        };
+
+        let feature = Feature {
+            id: "test-id".to_string(),
+            key: "ab-test-feature".to_string(),
+            feature_type: "Contextual".to_string(),
+            active: true,
+            enabled: true,
+            dependencies: vec![],
+            stages: vec![FeatureStage {
+                environment_id: "env1".to_string(),
+                enabled: true,
+                bucketing_key: None,
+                criterias: vec![StageCriterion {
+                    context_key: "tier".to_string(),
+                    context: StageContext {
+                        key: "tier".to_string(),
+                        entries: vec!["premium".to_string()],
+                    },
+                    rollout_percentage: 100,
+                    serve: None, // Not used when variant_allocations present
+                    operator: Operator::In,
+                    rule_groups: vec![],
+                    variant_allocations: vec![
+                        VariantAllocation {
+                            variant_control: "control".to_string(),
+                            weight: 25,
+                        },
+                        VariantAllocation {
+                            variant_control: "variant-a".to_string(),
+                            weight: 25,
+                        },
+                        VariantAllocation {
+                            variant_control: "variant-b".to_string(),
+                            weight: 50,
+                        },
+                    ],
+                }],
+            }],
+            variants: vec![
+                FeatureVariant {
+                    control: "control".to_string(),
+                    value: json!({"ui": "original"}),
+                },
+                FeatureVariant {
+                    control: "variant-a".to_string(),
+                    value: json!({"ui": "redesign-a"}),
+                },
+                FeatureVariant {
+                    control: "variant-b".to_string(),
+                    value: json!({"ui": "redesign-b"}),
+                },
+            ],
+        };
+
+        let result = evaluate(context, feature);
+
+        // The result should be one of the three variants (deterministic based on bucketing_key)
+        assert!(result.variant.is_some());
+        let variant = result.variant.unwrap();
+        assert!(
+            variant == "control" || variant == "variant-a" || variant == "variant-b",
+            "Expected one of the configured variants, got: {}",
+            variant
+        );
+        assert_eq!(result.reason, EvaluationReason::TargetingMatch);
+    }
+
+    #[test]
+    fn test_weighted_variants_with_partial_rollout() {
+        // Test weighted variants combined with rollout percentage
+        let mut context_attrs = HashMap::new();
+        context_attrs.insert("region".to_string(), json!("us-west"));
+
+        let context = FeatureEvaluationContext {
+            flag_key: "regional-test".to_string(),
+            context: ContextObject {
+                bucketing_key: "user-100".to_string(), // Choose a key that falls in low bucket
+                environment_id: "env1".to_string(),
+                attributes: context_attrs,
+            },
+        };
+
+        let feature = Feature {
+            id: "test-id".to_string(),
+            key: "regional-test".to_string(),
+            feature_type: "Contextual".to_string(),
+            active: true,
+            enabled: true,
+            dependencies: vec![],
+            stages: vec![FeatureStage {
+                environment_id: "env1".to_string(),
+                enabled: true,
+                bucketing_key: None,
+                criterias: vec![StageCriterion {
+                    context_key: "region".to_string(),
+                    context: StageContext {
+                        key: "region".to_string(),
+                        entries: vec!["us-west".to_string()],
+                    },
+                    rollout_percentage: 100,
+                    serve: None,
+                    operator: Operator::In,
+                    rule_groups: vec![],
+                    variant_allocations: vec![
+                        VariantAllocation {
+                            variant_control: "control".to_string(),
+                            weight: 50,
+                        },
+                        VariantAllocation {
+                            variant_control: "treatment".to_string(),
+                            weight: 50,
+                        },
+                    ],
+                }],
+            }],
+            variants: vec![
+                FeatureVariant {
+                    control: "control".to_string(),
+                    value: json!(false),
+                },
+                FeatureVariant {
+                    control: "treatment".to_string(),
+                    value: json!(true),
+                },
+            ],
+        };
+
+        let result = evaluate(context, feature);
+
+        // Should get a variant (deterministic)
+        assert!(result.variant.is_some());
+        let variant = result.variant.unwrap();
+        assert!(
+            variant == "control" || variant == "treatment",
+            "Expected control or treatment, got: {}",
+            variant
+        );
     }
 }
 

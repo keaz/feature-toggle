@@ -29,6 +29,12 @@ async fn test_get_stage_criteria_returns_seeded_values() {
         assert!(!c.context.entries.is_empty());
         // Rollout percentage should be within [0,100]
         assert!(c.rollout_percentage >= 0 && c.rollout_percentage <= 100);
+
+        if c.id == Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap() {
+            assert_eq!(c.variant_allocations.len(), 3);
+        } else if c.id == Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap() {
+            assert_eq!(c.variant_allocations.len(), 2);
+        }
     }
 
     // Check that contexts correspond to the seeded keys

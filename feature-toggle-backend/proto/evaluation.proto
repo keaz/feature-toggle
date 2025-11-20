@@ -54,15 +54,23 @@ message RuleGroup {
   repeated RuleCondition conditions = 3;
 }
 
+// Variant allocation for weighted traffic splits
+// Distributes traffic across multiple variants with percentage weights
+message VariantAllocation {
+  string variant_control = 1; // Variant name (must match a variant in the feature)
+  int32 weight = 2; // Weight percentage (0-100). Total across all allocations should equal 100
+}
+
 message StageCriterionFull {
   string id = 1;
   string context_key = 2;
   CriterionContext context = 3;
   int32 rollout_percentage = 4;
-  string serve = 5; // Optional variant control name to serve
+  string serve = 5; // Optional variant control name to serve (used when variant_allocations is empty)
   int32 priority = 6; // Evaluation priority (lower values evaluated first)
   string operator = 7; // Comparison operator (EQUALS, IN, GREATER_THAN, etc.)
   repeated RuleGroup rule_groups = 8; // Compound rules for advanced targeting
+  repeated VariantAllocation variant_allocations = 9; // Weighted variant allocations (overrides serve field when present)
 }
 
 message FeatureStageFull {

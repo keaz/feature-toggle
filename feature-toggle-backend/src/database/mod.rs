@@ -13,6 +13,7 @@ pub mod role;
 pub mod team;
 pub mod user;
 pub mod user_flag_assignment;
+pub mod variant_allocations;
 
 use crate::Error;
 use log::error;

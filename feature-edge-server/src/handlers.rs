@@ -141,6 +141,14 @@ pub fn map_proto_to_engine(f: &pb::FeatureFull) -> engine::Feature {
                         }
                     }).collect();
 
+                    // Map variant allocations from protobuf
+                    let variant_allocations = c.variant_allocations.iter().map(|alloc| {
+                        engine::VariantAllocation {
+                            variant_control: alloc.variant_control.clone(),
+                            weight: alloc.weight,
+                        }
+                    }).collect();
+
                     engine::StageCriterion {
                         context_key: c.context_key.clone(),
                         context,
@@ -152,6 +160,7 @@ pub fn map_proto_to_engine(f: &pb::FeatureFull) -> engine::Feature {
                         },
                         operator,
                         rule_groups,
+                        variant_allocations,
                     }
                 })
                 .collect(),

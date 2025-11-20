@@ -97,6 +97,14 @@ async fn map_db_feature_to_full_for_broadcast(
                     }
                 }).collect();
 
+                // Map variant allocations
+                let variant_allocations = c.variant_allocations.into_iter().map(|alloc| {
+                    pb::VariantAllocation {
+                        variant_control: alloc.variant_control,
+                        weight: alloc.weight,
+                    }
+                }).collect();
+
                 pb::StageCriterionFull {
                     id: c.id.to_string(),
                     context_key: c.context_key,
@@ -109,6 +117,7 @@ async fn map_db_feature_to_full_for_broadcast(
                     priority: c.priority,
                     operator: c.operator,
                     rule_groups,
+                    variant_allocations,
                 }
             })
             .collect::<Vec<_>>();

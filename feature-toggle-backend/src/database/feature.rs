@@ -1,11 +1,11 @@
 use crate::database::entity::{Feature, FeatureDependency, FeaturePipelineStage, FeatureType};
-use crate::database::{Error, handle_error};
-use chrono::{DateTime, Utc, format};
+use crate::database::{handle_error, Error};
+use chrono::{DateTime, Utc};
 use mockall::automock;
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgQueryResult;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -799,6 +799,35 @@ impl FeatureRepository for FeatureRepositoryImpl {
         .fetch_all(&self.pool)
         .await;
         let rows = handle_error(Some(stage_id), rows)?;
+
+        let criteria_ids: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
+        let mut allocations_map: std::collections::HashMap<
+            Uuid,
+            Vec<crate::database::entity::VariantAllocationSimple>,
+        > = std::collections::HashMap::new();
+
+        if !criteria_ids.is_empty() {
+            let allocations = sqlx::query!(
+                r#"SELECT criteria_id, variant_control, weight
+                   FROM variant_allocations
+                   WHERE criteria_id = ANY($1)
+                   ORDER BY variant_control"#,
+                &criteria_ids
+            )
+            .fetch_all(&self.pool)
+            .await;
+
+            let allocations = handle_error(None, allocations)?;
+            for alloc in allocations {
+                allocations_map
+                    .entry(alloc.criteria_id)
+                    .or_insert_with(Vec::new)
+                    .push(crate::database::entity::VariantAllocationSimple {
+                        variant_control: alloc.variant_control,
+                        weight: alloc.weight,
+                    });
+            }
+        }
         let mut out = Vec::new();
         for r in rows {
             // entries for context
@@ -894,6 +923,9 @@ impl FeatureRepository for FeatureRepositoryImpl {
                 priority: r.priority,
                 operator: r.operator.unwrap_or_else(|| "IN".to_string()),
                 rule_groups,
+                variant_allocations: allocations_map
+                    .remove(&r.id)
+                    .unwrap_or_else(Vec::new),
             });
         }
         Ok(out)

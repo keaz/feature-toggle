@@ -4,12 +4,13 @@ use crate::database::feature::FeatureRepository;
 use crate::graphql::create_user;
 use crate::graphql::schema::{
     AssignUserRolesInput, CreateClientInput, CreateEnvironmentInput, CreateFeatureInput,
-    CreatePipelineInput, CreateTeamInput, Environment, Feature, LoginInput as GqlLoginInput,
-    LoginResponse, Pipeline, RegisterUserInput as GqlRegisterUserInput,
+    CreatePipelineInput, CreateTeamInput, CreateVariantAllocationInput, Environment, Feature,
+    LoginInput as GqlLoginInput, LoginResponse, Pipeline, RegisterUserInput as GqlRegisterUserInput,
     ResetPasswordInput as GqlResetPasswordInput, Role,
     SetTemporaryPasswordInput as GqlSetTemporaryPasswordInput, Team, UpdateClientInput,
     UpdateEnvironmentInput, UpdateFeatureInput, UpdatePipelineInput, UpdateTeamInput,
-    UpdateUserInput as GqlUpdateUserInput, User,
+    UpdateUserInput as GqlUpdateUserInput, UpdateVariantAllocationInput, User,
+    VariantAllocation,
 };
 use crate::graphql::validator::{CreateInputValidator, UpdateInputValidator};
 use crate::logic::client::ClientLogic;
@@ -626,6 +627,136 @@ impl MutationRoot {
         Ok(true)
     }
 
+    // ========================
+    // Variant Allocation Mutations (for weighted traffic splits)
+    // ========================
+
+    /// Set variant allocations for a criterion (replaces existing allocations atomically)
+    /// This is the recommended way to update allocations to ensure consistency
+    async fn set_variant_allocations(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "ID of the stage criterion")] criteria_id: ID,
+        #[graphql(desc = "List of variant allocations (weights must sum to 100 or less)")]
+        allocations: Vec<CreateVariantAllocationInput>,
+    ) -> GqlResult<Vec<VariantAllocation>> {
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        let repo = crate::database::variant_allocations::variant_allocations_repository(pool.clone());
+
+        let criteria_uuid = uuid::Uuid::try_from(criteria_id.clone())
+            .map_err(|e| async_graphql::Error::new(format!("Invalid criteria ID: {}", e)))?;
+
+        // Validate that weights sum to 100 or less
+        let total_weight: i32 = allocations.iter().map(|a| a.weight).sum();
+        if total_weight > 100 {
+            return Err(async_graphql::Error::new(format!(
+                "Total weight exceeds 100: got {}",
+                total_weight
+            )));
+        }
+
+        // Convert to database input structs
+        let db_allocations: Vec<crate::database::variant_allocations::CreateVariantAllocationInput> =
+            allocations
+                .into_iter()
+                .map(|input| crate::database::variant_allocations::CreateVariantAllocationInput {
+                    criteria_id: criteria_uuid,
+                    variant_control: input.variant_control,
+                    weight: input.weight,
+                })
+                .collect();
+
+        let result = repo.set_allocations(criteria_uuid, db_allocations).await
+            .map_err(|e| async_graphql::Error::new(format!("Failed to set variant allocations: {}", e)))?;
+
+        // Convert to GraphQL types
+        Ok(result
+            .into_iter()
+            .map(|alloc| VariantAllocation {
+                id: alloc.id.to_string().into(),
+                criteria_id: criteria_id.clone(),
+                variant_control: alloc.variant_control,
+                weight: alloc.weight,
+            })
+            .collect())
+    }
+
+    /// Create a single variant allocation
+    async fn create_variant_allocation(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "ID of the stage criterion")] criteria_id: ID,
+        #[graphql(desc = "Variant allocation data")] input: CreateVariantAllocationInput,
+    ) -> GqlResult<VariantAllocation> {
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        let repo = crate::database::variant_allocations::variant_allocations_repository(pool.clone());
+
+        let criteria_uuid = uuid::Uuid::try_from(criteria_id.clone())
+            .map_err(|e| async_graphql::Error::new(format!("Invalid criteria ID: {}", e)))?;
+
+        let db_input = crate::database::variant_allocations::CreateVariantAllocationInput {
+            criteria_id: criteria_uuid,
+            variant_control: input.variant_control,
+            weight: input.weight,
+        };
+
+        let alloc = repo.create_allocation(db_input).await
+            .map_err(|e| async_graphql::Error::new(format!("Failed to create variant allocation: {}", e)))?;
+
+        Ok(VariantAllocation {
+            id: alloc.id.to_string().into(),
+            criteria_id,
+            variant_control: alloc.variant_control,
+            weight: alloc.weight,
+        })
+    }
+
+    /// Update the weight of a variant allocation
+    async fn update_variant_allocation(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "ID of the variant allocation")] allocation_id: ID,
+        #[graphql(desc = "Updated allocation data")] input: UpdateVariantAllocationInput,
+    ) -> GqlResult<VariantAllocation> {
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        let repo = crate::database::variant_allocations::variant_allocations_repository(pool.clone());
+
+        let alloc_uuid = uuid::Uuid::try_from(allocation_id)
+            .map_err(|e| async_graphql::Error::new(format!("Invalid allocation ID: {}", e)))?;
+
+        let db_input = crate::database::variant_allocations::UpdateVariantAllocationInput {
+            weight: input.weight,
+        };
+
+        let alloc = repo.update_allocation(alloc_uuid, db_input).await
+            .map_err(|e| async_graphql::Error::new(format!("Failed to update variant allocation: {}", e)))?;
+
+        Ok(VariantAllocation {
+            id: alloc.id.to_string().into(),
+            criteria_id: alloc.criteria_id.to_string().into(),
+            variant_control: alloc.variant_control,
+            weight: alloc.weight,
+        })
+    }
+
+    /// Delete a variant allocation
+    async fn delete_variant_allocation(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "ID of the variant allocation to delete")] allocation_id: ID,
+    ) -> GqlResult<bool> {
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        let repo = crate::database::variant_allocations::variant_allocations_repository(pool.clone());
+
+        let alloc_uuid = uuid::Uuid::try_from(allocation_id)
+            .map_err(|e| async_graphql::Error::new(format!("Invalid allocation ID: {}", e)))?;
+
+        repo.delete_allocation(alloc_uuid).await
+            .map_err(|e| async_graphql::Error::new(format!("Failed to delete variant allocation: {}", e)))?;
+
+        Ok(true)
+    }
+
     // Deployment workflow: request stage change
     async fn request_stage_change(
         &self,
@@ -1092,6 +1223,14 @@ async fn map_db_feature_to_full_for_broadcast(
                     }
                 }).collect();
 
+                // Map variant allocations
+                let variant_allocations = c.variant_allocations.into_iter().map(|alloc| {
+                    pb::VariantAllocation {
+                        variant_control: alloc.variant_control,
+                        weight: alloc.weight,
+                    }
+                }).collect();
+
                 pb::StageCriterionFull {
                     id: c.id.to_string(),
                     context_key: c.context_key,
@@ -1104,6 +1243,7 @@ async fn map_db_feature_to_full_for_broadcast(
                     priority: c.priority,
                     operator: c.operator,
                     rule_groups,
+                    variant_allocations,
                 }
             })
             .collect::<Vec<_>>();
@@ -1313,6 +1453,7 @@ mod tests {
             priority: 0,
             operator: crate::graphql::schema::RuleOperator::In,
             rule_groups: vec![],
+            variant_allocations: vec![],
         }];
         let stage_id_clone = stage_id.clone();
         mock.expect_set_stage_criteria()
