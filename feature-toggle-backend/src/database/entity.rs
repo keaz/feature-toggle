@@ -139,12 +139,7 @@ pub struct ContextEntry {
 pub struct StageCriterion {
     pub id: Uuid,
     pub stage_id: Uuid,
-    pub context_key: String,
-    pub context: Context,
-    pub rollout_percentage: i32,
-    pub serve: Option<String>,
     pub priority: i32,
-    pub operator: String,
     #[serde(default)]
     pub rule_groups: Vec<CompoundRuleGroup>,
     /// Variant allocations for weighted traffic splits

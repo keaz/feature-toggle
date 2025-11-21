@@ -537,12 +537,7 @@ pub struct UpdateClientInput {
 pub struct StageCriterion {
     pub id: ID,
     pub stage_id: ID,
-    pub context_key: String,
-    pub context: super::schema::Context,
-    pub rollout_percentage: i32,
-    pub serve: Option<String>,
     pub priority: i32,
-    pub operator: RuleOperator,
     pub rule_groups: Vec<CompoundRuleGroup>,
     /// Weighted variant allocations for multi-variant traffic splits
     /// If present, overrides the simple serve field with weighted distribution
@@ -551,17 +546,8 @@ pub struct StageCriterion {
 
 #[derive(InputObject, Debug, Clone)]
 pub struct CreateStageCriterionInput {
-    #[graphql(validator(min_length = 1, max_length = 100))]
-    pub context_key: String,
-    pub context_id: ID,
-    #[graphql(validator(minimum = 0, maximum = 100))]
-    pub rollout_percentage: i32,
-    #[graphql(validator(max_length = 100))]
-    pub serve: Option<String>,
     #[graphql(default = 0)]
     pub priority: i32,
-    #[graphql(default)]
-    pub operator: Option<RuleOperator>,
 }
 
 // Compound rules GraphQL types

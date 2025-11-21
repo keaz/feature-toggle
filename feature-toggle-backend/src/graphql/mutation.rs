@@ -1233,15 +1233,8 @@ async fn map_db_feature_to_full_for_broadcast(
 
                 pb::StageCriterionFull {
                     id: c.id.to_string(),
-                    context_key: c.context_key,
-                    context: Some(pb::CriterionContext {
-                        key: c.context.key,
-                        entries: c.context.entries.into_iter().map(|e| e.value).collect(),
-                    }),
-                    rollout_percentage: c.rollout_percentage,
-                    serve: c.serve.unwrap_or_default(),
+                    stage_id: c.stage_id.to_string(),
                     priority: c.priority,
-                    operator: c.operator,
                     rule_groups,
                     variant_allocations,
                 }
@@ -1441,17 +1434,7 @@ mod tests {
         let expected = vec![crate::graphql::schema::StageCriterion {
             id: ID::from(Uuid::new_v4()),
             stage_id: stage_id.clone(),
-            context_key: "filter".into(),
-            context: crate::graphql::schema::Context {
-                id: ID::from(Uuid::new_v4()),
-                team_id: ID::from(Uuid::new_v4()),
-                key: "filter-alpha".into(),
-                entries: vec![],
-            },
-            rollout_percentage: 75,
-            serve: None,
-            priority: 0,
-            operator: crate::graphql::schema::RuleOperator::In,
+            priority: 1,
             rule_groups: vec![],
             variant_allocations: vec![],
         }];
@@ -1461,8 +1444,7 @@ mod tests {
             .withf(move |sid, crit| {
                 sid == &stage_id_clone
                     && crit.len() == 1
-                    && crit[0].context_key == "filter"
-                    && crit[0].rollout_percentage == 75
+                    && crit[0].priority == 1
             })
             .return_once(move |_, _| Ok(expected.clone()));
 
@@ -1472,16 +1454,14 @@ mod tests {
 
         // success
         let gql = r#"
-            mutation($sid: ID!, $cid: ID!) {
-                setStageCriteria(stageId: $sid, criteria: [{ contextKey: "filter", contextId: $cid, rolloutPercentage: 75 }]) { rolloutPercentage }
+            mutation($sid: ID!) {
+                setStageCriteria(stageId: $sid, criteria: [{ priority: 1 }]) { priority }
             }
         "#;
         let mut req = Request::new(gql);
-        let cid = ID::from(Uuid::new_v4());
         req = req
             .variables(async_graphql::Variables::from_json(serde_json::json!({
-                "sid": stage_id.to_string(),
-                "cid": cid.to_string()
+                "sid": stage_id.to_string()
             })))
             .data::<Box<dyn crate::database::feature::FeatureRepository>>(Box::new(
                 MockFeatureRepository::new(),
@@ -1492,24 +1472,6 @@ mod tests {
             "{}",
             serde_json::to_string(&resp.errors).unwrap()
         );
-
-        // validation failure for rollout_percentage
-        let gql_bad = r#"
-            mutation($sid: ID!, $cid: ID!) {
-                setStageCriteria(stageId: $sid, criteria: [{ contextKey: "filter", contextId: $cid, rolloutPercentage: -5 }]) { rolloutPercentage }
-            }
-        "#;
-        let mut req_bad = Request::new(gql_bad);
-        req_bad = req_bad
-            .variables(async_graphql::Variables::from_json(serde_json::json!({
-                "sid": stage_id.to_string(),
-                "cid": cid.to_string()
-            })))
-            .data::<Box<dyn crate::database::feature::FeatureRepository>>(Box::new(
-                MockFeatureRepository::new(),
-            ));
-        let resp_bad = schema.execute(req_bad).await;
-        assert!(!resp_bad.errors.is_empty());
     }
 }
 

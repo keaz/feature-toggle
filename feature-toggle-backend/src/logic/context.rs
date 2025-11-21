@@ -107,15 +107,8 @@ async fn map_db_feature_to_full_for_broadcast(
 
                 pb::StageCriterionFull {
                     id: c.id.to_string(),
-                    context_key: c.context_key,
-                    context: Some(pb::CriterionContext {
-                        key: c.context.key,
-                        entries: c.context.entries.into_iter().map(|e| e.value).collect(),
-                    }),
-                    rollout_percentage: c.rollout_percentage,
-                    serve: c.serve.unwrap_or_default(),
+                    stage_id: c.stage_id.to_string(),
                     priority: c.priority,
-                    operator: c.operator,
                     rule_groups,
                     variant_allocations,
                 }

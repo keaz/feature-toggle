@@ -695,32 +695,16 @@ ON CONFLICT (id) DO NOTHING;
 -- Seed feature stage criteria for tests
 -- Link to an existing features_pipeline_stages row and existing contexts
 INSERT INTO
-    public.feature_stage_criteria (
-        id,
-        stage_id,
-        context_key,
-        context_id,
-        rollout_percentage,
-        serve,
-        operator
-    )
+    public.feature_stage_criteria (id, stage_id, priority)
 VALUES (
         '11111111-1111-4111-8111-111111111111',
         '3eef17bc-9e06-411d-b5f4-7a786e68bb96',
-        'filter',
-        'cb461425-373b-49d9-9634-9a248612d7b7',
-        50,
-        'treatment-a',
-        'IN'
+        0
     ),
     (
         '22222222-2222-4222-8222-222222222222',
         '3eef17bc-9e06-411d-b5f4-7a786e68bb96',
-        'filter',
-        'fcc0dfca-07b0-44ad-8d9a-21f2cd450d10',
-        30,
-        'treatment-b',
-        'IN'
+        1
     )
 ON CONFLICT (id) DO NOTHING;
 
@@ -746,24 +730,10 @@ ON CONFLICT (id) DO NOTHING;
 
 -- Add a criterion with GREATER_THAN_OR_EQUAL operator for age testing
 INSERT INTO
-    public.feature_stage_criteria (
-        id,
-        stage_id,
-        context_key,
-        context_id,
-        rollout_percentage,
-        serve,
-        operator,
-        priority
-    )
+    public.feature_stage_criteria (id, stage_id, priority)
 VALUES (
         '33333333-3333-4333-8333-333333333333',
         '99999999-9999-4999-8999-999999999999',
-        'age',
-        'aaaaaaaa-aaaa-4aaa-8aaa-111111111111',
-        100,
-        'adult-variant',
-        'GREATER_THAN_OR_EQUAL',
         10
     )
 ON CONFLICT (id) DO NOTHING;
@@ -789,24 +759,10 @@ ON CONFLICT (id) DO NOTHING;
 
 -- Add a criterion with REGEX operator for email testing
 INSERT INTO
-    public.feature_stage_criteria (
-        id,
-        stage_id,
-        context_key,
-        context_id,
-        rollout_percentage,
-        serve,
-        operator,
-        priority
-    )
+    public.feature_stage_criteria (id, stage_id, priority)
 VALUES (
         '44444444-4444-4444-8444-444444444444',
         '99999999-9999-4999-8999-999999999999',
-        'email',
-        'cccccccc-cccc-4ccc-8ccc-111111111111',
-        100,
-        'corporate-variant',
-        'REGEX',
         20
     )
 ON CONFLICT (id) DO NOTHING;
@@ -1249,21 +1205,11 @@ ON CONFLICT (id) DO NOTHING;
 
 -- Add feature stage criteria for contextual kill switch feature
 INSERT INTO
-    public.feature_stage_criteria (
-        id,
-        stage_id,
-        context_key,
-        context_id,
-        rollout_percentage,
-        serve
-    )
+    public.feature_stage_criteria (id, stage_id, priority)
 VALUES (
         'a2222222-2222-4222-8222-222222222221',
         'a1111111-1111-4111-8111-111111111116',
-        'filter',
-        'cb461425-373b-49d9-9634-9a248612d7b7',
-        75,
-        'blue'
+        0
     )
 ON CONFLICT (id) DO NOTHING;
 

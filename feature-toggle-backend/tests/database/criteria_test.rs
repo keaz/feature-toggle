@@ -14,36 +14,12 @@ async fn test_get_stage_criteria_returns_seeded_values() {
     assert!(result.is_ok());
     let criteria = result.unwrap();
 
-    // We seeded two criteria
-    assert_eq!(criteria.len(), 2);
+    assert!(!criteria.is_empty());
+    assert!(criteria.iter().all(|c| c.stage_id == stage_id));
 
-    // Validate content: same stage_id and context keys
-    for c in &criteria {
-        assert_eq!(c.stage_id, stage_id);
-        assert_eq!(c.context_key, "filter");
-        // Context should be fully loaded with entries
-        assert_eq!(
-            c.context.team_id,
-            Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap()
-        );
-        assert!(!c.context.entries.is_empty());
-        // Rollout percentage should be within [0,100]
-        assert!(c.rollout_percentage >= 0 && c.rollout_percentage <= 100);
-
-        if c.id == Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap() {
-            assert_eq!(c.variant_allocations.len(), 3);
-        } else if c.id == Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap() {
-            assert_eq!(c.variant_allocations.len(), 2);
-        }
-    }
-
-    // Check that contexts correspond to the seeded keys
-    let mut keys: Vec<String> = criteria.iter().map(|c| c.context.key.clone()).collect();
-    keys.sort();
-    assert_eq!(
-        keys,
-        vec!["filter-alpha".to_string(), "filter-beta".to_string()]
-    );
+    let mut priorities: Vec<i32> = criteria.iter().map(|c| c.priority).collect();
+    priorities.sort_unstable();
+    assert_eq!(priorities, vec![0, 1]);
 }
 
 #[tokio::test]
@@ -71,20 +47,10 @@ async fn test_set_stage_criteria_replaces_existing() {
     // First set some initial criteria
     let initial_crit = vec![
         CreateStageCriterion {
-            context_key: "filter".to_string(),
-            context_id: Uuid::parse_str("cb461425-373b-49d9-9634-9a248612d7b7").unwrap(),
-            rollout_percentage: 50,
-            serve: None,
             priority: 0,
-            operator: Some("IN".to_string()),
         },
         CreateStageCriterion {
-            context_key: "filter".to_string(),
-            context_id: Uuid::parse_str("fcc0dfca-07b0-44ad-8d9a-21f2cd450d10").unwrap(),
-            rollout_percentage: 30,
-            serve: None,
             priority: 1,
-            operator: Some("IN".to_string()),
         },
     ];
 
@@ -92,12 +58,7 @@ async fn test_set_stage_criteria_replaces_existing() {
 
     // Now replace them with a single criterion
     let crit = vec![CreateStageCriterion {
-        context_key: "filter".to_string(),
-        context_id: Uuid::parse_str("cb461425-373b-49d9-9634-9a248612d7b7").unwrap(),
-        rollout_percentage: 75,
-        serve: None,
         priority: 0,
-        operator: Some("IN".to_string()),
     }];
 
     let set_result = repo.set_stage_criteria(stage_id, crit).await;
@@ -108,9 +69,6 @@ async fn test_set_stage_criteria_replaces_existing() {
     assert_eq!(updated.len(), 1);
     let c = &updated[0];
     assert_eq!(c.stage_id, stage_id);
-    assert_eq!(c.context_key, "filter");
-    assert_eq!(c.context.key, "filter-alpha");
-    assert_eq!(c.rollout_percentage, 75);
 }
 
 #[tokio::test]
@@ -121,12 +79,7 @@ async fn test_set_stage_criteria_stage_not_found() {
     let non_existing_stage = Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").unwrap();
 
     let crit = vec![CreateStageCriterion {
-        context_key: "filter".to_string(),
-        context_id: Uuid::parse_str("cb461425-373b-49d9-9634-9a248612d7b7").unwrap(),
-        rollout_percentage: 10,
-        serve: None,
         priority: 0,
-        operator: Some("IN".to_string()),
     }];
 
     let result = repo.set_stage_criteria(non_existing_stage, crit).await;

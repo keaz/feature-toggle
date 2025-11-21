@@ -16,17 +16,9 @@ async fn test_create_rule_group_with_conditions() {
 
     // Use a dedicated stage for this test to avoid interference
     let stage_id = Uuid::parse_str("aaaaaaaa-1111-4111-8111-111111111111").unwrap();
-    let context_id = Uuid::parse_str("cb461425-373b-49d9-9634-9a248612d7b7").unwrap();
 
     // Create a criterion to attach rule groups to
-    let criteria = vec![CreateStageCriterion {
-        context_key: "user.tier".to_string(),
-        context_id,
-        rollout_percentage: 100,
-        serve: None,
-        priority: 0,
-        operator: Some("IN".to_string()),
-    }];
+    let criteria = vec![CreateStageCriterion { priority: 0 }];
 
     let created_criteria = feature_repo
         .set_stage_criteria(stage_id, criteria)
@@ -87,16 +79,8 @@ async fn test_get_rule_groups_by_criteria() {
 
     // Use a dedicated stage for this test to avoid interference
     let stage_id = Uuid::parse_str("bbbbbbbb-2222-4222-8222-222222222222").unwrap();
-    let context_id = Uuid::parse_str("cb461425-373b-49d9-9634-9a248612d7b7").unwrap();
 
-    let criteria = vec![CreateStageCriterion {
-        context_key: "feature.enabled".to_string(),
-        context_id,
-        rollout_percentage: 100,
-        serve: None,
-        priority: 0,
-        operator: Some("IN".to_string()),
-    }];
+    let criteria = vec![CreateStageCriterion { priority: 0 }];
 
     let created_criteria = feature_repo
         .set_stage_criteria(stage_id, criteria)
@@ -173,16 +157,8 @@ async fn test_update_rule_group() {
 
     // Use a dedicated stage for this test to avoid interference
     let stage_id = Uuid::parse_str("cccccccc-3333-4333-8333-333333333333").unwrap();
-    let context_id = Uuid::parse_str("cb461425-373b-49d9-9634-9a248612d7b7").unwrap();
 
-    let criteria = vec![CreateStageCriterion {
-        context_key: "test.key".to_string(),
-        context_id,
-        rollout_percentage: 50,
-        serve: None,
-        priority: 0,
-        operator: Some("IN".to_string()),
-    }];
+    let criteria = vec![CreateStageCriterion { priority: 0 }];
 
     let created_criteria = feature_repo
         .set_stage_criteria(stage_id, criteria)
@@ -244,16 +220,8 @@ async fn test_delete_rule_group() {
 
     // Use a dedicated stage for this test to avoid interference
     let stage_id = Uuid::parse_str("dddddddd-4444-4444-8444-444444444444").unwrap();
-    let context_id = Uuid::parse_str("cb461425-373b-49d9-9634-9a248612d7b7").unwrap();
 
-    let criteria = vec![CreateStageCriterion {
-        context_key: "delete.test".to_string(),
-        context_id,
-        rollout_percentage: 100,
-        serve: None,
-        priority: 0,
-        operator: Some("IN".to_string()),
-    }];
+    let criteria = vec![CreateStageCriterion { priority: 0 }];
 
     let created_criteria = feature_repo
         .set_stage_criteria(stage_id, criteria)
@@ -298,16 +266,8 @@ async fn test_all_operators() {
 
     // Use a dedicated stage for this test to avoid interference
     let stage_id = Uuid::parse_str("eeeeeeee-5555-4555-8555-555555555555").unwrap();
-    let context_id = Uuid::parse_str("cb461425-373b-49d9-9634-9a248612d7b7").unwrap();
 
-    let criteria = vec![CreateStageCriterion {
-        context_key: "operator.test".to_string(),
-        context_id,
-        rollout_percentage: 100,
-        serve: None,
-        priority: 0,
-        operator: Some("IN".to_string()),
-    }];
+    let criteria = vec![CreateStageCriterion { priority: 0 }];
 
     let created_criteria = feature_repo
         .set_stage_criteria(stage_id, criteria)
@@ -367,16 +327,8 @@ async fn test_complex_compound_rules() {
 
     // Use a dedicated stage for this test to avoid interference
     let stage_id = Uuid::parse_str("ffffffff-6666-4666-8666-666666666666").unwrap();
-    let context_id = Uuid::parse_str("cb461425-373b-49d9-9634-9a248612d7b7").unwrap();
 
-    let criteria = vec![CreateStageCriterion {
-        context_key: "complex.test".to_string(),
-        context_id,
-        rollout_percentage: 100,
-        serve: None,
-        priority: 0,
-        operator: Some("IN".to_string()),
-    }];
+    let criteria = vec![CreateStageCriterion { priority: 0 }];
 
     let created_criteria = feature_repo
         .set_stage_criteria(stage_id, criteria)
@@ -446,17 +398,9 @@ async fn test_cascade_delete_rule_groups_with_criteria() {
 
     // Use a dedicated stage for this test to avoid interference
     let stage_id = Uuid::parse_str("11111111-7777-4777-8777-777777777777").unwrap();
-    let context_id = Uuid::parse_str("cb461425-373b-49d9-9634-9a248612d7b7").unwrap();
 
     // Create criterion with rule groups
-    let criteria = vec![CreateStageCriterion {
-        context_key: "cascade.test".to_string(),
-        context_id,
-        rollout_percentage: 100,
-        serve: None,
-        priority: 0,
-        operator: Some("IN".to_string()),
-    }];
+    let criteria = vec![CreateStageCriterion { priority: 0 }];
 
     let created_criteria = feature_repo
         .set_stage_criteria(stage_id, criteria)

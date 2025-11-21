@@ -242,35 +242,42 @@ impl FeatureEvaluationSvc {
             let mapped_criteria = crits
                 .into_iter()
                 .map(|c| {
-                    // Parse operator from database string
-                    let operator = match c.operator.to_uppercase().as_str() {
-                        "EQUALS" => engine::Operator::Equals,
-                        "NOTEQUALS" | "NOT_EQUALS" => engine::Operator::NotEquals,
-                        "GREATERTHAN" | "GREATER_THAN" => engine::Operator::GreaterThan,
-                        "LESSTHAN" | "LESS_THAN" => engine::Operator::LessThan,
-                        "GREATERTHANOREQUAL" | "GREATER_THAN_OR_EQUAL" => engine::Operator::GreaterThanOrEqual,
-                        "LESSTHANOREQUAL" | "LESS_THAN_OR_EQUAL" => engine::Operator::LessThanOrEqual,
-                        "CONTAINS" => engine::Operator::Contains,
-                        "STARTSWITH" | "STARTS_WITH" => engine::Operator::StartsWith,
-                        "ENDSWITH" | "ENDS_WITH" => engine::Operator::EndsWith,
-                        "REGEX" => engine::Operator::Regex,
-                        "IN" => engine::Operator::In,
-                        "NOTIN" | "NOT_IN" => engine::Operator::NotIn,
-                        "SEMVERGREATERTHAN" | "SEMVER_GREATER_THAN" => engine::Operator::SemverGreaterThan,
-                        "SEMVERLESSTHAN" | "SEMVER_LESS_THAN" => engine::Operator::SemverLessThan,
-                        _ => engine::Operator::In, // Default fallback
-                    };
+                    let rule_groups = c.rule_groups.into_iter().map(|group| {
+                        engine::RuleGroup {
+                            logic_operator: match group.logic_operator {
+                                crate::database::entity::LogicOperator::And => engine::LogicOperator::And,
+                                crate::database::entity::LogicOperator::Or => engine::LogicOperator::Or,
+                            },
+                            conditions: group.conditions.into_iter().map(|cond| {
+                                let cond_operator = match cond.operator.to_uppercase().as_str() {
+                                    "EQUALS" => engine::Operator::Equals,
+                                    "NOTEQUALS" | "NOT_EQUALS" => engine::Operator::NotEquals,
+                                    "GREATERTHAN" | "GREATER_THAN" => engine::Operator::GreaterThan,
+                                    "LESSTHAN" | "LESS_THAN" => engine::Operator::LessThan,
+                                    "GREATERTHANOREQUAL" | "GREATER_THAN_OR_EQUAL" => engine::Operator::GreaterThanOrEqual,
+                                    "LESSTHANOREQUAL" | "LESS_THAN_OR_EQUAL" => engine::Operator::LessThanOrEqual,
+                                    "CONTAINS" => engine::Operator::Contains,
+                                    "STARTSWITH" | "STARTS_WITH" => engine::Operator::StartsWith,
+                                    "ENDSWITH" | "ENDS_WITH" => engine::Operator::EndsWith,
+                                    "REGEX" => engine::Operator::Regex,
+                                    "IN" => engine::Operator::In,
+                                    "NOTIN" | "NOT_IN" => engine::Operator::NotIn,
+                                    "SEMVERGREATERTHAN" | "SEMVER_GREATER_THAN" => engine::Operator::SemverGreaterThan,
+                                    "SEMVERLESSTHAN" | "SEMVER_LESS_THAN" => engine::Operator::SemverLessThan,
+                                    _ => engine::Operator::In,
+                                };
+                                engine::RuleCondition {
+                                    context_key: cond.context_key,
+                                    operator: cond_operator,
+                                    value: cond.value,
+                                }
+                            }).collect(),
+                        }
+                    }).collect();
 
                     engine::StageCriterion {
-                        context_key: c.context_key,
-                        context: engine::StageContext {
-                            key: c.context.key,
-                            entries: c.context.entries.into_iter().map(|e| e.value).collect(),
-                        },
-                        rollout_percentage: c.rollout_percentage,
-                        serve: c.serve,
-                        operator,
-                        rule_groups: vec![], // TODO: Map CompoundRuleGroup from database to engine
+                        priority: c.priority,
+                        rule_groups,
                         variant_allocations: c.variant_allocations.into_iter().map(|alloc| {
                             engine::VariantAllocation {
                                 variant_control: alloc.variant_control,
@@ -372,15 +379,8 @@ impl FeatureEvaluationSvc {
 
                     pb::StageCriterionFull {
                         id: c.id.to_string(),
-                        context_key: c.context_key,
-                        context: Some(pb::CriterionContext {
-                            key: c.context.key,
-                            entries: c.context.entries.into_iter().map(|e| e.value).collect(),
-                        }),
-                        rollout_percentage: c.rollout_percentage,
-                        serve: c.serve.unwrap_or_default(),
+                        stage_id: c.stage_id.to_string(),
                         priority: c.priority,
-                        operator: c.operator,
                         rule_groups,
                         variant_allocations,
                     }

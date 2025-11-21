@@ -32,12 +32,6 @@ message GetFeatureByKeyRequest {
   string client_secret = 3;
 }
 
-// Context used within criteria for full feature representation
-message CriterionContext {
-  string key = 1;
-  repeated string entries = 2;
-}
-
 // Compound rule condition within a rule group
 message RuleCondition {
   string id = 1;
@@ -63,14 +57,10 @@ message VariantAllocation {
 
 message StageCriterionFull {
   string id = 1;
-  string context_key = 2;
-  CriterionContext context = 3;
-  int32 rollout_percentage = 4;
-  string serve = 5; // Optional variant control name to serve (used when variant_allocations is empty)
-  int32 priority = 6; // Evaluation priority (lower values evaluated first)
-  string operator = 7; // Comparison operator (EQUALS, IN, GREATER_THAN, etc.)
-  repeated RuleGroup rule_groups = 8; // Compound rules for advanced targeting
-  repeated VariantAllocation variant_allocations = 9; // Weighted variant allocations (overrides serve field when present)
+  string stage_id = 2;
+  int32 priority = 3; // Evaluation priority (lower values evaluated first)
+  repeated RuleGroup rule_groups = 4; // Compound rules for advanced targeting
+  repeated VariantAllocation variant_allocations = 5; // Weighted variant allocations (overrides serve field when present)
 }
 
 message FeatureStageFull {

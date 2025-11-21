@@ -87,12 +87,6 @@ pub struct FeatureStage {
     pub criterias: Vec<StageCriterion>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct StageContext {
-    pub key: String,
-    pub entries: Vec<String>,
-}
-
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Operator {
@@ -120,12 +114,7 @@ impl Default for Operator {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct StageCriterion {
-    pub context_key: String,
-    pub context: StageContext,
-    pub rollout_percentage: i32,
-    pub serve: Option<String>,
-    #[serde(default)]
-    pub operator: Operator,
+    pub priority: i32,
     #[serde(default)]
     pub rule_groups: Vec<RuleGroup>,
     /// Variant allocations for weighted traffic splits
@@ -406,38 +395,47 @@ fn passes_stage_criteria(
         };
     }
 
-    // Use bucketing_key from stage or default to bucketingKey from context
-    let sticky_key = stage.bucketing_key.as_deref().unwrap_or("bucketingKey");
-    let sticky_val = if sticky_key == "bucketingKey" {
-        ec.context.bucketing_key.clone()
-    } else {
-        match get_context_attribute(&ec.context, sticky_key) {
-            Some(v) => v,
-            None => {
-                return CriteriaEvaluationResult {
-                    matched: false,
-                    variant: None,
-                    reason: EvaluationReason::Default,
-                };
+    // Only compute a sticky bucket if any criterion needs weighted allocation
+    let needs_bucket = stage
+        .criterias
+        .iter()
+        .any(|crit| !crit.variant_allocations.is_empty());
+    let user_bucket = if needs_bucket {
+        // Use bucketing_key from stage or default to bucketingKey from context
+        let sticky_key = stage.bucketing_key.as_deref().unwrap_or("bucketingKey");
+        let sticky_val = if sticky_key == "bucketingKey" {
+            ec.context.bucketing_key.clone()
+        } else {
+            match get_context_attribute(&ec.context, sticky_key) {
+                Some(v) => v,
+                None => {
+                    return CriteriaEvaluationResult {
+                        matched: false,
+                        variant: None,
+                        reason: EvaluationReason::Default,
+                    };
+                }
             }
-        }
-    };
-
-    if sticky_val.is_empty() {
-        return CriteriaEvaluationResult {
-            matched: false,
-            variant: None,
-            reason: EvaluationReason::Default,
         };
-    }
 
-    // Precompute user bucket percentage
-    let mut hasher = Sha256::new();
-    hasher.update(ec.flag_key.as_bytes());
-    hasher.update(b":");
-    hasher.update(sticky_val.as_bytes());
-    let digest = hasher.finalize();
-    let user_bucket = hash_to_percentage(&digest); // 0..100
+        if sticky_val.is_empty() {
+            return CriteriaEvaluationResult {
+                matched: false,
+                variant: None,
+                reason: EvaluationReason::Default,
+            };
+        }
+
+        // Precompute user bucket percentage
+        let mut hasher = Sha256::new();
+        hasher.update(ec.flag_key.as_bytes());
+        hasher.update(b":");
+        hasher.update(sticky_val.as_bytes());
+        let digest = hasher.finalize();
+        Some(hash_to_percentage(&digest)) // 0..100
+    } else {
+        None
+    };
 
     // Evaluate criteria in order (by priority, lowest first)
     // Note: Criteria should be pre-sorted by the caller (database query sorts by priority ASC)
@@ -446,43 +444,23 @@ fn passes_stage_criteria(
             // Use compound rules if defined
             evaluate_compound_rules(&crit.rule_groups, &ec.context)
         } else {
-            // Fallback to legacy single-condition evaluation
-            let ctx_key = &crit.context_key;
-            if let Some(provided) = get_context_attribute(&ec.context, ctx_key) {
-                // Check using operator-based matching
-                matches_operator(&crit.operator, &provided, &crit.context.entries)
-            } else {
-                false
-            }
+            // No rules means always match
+            true
         };
 
         if matches {
-            let pct = crit.rollout_percentage.clamp(0, 100) as f32;
-            if user_bucket < pct {
-                // Determine which variant to serve
-                let selected_variant = if !crit.variant_allocations.is_empty() {
-                    // Use weighted allocation if configured
-                    // Normalize user_bucket to allocation range: user_bucket is 0-100,
-                    // but we want it relative to the rollout percentage
-                    let normalized_bucket = (user_bucket / pct) * 100.0;
-                    select_variant_by_weight(&crit.variant_allocations, normalized_bucket)
-                } else {
-                    // Use simple serve field (legacy single-variant behavior)
-                    crit.serve.clone()
-                };
-
-                return CriteriaEvaluationResult {
-                    matched: true,
-                    variant: selected_variant,
-                    reason: EvaluationReason::TargetingMatch,
-                };
+            let selected_variant = if !crit.variant_allocations.is_empty() {
+                user_bucket
+                    .and_then(|bucket| select_variant_by_weight(&crit.variant_allocations, bucket))
             } else {
-                return CriteriaEvaluationResult {
-                    matched: true,
-                    variant: None,
-                    reason: EvaluationReason::TargetingMatch,
-                };
-            }
+                None
+            };
+
+            return CriteriaEvaluationResult {
+                matched: true,
+                variant: selected_variant,
+                reason: EvaluationReason::TargetingMatch,
+            };
         }
     }
 
@@ -627,16 +605,19 @@ mod tests {
                 enabled: true,
                 bucketing_key: None,
                 criterias: vec![StageCriterion {
-                    context_key: "role".to_string(),
-                    context: StageContext {
-                        key: "role".to_string(),
-                        entries: vec!["admin".to_string()],
-                    },
-                    rollout_percentage: 100,
-                    serve: Some("treatment".to_string()),
-                    operator: Operator::In,
-                    rule_groups: vec![],
-                    variant_allocations: vec![],
+                    priority: 0,
+                    rule_groups: vec![RuleGroup {
+                        logic_operator: LogicOperator::And,
+                        conditions: vec![RuleCondition {
+                            context_key: "role".to_string(),
+                            operator: Operator::In,
+                            value: json!(["admin"]),
+                        }],
+                    }],
+                    variant_allocations: vec![VariantAllocation {
+                        variant_control: "treatment".to_string(),
+                        weight: 100,
+                    }],
                 }],
             }],
             variants: vec![
@@ -995,16 +976,19 @@ mod tests {
                 enabled: true,
                 bucketing_key: None,
                 criterias: vec![StageCriterion {
-                    context_key: "age".to_string(),
-                    context: StageContext {
-                        key: "age".to_string(),
-                        entries: vec!["18".to_string()],
-                    },
-                    rollout_percentage: 100,
-                    serve: Some("adult-content".to_string()),
-                    operator: Operator::GreaterThanOrEqual,
-                    rule_groups: vec![],
-                    variant_allocations: vec![],
+                    priority: 0,
+                    rule_groups: vec![RuleGroup {
+                        logic_operator: LogicOperator::And,
+                        conditions: vec![RuleCondition {
+                            context_key: "age".to_string(),
+                            operator: Operator::GreaterThanOrEqual,
+                            value: json!("18"),
+                        }],
+                    }],
+                    variant_allocations: vec![VariantAllocation {
+                        variant_control: "adult-content".to_string(),
+                        weight: 100,
+                    }],
                 }],
             }],
             variants: vec![
@@ -1051,16 +1035,19 @@ mod tests {
                 enabled: true,
                 bucketing_key: None,
                 criterias: vec![StageCriterion {
-                    context_key: "email".to_string(),
-                    context: StageContext {
-                        key: "email".to_string(),
-                        entries: vec![r".*@company\.com$".to_string()],
-                    },
-                    rollout_percentage: 100,
-                    serve: Some("corporate-variant".to_string()),
-                    operator: Operator::Regex,
-                    rule_groups: vec![],
-                    variant_allocations: vec![],
+                    priority: 0,
+                    rule_groups: vec![RuleGroup {
+                        logic_operator: LogicOperator::And,
+                        conditions: vec![RuleCondition {
+                            context_key: "email".to_string(),
+                            operator: Operator::Regex,
+                            value: json!(r".*@company\.com$"),
+                        }],
+                    }],
+                    variant_allocations: vec![VariantAllocation {
+                        variant_control: "corporate-variant".to_string(),
+                        weight: 100,
+                    }],
                 }],
             }],
             variants: vec![
@@ -1419,14 +1406,7 @@ mod tests {
                 enabled: true,
                 bucketing_key: None,
                 criterias: vec![StageCriterion {
-                    context_key: "country".to_string(), // Legacy field (not used when rule_groups present)
-                    context: StageContext {
-                        key: "country".to_string(),
-                        entries: vec![],
-                    },
-                    rollout_percentage: 100,
-                    serve: Some("premium-variant".to_string()),
-                    operator: Operator::In,
+                    priority: 0,
                     rule_groups: vec![RuleGroup {
                         logic_operator: LogicOperator::And,
                         conditions: vec![
@@ -1442,7 +1422,10 @@ mod tests {
                             },
                         ],
                     }],
-                    variant_allocations: vec![],
+                    variant_allocations: vec![VariantAllocation {
+                        variant_control: "premium-variant".to_string(),
+                        weight: 100,
+                    }],
                 }],
             }],
             variants: vec![
@@ -1688,14 +1671,7 @@ mod tests {
                 enabled: true,
                 bucketing_key: None,
                 criterias: vec![StageCriterion {
-                    context_key: "tier".to_string(),
-                    context: StageContext {
-                        key: "tier".to_string(),
-                        entries: vec!["premium".to_string()],
-                    },
-                    rollout_percentage: 100,
-                    serve: None, // Not used when variant_allocations present
-                    operator: Operator::In,
+                    priority: 0,
                     rule_groups: vec![],
                     variant_allocations: vec![
                         VariantAllocation {
@@ -1769,14 +1745,7 @@ mod tests {
                 enabled: true,
                 bucketing_key: None,
                 criterias: vec![StageCriterion {
-                    context_key: "region".to_string(),
-                    context: StageContext {
-                        key: "region".to_string(),
-                        entries: vec!["us-west".to_string()],
-                    },
-                    rollout_percentage: 100,
-                    serve: None,
-                    operator: Operator::In,
+                    priority: 0,
                     rule_groups: vec![],
                     variant_allocations: vec![
                         VariantAllocation {
@@ -1814,4 +1783,3 @@ mod tests {
         );
     }
 }
-

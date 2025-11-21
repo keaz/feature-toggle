@@ -1,6 +1,7 @@
 use evaluation_engine::{
     ContextObject, ErrorCode, EvaluationReason, Feature, FeatureEvaluationContext, FeatureStage,
-    FeatureVariant, Operator, StageContext, StageCriterion,
+    FeatureVariant, LogicOperator, Operator, RuleCondition, RuleGroup, StageCriterion,
+    VariantAllocation,
 };
 use serde_json::json;
 use std::collections::HashMap;
@@ -40,18 +41,33 @@ fn stage(
     }
 }
 
-fn criterion(context_key: &str, allowed: &[&str], pct: i32, serve: Option<&str>) -> StageCriterion {
-    StageCriterion {
+fn rule(context_key: &str, operator: Operator, value: serde_json::Value) -> RuleCondition {
+    RuleCondition {
         context_key: context_key.to_string(),
-        context: StageContext {
-            key: context_key.to_string(),
-            entries: allowed.iter().map(|s| (*s).into()).collect(),
+        operator,
+        value,
+    }
+}
+
+fn criterion(rules: Vec<RuleCondition>, variant: Option<&str>, priority: i32) -> StageCriterion {
+    StageCriterion {
+        priority,
+        rule_groups: if rules.is_empty() {
+            vec![]
+        } else {
+            vec![RuleGroup {
+                logic_operator: LogicOperator::And,
+                conditions: rules,
+            }]
         },
-        rollout_percentage: pct,
-        serve: serve.map(|s| s.to_string()),
-        operator: Operator::In,
-        rule_groups: vec![],
-        variant_allocations: vec![],
+        variant_allocations: variant
+            .map(|v| {
+                vec![VariantAllocation {
+                    variant_control: v.to_string(),
+                    weight: 100,
+                }]
+            })
+            .unwrap_or_default(),
     }
 }
 
@@ -144,49 +160,67 @@ fn evaluate_passes_when_no_criteria_and_enabled_stage() {
 }
 
 #[test]
+fn evaluate_unconditional_criterion_matches() {
+    let ctx = mk_ctx("feat", "env-a", "user123", &[]);
+    let crit = criterion(vec![], Some("control"), 0);
+    let stg = stage("env-a", true, None, vec![crit]);
+    let feature = mk_feature(
+        "test-id",
+        "test-key",
+        "Contextual",
+        true,
+        true,
+        vec![stg],
+        vec![FeatureVariant {
+            control: "control".to_string(),
+            value: json!(true),
+        }],
+    );
+
+    let result = evaluation_engine::evaluate(ctx, feature);
+    assert_eq!(result.value, json!(true));
+    assert_eq!(result.variant, Some("control".to_string()));
+    assert_eq!(result.reason, EvaluationReason::TargetingMatch);
+}
+
+#[test]
 fn evaluate_fails_when_user_not_in_allowed_values() {
     let ctx = mk_ctx("feat", "env-a", "user123", &[("role", "viewer")]);
-    let crit = criterion("role", &["admin", "editor"], 100, None);
+    let crit = criterion(
+        vec![rule(
+            "role",
+            Operator::In,
+            json!(["admin", "editor"]),
+        )],
+        None,
+        0,
+    );
     let stg = stage("env-a", true, None, vec![crit]);
-    let feature = Feature {
-        id: "test-id".to_string(),
-        key: "test-key".to_string(),
-        feature_type: "Contextual".to_string(),
-        active: true,
-        enabled: true,
-        dependencies: vec![],
-        stages: vec![stg],
-        variants: vec![],
-    };
+    let feature = mk_feature("test-id", "test-key", "Contextual", true, true, vec![stg], vec![]);
     let result = evaluation_engine::evaluate(ctx, feature);
     assert_eq!(result.value, json!(false));
     assert_eq!(result.reason, EvaluationReason::Default);
 }
 
 #[test]
-fn evaluate_passes_when_user_in_allowed_and_rollout_100() {
+fn evaluate_passes_when_user_in_allowed() {
     let ctx = mk_ctx("feat", "env-a", "user123", &[("role", "admin")]);
-    let crit = criterion("role", &["admin"], 100, None);
+    let crit = criterion(vec![rule("role", Operator::In, json!(["admin"]))], None, 0);
     let stg = stage("env-a", true, None, vec![crit]);
-    let feature = Feature {
-        id: "test-id".to_string(),
-        key: "test-key".to_string(),
-        feature_type: "Contextual".to_string(),
-        active: true,
-        enabled: true,
-        dependencies: vec![],
-        stages: vec![stg],
-        variants: vec![],
-    };
+    let feature = mk_feature("test-id", "test-key", "Contextual", true, true, vec![stg], vec![]);
     let result = evaluation_engine::evaluate(ctx, feature);
     assert_eq!(result.value, json!(true));
     assert_eq!(result.reason, EvaluationReason::TargetingMatch);
 }
 
 #[test]
-fn evaluate_with_variant() {
+fn evaluate_with_variant_allocation() {
     let ctx = mk_ctx("feat", "env-a", "user123", &[("role", "admin")]);
-    let crit = criterion("role", &["admin"], 100, Some("treatment"));
+    let crit = criterion(
+        vec![rule("role", Operator::In, json!(["admin"]))],
+        Some("treatment"),
+        0,
+    );
     let stg = stage("env-a", true, None, vec![crit]);
     let feature = Feature {
         id: "test-id".to_string(),
@@ -216,7 +250,7 @@ fn evaluate_with_variant() {
 #[test]
 fn evaluate_with_json_variant() {
     let ctx = mk_ctx("feat", "env-a", "user123", &[("tier", "premium")]);
-    let crit = criterion("tier", &["premium"], 100, Some("premium-config"));
+    let crit = criterion(vec![rule("tier", Operator::In, json!(["premium"]))], Some("premium-config"), 0);
     let stg = stage("env-a", true, None, vec![crit]);
     let feature = Feature {
         id: "test-id".to_string(),
@@ -286,7 +320,11 @@ fn evaluate_with_custom_bucketing_key() {
         "user123",
         &[("org_id", "org456"), ("role", "admin")],
     );
-    let crit = criterion("role", &["admin"], 100, None);
+    let crit = criterion(
+        vec![rule("role", Operator::In, json!(["admin"]))],
+        Some("treatment"),
+        0,
+    );
     let stg = stage("env-a", true, Some("org_id"), vec![crit]);
     let feature = Feature {
         id: "test-id".to_string(),
@@ -296,7 +334,10 @@ fn evaluate_with_custom_bucketing_key() {
         enabled: true,
         dependencies: vec![],
         stages: vec![stg],
-        variants: vec![],
+        variants: vec![FeatureVariant {
+            control: "treatment".to_string(),
+            value: json!(true),
+        }],
     };
     let result = evaluation_engine::evaluate(ctx, feature);
     assert_eq!(result.value, json!(true));
@@ -311,8 +352,16 @@ fn evaluate_multiple_criteria_first_match_wins() {
         "user123",
         &[("role", "admin"), ("tier", "premium")],
     );
-    let crit1 = criterion("role", &["admin"], 100, Some("admin-variant"));
-    let crit2 = criterion("tier", &["premium"], 100, Some("premium-variant"));
+    let crit1 = criterion(
+        vec![rule("role", Operator::In, json!(["admin"]))],
+        Some("admin-variant"),
+        0,
+    );
+    let crit2 = criterion(
+        vec![rule("tier", Operator::In, json!(["premium"]))],
+        Some("premium-variant"),
+        1,
+    );
     let stg = stage("env-a", true, None, vec![crit1, crit2]);
     let feature = Feature {
         id: "test-id".to_string(),
@@ -343,7 +392,11 @@ fn evaluate_multiple_criteria_first_match_wins() {
 fn evaluate_missing_bucketing_key_attribute() {
     let ctx = mk_ctx("feat", "env-a", "user123", &[("role", "admin")]);
     // Stage expects "org_id" but it's not provided
-    let crit = criterion("role", &["admin"], 100, None);
+    let crit = criterion(
+        vec![rule("role", Operator::In, json!(["admin"]))],
+        Some("treatment"),
+        0,
+    );
     let stg = stage("env-a", true, Some("org_id"), vec![crit]);
     let feature = Feature {
         id: "test-id".to_string(),
@@ -353,7 +406,10 @@ fn evaluate_missing_bucketing_key_attribute() {
         enabled: true,
         dependencies: vec![],
         stages: vec![stg],
-        variants: vec![],
+        variants: vec![FeatureVariant {
+            control: "treatment".to_string(),
+            value: json!(true),
+        }],
     };
     let result = evaluation_engine::evaluate(ctx, feature);
     assert_eq!(result.value, json!(false));
@@ -363,7 +419,11 @@ fn evaluate_missing_bucketing_key_attribute() {
 #[test]
 fn evaluate_variant_not_found_returns_default() {
     let ctx = mk_ctx("feat", "env-a", "user123", &[("role", "admin")]);
-    let crit = criterion("role", &["admin"], 100, Some("non-existent-variant"));
+    let crit = criterion(
+        vec![rule("role", Operator::In, json!(["admin"]))],
+        Some("non-existent-variant"),
+        0,
+    );
     let stg = stage("env-a", true, None, vec![crit]);
     let feature = Feature {
         id: "test-id".to_string(),

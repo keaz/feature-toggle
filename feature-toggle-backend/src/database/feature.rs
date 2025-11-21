@@ -10,14 +10,8 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateStageCriterion {
-    pub context_key: String,
-    pub context_id: Uuid,
-    pub rollout_percentage: i32,
-    pub serve: Option<String>,
     #[serde(default)]
     pub priority: i32,
-    #[serde(default)]
-    pub operator: Option<String>,
 }
 
 /// Represents feature growth data at a specific time bucket
@@ -205,6 +199,7 @@ pub trait FeatureRepository: Send + Sync {
         &self,
         stage_id: Uuid,
     ) -> Result<Vec<crate::database::entity::StageCriterion>, Error>;
+
     async fn set_stage_criteria(
         &self,
         stage_id: Uuid,
@@ -786,12 +781,9 @@ impl FeatureRepository for FeatureRepositoryImpl {
         &self,
         stage_id: Uuid,
     ) -> Result<Vec<crate::database::entity::StageCriterion>, Error> {
-        // load criteria join contexts and entries
         let rows = sqlx::query!(
-            r#"SELECT sc.id, sc.stage_id, sc.context_key, sc.context_id, sc.rollout_percentage, sc.serve, sc.priority, sc.operator,
-                      c.team_id, c.key
+            r#"SELECT sc.id, sc.stage_id, sc.priority
                FROM feature_stage_criteria sc
-               JOIN contexts c ON c.id = sc.context_id
                WHERE sc.stage_id = $1
                ORDER BY sc.priority ASC, sc.id"#,
             stage_id
@@ -828,83 +820,69 @@ impl FeatureRepository for FeatureRepositoryImpl {
                     });
             }
         }
-        let mut out = Vec::new();
-        for r in rows {
-            // entries for context
-            let entries = handle_error(
-                Some(r.context_id),
-                sqlx::query!(
-                    r#"SELECT id, value FROM context_entries WHERE context_id = $1 ORDER BY value"#,
-                    r.context_id
-                )
-                .fetch_all(&self.pool)
-                .await,
-            )?
-            .into_iter()
-            .map(|e| crate::database::entity::ContextEntry {
-                id: e.id,
-                value: e.value,
-            })
-            .collect();
-            let context = crate::database::entity::Context {
-                id: r.context_id,
-                team_id: r.team_id,
-                key: r.key,
-                entries,
-            };
 
-            // Load rule groups with conditions for this criterion
-            let rule_groups_data = sqlx::query!(
-                r#"SELECT rg.id as group_id, rg.logic_operator,
+        let mut rule_groups_by_criteria: std::collections::HashMap<
+            Uuid,
+            std::collections::HashMap<
+                Uuid,
+                (
+                    crate::database::entity::LogicOperator,
+                    Vec<crate::database::entity::CompoundRuleCondition>,
+                ),
+            >,
+        > = std::collections::HashMap::new();
+
+        if !criteria_ids.is_empty() {
+            let rule_rows = sqlx::query!(
+                r#"SELECT rg.id as group_id, rg.criteria_id, rg.logic_operator,
                           rc.id as "condition_id?", rc.context_key as "context_key?",
                           rc.operator as "operator?", rc.value as "value?",
                           rc.order_index as "order_index?"
                    FROM rule_groups rg
                    LEFT JOIN rule_conditions rc ON rc.group_id = rg.id
-                   WHERE rg.criteria_id = $1
+                   WHERE rg.criteria_id = ANY($1)
                    ORDER BY rg.created_at, rc.order_index"#,
-                r.id
+                &criteria_ids
             )
             .fetch_all(&self.pool)
             .await;
 
-            let rule_groups_data = handle_error(None, rule_groups_data)?;
+            let rule_rows = handle_error(None, rule_rows)?;
 
-            // Group conditions by rule group ID
-            let mut rule_groups_map: std::collections::HashMap<
-                Uuid,
-                (String, Vec<crate::database::entity::CompoundRuleCondition>),
-            > = std::collections::HashMap::new();
+            for row in rule_rows {
+                let by_group = rule_groups_by_criteria
+                    .entry(row.criteria_id)
+                    .or_insert_with(std::collections::HashMap::new);
 
-            for row in rule_groups_data {
-                let entry = rule_groups_map.entry(row.group_id).or_insert_with(|| {
-                    (row.logic_operator.clone(), Vec::new())
-                });
-
-                // Only add condition if it exists (LEFT JOIN may return null for condition fields)
-                if let Some(condition_id) = row.condition_id {
-                    if let (Some(context_key), Some(operator), Some(value), Some(order_index)) =
-                        (row.context_key, row.operator, row.value, row.order_index)
-                    {
-                        entry.1.push(crate::database::entity::CompoundRuleCondition {
-                            id: condition_id,
-                            context_key,
-                            operator,
-                            value,
-                            order_index,
-                        });
-                    }
-                }
-            }
-
-            // Convert to CompoundRuleGroup vec
-            let rule_groups = rule_groups_map
-                .into_iter()
-                .map(|(group_id, (logic_op, conditions))| {
-                    let logic_operator = match logic_op.to_uppercase().as_str() {
+                let entry = by_group.entry(row.group_id).or_insert_with(|| {
+                    let logic_operator = match row.logic_operator.to_uppercase().as_str() {
                         "OR" => crate::database::entity::LogicOperator::Or,
                         _ => crate::database::entity::LogicOperator::And,
                     };
+                    (logic_operator, Vec::new())
+                });
+
+                if let (Some(condition_id), Some(context_key), Some(operator), Some(order_index)) =
+                    (row.condition_id, row.context_key, row.operator, row.order_index)
+                {
+                    entry.1.push(crate::database::entity::CompoundRuleCondition {
+                        id: condition_id,
+                        context_key,
+                        operator,
+                        value: row.value.unwrap_or(serde_json::Value::Null),
+                        order_index,
+                    });
+                }
+            }
+        }
+
+        let mut out = Vec::new();
+        for r in rows {
+            let rule_groups = rule_groups_by_criteria
+                .remove(&r.id)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(group_id, (logic_operator, conditions))| {
                     crate::database::entity::CompoundRuleGroup {
                         id: group_id,
                         logic_operator,
@@ -916,12 +894,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
             out.push(crate::database::entity::StageCriterion {
                 id: r.id,
                 stage_id: r.stage_id,
-                context_key: r.context_key,
-                context,
-                rollout_percentage: r.rollout_percentage,
-                serve: r.serve,
                 priority: r.priority,
-                operator: r.operator.unwrap_or_else(|| "IN".to_string()),
                 rule_groups,
                 variant_allocations: allocations_map
                     .remove(&r.id)
@@ -936,7 +909,6 @@ impl FeatureRepository for FeatureRepositoryImpl {
         stage_id: Uuid,
         criteria: Vec<CreateStageCriterion>,
     ) -> Result<Vec<crate::database::entity::StageCriterion>, Error> {
-        // ensure stage exists
         let exists = handle_error(
             Some(stage_id),
             sqlx::query_scalar!(
@@ -950,18 +922,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
             return Err(Error::NotFound(stage_id));
         }
 
-        // validate rollout range and contexts/key match
-        for c in &criteria {
-            if c.rollout_percentage < 0 || c.rollout_percentage > 100 {
-                return Err(Error::InvalidInput(format!(
-                    "rollout_percentage for context {} must be between 0 and 100",
-                    c.context_id
-                )));
-            }
-        }
-
         let mut tx = self.pool.begin().await.map_err(Error::DatabaseError)?;
-        // clear
         handle_error(
             Some(stage_id),
             sqlx::query!(
@@ -974,21 +935,20 @@ impl FeatureRepository for FeatureRepositoryImpl {
         if !criteria.is_empty() {
             let ids: Vec<Uuid> = criteria.iter().map(|_| Uuid::new_v4()).collect();
             let stage_ids: Vec<Uuid> = vec![stage_id; criteria.len()];
-            let context_keys: Vec<String> =
-                criteria.iter().map(|c| c.context_key.clone()).collect();
-            let context_ids: Vec<Uuid> = criteria.iter().map(|c| c.context_id).collect();
-            let rollouts: Vec<i32> = criteria.iter().map(|c| c.rollout_percentage).collect();
-            let serves: Vec<Option<String>> = criteria.iter().map(|c| c.serve.clone()).collect();
             let priorities: Vec<i32> = criteria.iter().map(|c| c.priority).collect();
-            let operators: Vec<String> = criteria
-                .iter()
-                .map(|c| c.operator.clone().unwrap_or_else(|| "IN".to_string()))
-                .collect();
-            handle_error(None, sqlx::query!(
-                r#"INSERT INTO feature_stage_criteria(id, stage_id, context_key, context_id, rollout_percentage, serve, priority, operator)
-                   SELECT unnest($1::uuid[]), unnest($2::uuid[]), unnest($3::varchar[]), unnest($4::uuid[]), unnest($5::int[]), unnest($6::varchar[]), unnest($7::int[]), unnest($8::varchar[])"#,
-                &ids[..], &stage_ids[..], &context_keys[..], &context_ids[..], &rollouts[..], &serves as _, &priorities[..], &operators[..]
-            ).execute(&mut *tx).await)?;
+
+            handle_error(
+                None,
+                sqlx::query!(
+                    r#"INSERT INTO feature_stage_criteria(id, stage_id, priority)
+                       SELECT unnest($1::uuid[]), unnest($2::uuid[]), unnest($3::int[])"#,
+                    &ids[..],
+                    &stage_ids[..],
+                    &priorities[..]
+                )
+                .execute(&mut *tx)
+                .await,
+            )?;
         }
         tx.commit().await.map_err(Error::DatabaseError)?;
         self.get_stage_criteria(stage_id).await
@@ -1371,8 +1331,8 @@ impl FeatureRepository for FeatureRepositoryImpl {
             r#"SELECT DISTINCT f.id
                FROM features f
                JOIN features_pipeline_stages s ON s.feature_id = f.id
-               JOIN feature_stage_criteria sc ON sc.stage_id = s.id
-               WHERE sc.context_id = $1"#,
+               JOIN feature_stage_contexts fsc ON fsc.stage_id = s.id
+               WHERE fsc.context_id = $1"#,
             context_id
         )
         .fetch_all(&self.pool)
