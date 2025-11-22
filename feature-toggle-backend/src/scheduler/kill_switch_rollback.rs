@@ -130,32 +130,38 @@ impl KillSwitchRollbackScheduler {
                 .into_iter()
                 .map(|c| {
                     // Map rule groups
-                    let rule_groups = c.rule_groups.into_iter().map(|group| {
-                        pb::RuleGroup {
+                    let rule_groups = c
+                        .rule_groups
+                        .into_iter()
+                        .map(|group| pb::RuleGroup {
                             id: group.id.to_string(),
                             logic_operator: match group.logic_operator {
                                 crate::database::entity::LogicOperator::And => "AND".to_string(),
                                 crate::database::entity::LogicOperator::Or => "OR".to_string(),
                             },
-                            conditions: group.conditions.into_iter().map(|cond| {
-                                pb::RuleCondition {
+                            conditions: group
+                                .conditions
+                                .into_iter()
+                                .map(|cond| pb::RuleCondition {
                                     id: cond.id.to_string(),
                                     context_key: cond.context_key,
                                     operator: cond.operator,
                                     value: cond.value.to_string(),
                                     order_index: cond.order_index,
-                                }
-                            }).collect(),
-                        }
-                    }).collect();
+                                })
+                                .collect(),
+                        })
+                        .collect();
 
                     // Map variant allocations
-                    let variant_allocations = c.variant_allocations.into_iter().map(|alloc| {
-                        pb::VariantAllocation {
+                    let variant_allocations = c
+                        .variant_allocations
+                        .into_iter()
+                        .map(|alloc| pb::VariantAllocation {
                             variant_control: alloc.variant_control,
                             weight: alloc.weight,
-                        }
-                    }).collect();
+                        })
+                        .collect();
 
                     pb::StageCriterionFull {
                         id: c.id.to_string(),
@@ -190,9 +196,7 @@ impl KillSwitchRollbackScheduler {
         // Load variants from database only for Contextual features
         use crate::database::entity::FeatureType as EntityFeatureType;
         let variant_msgs = if matches!(f.feature_type, EntityFeatureType::Contextual) {
-            let db_variants = feature_repository
-                .get_feature_variants(f.id)
-                .await?;
+            let db_variants = feature_repository.get_feature_variants(f.id).await?;
 
             db_variants
                 .into_iter()

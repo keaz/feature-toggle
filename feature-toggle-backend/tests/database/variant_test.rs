@@ -1,10 +1,6 @@
-use feature_toggle_backend::database::feature::{CreateFeature, CreateFeatureStage};
-use feature_toggle_backend::database::{
-    entity::FeatureType,
-    feature,
-    init_pg_pool,
-};
 use feature_toggle_backend::database::entity::VariantValueType;
+use feature_toggle_backend::database::feature::{CreateFeature, CreateFeatureStage};
+use feature_toggle_backend::database::{entity::FeatureType, feature, init_pg_pool};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -66,7 +62,10 @@ async fn test_variant_value_types() {
         variants: Some(variants),
     };
 
-    let feature_id = repository.create_feature(input).await.expect("Feature creation should succeed");
+    let feature_id = repository
+        .create_feature(input)
+        .await
+        .expect("Feature creation should succeed");
 
     // Verify all types were stored correctly
     let mut tx = pool.begin().await.expect("Transaction should start");
@@ -85,19 +84,31 @@ async fn test_variant_value_types() {
 
     assert_eq!(db_variants.len(), 4);
 
-    let boolean = db_variants.iter().find(|v| v.control == "boolean_variant").unwrap();
+    let boolean = db_variants
+        .iter()
+        .find(|v| v.control == "boolean_variant")
+        .unwrap();
     assert_eq!(boolean.value_type, VariantValueType::Boolean);
     assert_eq!(boolean.value, json!(true));
 
-    let json_var = db_variants.iter().find(|v| v.control == "json_variant").unwrap();
+    let json_var = db_variants
+        .iter()
+        .find(|v| v.control == "json_variant")
+        .unwrap();
     assert_eq!(json_var.value_type, VariantValueType::Json);
     assert!(json_var.value.is_object());
 
-    let number = db_variants.iter().find(|v| v.control == "number_variant").unwrap();
+    let number = db_variants
+        .iter()
+        .find(|v| v.control == "number_variant")
+        .unwrap();
     assert_eq!(number.value_type, VariantValueType::Number);
     assert_eq!(number.value, json!(42));
 
-    let string = db_variants.iter().find(|v| v.control == "string_variant").unwrap();
+    let string = db_variants
+        .iter()
+        .find(|v| v.control == "string_variant")
+        .unwrap();
     assert_eq!(string.value_type, VariantValueType::String);
     assert_eq!(string.value, json!("Hello World"));
 }

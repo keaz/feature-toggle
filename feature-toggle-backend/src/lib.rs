@@ -16,11 +16,16 @@ use crate::middleware::access_log::AccessLogger;
 use crate::middleware::admin_guard::{AdminGuard, AdminState};
 use crate::middleware::jwt_guard::JwtGuard;
 use actix_cors::Cors;
+use actix_web::error::{
+    ErrorBadRequest, ErrorConflict, ErrorForbidden, ErrorInternalServerError, ErrorUnauthorized,
+};
 use actix_web::{App, HttpMessage, HttpRequest, HttpResponse, HttpServer, Result, guard, web};
 use async_graphql::Schema;
 use async_graphql::http::GraphiQLSource;
 use async_graphql_actix_web::{GraphQLRequest, GraphQLResponse, GraphQLSubscription};
+use chrono::{DateTime, Utc};
 use log::error;
+use serde::Deserialize;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -80,6 +85,10 @@ pub async fn run() -> std::io::Result<()> {
     let client_logic = logic::client::client_logic(
         database::client::client_repository(db_pool.clone()),
         activity_log_repository.clone_box(),
+    );
+    let metric_logic = logic::metrics::metric_logic(
+        database::metrics::metric_repository(db_pool.clone()),
+        database::client::client_repository(db_pool.clone()),
     );
     let context_logic = logic::context::context_logic(
         database::context::context_repository(db_pool.clone()),
@@ -159,6 +168,16 @@ pub async fn run() -> std::io::Result<()> {
         scheduler.start_scheduler().await;
     });
 
+    // Metrics aggregation scheduler (hourly)
+    let metrics_logic_for_scheduler = metric_logic.clone();
+    tokio::spawn(async move {
+        let aggregator = scheduler::MetricsAggregator::new(
+            metrics_logic_for_scheduler,
+            std::time::Duration::from_secs(3600),
+        );
+        aggregator.start().await;
+    });
+
     // Clone values for use in the HttpServer closure
     let jwt_secret_logic_for_server = jwt_secret_logic.clone();
     let jwt_token_logic_for_server = jwt_token_logic.clone();
@@ -185,6 +204,7 @@ pub async fn run() -> std::io::Result<()> {
             .data(jwt_secret_logic_for_server.clone())
             .data(jwt_token_logic_for_server.clone())
             .data(feature_evaluation_logic.clone())
+            .data(metric_logic.clone())
             .data(admin_state.clone())
             // .extension(ApolloTracing)
             .finish();
@@ -211,6 +231,7 @@ pub async fn run() -> std::io::Result<()> {
             .wrap(AccessLogger)
             .wrap(cors)
             .app_data(web::Data::new(schema.clone()))
+            .app_data(web::Data::new(metric_logic.clone()))
             .service(
                 web::resource("/graphql")
                     .guard(guard::Post())
@@ -227,6 +248,11 @@ pub async fn run() -> std::io::Result<()> {
                 web::resource("/graphql")
                     .guard(guard::Get())
                     .to(index_graphiql),
+            )
+            .service(
+                web::resource("/metrics/track")
+                    .guard(guard::Post())
+                    .to(track_metrics_http),
             )
     })
     .bind(&cfg.http_addr)?
@@ -286,6 +312,83 @@ async fn index_ws(
     payload: web::Payload,
 ) -> Result<HttpResponse> {
     GraphQLSubscription::new(Schema::clone(&*schema)).start(&req, payload)
+}
+
+#[derive(Deserialize)]
+struct MetricEventPayload {
+    metric_key: String,
+    feature_key: Option<String>,
+    environment_id: Option<String>,
+    user_context: String,
+    variant: Option<String>,
+    value: f64,
+    metadata: Option<serde_json::Value>,
+    timestamp_unix_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct TrackMetricsPayload {
+    client_id: String,
+    client_secret: String,
+    events: Vec<MetricEventPayload>,
+}
+
+async fn track_metrics_http(
+    metric_logic: web::Data<Box<dyn crate::logic::metrics::MetricLogic>>,
+    payload: web::Json<TrackMetricsPayload>,
+) -> Result<HttpResponse, actix_web::Error> {
+    let body = payload.into_inner();
+    let mut events = Vec::with_capacity(body.events.len());
+
+    for ev in body.events {
+        let environment_id = match ev.environment_id {
+            Some(ref env) if !env.is_empty() => {
+                Some(Uuid::parse_str(env).map_err(|_| ErrorBadRequest("invalid environment_id"))?)
+            }
+            _ => None,
+        };
+
+        let timestamp = match ev.timestamp_unix_ms {
+            Some(ts) if ts > 0 => Some(
+                DateTime::<Utc>::from_timestamp_millis(ts)
+                    .ok_or_else(|| ErrorBadRequest("invalid timestamp_unix_ms"))?,
+            ),
+            _ => None,
+        };
+
+        events.push(crate::logic::metrics::TrackMetricInput {
+            metric_key: ev.metric_key,
+            feature_key: ev.feature_key,
+            environment_id,
+            user_context: ev.user_context,
+            variant: ev.variant,
+            value: ev.value,
+            metadata: ev.metadata,
+            timestamp,
+        });
+    }
+
+    let processed = metric_logic
+        .track_metrics(&body.client_id, &body.client_secret, events)
+        .await
+        .map_err(map_metric_logic_error_to_http)?;
+
+    Ok(HttpResponse::Ok().json(serde_json::json!({ "processed": processed })))
+}
+
+fn map_metric_logic_error_to_http(
+    err: crate::logic::metrics::MetricLogicError,
+) -> actix_web::Error {
+    match err {
+        crate::logic::metrics::MetricLogicError::InvalidInput(msg) => ErrorBadRequest(msg),
+        crate::logic::metrics::MetricLogicError::NotFound(msg) => ErrorBadRequest(msg),
+        crate::logic::metrics::MetricLogicError::RecordAlreadyExists(msg) => ErrorConflict(msg),
+        crate::logic::metrics::MetricLogicError::Unauthenticated(msg) => ErrorUnauthorized(msg),
+        crate::logic::metrics::MetricLogicError::PermissionDenied(msg) => ErrorForbidden(msg),
+        crate::logic::metrics::MetricLogicError::Database(e) => {
+            ErrorInternalServerError(format!("database error: {e}"))
+        }
+    }
 }
 
 fn setup_logger() -> Result<(), Box<dyn std::error::Error>> {

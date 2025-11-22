@@ -78,32 +78,38 @@ async fn map_db_feature_to_full_for_broadcast(
             .into_iter()
             .map(|c| {
                 // Map rule groups
-                let rule_groups = c.rule_groups.into_iter().map(|group| {
-                    pb::RuleGroup {
+                let rule_groups = c
+                    .rule_groups
+                    .into_iter()
+                    .map(|group| pb::RuleGroup {
                         id: group.id.to_string(),
                         logic_operator: match group.logic_operator {
                             crate::database::entity::LogicOperator::And => "AND".to_string(),
                             crate::database::entity::LogicOperator::Or => "OR".to_string(),
                         },
-                        conditions: group.conditions.into_iter().map(|cond| {
-                            pb::RuleCondition {
+                        conditions: group
+                            .conditions
+                            .into_iter()
+                            .map(|cond| pb::RuleCondition {
                                 id: cond.id.to_string(),
                                 context_key: cond.context_key,
                                 operator: cond.operator,
                                 value: cond.value.to_string(),
                                 order_index: cond.order_index,
-                            }
-                        }).collect(),
-                    }
-                }).collect();
+                            })
+                            .collect(),
+                    })
+                    .collect();
 
                 // Map variant allocations
-                let variant_allocations = c.variant_allocations.into_iter().map(|alloc| {
-                    pb::VariantAllocation {
+                let variant_allocations = c
+                    .variant_allocations
+                    .into_iter()
+                    .map(|alloc| pb::VariantAllocation {
                         variant_control: alloc.variant_control,
                         weight: alloc.weight,
-                    }
-                }).collect();
+                    })
+                    .collect();
 
                 pb::StageCriterionFull {
                     id: c.id.to_string(),
@@ -138,9 +144,7 @@ async fn map_db_feature_to_full_for_broadcast(
     // Load variants from database only for Contextual features
     use crate::database::entity::FeatureType as EntityFeatureType;
     let variant_msgs = if matches!(f.feature_type, EntityFeatureType::Contextual) {
-        let db_variants = repo
-            .get_feature_variants(f.id)
-            .await?;
+        let db_variants = repo.get_feature_variants(f.id).await?;
 
         db_variants
             .into_iter()
@@ -242,7 +246,7 @@ impl ContextLogic for ContextLogicImpl {
         Ok(map_db_to_gql(created))
     }
 
-async fn update_context(&self, id: ID, input: UpdateContextInput) -> Result<GqlContext, Error> {
+    async fn update_context(&self, id: ID, input: UpdateContextInput) -> Result<GqlContext, Error> {
         if let Some(k) = &input.key
             && k.trim().is_empty()
         {
@@ -504,23 +508,21 @@ mod tests {
             .returning(move |_| Ok(vec![feature_id]));
 
         // Feature fetch for broadcast
-        feature_repo
-            .expect_get_feature_by_id()
-            .returning(move |_| {
-                Ok(entity::Feature {
-                    id: feature_id,
-                    key: "example".into(),
-                    description: None,
-                    feature_type: entity::FeatureType::Contextual,
-                    team_id,
-                    created_at: chrono::Utc::now(),
-                    kill_switch_enabled: false,
-                    kill_switch_activated_at: None,
-                    rollback_scheduled_at: None,
-                    dependencies: vec![],
-                    active: true,
-                })
-            });
+        feature_repo.expect_get_feature_by_id().returning(move |_| {
+            Ok(entity::Feature {
+                id: feature_id,
+                key: "example".into(),
+                description: None,
+                feature_type: entity::FeatureType::Contextual,
+                team_id,
+                created_at: chrono::Utc::now(),
+                kill_switch_enabled: false,
+                kill_switch_activated_at: None,
+                rollback_scheduled_at: None,
+                dependencies: vec![],
+                active: true,
+            })
+        });
 
         feature_repo
             .expect_get_feature_stages()

@@ -187,16 +187,20 @@ fn evaluate_unconditional_criterion_matches() {
 fn evaluate_fails_when_user_not_in_allowed_values() {
     let ctx = mk_ctx("feat", "env-a", "user123", &[("role", "viewer")]);
     let crit = criterion(
-        vec![rule(
-            "role",
-            Operator::In,
-            json!(["admin", "editor"]),
-        )],
+        vec![rule("role", Operator::In, json!(["admin", "editor"]))],
         None,
         0,
     );
     let stg = stage("env-a", true, None, vec![crit]);
-    let feature = mk_feature("test-id", "test-key", "Contextual", true, true, vec![stg], vec![]);
+    let feature = mk_feature(
+        "test-id",
+        "test-key",
+        "Contextual",
+        true,
+        true,
+        vec![stg],
+        vec![],
+    );
     let result = evaluation_engine::evaluate(ctx, feature);
     assert_eq!(result.value, json!(false));
     assert_eq!(result.reason, EvaluationReason::Default);
@@ -207,7 +211,15 @@ fn evaluate_passes_when_user_in_allowed() {
     let ctx = mk_ctx("feat", "env-a", "user123", &[("role", "admin")]);
     let crit = criterion(vec![rule("role", Operator::In, json!(["admin"]))], None, 0);
     let stg = stage("env-a", true, None, vec![crit]);
-    let feature = mk_feature("test-id", "test-key", "Contextual", true, true, vec![stg], vec![]);
+    let feature = mk_feature(
+        "test-id",
+        "test-key",
+        "Contextual",
+        true,
+        true,
+        vec![stg],
+        vec![],
+    );
     let result = evaluation_engine::evaluate(ctx, feature);
     assert_eq!(result.value, json!(true));
     assert_eq!(result.reason, EvaluationReason::TargetingMatch);
@@ -250,7 +262,11 @@ fn evaluate_with_variant_allocation() {
 #[test]
 fn evaluate_with_json_variant() {
     let ctx = mk_ctx("feat", "env-a", "user123", &[("tier", "premium")]);
-    let crit = criterion(vec![rule("tier", Operator::In, json!(["premium"]))], Some("premium-config"), 0);
+    let crit = criterion(
+        vec![rule("tier", Operator::In, json!(["premium"]))],
+        Some("premium-config"),
+        0,
+    );
     let stg = stage("env-a", true, None, vec![crit]);
     let feature = Feature {
         id: "test-id".to_string(),

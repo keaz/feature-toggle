@@ -1,5 +1,5 @@
 use crate::database::entity::VariantAllocation;
-use crate::database::{handle_error, Error};
+use crate::database::{Error, handle_error};
 use log::{debug, info};
 use mockall::automock;
 use sqlx::PgPool;
@@ -30,10 +30,7 @@ pub trait VariantAllocationsRepository: Send + Sync {
     ) -> Result<Vec<VariantAllocation>, Error>;
 
     /// Get a single variant allocation by ID
-    async fn get_allocation_by_id(
-        &self,
-        allocation_id: Uuid,
-    ) -> Result<VariantAllocation, Error>;
+    async fn get_allocation_by_id(&self, allocation_id: Uuid) -> Result<VariantAllocation, Error>;
 
     /// Create a new variant allocation
     async fn create_allocation(
@@ -113,10 +110,7 @@ impl VariantAllocationsRepository for VariantAllocationsRepositoryImpl {
         handle_error(None, allocations)
     }
 
-    async fn get_allocation_by_id(
-        &self,
-        allocation_id: Uuid,
-    ) -> Result<VariantAllocation, Error> {
+    async fn get_allocation_by_id(&self, allocation_id: Uuid) -> Result<VariantAllocation, Error> {
         debug!("DB: get_allocation_by_id allocation_id={}", allocation_id);
 
         let allocation = sqlx::query_as!(
@@ -231,11 +225,7 @@ impl VariantAllocationsRepository for VariantAllocationsRepositoryImpl {
         );
 
         // Use a transaction to ensure atomicity
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(Error::DatabaseError)?;
+        let mut tx = self.pool.begin().await.map_err(Error::DatabaseError)?;
 
         // Delete all existing allocations for this criterion
         let _ = sqlx::query!(
@@ -269,9 +259,7 @@ impl VariantAllocationsRepository for VariantAllocationsRepositoryImpl {
         }
 
         // Commit transaction
-        tx.commit()
-            .await
-            .map_err(Error::DatabaseError)?;
+        tx.commit().await.map_err(Error::DatabaseError)?;
 
         Ok(result_allocations)
     }

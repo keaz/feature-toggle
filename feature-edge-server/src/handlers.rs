@@ -70,54 +70,78 @@ pub fn map_proto_to_engine(f: &pb::FeatureFull) -> engine::Feature {
                 .iter()
                 .map(|c| {
                     // Parse compound rules from protobuf
-                    let rule_groups = c.rule_groups.iter().map(|group| {
-                        let logic_operator = match group.logic_operator.to_uppercase().as_str() {
-                            "OR" => engine::LogicOperator::Or,
-                            _ => engine::LogicOperator::And, // Default to AND
-                        };
-
-                        let conditions = group.conditions.iter().map(|cond| {
-                            let cond_operator = match cond.operator.to_uppercase().as_str() {
-                                "EQUALS" => engine::Operator::Equals,
-                                "NOTEQUALS" | "NOT_EQUALS" => engine::Operator::NotEquals,
-                                "GREATERTHAN" | "GREATER_THAN" => engine::Operator::GreaterThan,
-                                "LESSTHAN" | "LESS_THAN" => engine::Operator::LessThan,
-                                "GREATERTHANOREQUAL" | "GREATER_THAN_OR_EQUAL" => engine::Operator::GreaterThanOrEqual,
-                                "LESSTHANOREQUAL" | "LESS_THAN_OR_EQUAL" => engine::Operator::LessThanOrEqual,
-                                "CONTAINS" => engine::Operator::Contains,
-                                "STARTSWITH" | "STARTS_WITH" => engine::Operator::StartsWith,
-                                "ENDSWITH" | "ENDS_WITH" => engine::Operator::EndsWith,
-                                "REGEX" => engine::Operator::Regex,
-                                "IN" => engine::Operator::In,
-                                "NOTIN" | "NOT_IN" => engine::Operator::NotIn,
-                                "SEMVERGREATERTHAN" | "SEMVER_GREATER_THAN" => engine::Operator::SemverGreaterThan,
-                                "SEMVERLESSTHAN" | "SEMVER_LESS_THAN" => engine::Operator::SemverLessThan,
-                                _ => engine::Operator::In,
+                    let rule_groups = c
+                        .rule_groups
+                        .iter()
+                        .map(|group| {
+                            let logic_operator = match group.logic_operator.to_uppercase().as_str()
+                            {
+                                "OR" => engine::LogicOperator::Or,
+                                _ => engine::LogicOperator::And, // Default to AND
                             };
 
-                            let value = serde_json::from_str(&cond.value)
-                                .unwrap_or_else(|_| serde_json::json!(cond.value.clone()));
+                            let conditions = group
+                                .conditions
+                                .iter()
+                                .map(|cond| {
+                                    let cond_operator = match cond.operator.to_uppercase().as_str()
+                                    {
+                                        "EQUALS" => engine::Operator::Equals,
+                                        "NOTEQUALS" | "NOT_EQUALS" => engine::Operator::NotEquals,
+                                        "GREATERTHAN" | "GREATER_THAN" => {
+                                            engine::Operator::GreaterThan
+                                        }
+                                        "LESSTHAN" | "LESS_THAN" => engine::Operator::LessThan,
+                                        "GREATERTHANOREQUAL" | "GREATER_THAN_OR_EQUAL" => {
+                                            engine::Operator::GreaterThanOrEqual
+                                        }
+                                        "LESSTHANOREQUAL" | "LESS_THAN_OR_EQUAL" => {
+                                            engine::Operator::LessThanOrEqual
+                                        }
+                                        "CONTAINS" => engine::Operator::Contains,
+                                        "STARTSWITH" | "STARTS_WITH" => {
+                                            engine::Operator::StartsWith
+                                        }
+                                        "ENDSWITH" | "ENDS_WITH" => engine::Operator::EndsWith,
+                                        "REGEX" => engine::Operator::Regex,
+                                        "IN" => engine::Operator::In,
+                                        "NOTIN" | "NOT_IN" => engine::Operator::NotIn,
+                                        "SEMVERGREATERTHAN" | "SEMVER_GREATER_THAN" => {
+                                            engine::Operator::SemverGreaterThan
+                                        }
+                                        "SEMVERLESSTHAN" | "SEMVER_LESS_THAN" => {
+                                            engine::Operator::SemverLessThan
+                                        }
+                                        _ => engine::Operator::In,
+                                    };
 
-                            engine::RuleCondition {
-                                context_key: cond.context_key.clone(),
-                                operator: cond_operator,
-                                value,
+                                    let value = serde_json::from_str(&cond.value)
+                                        .unwrap_or_else(|_| serde_json::json!(cond.value.clone()));
+
+                                    engine::RuleCondition {
+                                        context_key: cond.context_key.clone(),
+                                        operator: cond_operator,
+                                        value,
+                                    }
+                                })
+                                .collect();
+
+                            engine::RuleGroup {
+                                logic_operator,
+                                conditions,
                             }
-                        }).collect();
-
-                        engine::RuleGroup {
-                            logic_operator,
-                            conditions,
-                        }
-                    }).collect();
+                        })
+                        .collect();
 
                     // Map variant allocations from protobuf
-                    let variant_allocations = c.variant_allocations.iter().map(|alloc| {
-                        engine::VariantAllocation {
+                    let variant_allocations = c
+                        .variant_allocations
+                        .iter()
+                        .map(|alloc| engine::VariantAllocation {
                             variant_control: alloc.variant_control.clone(),
                             weight: alloc.weight,
-                        }
-                    }).collect();
+                        })
+                        .collect();
 
                     engine::StageCriterion {
                         priority: c.priority,
@@ -230,7 +254,10 @@ async fn get_or_fetch_feature(
     }
 
     // Cache miss - fetch protobuf from backend and map it
-    info_log!("Feature '{}' NOT in cache, fetching from backend via gRPC", feature_key);
+    info_log!(
+        "Feature '{}' NOT in cache, fetching from backend via gRPC",
+        feature_key
+    );
     let pb_feature = fetch_feature_via_grpc(app, feature_key, client_id, client_secret).await?;
 
     // Map to engine format
@@ -238,7 +265,10 @@ async fn get_or_fetch_feature(
 
     // Cache the mapped version
     app.mapped_cache.insert(engine_feature.clone()).await;
-    info_log!("Feature '{}' successfully cached in mapped cache", feature_key);
+    info_log!(
+        "Feature '{}' successfully cached in mapped cache",
+        feature_key
+    );
 
     Some(engine_feature)
 }

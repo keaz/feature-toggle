@@ -324,12 +324,25 @@ impl FeatureLogicImpl {
             v.into_iter()
                 .map(|variant| {
                     let value_type = match variant.value_type {
-                        crate::graphql::schema::VariantValueType::String => crate::database::entity::VariantValueType::String,
-                        crate::graphql::schema::VariantValueType::Number => crate::database::entity::VariantValueType::Number,
-                        crate::graphql::schema::VariantValueType::Boolean => crate::database::entity::VariantValueType::Boolean,
-                        crate::graphql::schema::VariantValueType::Json => crate::database::entity::VariantValueType::Json,
+                        crate::graphql::schema::VariantValueType::String => {
+                            crate::database::entity::VariantValueType::String
+                        }
+                        crate::graphql::schema::VariantValueType::Number => {
+                            crate::database::entity::VariantValueType::Number
+                        }
+                        crate::graphql::schema::VariantValueType::Boolean => {
+                            crate::database::entity::VariantValueType::Boolean
+                        }
+                        crate::graphql::schema::VariantValueType::Json => {
+                            crate::database::entity::VariantValueType::Json
+                        }
                     };
-                    (variant.control, variant.value.0, value_type, variant.description)
+                    (
+                        variant.control,
+                        variant.value.0,
+                        value_type,
+                        variant.description,
+                    )
                 })
                 .collect::<Vec<_>>()
         });
@@ -387,12 +400,25 @@ impl FeatureLogicImpl {
             v.into_iter()
                 .map(|variant| {
                     let value_type = match variant.value_type {
-                        crate::graphql::schema::VariantValueType::String => crate::database::entity::VariantValueType::String,
-                        crate::graphql::schema::VariantValueType::Number => crate::database::entity::VariantValueType::Number,
-                        crate::graphql::schema::VariantValueType::Boolean => crate::database::entity::VariantValueType::Boolean,
-                        crate::graphql::schema::VariantValueType::Json => crate::database::entity::VariantValueType::Json,
+                        crate::graphql::schema::VariantValueType::String => {
+                            crate::database::entity::VariantValueType::String
+                        }
+                        crate::graphql::schema::VariantValueType::Number => {
+                            crate::database::entity::VariantValueType::Number
+                        }
+                        crate::graphql::schema::VariantValueType::Boolean => {
+                            crate::database::entity::VariantValueType::Boolean
+                        }
+                        crate::graphql::schema::VariantValueType::Json => {
+                            crate::database::entity::VariantValueType::Json
+                        }
                     };
-                    (variant.control, variant.value.0, value_type, variant.description)
+                    (
+                        variant.control,
+                        variant.value.0,
+                        value_type,
+                        variant.description,
+                    )
                 })
                 .collect::<Vec<_>>()
         });
@@ -847,11 +873,13 @@ impl StageLogic for FeatureLogicImpl {
         let stage_id = id_to_uuid(stage_id)?;
         let create: Result<Vec<crate::database::feature::CreateStageCriterion>, Error> = criteria
             .into_iter()
-            .map(|c| -> Result<crate::database::feature::CreateStageCriterion, Error> {
-                Ok(crate::database::feature::CreateStageCriterion {
-                    priority: c.priority,
-                })
-            })
+            .map(
+                |c| -> Result<crate::database::feature::CreateStageCriterion, Error> {
+                    Ok(crate::database::feature::CreateStageCriterion {
+                        priority: c.priority,
+                    })
+                },
+            )
             .collect();
         let list = self
             .repository
@@ -1083,51 +1111,69 @@ fn map_db_criterion_to_gql(
     use crate::graphql::schema::RuleOperator;
 
     // Map compound rule groups
-    let rule_groups = sc.rule_groups.into_iter().map(|group| {
-        crate::graphql::schema::CompoundRuleGroup {
+    let rule_groups = sc
+        .rule_groups
+        .into_iter()
+        .map(|group| crate::graphql::schema::CompoundRuleGroup {
             id: ID::from(group.id),
             logic_operator: match group.logic_operator {
-                crate::database::entity::LogicOperator::And => crate::graphql::schema::LogicOperator::And,
-                crate::database::entity::LogicOperator::Or => crate::graphql::schema::LogicOperator::Or,
-            },
-            conditions: group.conditions.into_iter().map(|cond| {
-                let cond_operator = match cond.operator.to_uppercase().as_str() {
-                    "EQUALS" => RuleOperator::Equals,
-                    "NOTEQUALS" | "NOT_EQUALS" => RuleOperator::NotEquals,
-                    "GREATERTHAN" | "GREATER_THAN" => RuleOperator::GreaterThan,
-                    "LESSTHAN" | "LESS_THAN" => RuleOperator::LessThan,
-                    "GREATERTHANOREQUAL" | "GREATER_THAN_OR_EQUAL" => RuleOperator::GreaterThanOrEqual,
-                    "LESSTHANOREQUAL" | "LESS_THAN_OR_EQUAL" => RuleOperator::LessThanOrEqual,
-                    "CONTAINS" => RuleOperator::Contains,
-                    "STARTSWITH" | "STARTS_WITH" => RuleOperator::StartsWith,
-                    "ENDSWITH" | "ENDS_WITH" => RuleOperator::EndsWith,
-                    "REGEX" => RuleOperator::Regex,
-                    "IN" => RuleOperator::In,
-                    "NOTIN" | "NOT_IN" => RuleOperator::NotIn,
-                    "SEMVERGREATERTHAN" | "SEMVER_GREATER_THAN" => RuleOperator::SemverGreaterThan,
-                    "SEMVERLESSTHAN" | "SEMVER_LESS_THAN" => RuleOperator::SemverLessThan,
-                    _ => RuleOperator::In,
-                };
-                crate::graphql::schema::CompoundRuleCondition {
-                    id: ID::from(cond.id),
-                    context_key: cond.context_key,
-                    operator: cond_operator,
-                    value: async_graphql::Json(cond.value),
-                    order_index: cond.order_index,
+                crate::database::entity::LogicOperator::And => {
+                    crate::graphql::schema::LogicOperator::And
                 }
-            }).collect(),
-        }
-    }).collect();
+                crate::database::entity::LogicOperator::Or => {
+                    crate::graphql::schema::LogicOperator::Or
+                }
+            },
+            conditions: group
+                .conditions
+                .into_iter()
+                .map(|cond| {
+                    let cond_operator = match cond.operator.to_uppercase().as_str() {
+                        "EQUALS" => RuleOperator::Equals,
+                        "NOTEQUALS" | "NOT_EQUALS" => RuleOperator::NotEquals,
+                        "GREATERTHAN" | "GREATER_THAN" => RuleOperator::GreaterThan,
+                        "LESSTHAN" | "LESS_THAN" => RuleOperator::LessThan,
+                        "GREATERTHANOREQUAL" | "GREATER_THAN_OR_EQUAL" => {
+                            RuleOperator::GreaterThanOrEqual
+                        }
+                        "LESSTHANOREQUAL" | "LESS_THAN_OR_EQUAL" => RuleOperator::LessThanOrEqual,
+                        "CONTAINS" => RuleOperator::Contains,
+                        "STARTSWITH" | "STARTS_WITH" => RuleOperator::StartsWith,
+                        "ENDSWITH" | "ENDS_WITH" => RuleOperator::EndsWith,
+                        "REGEX" => RuleOperator::Regex,
+                        "IN" => RuleOperator::In,
+                        "NOTIN" | "NOT_IN" => RuleOperator::NotIn,
+                        "SEMVERGREATERTHAN" | "SEMVER_GREATER_THAN" => {
+                            RuleOperator::SemverGreaterThan
+                        }
+                        "SEMVERLESSTHAN" | "SEMVER_LESS_THAN" => RuleOperator::SemverLessThan,
+                        _ => RuleOperator::In,
+                    };
+                    crate::graphql::schema::CompoundRuleCondition {
+                        id: ID::from(cond.id),
+                        context_key: cond.context_key,
+                        operator: cond_operator,
+                        value: async_graphql::Json(cond.value),
+                        order_index: cond.order_index,
+                    }
+                })
+                .collect(),
+        })
+        .collect();
 
     // Map variant allocations
-    let variant_allocations = sc.variant_allocations.into_iter().map(|alloc| {
-        crate::graphql::schema::VariantAllocation {
-            id: ID::from(uuid::Uuid::new_v4()), // Generate ID for GraphQL (not stored in simple version)
-            criteria_id: ID::from(sc.id),
-            variant_control: alloc.variant_control,
-            weight: alloc.weight,
-        }
-    }).collect();
+    let variant_allocations = sc
+        .variant_allocations
+        .into_iter()
+        .map(|alloc| {
+            crate::graphql::schema::VariantAllocation {
+                id: ID::from(uuid::Uuid::new_v4()), // Generate ID for GraphQL (not stored in simple version)
+                criteria_id: ID::from(sc.id),
+                variant_control: alloc.variant_control,
+                weight: alloc.weight,
+            }
+        })
+        .collect();
 
     crate::graphql::schema::StageCriterion {
         id: ID::from(sc.id),

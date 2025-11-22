@@ -31,6 +31,7 @@ pub mod feature;
 pub mod feature_evaluation;
 pub mod jwt_secret;
 pub mod jwt_token;
+pub mod metrics;
 pub mod pipeline;
 pub mod role;
 pub mod stage_builder;

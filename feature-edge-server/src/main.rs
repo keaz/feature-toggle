@@ -101,7 +101,10 @@ pub struct MappedFeatureCache {
 
 impl MappedFeatureCache {
     pub fn new(max_capacity: u64) -> Self {
-        tracing::info!("Initializing MappedFeatureCache with max_capacity={}", max_capacity);
+        tracing::info!(
+            "Initializing MappedFeatureCache with max_capacity={}",
+            max_capacity
+        );
         Self {
             by_key: moka::future::Cache::new(max_capacity),
             by_id: moka::future::Cache::new(max_capacity),
@@ -150,10 +153,7 @@ impl MappedFeatureCache {
 
     /// Get all feature keys
     pub async fn get_all_keys(&self) -> Vec<String> {
-        self.by_key
-            .iter()
-            .map(|(k, _)| k.to_string())
-            .collect()
+        self.by_key.iter().map(|(k, _)| k.to_string()).collect()
     }
 
     pub fn entry_count(&self) -> u64 {
@@ -171,9 +171,8 @@ impl MappedFeatureCache {
 impl AppState {
     pub async fn purge_assignments_for_feature(&self, feature_id: &str) {
         // DashMap allows concurrent iteration and removal
-        self.assigned_cache.retain(|key, _| {
-            key.split('|').nth(1) != Some(feature_id)
-        });
+        self.assigned_cache
+            .retain(|key, _| key.split('|').nth(1) != Some(feature_id));
 
         // SegQueue doesn't have retain, so we drain, filter, and re-add
         let mut to_keep = Vec::new();
@@ -269,9 +268,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Start periodic evaluation events flush task
     let evaluation_flush_state = state.clone();
-    tokio::spawn(
-        async move { grpc_client::run_evaluation_flush_task(evaluation_flush_state, event_rx).await },
-    );
+    tokio::spawn(async move {
+        grpc_client::run_evaluation_flush_task(evaluation_flush_state, event_rx).await
+    });
 
     info!(
         "feature-edge-server listening on {} (HTTP), streaming from {}",
@@ -345,25 +344,34 @@ mod tests {
         );
 
         // Lock-free push!
-        state.pending_assignments.push(crate::grpc_client::UserAssignment {
-            user_id: "user-1".into(),
-            feature_id: feature_id.into(),
-            environment_id: "env-1".into(),
-            assigned: true,
-            variant: None,
-        });
-        state.pending_assignments.push(crate::grpc_client::UserAssignment {
-            user_id: "user-9".into(),
-            feature_id: "other".into(),
-            environment_id: "env-1".into(),
-            assigned: true,
-            variant: None,
-        });
+        state
+            .pending_assignments
+            .push(crate::grpc_client::UserAssignment {
+                user_id: "user-1".into(),
+                feature_id: feature_id.into(),
+                environment_id: "env-1".into(),
+                assigned: true,
+                variant: None,
+            });
+        state
+            .pending_assignments
+            .push(crate::grpc_client::UserAssignment {
+                user_id: "user-9".into(),
+                feature_id: "other".into(),
+                environment_id: "env-1".into(),
+                assigned: true,
+                variant: None,
+            });
 
         state.purge_assignments_for_feature(feature_id).await;
 
         assert_eq!(state.assigned_cache.len(), 1);
-        assert!(state.assigned_cache.iter().all(|entry| !entry.key().contains(feature_id)));
+        assert!(
+            state
+                .assigned_cache
+                .iter()
+                .all(|entry| !entry.key().contains(feature_id))
+        );
 
         // Drain queue to check contents
         let mut remaining = Vec::new();
@@ -371,7 +379,11 @@ mod tests {
             remaining.push(assignment);
         }
         assert_eq!(remaining.len(), 1);
-        assert!(remaining.iter().all(|assignment| assignment.feature_id != feature_id));
+        assert!(
+            remaining
+                .iter()
+                .all(|assignment| assignment.feature_id != feature_id)
+        );
     }
 
     #[actix_web::test]
@@ -412,5 +424,4 @@ mod tests {
         // Test non-existent key
         assert!(mapped_cache.get("non_existent").await.is_none());
     }
-
 }

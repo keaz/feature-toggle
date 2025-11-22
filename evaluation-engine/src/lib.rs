@@ -232,13 +232,9 @@ fn matches_operator(operator: &Operator, provided: &str, allowed_values: &[Strin
 
         Operator::NotIn => !allowed_values.iter().any(|v| v == provided),
 
-        Operator::Equals => {
-            allowed_values.first().map_or(false, |v| v == provided)
-        }
+        Operator::Equals => allowed_values.first().map_or(false, |v| v == provided),
 
-        Operator::NotEquals => {
-            allowed_values.first().map_or(false, |v| v != provided)
-        }
+        Operator::NotEquals => allowed_values.first().map_or(false, |v| v != provided),
 
         Operator::GreaterThan => {
             if let (Ok(provided_num), Some(Ok(allowed_num))) = (
@@ -284,23 +280,22 @@ fn matches_operator(operator: &Operator, provided: &str, allowed_values: &[Strin
             }
         }
 
-        Operator::Contains => {
-            allowed_values.first().map_or(false, |v| provided.contains(v))
-        }
+        Operator::Contains => allowed_values
+            .first()
+            .map_or(false, |v| provided.contains(v)),
 
-        Operator::StartsWith => {
-            allowed_values.first().map_or(false, |v| provided.starts_with(v))
-        }
+        Operator::StartsWith => allowed_values
+            .first()
+            .map_or(false, |v| provided.starts_with(v)),
 
-        Operator::EndsWith => {
-            allowed_values.first().map_or(false, |v| provided.ends_with(v))
-        }
+        Operator::EndsWith => allowed_values
+            .first()
+            .map_or(false, |v| provided.ends_with(v)),
 
-        Operator::Regex => {
-            allowed_values.first().and_then(|pattern| {
-                Regex::new(pattern).ok().map(|re| re.is_match(provided))
-            }).unwrap_or(false)
-        }
+        Operator::Regex => allowed_values
+            .first()
+            .and_then(|pattern| Regex::new(pattern).ok().map(|re| re.is_match(provided)))
+            .unwrap_or(false),
 
         Operator::SemverGreaterThan => {
             if let (Ok(provided_ver), Some(allowed_ver)) = (
@@ -379,7 +374,9 @@ fn evaluate_compound_rules(rule_groups: &[RuleGroup], ctx: &ContextObject) -> bo
 
     // Multiple rule groups are OR'd together
     // e.g., (country=US AND tier=premium) OR (beta_user=true)
-    rule_groups.iter().any(|group| evaluate_rule_group(group, ctx))
+    rule_groups
+        .iter()
+        .any(|group| evaluate_rule_group(group, ctx))
 }
 
 fn passes_stage_criteria(
@@ -1435,12 +1432,10 @@ mod tests {
                     }],
                 }],
             }],
-            variants: vec![
-                FeatureVariant {
-                    control: "premium-variant".to_string(),
-                    value: json!("Premium features unlocked"),
-                },
-            ],
+            variants: vec![FeatureVariant {
+                control: "premium-variant".to_string(),
+                value: json!("Premium features unlocked"),
+            }],
         };
 
         let result = evaluate(context, feature);

@@ -3,6 +3,8 @@ pub mod pb {
 }
 
 use crate::database::entity as db;
+use crate::logic::metrics::{MetricLogic, MetricLogicError, TrackMetricInput};
+use chrono::{DateTime, Utc};
 use evaluation_engine as engine;
 use futures_util::StreamExt;
 use pb::feature_evaluation_server::{FeatureEvaluation, FeatureEvaluationServer};
@@ -55,6 +57,66 @@ impl crate::logic::user_flag::UserFlagLogic for NoopUserFlagLogic {
     }
 }
 
+// Minimal no-op MetricLogic for tests that inject mocked repos
+struct NoopMetricLogic;
+
+#[async_trait::async_trait]
+impl crate::logic::metrics::MetricLogic for NoopMetricLogic {
+    async fn create_metric(
+        &self,
+        _team_id: Uuid,
+        _key: String,
+        _name: String,
+        _description: Option<String>,
+        _metric_type: crate::database::metrics::MetricType,
+        _unit: Option<String>,
+        _success_criteria: Option<serde_json::Value>,
+    ) -> Result<crate::database::metrics::MetricRow, MetricLogicError> {
+        Err(MetricLogicError::PermissionDenied(
+            "metric creation not available in noop logic".into(),
+        ))
+    }
+
+    async fn track_metrics(
+        &self,
+        _client_id: &str,
+        _client_secret: &str,
+        _events: Vec<TrackMetricInput>,
+    ) -> Result<usize, MetricLogicError> {
+        Ok(0)
+    }
+
+    async fn aggregate_metrics(
+        &self,
+        _from: DateTime<Utc>,
+        _to: DateTime<Utc>,
+        _bucket: &str,
+    ) -> Result<u64, MetricLogicError> {
+        Ok(0)
+    }
+
+    async fn get_metric_results(
+        &self,
+        _feature_key: &str,
+        _environment_id: Option<Uuid>,
+        _from: DateTime<Utc>,
+        _to: DateTime<Utc>,
+    ) -> Result<Vec<crate::database::metrics::MetricAggregationRow>, MetricLogicError> {
+        Ok(vec![])
+    }
+
+    async fn list_metrics(
+        &self,
+        _team_id: Uuid,
+    ) -> Result<Vec<crate::database::metrics::MetricRow>, MetricLogicError> {
+        Ok(vec![])
+    }
+
+    fn clone_box(&self) -> Box<dyn crate::logic::metrics::MetricLogic> {
+        Box::new(NoopMetricLogic)
+    }
+}
+
 // Message type for async database writer
 type EvaluationBatch = Vec<crate::database::feature_evaluation::CreateFeatureEvaluation>;
 
@@ -65,6 +127,7 @@ pub struct FeatureEvaluationSvc {
     user_flag_repo: Box<dyn crate::database::user_flag_assignment::UserFlagAssignmentRepository>,
     user_flag_logic: Box<dyn crate::logic::user_flag::UserFlagLogic>,
     feature_evaluation_logic: Box<dyn crate::logic::feature_evaluation::FeatureEvaluationLogic>,
+    metric_logic: Box<dyn MetricLogic>,
     updates_tx: tokio::sync::broadcast::Sender<pb::FeatureUpdate>,
     // Async database writer channel - sends evaluation batches to background task
     evaluation_writer_tx: tokio::sync::mpsc::UnboundedSender<EvaluationBatch>,
@@ -85,10 +148,22 @@ impl Clone for FeatureEvaluationSvc {
             user_flag_repo: self.user_flag_repo.clone_box(),
             user_flag_logic: self.user_flag_logic.clone_box(),
             feature_evaluation_logic: self.feature_evaluation_logic.clone_box(),
+            metric_logic: self.metric_logic.clone_box(),
             updates_tx: self.updates_tx.clone(),
             evaluation_writer_tx: self.evaluation_writer_tx.clone(),
             requested_keys: self.requested_keys.clone(),
         }
+    }
+}
+
+fn map_metric_error(err: MetricLogicError) -> Status {
+    match err {
+        MetricLogicError::InvalidInput(msg) => Status::invalid_argument(msg),
+        MetricLogicError::NotFound(msg) => Status::not_found(msg),
+        MetricLogicError::RecordAlreadyExists(msg) => Status::already_exists(msg),
+        MetricLogicError::Unauthenticated(msg) => Status::unauthenticated(msg),
+        MetricLogicError::PermissionDenied(msg) => Status::permission_denied(msg),
+        MetricLogicError::Database(e) => Status::internal(format!("db error: {e}")),
     }
 }
 
@@ -114,6 +189,9 @@ impl FeatureEvaluationSvc {
                 feature_evaluation_repo,
                 evaluation_events_tx.clone(),
             );
+        let metric_repo = crate::database::metrics::metric_repository(pool.clone());
+        let metric_logic =
+            crate::logic::metrics::metric_logic(metric_repo, client_repo.clone_box());
 
         // Create mpsc channel for async database writes
         let (evaluation_writer_tx, evaluation_writer_rx) =
@@ -132,6 +210,7 @@ impl FeatureEvaluationSvc {
             user_flag_repo,
             user_flag_logic,
             feature_evaluation_logic,
+            metric_logic,
             updates_tx,
             evaluation_writer_tx,
             requested_keys: std::sync::Arc::new(tokio::sync::RwLock::new(
@@ -190,6 +269,8 @@ impl FeatureEvaluationSvc {
                 feature_evaluation_repo,
                 evaluation_events_tx.clone(),
             );
+        // No-op metric logic for tests (avoids cloning mocked repos)
+        let metric_logic: Box<dyn MetricLogic> = Box::new(NoopMetricLogic);
 
         // Create mpsc channel for async database writes (test mode)
         let (evaluation_writer_tx, evaluation_writer_rx) =
@@ -208,6 +289,7 @@ impl FeatureEvaluationSvc {
             user_flag_repo,
             user_flag_logic,
             feature_evaluation_logic,
+            metric_logic,
             updates_tx,
             evaluation_writer_tx,
             requested_keys: std::sync::Arc::new(tokio::sync::RwLock::new(
@@ -242,48 +324,73 @@ impl FeatureEvaluationSvc {
             let mapped_criteria = crits
                 .into_iter()
                 .map(|c| {
-                    let rule_groups = c.rule_groups.into_iter().map(|group| {
-                        engine::RuleGroup {
+                    let rule_groups = c
+                        .rule_groups
+                        .into_iter()
+                        .map(|group| engine::RuleGroup {
                             logic_operator: match group.logic_operator {
-                                crate::database::entity::LogicOperator::And => engine::LogicOperator::And,
-                                crate::database::entity::LogicOperator::Or => engine::LogicOperator::Or,
-                            },
-                            conditions: group.conditions.into_iter().map(|cond| {
-                                let cond_operator = match cond.operator.to_uppercase().as_str() {
-                                    "EQUALS" => engine::Operator::Equals,
-                                    "NOTEQUALS" | "NOT_EQUALS" => engine::Operator::NotEquals,
-                                    "GREATERTHAN" | "GREATER_THAN" => engine::Operator::GreaterThan,
-                                    "LESSTHAN" | "LESS_THAN" => engine::Operator::LessThan,
-                                    "GREATERTHANOREQUAL" | "GREATER_THAN_OR_EQUAL" => engine::Operator::GreaterThanOrEqual,
-                                    "LESSTHANOREQUAL" | "LESS_THAN_OR_EQUAL" => engine::Operator::LessThanOrEqual,
-                                    "CONTAINS" => engine::Operator::Contains,
-                                    "STARTSWITH" | "STARTS_WITH" => engine::Operator::StartsWith,
-                                    "ENDSWITH" | "ENDS_WITH" => engine::Operator::EndsWith,
-                                    "REGEX" => engine::Operator::Regex,
-                                    "IN" => engine::Operator::In,
-                                    "NOTIN" | "NOT_IN" => engine::Operator::NotIn,
-                                    "SEMVERGREATERTHAN" | "SEMVER_GREATER_THAN" => engine::Operator::SemverGreaterThan,
-                                    "SEMVERLESSTHAN" | "SEMVER_LESS_THAN" => engine::Operator::SemverLessThan,
-                                    _ => engine::Operator::In,
-                                };
-                                engine::RuleCondition {
-                                    context_key: cond.context_key,
-                                    operator: cond_operator,
-                                    value: cond.value,
+                                crate::database::entity::LogicOperator::And => {
+                                    engine::LogicOperator::And
                                 }
-                            }).collect(),
-                        }
-                    }).collect();
+                                crate::database::entity::LogicOperator::Or => {
+                                    engine::LogicOperator::Or
+                                }
+                            },
+                            conditions: group
+                                .conditions
+                                .into_iter()
+                                .map(|cond| {
+                                    let cond_operator = match cond.operator.to_uppercase().as_str()
+                                    {
+                                        "EQUALS" => engine::Operator::Equals,
+                                        "NOTEQUALS" | "NOT_EQUALS" => engine::Operator::NotEquals,
+                                        "GREATERTHAN" | "GREATER_THAN" => {
+                                            engine::Operator::GreaterThan
+                                        }
+                                        "LESSTHAN" | "LESS_THAN" => engine::Operator::LessThan,
+                                        "GREATERTHANOREQUAL" | "GREATER_THAN_OR_EQUAL" => {
+                                            engine::Operator::GreaterThanOrEqual
+                                        }
+                                        "LESSTHANOREQUAL" | "LESS_THAN_OR_EQUAL" => {
+                                            engine::Operator::LessThanOrEqual
+                                        }
+                                        "CONTAINS" => engine::Operator::Contains,
+                                        "STARTSWITH" | "STARTS_WITH" => {
+                                            engine::Operator::StartsWith
+                                        }
+                                        "ENDSWITH" | "ENDS_WITH" => engine::Operator::EndsWith,
+                                        "REGEX" => engine::Operator::Regex,
+                                        "IN" => engine::Operator::In,
+                                        "NOTIN" | "NOT_IN" => engine::Operator::NotIn,
+                                        "SEMVERGREATERTHAN" | "SEMVER_GREATER_THAN" => {
+                                            engine::Operator::SemverGreaterThan
+                                        }
+                                        "SEMVERLESSTHAN" | "SEMVER_LESS_THAN" => {
+                                            engine::Operator::SemverLessThan
+                                        }
+                                        _ => engine::Operator::In,
+                                    };
+                                    engine::RuleCondition {
+                                        context_key: cond.context_key,
+                                        operator: cond_operator,
+                                        value: cond.value,
+                                    }
+                                })
+                                .collect(),
+                        })
+                        .collect();
 
                     engine::StageCriterion {
                         priority: c.priority,
                         rule_groups,
-                        variant_allocations: c.variant_allocations.into_iter().map(|alloc| {
-                            engine::VariantAllocation {
+                        variant_allocations: c
+                            .variant_allocations
+                            .into_iter()
+                            .map(|alloc| engine::VariantAllocation {
                                 variant_control: alloc.variant_control,
                                 weight: alloc.weight,
-                            }
-                        }).collect(),
+                            })
+                            .collect(),
                     }
                 })
                 .collect::<Vec<_>>();
@@ -350,32 +457,38 @@ impl FeatureEvaluationSvc {
                 .into_iter()
                 .map(|c| {
                     // Map rule groups
-                    let rule_groups = c.rule_groups.into_iter().map(|group| {
-                        pb::RuleGroup {
+                    let rule_groups = c
+                        .rule_groups
+                        .into_iter()
+                        .map(|group| pb::RuleGroup {
                             id: group.id.to_string(),
                             logic_operator: match group.logic_operator {
                                 crate::database::entity::LogicOperator::And => "AND".to_string(),
                                 crate::database::entity::LogicOperator::Or => "OR".to_string(),
                             },
-                            conditions: group.conditions.into_iter().map(|cond| {
-                                pb::RuleCondition {
+                            conditions: group
+                                .conditions
+                                .into_iter()
+                                .map(|cond| pb::RuleCondition {
                                     id: cond.id.to_string(),
                                     context_key: cond.context_key,
                                     operator: cond.operator,
                                     value: cond.value.to_string(),
                                     order_index: cond.order_index,
-                                }
-                            }).collect(),
-                        }
-                    }).collect();
+                                })
+                                .collect(),
+                        })
+                        .collect();
 
                     // Map variant allocations
-                    let variant_allocations = c.variant_allocations.into_iter().map(|alloc| {
-                        pb::VariantAllocation {
+                    let variant_allocations = c
+                        .variant_allocations
+                        .into_iter()
+                        .map(|alloc| pb::VariantAllocation {
                             variant_control: alloc.variant_control,
                             weight: alloc.weight,
-                        }
-                    }).collect();
+                        })
+                        .collect();
 
                     pb::StageCriterionFull {
                         id: c.id.to_string(),
@@ -1154,6 +1267,72 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
                 Err(Status::internal("failed to queue evaluation events"))
             }
         }
+    }
+
+    async fn track_metrics(
+        &self,
+        request: Request<pb::TrackMetricRequest>,
+    ) -> Result<Response<pb::TrackMetricResponse>, Status> {
+        let req = request.into_inner();
+
+        let mut inputs = Vec::with_capacity(req.events.len());
+        for event in req.events {
+            let environment_id = if event.environment_id.is_empty() {
+                None
+            } else {
+                Some(
+                    Uuid::parse_str(&event.environment_id)
+                        .map_err(|_| Status::invalid_argument("invalid environment_id"))?,
+                )
+            };
+
+            let metadata = if event.metadata.trim().is_empty() {
+                None
+            } else {
+                Some(
+                    serde_json::from_str::<serde_json::Value>(&event.metadata)
+                        .map_err(|_| Status::invalid_argument("metadata must be valid JSON"))?,
+                )
+            };
+
+            let timestamp = if event.timestamp_unix_ms > 0 {
+                Some(
+                    DateTime::<Utc>::from_timestamp_millis(event.timestamp_unix_ms)
+                        .ok_or_else(|| Status::invalid_argument("timestamp_unix_ms is invalid"))?,
+                )
+            } else {
+                None
+            };
+
+            inputs.push(TrackMetricInput {
+                metric_key: event.metric_key,
+                feature_key: if event.feature_key.is_empty() {
+                    None
+                } else {
+                    Some(event.feature_key)
+                },
+                environment_id,
+                user_context: event.user_context,
+                variant: if event.variant.is_empty() {
+                    None
+                } else {
+                    Some(event.variant)
+                },
+                value: event.value,
+                metadata,
+                timestamp,
+            });
+        }
+
+        let processed = self
+            .metric_logic
+            .track_metrics(&req.client_id, &req.client_secret, inputs)
+            .await
+            .map_err(map_metric_error)?;
+
+        Ok(Response::new(pb::TrackMetricResponse {
+            processed_count: processed as i32,
+        }))
     }
 }
 

@@ -283,7 +283,9 @@ mod tests {
         let logic = UserFlagLogicImpl::new(Box::new(mock_client), Box::new(uf_repo));
         let fid = Uuid::new_v4().to_string();
         let eid = Uuid::new_v4().to_string();
-        let res = logic.upsert_after_auth("user", &fid, &eid, true, Some("variant-a".into())).await;
+        let res = logic
+            .upsert_after_auth("user", &fid, &eid, true, Some("variant-a".into()))
+            .await;
         assert!(res.is_ok());
     }
 

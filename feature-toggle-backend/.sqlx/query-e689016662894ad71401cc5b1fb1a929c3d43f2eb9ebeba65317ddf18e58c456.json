@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO metric_aggregations (\n                metric_id,\n                feature_key,\n                environment_id,\n                variant,\n                time_bucket,\n                sample_size,\n                sum_value,\n                mean_value,\n                min_value,\n                max_value,\n                p50_value,\n                p95_value,\n                p99_value,\n                conversion_count,\n                conversion_rate\n            )\n            SELECT\n                me.metric_id,\n                me.feature_key,\n                me.environment_id,\n                me.variant,\n                date_trunc($3, me.occurred_at) AS time_bucket,\n                COUNT(*) AS sample_size,\n                SUM(me.value)::DOUBLE PRECISION AS sum_value,\n                AVG(me.value)::DOUBLE PRECISION AS mean_value,\n                MIN(me.value)::DOUBLE PRECISION AS min_value,\n                MAX(me.value)::DOUBLE PRECISION AS max_value,\n                percentile_disc(0.50) WITHIN GROUP (ORDER BY me.value) AS p50_value,\n                percentile_disc(0.95) WITHIN GROUP (ORDER BY me.value) AS p95_value,\n                percentile_disc(0.99) WITHIN GROUP (ORDER BY me.value) AS p99_value,\n                SUM(\n                    CASE\n                        WHEN m.metric_type = 'conversion' AND me.value > 0 THEN 1\n                        ELSE 0\n                    END\n                )::BIGINT AS conversion_count,\n                CASE\n                    WHEN COUNT(*) = 0 THEN 0::DOUBLE PRECISION\n                    ELSE SUM(\n                        CASE\n                            WHEN m.metric_type = 'conversion' AND me.value > 0 THEN 1\n                            ELSE 0\n                        END\n                    )::DOUBLE PRECISION / COUNT(*)::DOUBLE PRECISION\n                END AS conversion_rate\n            FROM metric_events me\n            JOIN metrics m ON me.metric_id = m.id\n            WHERE me.occurred_at >= $1 AND me.occurred_at < $2\n            GROUP BY me.metric_id, me.feature_key, me.environment_id, me.variant, date_trunc($3, me.occurred_at)\n            ON CONFLICT (metric_id, feature_key, environment_id, variant, time_bucket)\n            DO UPDATE SET\n                sample_size = EXCLUDED.sample_size,\n                sum_value = EXCLUDED.sum_value,\n                mean_value = EXCLUDED.mean_value,\n                min_value = EXCLUDED.min_value,\n                max_value = EXCLUDED.max_value,\n                p50_value = EXCLUDED.p50_value,\n                p95_value = EXCLUDED.p95_value,\n                p99_value = EXCLUDED.p99_value,\n                conversion_count = EXCLUDED.conversion_count,\n                conversion_rate = EXCLUDED.conversion_rate\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Timestamptz",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e689016662894ad71401cc5b1fb1a929c3d43f2eb9ebeba65317ddf18e58c456"
+}

@@ -2,14 +2,16 @@ use crate::graphql::create_user;
 use crate::graphql::schema::{
     ActivityLog, ActivityLogPage, ApplicationStatus, Client, ClientType, ClientsPage, ContextsPage,
     Environment, EnvironmentsPage, EvaluationByFeature, EvaluationCountFilter,
-    EvaluationSummaryOutput, EvaluationSummaryQueryInput, Feature, FeatureGrowthPoint, FeatureType,
-    FeaturesPage, JwtSecretResponse, Pipeline, PipelinesPage, Role, RolloutMetrics, Team, User,
-    UsersPage,
+    EvaluationSummaryOutput, EvaluationSummaryQueryInput, ExperimentAnalysis, Feature,
+    FeatureGrowthPoint, FeatureType, FeaturesPage, JwtSecretResponse, Metric, MetricAnalysis,
+    MetricResult, Pipeline, PipelinesPage, Role, RolloutMetrics, Team, User, UsersPage,
 };
+use crate::graphql::subscription::calculate_time_range;
 use crate::logic::client::ClientLogic;
 use crate::logic::context::ContextLogic;
 use crate::logic::environment::EnvironmentLogic;
 use crate::logic::feature::FeatureLogic;
+use crate::logic::metrics::MetricLogic;
 use crate::logic::pipeline::PipelineLogic;
 use crate::logic::role::RoleLogic;
 use crate::logic::team::TeamLogic;
@@ -17,6 +19,8 @@ use crate::logic::user::UserLogic;
 use async_graphql::{Context, ID, Object, Result as GqlResult};
 use chrono::{DateTime, Utc};
 use log::debug;
+use std::collections::{HashMap, HashSet};
+use uuid::Uuid;
 
 pub struct Query;
 
@@ -972,6 +976,195 @@ impl Query {
             bottleneck_stage: metrics.bottleneck_stage,
             bottleneck_duration: metrics.bottleneck_duration,
             total_pending_approvals: metrics.total_pending_approvals,
+        })
+    }
+
+    /// List metrics defined for a team (experiment KPIs)
+    async fn metrics(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Team ID that owns the metrics")] team_id: ID,
+    ) -> GqlResult<Vec<Metric>> {
+        let team_uuid = Uuid::parse_str(&team_id.to_string())
+            .map_err(|e| async_graphql::Error::new(format!("Invalid team id: {}", e)))?;
+        let logic = ctx.data::<Box<dyn MetricLogic>>()?;
+        let metrics = logic
+            .list_metrics(team_uuid)
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("Failed to load metrics: {}", e)))?;
+
+        Ok(metrics
+            .into_iter()
+            .map(|m| Metric {
+                id: ID::from(m.id.to_string()),
+                key: m.key,
+                name: m.name,
+                description: m.description,
+                metric_type: m.metric_type,
+                unit: m.unit,
+            })
+            .collect())
+    }
+
+    /// Time-series metrics by feature and environment (pre-aggregated buckets)
+    async fn metrics_by_feature(
+        &self,
+        ctx: &Context<'_>,
+        feature_key: String,
+        #[graphql(desc = "Environment to scope results")] environment_id: ID,
+        #[graphql(desc = "Time window for aggregation")]
+        time_period: crate::graphql::subscription::TimePeriod,
+    ) -> GqlResult<Vec<MetricResult>> {
+        let env_uuid = Uuid::parse_str(&environment_id.to_string())
+            .map_err(|e| async_graphql::Error::new(format!("Invalid environment id: {}", e)))?;
+
+        let logic = ctx.data::<Box<dyn MetricLogic>>()?;
+        let now = Utc::now();
+        let (from, to) = calculate_time_range(time_period, now);
+
+        let rows = logic
+            .get_metric_results(&feature_key, Some(env_uuid), from, to)
+            .await
+            .map_err(|e| {
+                async_graphql::Error::new(format!("Failed to load metric results: {}", e))
+            })?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| MetricResult {
+                metric_key: row.metric_key,
+                variant: row.variant,
+                sample_size: std::cmp::min(row.sample_size, i32::MAX as i64) as i32,
+                conversion_rate: row.conversion_rate,
+                mean_value: row.mean_value,
+                p95_value: row.p95_value,
+                time_bucket: row.time_bucket,
+                confidence_interval: None,
+            })
+            .collect())
+    }
+
+    /// Experiment summary grouped by metric and variant
+    async fn experiment_results(
+        &self,
+        ctx: &Context<'_>,
+        feature_key: String,
+        #[graphql(desc = "Metric keys to include")] metric_keys: Vec<String>,
+        #[graphql(desc = "Optional environment to scope results")] environment_id: Option<ID>,
+        #[graphql(desc = "Time window for aggregation")] time_period: Option<
+            crate::graphql::subscription::TimePeriod,
+        >,
+    ) -> GqlResult<ExperimentAnalysis> {
+        if metric_keys.is_empty() {
+            return Err(async_graphql::Error::new(
+                "metricKeys must include at least one entry",
+            ));
+        }
+
+        let env_uuid = match environment_id {
+            Some(id) => Some(Uuid::parse_str(&id.to_string()).map_err(|e| {
+                async_graphql::Error::new(format!("Invalid environment id: {}", e))
+            })?),
+            None => None,
+        };
+
+        let logic = ctx.data::<Box<dyn MetricLogic>>()?;
+        let period = time_period.unwrap_or(crate::graphql::subscription::TimePeriod::D7);
+        let (from, to) = calculate_time_range(period, Utc::now());
+
+        let rows = logic
+            .get_metric_results(&feature_key, env_uuid, from, to)
+            .await
+            .map_err(|e| {
+                async_graphql::Error::new(format!("Failed to load metric results: {}", e))
+            })?;
+
+        let requested: HashSet<String> = metric_keys.iter().cloned().collect();
+        let mut aggregated: HashMap<
+            String,
+            HashMap<Option<String>, (i64, i64, f64, Option<f64>, DateTime<Utc>)>,
+        > = HashMap::new();
+
+        for row in rows
+            .into_iter()
+            .filter(|r| requested.contains(&r.metric_key))
+        {
+            let metric_entry = aggregated
+                .entry(row.metric_key.clone())
+                .or_insert_with(HashMap::new);
+            let entry = metric_entry.entry(row.variant.clone()).or_insert((
+                0,
+                0,
+                0.0,
+                None,
+                row.time_bucket,
+            ));
+
+            entry.0 += row.sample_size;
+            entry.1 += row.conversion_count.unwrap_or(0);
+            entry.2 += row.sum_value.unwrap_or(0.0);
+            if row.p95_value.is_some() {
+                entry.3 = row.p95_value;
+            }
+            if row.time_bucket > entry.4 {
+                entry.4 = row.time_bucket;
+            }
+        }
+
+        let mut analyses = Vec::new();
+        for key in metric_keys {
+            let mut results = Vec::new();
+            if let Some(variants) = aggregated.get(&key) {
+                for (variant, (sample_size, conversion_count, sum_value, p95_value, time_bucket)) in
+                    variants.iter()
+                {
+                    let sample_size_i32 = std::cmp::min(*sample_size, i32::MAX as i64) as i32;
+                    let conversion_rate = if *sample_size > 0 {
+                        Some(*conversion_count as f64 / *sample_size as f64)
+                    } else {
+                        None
+                    };
+                    let mean_value = if *sample_size > 0 {
+                        Some(*sum_value / *sample_size as f64)
+                    } else {
+                        None
+                    };
+
+                    results.push(MetricResult {
+                        metric_key: key.clone(),
+                        variant: variant.clone(),
+                        sample_size: sample_size_i32,
+                        conversion_rate,
+                        mean_value,
+                        p95_value: *p95_value,
+                        time_bucket: *time_bucket,
+                        confidence_interval: None,
+                    });
+                }
+            }
+
+            // Simple heuristic winner: highest conversion_rate, else highest mean_value
+            let mut winner: Option<String> = None;
+            let mut best_score = f64::MIN;
+            for r in &results {
+                let score = r.conversion_rate.or(r.mean_value).unwrap_or(f64::MIN / 2.0);
+                if score > best_score {
+                    best_score = score;
+                    winner = r.variant.clone();
+                }
+            }
+
+            analyses.push(MetricAnalysis {
+                metric_key: key,
+                results,
+                winner,
+                statistical_significance: None,
+            });
+        }
+
+        Ok(ExperimentAnalysis {
+            feature_key,
+            metrics: analyses,
         })
     }
 

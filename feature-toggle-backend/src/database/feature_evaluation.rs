@@ -9,7 +9,9 @@ pub struct FeatureEvaluationRow {
     pub environment_id: String,
     pub client_id: Uuid,
     pub evaluated_at: DateTime<Utc>,
-    #[deprecated(note = "Use evaluation_success for success tracking and evaluation_value for the actual value")]
+    #[deprecated(
+        note = "Use evaluation_success for success tracking and evaluation_value for the actual value"
+    )]
     pub evaluation_result: bool,
     pub evaluation_context: Option<serde_json::Value>,
     pub user_context: Option<String>,
@@ -29,7 +31,9 @@ pub struct CreateFeatureEvaluation {
     pub environment_id: String,
     pub client_id: Uuid,
     pub evaluated_at: DateTime<Utc>,
-    #[deprecated(note = "Use evaluation_success for success tracking and evaluation_value for the actual value")]
+    #[deprecated(
+        note = "Use evaluation_success for success tracking and evaluation_value for the actual value"
+    )]
     pub evaluation_result: bool,
     pub evaluation_context: Option<serde_json::Value>,
     pub user_context: Option<String>,

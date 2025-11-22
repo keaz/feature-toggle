@@ -237,7 +237,8 @@ async fn handle_feature_update(app: &AppState, update: pb::FeatureUpdate) {
         }
         x if x == Action::Delete as i32 => {
             if !update.feature_key.is_empty() {
-                if let Some(feature_id) = app.mapped_cache.delete_by_key(&update.feature_key).await {
+                if let Some(feature_id) = app.mapped_cache.delete_by_key(&update.feature_key).await
+                {
                     app.purge_assignments_for_feature(&feature_id).await;
                 }
             }

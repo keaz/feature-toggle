@@ -1,8 +1,8 @@
 use feature_toggle_backend::database::compound_rules::{
-    compound_rules_repository, CreateRuleConditionInput, CreateRuleGroupInput, UpdateRuleGroupInput,
+    CreateRuleConditionInput, CreateRuleGroupInput, UpdateRuleGroupInput, compound_rules_repository,
 };
 use feature_toggle_backend::database::entity::LogicOperator;
-use feature_toggle_backend::database::feature::{feature_repository, CreateStageCriterion};
+use feature_toggle_backend::database::feature::{CreateStageCriterion, feature_repository};
 use feature_toggle_backend::database::init_pg_pool;
 use serde_json::json;
 use uuid::Uuid;

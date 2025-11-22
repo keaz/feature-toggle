@@ -181,6 +181,28 @@ message PushEvaluationEventsResponse {
   int32 processed_count = 2;
 }
 
+// Metric tracking for experiments and analytics
+message MetricEvent {
+  string metric_key = 1;
+  string feature_key = 2;
+  string environment_id = 3;
+  string user_context = 4;
+  string variant = 5;
+  double value = 6;
+  string metadata = 7; // JSON string
+  int64 timestamp_unix_ms = 8;
+}
+
+message TrackMetricRequest {
+  repeated MetricEvent events = 1;
+  string client_id = 2;
+  string client_secret = 3;
+}
+
+message TrackMetricResponse {
+  int32 processed_count = 1;
+}
+
 // Cluster replication messages to fan out updates across backend instances.
 message ClusterEvaluationEvent {
   string event_id = 1;
@@ -228,4 +250,6 @@ service FeatureEvaluation {
   rpc ListUserAssignments(ListUserFlagAssignmentsRequest) returns (ListUserFlagAssignmentsResponse);
   // Edge pushes evaluation events periodically for analytics and tracking
   rpc PushEvaluationEvents(PushEvaluationEventsRequest) returns (PushEvaluationEventsResponse);
+  // Track business metrics (conversion/numeric) for experiments
+  rpc TrackMetrics(TrackMetricRequest) returns (TrackMetricResponse);
 }

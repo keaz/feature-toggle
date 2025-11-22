@@ -1,0 +1,121 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT\n                ma.metric_id,\n                m.key as metric_key,\n                m.metric_type as \"metric_type: MetricType\",\n                ma.feature_key,\n                ma.environment_id,\n                ma.variant,\n                ma.time_bucket,\n                ma.sample_size,\n                ma.sum_value,\n                ma.mean_value,\n                ma.min_value,\n                ma.max_value,\n                ma.p50_value,\n                ma.p95_value,\n                ma.p99_value,\n                ma.conversion_count,\n                ma.conversion_rate\n            FROM metric_aggregations ma\n            JOIN metrics m ON ma.metric_id = m.id\n            WHERE ma.feature_key = $1\n              AND ($2::UUID IS NULL OR ma.environment_id = $2)\n              AND ma.time_bucket >= date_trunc('hour', $3::timestamptz)\n              AND ma.time_bucket < date_trunc('hour', $4::timestamptz) + INTERVAL '1 hour'\n            ORDER BY ma.time_bucket DESC, ma.metric_id, COALESCE(ma.variant, '')\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "metric_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "metric_key",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "metric_type: MetricType",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "feature_key",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "environment_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 5,
+        "name": "variant",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "time_bucket",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "sample_size",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 8,
+        "name": "sum_value",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 9,
+        "name": "mean_value",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 10,
+        "name": "min_value",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 11,
+        "name": "max_value",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 12,
+        "name": "p50_value",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 13,
+        "name": "p95_value",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 14,
+        "name": "p99_value",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 15,
+        "name": "conversion_count",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 16,
+        "name": "conversion_rate",
+        "type_info": "Float8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "bffd9c5d5e23047961260ed6dc68ca45e065c7449d5a35aead472637c406e97b"
+}

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 // Re-export TimePeriod from subscription module
+pub use crate::database::metrics::MetricType;
 use crate::{
     database::{entity::DBStage, feature::FeatureRepository},
     graphql::subscription::TimePeriod,
@@ -948,6 +949,54 @@ pub struct EvaluationSummaryOutput {
 
     /// Cache hit rate as percentage (0-100)
     pub cache_hit_rate: f64,
+}
+
+#[derive(SimpleObject, Debug, Clone, Serialize, Deserialize)]
+pub struct Metric {
+    pub id: ID,
+    pub key: String,
+    pub name: String,
+    pub description: Option<String>,
+    #[graphql(name = "metricType")]
+    pub metric_type: MetricType,
+    pub unit: Option<String>,
+}
+
+#[derive(InputObject, Debug, Clone, Serialize, Deserialize)]
+pub struct CreateMetricInput {
+    pub key: String,
+    pub name: String,
+    pub description: Option<String>,
+    #[graphql(name = "metricType")]
+    pub metric_type: MetricType,
+    pub unit: Option<String>,
+    pub success_criteria: Option<async_graphql::Json<serde_json::Value>>,
+}
+
+#[derive(SimpleObject, Debug, Clone, Serialize, Deserialize)]
+pub struct MetricResult {
+    pub metric_key: String,
+    pub variant: Option<String>,
+    pub sample_size: i32,
+    pub conversion_rate: Option<f64>,
+    pub mean_value: Option<f64>,
+    pub p95_value: Option<f64>,
+    pub time_bucket: chrono::DateTime<chrono::Utc>,
+    pub confidence_interval: Option<Vec<f64>>,
+}
+
+#[derive(SimpleObject, Debug, Clone, Serialize, Deserialize)]
+pub struct MetricAnalysis {
+    pub metric_key: String,
+    pub results: Vec<MetricResult>,
+    pub winner: Option<String>,
+    pub statistical_significance: Option<f64>,
+}
+
+#[derive(SimpleObject, Debug, Clone, Serialize, Deserialize)]
+pub struct ExperimentAnalysis {
+    pub feature_key: String,
+    pub metrics: Vec<MetricAnalysis>,
 }
 
 // Rollout metrics for dashboard

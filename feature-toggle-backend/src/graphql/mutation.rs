@@ -4,8 +4,8 @@ use crate::database::feature::FeatureRepository;
 use crate::graphql::create_user;
 use crate::graphql::schema::{
     AssignUserRolesInput, CreateClientInput, CreateEnvironmentInput, CreateFeatureInput,
-    CreatePipelineInput, CreateTeamInput, CreateVariantAllocationInput, Environment, Feature,
-    LoginInput as GqlLoginInput, LoginResponse, Pipeline,
+    CreateMetricInput, CreatePipelineInput, CreateTeamInput, CreateVariantAllocationInput,
+    Environment, Feature, LoginInput as GqlLoginInput, LoginResponse, Metric, Pipeline,
     RegisterUserInput as GqlRegisterUserInput, ResetPasswordInput as GqlResetPasswordInput, Role,
     SetTemporaryPasswordInput as GqlSetTemporaryPasswordInput, Team, UpdateClientInput,
     UpdateEnvironmentInput, UpdateFeatureInput, UpdatePipelineInput, UpdateTeamInput,
@@ -16,6 +16,7 @@ use crate::logic::client::ClientLogic;
 use crate::logic::context::ContextLogic;
 use crate::logic::environment::EnvironmentLogic;
 use crate::logic::feature::FeatureLogic;
+use crate::logic::metrics::MetricLogic;
 use crate::logic::pipeline::PipelineLogic;
 use crate::logic::role::RoleLogic;
 use crate::logic::team::TeamLogic;
@@ -140,6 +141,41 @@ impl MutationRoot {
         let logic = ctx.data::<Box<dyn PipelineLogic>>()?;
         let pipeline = logic.update_pipeline(id, input, actor).await?;
         Ok(pipeline)
+    }
+
+    async fn create_metric(
+        &self,
+        ctx: &Context<'_>,
+        team_id: ID,
+        input: CreateMetricInput,
+    ) -> GqlResult<Metric> {
+        let logic = ctx.data::<Box<dyn MetricLogic>>()?;
+        let team_uuid = uuid::Uuid::parse_str(&team_id.to_string())
+            .map_err(|e| async_graphql::Error::new(format!("Invalid team id: {e}")))?;
+
+        let success_criteria = input.success_criteria.as_ref().map(|json| json.0.clone());
+
+        let created = logic
+            .create_metric(
+                team_uuid,
+                input.key,
+                input.name,
+                input.description,
+                input.metric_type,
+                input.unit,
+                success_criteria,
+            )
+            .await
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+
+        Ok(Metric {
+            id: ID::from(created.id.to_string()),
+            key: created.key,
+            name: created.name,
+            description: created.description,
+            metric_type: created.metric_type,
+            unit: created.unit,
+        })
     }
 
     async fn delete_pipeline(&self, ctx: &Context<'_>, id: ID) -> GqlResult<bool> {
@@ -463,19 +499,24 @@ impl MutationRoot {
                             crate::database::variant_allocations::CreateVariantAllocationInput,
                         > = allocs
                             .iter()
-                            .map(|a| crate::database::variant_allocations::CreateVariantAllocationInput {
-                                criteria_id: crit_uuid,
-                                variant_control: a.variant_control.clone(),
-                                weight: a.weight,
+                            .map(|a| {
+                                crate::database::variant_allocations::CreateVariantAllocationInput {
+                                    criteria_id: crit_uuid,
+                                    variant_control: a.variant_control.clone(),
+                                    weight: a.weight,
+                                }
                             })
                             .collect();
 
-                        variant_repo.set_allocations(crit_uuid, db_allocs).await.map_err(|e| {
-                            async_graphql::Error::new(format!(
-                                "Failed to set variant allocations: {}",
-                                e
-                            ))
-                        })?;
+                        variant_repo
+                            .set_allocations(crit_uuid, db_allocs)
+                            .await
+                            .map_err(|e| {
+                                async_graphql::Error::new(format!(
+                                    "Failed to set variant allocations: {}",
+                                    e
+                                ))
+                            })?;
                     }
                 }
 
@@ -494,20 +535,19 @@ impl MutationRoot {
                             conditions: group
                                 .conditions
                                 .iter()
-                                .map(|c| crate::database::compound_rules::CreateRuleConditionInput {
-                                    context_key: c.context_key.clone(),
-                                    operator: c.operator.to_db_string(),
-                                    value: c.value.0.clone(),
-                                    order_index: c.order_index,
+                                .map(|c| {
+                                    crate::database::compound_rules::CreateRuleConditionInput {
+                                        context_key: c.context_key.clone(),
+                                        operator: c.operator.to_db_string(),
+                                        value: c.value.0.clone(),
+                                        order_index: c.order_index,
+                                    }
                                 })
                                 .collect(),
                         };
 
                         rules_repo.create_rule_group(db_input).await.map_err(|e| {
-                            async_graphql::Error::new(format!(
-                                "Failed to create rule group: {}",
-                                e
-                            ))
+                            async_graphql::Error::new(format!("Failed to create rule group: {}", e))
                         })?;
                     }
                 }

@@ -1,0 +1,70 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT\n                id,\n                team_id,\n                key,\n                name,\n                description,\n                metric_type as \"metric_type: MetricType\",\n                unit,\n                success_criteria,\n                created_at\n            FROM metrics\n            WHERE team_id = $1\n            ORDER BY created_at DESC\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "team_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "key",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "description",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "metric_type: MetricType",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "unit",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 7,
+        "name": "success_criteria",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 8,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "926d6df5c4970c3d819f1975dfdc290bc5be44390b9ec95c4b105ac2add9a4e8"
+}

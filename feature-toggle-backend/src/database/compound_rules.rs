@@ -1,5 +1,5 @@
 use crate::database::entity::{LogicOperator, RuleCondition, RuleGroup};
-use crate::database::{handle_error, Error};
+use crate::database::{Error, handle_error};
 use log::{debug, info};
 use mockall::automock;
 use serde_json::Value as JsonValue;
@@ -31,25 +31,17 @@ pub struct UpdateRuleGroupInput {
 #[async_trait::async_trait]
 pub trait CompoundRulesRepository: Send + Sync {
     /// Get all rule groups for a specific criterion
-    async fn get_rule_groups_by_criteria(
-        &self,
-        criteria_id: Uuid,
-    ) -> Result<Vec<RuleGroup>, Error>;
+    async fn get_rule_groups_by_criteria(&self, criteria_id: Uuid)
+    -> Result<Vec<RuleGroup>, Error>;
 
     /// Get a single rule group by ID with its conditions
     async fn get_rule_group_by_id(&self, group_id: Uuid) -> Result<RuleGroup, Error>;
 
     /// Get all conditions for a specific rule group
-    async fn get_rule_conditions(
-        &self,
-        group_id: Uuid,
-    ) -> Result<Vec<RuleCondition>, Error>;
+    async fn get_rule_conditions(&self, group_id: Uuid) -> Result<Vec<RuleCondition>, Error>;
 
     /// Create a new rule group with conditions
-    async fn create_rule_group(
-        &self,
-        input: CreateRuleGroupInput,
-    ) -> Result<RuleGroup, Error>;
+    async fn create_rule_group(&self, input: CreateRuleGroupInput) -> Result<RuleGroup, Error>;
 
     /// Update a rule group (logic operator and/or conditions)
     async fn update_rule_group(
@@ -145,10 +137,7 @@ impl CompoundRulesRepository for CompoundRulesRepositoryImpl {
         })
     }
 
-    async fn get_rule_conditions(
-        &self,
-        group_id: Uuid,
-    ) -> Result<Vec<RuleCondition>, Error> {
+    async fn get_rule_conditions(&self, group_id: Uuid) -> Result<Vec<RuleCondition>, Error> {
         debug!("DB: get_rule_conditions group_id={group_id}");
 
         let conditions = sqlx::query!(
@@ -179,10 +168,7 @@ impl CompoundRulesRepository for CompoundRulesRepositoryImpl {
             .collect())
     }
 
-    async fn create_rule_group(
-        &self,
-        input: CreateRuleGroupInput,
-    ) -> Result<RuleGroup, Error> {
+    async fn create_rule_group(&self, input: CreateRuleGroupInput) -> Result<RuleGroup, Error> {
         info!(
             "DB: create_rule_group criteria_id={} logic_operator={:?}",
             input.criteria_id, input.logic_operator

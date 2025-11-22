@@ -46,20 +46,14 @@ async fn test_set_stage_criteria_replaces_existing() {
 
     // First set some initial criteria
     let initial_crit = vec![
-        CreateStageCriterion {
-            priority: 0,
-        },
-        CreateStageCriterion {
-            priority: 1,
-        },
+        CreateStageCriterion { priority: 0 },
+        CreateStageCriterion { priority: 1 },
     ];
 
     let _ = repo.set_stage_criteria(stage_id, initial_crit).await;
 
     // Now replace them with a single criterion
-    let crit = vec![CreateStageCriterion {
-        priority: 0,
-    }];
+    let crit = vec![CreateStageCriterion { priority: 0 }];
 
     let set_result = repo.set_stage_criteria(stage_id, crit).await;
     assert!(set_result.is_ok());
@@ -78,9 +72,7 @@ async fn test_set_stage_criteria_stage_not_found() {
 
     let non_existing_stage = Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").unwrap();
 
-    let crit = vec![CreateStageCriterion {
-        priority: 0,
-    }];
+    let crit = vec![CreateStageCriterion { priority: 0 }];
 
     let result = repo.set_stage_criteria(non_existing_stage, crit).await;
     assert!(result.is_err());

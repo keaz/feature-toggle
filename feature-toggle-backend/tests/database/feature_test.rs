@@ -105,7 +105,8 @@ async fn test_create_feature_with_stages() {
             },
         ],
         dependencies: vec![],
-        variants: None,    };
+        variants: None,
+    };
     let result = repository.create_feature(input).await;
 
     assert!(result.is_ok());
@@ -126,7 +127,8 @@ async fn test_create_feature_with_dependencies() {
         feature_type: FeatureType::Simple,
         stages: vec![],
         dependencies: vec![],
-        variants: None,    };
+        variants: None,
+    };
     let dependency_result = repository.create_feature(dependency_input).await;
     assert!(dependency_result.is_ok());
     let dependency_id = dependency_result.unwrap();
@@ -165,7 +167,8 @@ async fn test_create_existing_feature() {
         feature_type: FeatureType::Simple,
         stages: vec![],
         dependencies: vec![],
-        variants: None,    };
+        variants: None,
+    };
     let result = repository.create_feature(input).await;
 
     assert!(result.is_err());
@@ -188,7 +191,8 @@ async fn test_update_feature() {
         feature_type: Some(FeatureType::Contextual),
         stages: vec![],
         dependencies: vec![],
-        variants: None,    };
+        variants: None,
+    };
     let result = repository.update_feature(input).await;
 
     assert!(result.is_ok());
@@ -223,7 +227,8 @@ async fn test_update_feature_with_existing_stages() {
             bucketing_key: None,
         }],
         dependencies: vec![],
-        variants: None,    };
+        variants: None,
+    };
     let result = repository.update_feature(input).await;
 
     assert!(result.is_ok());
@@ -262,7 +267,8 @@ async fn test_update_non_existing_feature() {
         feature_type: Some(FeatureType::Simple),
         stages: vec![],
         dependencies: vec![],
-        variants: None,    };
+        variants: None,
+    };
     let result = repository.update_feature(input).await;
 
     assert!(result.is_err());
@@ -403,7 +409,8 @@ async fn test_create_feature_with_stages_verification() {
         feature_type: FeatureType::Simple,
         stages: vec![parent.clone(), child],
         dependencies: vec![],
-        variants: None,    };
+        variants: None,
+    };
 
     // Create the feature
     let result = repository.create_feature(input).await;
@@ -492,7 +499,8 @@ async fn test_update_feature_with_stages() {
         feature_type: FeatureType::Simple,
         stages: vec![stage1.clone(), stage2.clone()],
         dependencies: vec![],
-        variants: None,    };
+        variants: None,
+    };
 
     // Create the feature
     let create_result = repository.create_feature(create_input).await;
@@ -543,7 +551,8 @@ async fn test_update_feature_with_stages() {
         feature_type: Some(FeatureType::Contextual),
         stages: vec![updated_stage1, new_stage3],
         dependencies: vec![],
-        variants: None,    };
+        variants: None,
+    };
 
     let update_result = repository.update_feature(update_input).await;
     assert!(update_result.is_ok());

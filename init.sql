@@ -36,6 +36,12 @@ DELETE FROM public.client_web_origins;
 
 DELETE FROM public.clients;
 
+DELETE FROM public.metric_aggregations;
+
+DELETE FROM public.metric_events;
+
+DELETE FROM public.metrics;
+
 DELETE FROM public.pipeline_stages;
 
 DELETE FROM public.pipelines;
@@ -199,6 +205,94 @@ VALUES (
         'Compound Rules Test Env 7',
         true,
         '51ecc366-f1cd-4d3d-ab73-fa60bad98f27'
+    )
+ON CONFLICT (id) DO NOTHING;
+
+-- Seed metrics for analytics smoke tests
+INSERT INTO
+    public.metrics (id, team_id, key, name, description, metric_type, unit, success_criteria)
+VALUES (
+        '11111111-aaaa-4aaa-8aaa-111111111111',
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+        'signup_conversion',
+        'Signup Conversion',
+        'Tracks the rate of users completing signup',
+        'conversion',
+        'count',
+        '{ "operator": "greater_than", "value": 0.2 }'
+    ),
+    (
+        '22222222-bbbb-4bbb-8bbb-222222222222',
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+        'checkout_value',
+        'Checkout Value',
+        'Average checkout amount',
+        'numeric',
+        '$',
+        '{ "operator": "greater_than", "value": 50 }'
+    )
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO
+    public.metric_events (
+        id,
+        metric_id,
+        feature_key,
+        environment_id,
+        user_context,
+        variant,
+        value,
+        metadata,
+        is_conversion,
+        occurred_at
+    )
+VALUES (
+        '31111111-aaaa-4aaa-8aaa-111111111111',
+        '11111111-aaaa-4aaa-8aaa-111111111111',
+        'test-feature-create',
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+        'user-metrics-1',
+        'control',
+        1,
+        '{ "plan": "basic" }',
+        true,
+        now() - interval '30 minutes'
+    ),
+    (
+        '31111111-aaaa-4aaa-8aaa-111111111112',
+        '11111111-aaaa-4aaa-8aaa-111111111111',
+        'test-feature-create',
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+        'user-metrics-2',
+        'treatment',
+        1,
+        '{ "plan": "pro" }',
+        true,
+        now() - interval '90 minutes'
+    ),
+    (
+        '32222222-bbbb-4bbb-8bbb-222222222221',
+        '22222222-bbbb-4bbb-8bbb-222222222222',
+        'test-feature-create',
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+        'user-metrics-1',
+        'control',
+        47.5,
+        '{ "order": "A" }',
+        false,
+        now() - interval '20 minutes'
+    ),
+    (
+        '32222222-bbbb-4bbb-8bbb-222222222222',
+        '22222222-bbbb-4bbb-8bbb-222222222222',
+        'test-feature-create',
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+        'user-metrics-3',
+        'treatment',
+        103.2,
+        '{ "order": "B" }',
+        false,
+        now() - interval '70 minutes'
     )
 ON CONFLICT (id) DO NOTHING;
 
