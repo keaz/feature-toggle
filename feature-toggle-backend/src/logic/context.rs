@@ -515,12 +515,19 @@ mod tests {
                 description: None,
                 feature_type: entity::FeatureType::Contextual,
                 team_id,
+                active: true,
                 created_at: chrono::Utc::now(),
                 kill_switch_enabled: false,
                 kill_switch_activated_at: None,
                 rollback_scheduled_at: None,
+                lifecycle_stage: "active".to_string(),
+                deprecated_at: None,
+                deprecation_notice: None,
+                last_evaluated_at: None,
+                evaluation_count_7d: 0,
+                evaluation_count_30d: 0,
+                evaluation_count_90d: 0,
                 dependencies: vec![],
-                active: true,
             })
         });
 

@@ -27,6 +27,7 @@ use chrono::{DateTime, Utc};
 use log::error;
 use serde::Deserialize;
 use std::sync::Arc;
+use std::time::Duration;
 use uuid::Uuid;
 
 #[derive(Debug, thiserror::Error)]
@@ -63,6 +64,15 @@ pub async fn run() -> std::io::Result<()> {
         environment_repository.clone(),
         activity_log_repository.clone_box(),
     );
+    let approval_repository = database::approval::approval_repository(db_pool.clone());
+    let (approval_events_tx, _approval_events_rx) =
+        tokio::sync::broadcast::channel::<logic::approval::ApprovalRequestEvent>(128);
+    let approval_logic = logic::approval::approval_logic(
+        approval_repository.clone(),
+        feature_repository.clone_box(),
+        environment_logic.clone(),
+        approval_events_tx.clone(),
+    );
     let team_logic = logic::team::team_logic(
         database::team::team_repository(db_pool.clone()),
         activity_log_repository.clone_box(),
@@ -72,11 +82,12 @@ pub async fn run() -> std::io::Result<()> {
         environment_logic.clone(),
         activity_log_repository.clone_box(),
     );
-    let feature_logic = logic::feature::feature_logic(
+    let feature_logic = logic::feature::feature_logic_with_approval(
         feature_repository.clone_box(),
         environment_logic.clone(),
         activity_log_repository.clone_box(),
         database::user::user_repository(db_pool.clone()),
+        Some(approval_logic.clone()),
     );
     // Create a broadcast channel for feature updates shared between GraphQL mutations and gRPC streaming
     let (updates_tx, _updates_rx) =
@@ -178,6 +189,15 @@ pub async fn run() -> std::io::Result<()> {
         aggregator.start().await;
     });
 
+    let auto_approval_scheduler = scheduler::AutoApprovalScheduler::new(
+        approval_repository.clone_box(),
+        approval_logic.clone(),
+        Duration::from_secs(60),
+    );
+    tokio::spawn(async move {
+        auto_approval_scheduler.start().await;
+    });
+
     // Clone values for use in the HttpServer closure
     let jwt_secret_logic_for_server = jwt_secret_logic.clone();
     let jwt_token_logic_for_server = jwt_token_logic.clone();
@@ -197,6 +217,8 @@ pub async fn run() -> std::io::Result<()> {
             .data(team_logic.clone())
             .data(pipeline_logic.clone())
             .data(feature_logic.clone())
+            .data(approval_logic.clone())
+            .data(approval_events_tx.clone())
             .data(client_logic.clone())
             .data(context_logic.clone())
             .data(user_logic.clone())

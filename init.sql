@@ -17,6 +17,12 @@ DELETE FROM public.feature_dependencies;
 
 DELETE FROM public.feature_stage_criteria;
 
+DELETE FROM public.approval_votes;
+
+DELETE FROM public.approval_requests;
+
+DELETE FROM public.approval_policies;
+
 DELETE FROM public.features_pipeline_stages;
 
 DELETE FROM public.features;
@@ -51,6 +57,8 @@ DELETE FROM public.environments;
 DELETE FROM public.teams;
 
 DELETE FROM public.user_flag_assignments;
+
+DELETE FROM public.user_roles;
 
 -- Users cleanup and seed for tests
 DELETE FROM public.users;
@@ -95,6 +103,14 @@ VALUES (
     )
 ON CONFLICT (id) DO NOTHING;
 
+-- Ensure base roles exist for approval workflows
+INSERT INTO public.roles (id, name, description)
+VALUES
+    ('00000000-0000-0000-0000-000000000001', 'Approver', 'Can approve deployment requests and stage changes'),
+    ('00000000-0000-0000-0000-000000000002', 'Requester', 'Can request deployment and stage changes'),
+    ('00000000-0000-0000-0000-000000000003', 'Team Admin', 'Can manage team settings and members')
+ON CONFLICT (id) DO NOTHING;
+
 INSERT INTO
     public.teams (id, name, description)
 VALUES (
@@ -130,6 +146,23 @@ VALUES (
         '51ecc366-f1cd-4d3d-ab73-fa60bad98f27'
     )
 ON CONFLICT (user_id, team_id) DO NOTHING;
+
+-- Assign roles to test users for approval scenarios
+INSERT INTO public.user_roles (id, user_id, role_id, assigned_by)
+VALUES
+    (
+        '10000000-0000-0000-0000-000000000001',
+        'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        '00000000-0000-0000-0000-000000000001',
+        'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    ),
+    (
+        '10000000-0000-0000-0000-000000000002',
+        'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+        '00000000-0000-0000-0000-000000000001',
+        'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    )
+ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO
     public.environments (id, name, active, team_id)
@@ -203,6 +236,12 @@ VALUES (
     (
         '11111111-7777-7777-7777-777777777777',
         'Compound Rules Test Env 7',
+        true,
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27'
+    ),
+    (
+        '9f9f9f9f-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+        'Approval Production',
         true,
         '51ecc366-f1cd-4d3d-ab73-fa60bad98f27'
     )
@@ -547,6 +586,14 @@ VALUES (
         'Contextual',
         '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
         now()
+    ),
+    (
+        '9f9f9f9f-bbbb-4bbb-bbbb-aaaaaaaaaaaa',
+        'Approval Gated Feature',
+        'Feature that requires approval before production deploy',
+        'Simple',
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+        now()
     )
 ON CONFLICT (id) DO NOTHING;
 
@@ -656,6 +703,14 @@ VALUES (
         NULL,
         1,
         '{ "x": 100, "y": 500 }'
+    ),
+    (
+        '9f9f9f9f-cccc-4ccc-cccc-aaaaaaaaaaaa',
+        '9f9f9f9f-bbbb-4bbb-bbbb-aaaaaaaaaaaa',
+        '9f9f9f9f-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+        NULL,
+        0,
+        '{ "x": 650, "y": 240 }'
     )
 ON CONFLICT (id) DO NOTHING;
 
@@ -670,6 +725,142 @@ VALUES (
         '6eef17bc-9e06-411d-b5f4-7a786e68bb91'
     )
 ON CONFLICT (feature_id, depends_on_id) DO NOTHING;
+
+-- Approval workflow policy for gated production changes
+INSERT INTO public.approval_policies (
+    id,
+    team_id,
+    name,
+    description,
+    applies_to,
+    environment_ids,
+    required_approvers,
+    approver_role_ids,
+    auto_approve_after_hours,
+    enabled
+)
+VALUES (
+    '9f9f9f9f-dddd-4ddd-dddd-aaaaaaaaaaaa',
+    '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+    'Prod deploy approvals',
+    'Require two approvers before deploying to production',
+    'specific_environments',
+    ARRAY['9f9f9f9f-aaaa-4aaa-aaaa-aaaaaaaaaaaa']::uuid[],
+    2,
+    ARRAY['00000000-0000-0000-0000-000000000001']::uuid[],
+    NULL,
+    true
+)
+ON CONFLICT (id) DO NOTHING;
+
+-- Auto-approve policy (mimics auto-approval job)
+INSERT INTO public.approval_policies (
+    id,
+    team_id,
+    name,
+    description,
+    applies_to,
+    environment_ids,
+    required_approvers,
+    approver_role_ids,
+    auto_approve_after_hours,
+    enabled
+)
+VALUES (
+    'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaacc',
+    '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+    'Auto approve after 1h',
+    'Auto-approve requests after 1 hour',
+    'specific_environments',
+    ARRAY['9f9f9f9f-aaaa-4aaa-aaaa-aaaaaaaaaaaa']::uuid[],
+    1,
+    ARRAY['00000000-0000-0000-0000-000000000001']::uuid[],
+    1,
+    true
+)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO public.approval_requests (
+    id,
+    policy_id,
+    feature_id,
+    environment_id,
+    change_type,
+    change_payload,
+    change_description,
+    requested_by,
+    status,
+    approved_count,
+    rejected_count,
+    created_at,
+    updated_at,
+    executed_at
+)
+VALUES (
+    'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaadd',
+    'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaacc',
+    '9f9f9f9f-bbbb-4bbb-bbbb-aaaaaaaaaaaa',
+    '9f9f9f9f-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+    'stage_change',
+    '{ "stage_id": "9f9f9f9f-cccc-4ccc-cccc-aaaaaaaaaaaa", "next_status": "DEPLOYED" }'::jsonb,
+    'Auto-approval fixture',
+    'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+    'pending',
+    0,
+    0,
+    now() - interval '2 hours',
+    now() - interval '2 hours',
+    NULL
+),
+(
+    'bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb',
+    '9f9f9f9f-dddd-4ddd-dddd-aaaaaaaaaaaa',
+    '9f9f9f9f-bbbb-4bbb-bbbb-aaaaaaaaaaaa',
+    '9f9f9f9f-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+    'stage_change',
+    '{ "stage_id": "9f9f9f9f-cccc-4ccc-cccc-aaaaaaaaaaaa", "next_status": "DEPLOYED" }'::jsonb,
+    'Pending prod deploy',
+    'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    'pending',
+    0,
+    0,
+    now() - interval '40 minutes',
+    now() - interval '20 minutes',
+    NULL
+),
+(
+    'cccccccc-cccc-4ccc-cccc-aaaaaaaaaaaa',
+    '9f9f9f9f-dddd-4ddd-dddd-aaaaaaaaaaaa',
+    '9f9f9f9f-bbbb-4bbb-bbbb-aaaaaaaaaaaa',
+    '9f9f9f9f-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+    'stage_change',
+    '{ "stage_id": "9f9f9f9f-cccc-4ccc-cccc-aaaaaaaaaaaa", "next_status": "DEPLOYED" }'::jsonb,
+    'Rejected change for regression',
+    'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+    'rejected',
+    0,
+    1,
+    now() - interval '70 minutes',
+    now() - interval '15 minutes',
+    NULL
+),
+(
+    'dddddddd-dddd-4ddd-dddd-aaaaaaaaaaaa',
+    '9f9f9f9f-dddd-4ddd-dddd-aaaaaaaaaaaa',
+    '9f9f9f9f-bbbb-4bbb-bbbb-aaaaaaaaaaaa',
+    '9f9f9f9f-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+    'stage_change',
+    '{ "stage_id": "9f9f9f9f-cccc-4ccc-cccc-aaaaaaaaaaaa", "next_status": "DEPLOYED" }'::jsonb,
+    'Approved release ready',
+    'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    'approved',
+    2,
+    0,
+    now() - interval '3 hours',
+    now() - interval '18 minutes',
+    now() - interval '17 minutes'
+)
+ON CONFLICT (id) DO NOTHING;
 
 -- Seed clients
 INSERT INTO
@@ -755,6 +946,14 @@ UPDATE public.features_pipeline_stages
 SET
     status = 'DEPLOYED',
     enabled = true;
+
+-- Keep approval workflow stage awaiting deployment so approvals can promote it
+UPDATE public.features_pipeline_stages
+SET
+    status = 'DEPLOYMENT_REQUESTED',
+    enabled = true
+WHERE
+    id = '9f9f9f9f-cccc-4ccc-cccc-aaaaaaaaaaaa';
 
 -- Seed contexts for tests (appended by automation)
 -- Ensure contexts tables are clean and then insert deterministic data

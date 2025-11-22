@@ -1,4 +1,6 @@
-use async_graphql::{Context, Enum, InputObject, Result as GqlResult, SimpleObject, Subscription};
+use async_graphql::{
+    Context, Enum, ID, InputObject, Result as GqlResult, SimpleObject, Subscription,
+};
 use async_stream::stream;
 use chrono::{DateTime, Utc};
 use futures_util::stream::Stream;
@@ -10,6 +12,8 @@ use crate::database::activity_log::{ActivityLogFilter, ActivityLogRepository};
 use crate::database::feature_evaluation::{
     EvaluationByFeature, EvaluationRatePoint, EvaluationSummary,
 };
+use crate::graphql::schema::{ApprovalRequest, map_approval_request};
+use crate::logic::approval::{ApprovalLogic, ApprovalRequestEvent};
 use crate::logic::client::ClientLogic;
 use crate::logic::feature::FeatureLogic;
 use crate::logic::feature_evaluation::{FeatureEvaluationEvent, FeatureEvaluationLogic};
@@ -109,6 +113,14 @@ fn evaluation_events_receiver(
     ctx.data::<tokio::sync::broadcast::Sender<FeatureEvaluationEvent>>()
         .map(|tx| tx.subscribe())
         .map_err(|_| async_graphql::Error::new("Evaluation events channel not found"))
+}
+
+fn approval_events_receiver(
+    ctx: &Context<'_>,
+) -> Result<broadcast::Receiver<ApprovalRequestEvent>, async_graphql::Error> {
+    ctx.data::<tokio::sync::broadcast::Sender<ApprovalRequestEvent>>()
+        .map(|tx| tx.subscribe())
+        .map_err(|_| async_graphql::Error::new("Approval events channel not found"))
 }
 
 /// Invoke the logic layer to load evaluation rates and format for GraphQL clients.
@@ -1120,6 +1132,59 @@ impl FeatureEvaluationSubscription {
                     Err(e) => {
                         yield Err(e);
                         break; // Exit loop on error
+                    }
+                }
+            }
+        };
+
+        Box::pin(stream)
+    }
+
+    /// Real-time approval request updates scoped to a single team
+    async fn approval_requests_for_team(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Team ID")] team_id: ID,
+    ) -> GqlStream<ApprovalRequest> {
+        let team_uuid = match Uuid::try_from(team_id.clone()) {
+            Ok(id) => id,
+            Err(_) => return stream_error("Invalid team ID format"),
+        };
+
+        let logic = match ctx.data::<Box<dyn ApprovalLogic>>() {
+            Ok(logic) => logic.clone(),
+            Err(err) => return stream_failure(async_graphql::Error::new(format!("{err:?}"))),
+        };
+
+        let mut events_rx = match approval_events_receiver(ctx) {
+            Ok(rx) => rx,
+            Err(err) => return stream_failure(err),
+        };
+
+        let initial_requests = match logic
+            .list_requests_for_team(Some(team_uuid), None, None, None)
+            .await
+        {
+            Ok((requests, _)) => requests,
+            Err(err) => return stream_failure(async_graphql::Error::new(format!("{err:?}"))),
+        };
+
+        let stream = stream! {
+            for request in initial_requests {
+                yield Ok(map_approval_request(request));
+            }
+
+            loop {
+                match events_rx.recv().await {
+                    Ok(event) => {
+                        if event.team_id == team_uuid {
+                            yield Ok(map_approval_request(event.request.clone()));
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(err) => {
+                        yield Err(async_graphql::Error::new(format!("{err:?}")));
+                        break;
                     }
                 }
             }

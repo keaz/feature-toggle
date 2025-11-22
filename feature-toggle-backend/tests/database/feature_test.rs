@@ -38,6 +38,24 @@ async fn test_get_existing_feature() {
 }
 
 #[tokio::test]
+async fn test_feature_lifecycle_defaults() {
+    let pool = init_pg_pool().await;
+    let repository = feature::feature_repository(pool);
+
+    let id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+    let feature = repository
+        .get_feature_by_id(id)
+        .await
+        .expect("should load feature");
+
+    assert_eq!(feature.lifecycle_stage, "active");
+    assert_eq!(feature.evaluation_count_7d, 0);
+    assert_eq!(feature.evaluation_count_30d, 0);
+    assert_eq!(feature.evaluation_count_90d, 0);
+    assert!(feature.deprecated_at.is_none());
+}
+
+#[tokio::test]
 async fn test_get_non_existing_feature() {
     let pool = init_pg_pool().await;
     let repository = feature::feature_repository(pool);

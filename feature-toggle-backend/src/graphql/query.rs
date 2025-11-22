@@ -1,12 +1,16 @@
+use crate::database::approval::DEFAULT_APPROVAL_PAGE_SIZE;
+use crate::database::entity::ApprovalStatus;
 use crate::graphql::create_user;
 use crate::graphql::schema::{
-    ActivityLog, ActivityLogPage, ApplicationStatus, Client, ClientType, ClientsPage, ContextsPage,
-    Environment, EnvironmentsPage, EvaluationByFeature, EvaluationCountFilter,
-    EvaluationSummaryOutput, EvaluationSummaryQueryInput, ExperimentAnalysis, Feature,
-    FeatureGrowthPoint, FeatureType, FeaturesPage, JwtSecretResponse, Metric, MetricAnalysis,
-    MetricResult, Pipeline, PipelinesPage, Role, RolloutMetrics, Team, User, UsersPage,
+    ActivityLog, ActivityLogPage, ApplicationStatus, ApprovalRequestPage, ApprovalRequestStatus,
+    Client, ClientType, ClientsPage, ContextsPage, Environment, EnvironmentsPage,
+    EvaluationByFeature, EvaluationCountFilter, EvaluationSummaryOutput,
+    EvaluationSummaryQueryInput, ExperimentAnalysis, Feature, FeatureGrowthPoint, FeatureType,
+    FeaturesPage, JwtSecretResponse, Metric, MetricAnalysis, MetricResult, Pipeline, PipelinesPage,
+    Role, RolloutMetrics, Team, User, UsersPage, map_approval_request,
 };
 use crate::graphql::subscription::calculate_time_range;
+use crate::logic::approval::ApprovalLogic;
 use crate::logic::client::ClientLogic;
 use crate::logic::context::ContextLogic;
 use crate::logic::environment::EnvironmentLogic;
@@ -221,6 +225,49 @@ impl Query {
             page_number: page_num,
             page_size: page_sz,
             total,
+        })
+    }
+
+    async fn approval_requests(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Team ID")] team_id: ID,
+        #[graphql(desc = "Optional statuses to filter")] statuses: Option<
+            Vec<ApprovalRequestStatus>,
+        >,
+        #[graphql(desc = "Page number (1-based)")] page_number: Option<i32>,
+        #[graphql(desc = "Page size")] page_size: Option<i32>,
+    ) -> GqlResult<ApprovalRequestPage> {
+        debug!("Fetching approval requests for team {team_id:?}");
+        let team_uuid = Uuid::try_from(team_id.clone())
+            .map_err(|e| async_graphql::Error::new(format!("Invalid team id: {e}")))?;
+        let logic = ctx.data::<Box<dyn ApprovalLogic>>()?;
+
+        let status_filters = statuses.map(|status_list| {
+            status_list
+                .into_iter()
+                .map(|status| match status {
+                    ApprovalRequestStatus::Pending => ApprovalStatus::Pending,
+                    ApprovalRequestStatus::Approved => ApprovalStatus::Approved,
+                    ApprovalRequestStatus::Rejected => ApprovalStatus::Rejected,
+                    ApprovalRequestStatus::Cancelled => ApprovalStatus::Cancelled,
+                    ApprovalRequestStatus::AutoApproved => ApprovalStatus::AutoApproved,
+                })
+                .collect::<Vec<_>>()
+        });
+
+        let (requests, total) = logic
+            .list_requests_for_team(Some(team_uuid), status_filters, page_number, page_size)
+            .await?;
+
+        let page_num = page_number.unwrap_or(1).max(1);
+        let page_sz = page_size.unwrap_or(DEFAULT_APPROVAL_PAGE_SIZE).max(1);
+
+        Ok(ApprovalRequestPage {
+            items: requests.into_iter().map(map_approval_request).collect(),
+            total,
+            page_number: page_num,
+            page_size: page_sz,
         })
     }
 
@@ -1439,6 +1486,7 @@ mod more_query_tests {
     use async_graphql::{EmptySubscription, Request, Schema};
 
     // Use stub for PipelineLogic (no automock) and mock for EnvironmentLogic
+    use crate::logic::approval::{ApprovalLogic, MockApprovalLogic};
     use crate::logic::environment::MockEnvironmentLogic;
     use std::sync::{Arc, Mutex};
 
@@ -2250,5 +2298,80 @@ mod more_query_tests {
         );
         let data_no_admin = response_no_admin.data.into_json().unwrap();
         assert_eq!(data_no_admin["applicationStatus"]["adminConfigured"], false);
+    }
+
+    #[tokio::test]
+    async fn test_approval_requests_query_returns_data() {
+        let team_id = Uuid::new_v4();
+        let request_entity = crate::database::entity::ApprovalRequest {
+            id: Uuid::new_v4(),
+            policy_id: Uuid::new_v4(),
+            feature_id: Uuid::new_v4(),
+            environment_id: Some(Uuid::new_v4()),
+            change_type: "stage_change".into(),
+            change_payload: serde_json::json!({
+                "stage_id": "stage-abc",
+                "next_status": "DEPLOYMENT_REQUESTED"
+            }),
+            change_description: Some("Deploy to prod".into()),
+            requested_by: Uuid::new_v4(),
+            status: crate::database::entity::ApprovalStatus::Pending,
+            approved_count: 0,
+            rejected_count: 0,
+            executed_at: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let mut mock_logic = MockApprovalLogic::new();
+        let mock_payload = request_entity.clone();
+        mock_logic
+            .expect_list_requests_for_team()
+            .returning(move |team, _, _, _| {
+                assert_eq!(team, Some(team_id));
+                Ok((vec![mock_payload.clone()], 1))
+            });
+
+        let schema = Schema::build(
+            super::Query,
+            crate::graphql::mutation::MutationRoot,
+            EmptySubscription,
+        )
+        .data::<Box<dyn ApprovalLogic>>(Box::new(mock_logic))
+        .finish();
+
+        let mut req = Request::new(
+            r#"
+            query($teamId: ID!) {
+                approvalRequests(teamId: $teamId) {
+                    total
+                    pageNumber
+                    pageSize
+                    items {
+                        id
+                        status
+                    }
+                }
+            }
+        "#,
+        );
+        req = req.variables(async_graphql::Variables::from_json(serde_json::json!({
+            "teamId": team_id.to_string()
+        })));
+
+        let resp = schema.execute(req).await;
+        assert!(
+            resp.errors.is_empty(),
+            "{}",
+            serde_json::to_string(&resp.errors).unwrap()
+        );
+        let data = resp.data.into_json().unwrap();
+        assert_eq!(
+            data["approvalRequests"]["items"][0]["id"],
+            request_entity.id.to_string()
+        );
+        assert_eq!(data["approvalRequests"]["items"][0]["status"], "Pending");
+        assert_eq!(data["approvalRequests"]["total"], 1);
+        assert_eq!(data["approvalRequests"]["pageNumber"], 1);
     }
 }

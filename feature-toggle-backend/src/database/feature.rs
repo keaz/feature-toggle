@@ -124,6 +124,13 @@ struct Features {
     kill_switch_activated_at: Option<DateTime<Utc>>,
     rollback_scheduled_at: Option<DateTime<Utc>>,
     feature_enabled: bool,
+    lifecycle_stage: String,
+    deprecated_at: Option<DateTime<Utc>>,
+    deprecation_notice: Option<String>,
+    last_evaluated_at: Option<DateTime<Utc>>,
+    evaluation_count_7d: i64,
+    evaluation_count_30d: i64,
+    evaluation_count_90d: i64,
 }
 
 #[derive(Debug, sqlx::FromRow, Clone)]
@@ -138,6 +145,13 @@ struct FeatureWithStageRow {
     kill_switch_activated_at: Option<DateTime<Utc>>,
     rollback_scheduled_at: Option<DateTime<Utc>>,
     feature_enabled: bool,
+    lifecycle_stage: String,
+    deprecated_at: Option<DateTime<Utc>>,
+    deprecation_notice: Option<String>,
+    last_evaluated_at: Option<DateTime<Utc>>,
+    evaluation_count_7d: i64,
+    evaluation_count_30d: i64,
+    evaluation_count_90d: i64,
 }
 
 #[derive(Debug, sqlx::FromRow, Clone)]
@@ -160,7 +174,9 @@ struct FeaturePipelineStageRow {
 }
 
 const FEATURE_SELECT: &str = r#"SELECT f.id as feature_id, f.key as feature_key, f.description, f.feature_type, f.team_id, f.created_at, 
-            f.kill_switch_enabled, f.kill_switch_activated_at, f.rollback_scheduled_at, f.active as feature_enabled
+            f.kill_switch_enabled, f.kill_switch_activated_at, f.rollback_scheduled_at, f.active as feature_enabled,
+            f.lifecycle_stage, f.deprecated_at, f.deprecation_notice, f.last_evaluated_at,
+            f.evaluation_count_7d, f.evaluation_count_30d, f.evaluation_count_90d
 			FROM features f"#;
 
 #[automock]
@@ -635,6 +651,13 @@ impl FeatureRepositoryImpl {
             kill_switch_enabled: feature.kill_switch_enabled,
             kill_switch_activated_at: feature.kill_switch_activated_at,
             rollback_scheduled_at: feature.rollback_scheduled_at,
+            lifecycle_stage: feature.lifecycle_stage.clone(),
+            deprecated_at: feature.deprecated_at,
+            deprecation_notice: feature.deprecation_notice.clone(),
+            last_evaluated_at: feature.last_evaluated_at,
+            evaluation_count_7d: feature.evaluation_count_7d,
+            evaluation_count_30d: feature.evaluation_count_30d,
+            evaluation_count_90d: feature.evaluation_count_90d,
             dependencies: vec![], // Dependencies will be loaded separately
         }
     }
@@ -1992,6 +2015,8 @@ impl FeatureRepository for FeatureRepositoryImpl {
             r#"SELECT DISTINCT ON (f.id) f.id as feature_id, f.key as feature_key, f.description,
                f.feature_type, f.team_id, f.created_at, f.kill_switch_enabled,
                f.kill_switch_activated_at, f.rollback_scheduled_at, f.active as feature_enabled,
+               f.lifecycle_stage, f.deprecated_at, f.deprecation_notice, f.last_evaluated_at,
+               f.evaluation_count_7d, f.evaluation_count_30d, f.evaluation_count_90d,
                s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
                s.parent_stage_id, s.position, s.bucketing_key, s.status, s.enabled
                FROM features f
@@ -2073,6 +2098,8 @@ impl FeatureRepository for FeatureRepositoryImpl {
             r#"SELECT DISTINCT ON (f.id) f.id as feature_id, f.key as feature_key, f.description,
                f.feature_type, f.team_id, f.created_at, f.kill_switch_enabled,
                f.kill_switch_activated_at, f.rollback_scheduled_at, f.active as feature_enabled,
+               f.lifecycle_stage, f.deprecated_at, f.deprecation_notice, f.last_evaluated_at,
+               f.evaluation_count_7d, f.evaluation_count_30d, f.evaluation_count_90d,
                s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
                s.parent_stage_id, s.position, s.bucketing_key, s.status, s.enabled
                FROM features f

@@ -239,6 +239,7 @@ mod tests {
     use crate::database::feature::MockFeatureRepository;
     use crate::graphql::schema::Feature as GraphQLFeature;
     use crate::graphql::schema::FeatureType as GraphQLFeatureType;
+    use crate::graphql::schema::LifecycleStage;
     use crate::logic::feature::MockFeatureLogic;
     use async_graphql::ID;
     use chrono::Utc;
@@ -255,8 +256,16 @@ mod tests {
             kill_switch_enabled: true,      // Kill switch is enabled (not activated yet)
             kill_switch_activated_at: None, // Not activated yet
             rollback_scheduled_at: Some(Utc::now() - chrono::Duration::minutes(5)), // Scheduled in the past
+            lifecycle_stage: LifecycleStage::Active,
+            deprecated_at: None,
+            deprecation_notice: None,
+            last_evaluated_at: Some(Utc::now() - chrono::Duration::minutes(6)),
+            evaluation_count_7d: 2,
+            evaluation_count_30d: 5,
+            evaluation_count_90d: 10,
             dependencies: vec![],
             team_id: ID::from("22222222-2222-2222-2222-222222222222"),
+            pending_approval_request_id: None,
         }
     }
 
@@ -270,8 +279,16 @@ mod tests {
             kill_switch_enabled: false, // Kill switch is now activated (disabled)
             kill_switch_activated_at: Some(Utc::now()), // Activation timestamp set
             rollback_scheduled_at: None, // Cleared after execution
+            lifecycle_stage: LifecycleStage::Active,
+            deprecated_at: None,
+            deprecation_notice: None,
+            last_evaluated_at: Some(Utc::now()),
+            evaluation_count_7d: 3,
+            evaluation_count_30d: 7,
+            evaluation_count_90d: 15,
             dependencies: vec![],
             team_id: ID::from("22222222-2222-2222-2222-222222222222"),
+            pending_approval_request_id: None,
         }
     }
 

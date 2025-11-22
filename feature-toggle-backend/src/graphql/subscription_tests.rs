@@ -1,12 +1,14 @@
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::logic::feature_evaluation::{MockFeatureEvaluationLogic, EvaluationRatePoint, EvaluationSummary};
-    use async_graphql::{Schema, Context};
-    use futures_util::stream::StreamExt;
-    use chrono::{DateTime, Utc};
-    use std::sync::Arc;
-    use tokio::time::{sleep, Duration};
+use super::*;
+use crate::logic::approval::{ApprovalLogic, ApprovalRequestEvent, MockApprovalLogic};
+use crate::logic::feature_evaluation::{MockFeatureEvaluationLogic, EvaluationRatePoint, EvaluationSummary};
+use async_graphql::{Schema, Context, Request};
+use futures_util::stream::StreamExt;
+use chrono::{DateTime, Utc};
+use std::sync::Arc;
+use tokio::time::{sleep, Duration};
+use serde_json::json;
 
     /// Test basic subscription input validation
     #[tokio::test]
@@ -183,5 +185,78 @@ mod tests {
             // Verify calculated cache hit rate: 25/100 * 100 = 25%
             assert!((rate_point.cache_hit_rate - 25.0).abs() < f64::EPSILON);
         }
+    }
+
+    #[tokio::test]
+    async fn test_approval_requests_subscription_streams_events() {
+        let team_id = Uuid::new_v4();
+
+        let request_entity = crate::database::entity::ApprovalRequest {
+            id: Uuid::new_v4(),
+            policy_id: Uuid::new_v4(),
+            feature_id: Uuid::new_v4(),
+            environment_id: Some(Uuid::new_v4()),
+            change_type: "stage_change".into(),
+            change_payload: json!({
+                "stage_id": "stage-1",
+                "next_status": "DEPLOYMENT_REQUESTED"
+            }),
+            change_description: Some("Pending approval".into()),
+            requested_by: Uuid::new_v4(),
+            status: crate::database::entity::ApprovalStatus::Pending,
+            approved_count: 0,
+            rejected_count: 0,
+            executed_at: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let mut mock_logic = MockApprovalLogic::new();
+        mock_logic.expect_list_requests_for_team().returning(move |team, _, _, _| {
+            assert_eq!(team, Some(team_id));
+            Ok((vec![request_entity.clone()], 1))
+        });
+
+        let (tx, _rx) = tokio::sync::broadcast::channel::<ApprovalRequestEvent>(4);
+
+        let schema = Schema::build(
+            async_graphql::EmptyQuery,
+            async_graphql::EmptyMutation,
+            FeatureEvaluationSubscription,
+        )
+        .data(Box::new(mock_logic) as Box<dyn ApprovalLogic>)
+        .data(tx.clone())
+        .finish();
+
+        let request = format!(
+            "subscription {{ approvalRequestsForTeam(teamId: \"{team_id}\") {{ id status }} }}",
+        );
+
+        let mut stream = schema.execute_stream(Request::new(request));
+        let first = stream.next().await.unwrap();
+        assert!(first.errors.is_empty());
+        let data = first.data.into_json().unwrap();
+        assert_eq!(
+            data["approvalRequestsForTeam"]["id"],
+            request_entity.id.to_string()
+        );
+
+        let mut updated_request = request_entity.clone();
+        updated_request.status = crate::database::entity::ApprovalStatus::Approved;
+
+        tx.send(ApprovalRequestEvent {
+            request: updated_request.clone(),
+            team_id,
+        })
+        .unwrap();
+
+        let second = stream.next().await.unwrap();
+        assert!(second.errors.is_empty());
+        let data = second.data.into_json().unwrap();
+        assert_eq!(
+            data["approvalRequestsForTeam"]["id"],
+            updated_request.id.to_string()
+        );
+        assert_eq!(data["approvalRequestsForTeam"]["status"], "APPROVED");
     }
 }

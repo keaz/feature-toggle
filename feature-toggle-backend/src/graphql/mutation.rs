@@ -2,16 +2,19 @@ use std::sync::Arc;
 
 use crate::database::feature::FeatureRepository;
 use crate::graphql::create_user;
+use crate::graphql::schema::map_approval_request;
 use crate::graphql::schema::{
-    AssignUserRolesInput, CreateClientInput, CreateEnvironmentInput, CreateFeatureInput,
-    CreateMetricInput, CreatePipelineInput, CreateTeamInput, CreateVariantAllocationInput,
-    Environment, Feature, LoginInput as GqlLoginInput, LoginResponse, Metric, Pipeline,
-    RegisterUserInput as GqlRegisterUserInput, ResetPasswordInput as GqlResetPasswordInput, Role,
+    ApprovalRequest, AssignUserRolesInput, CreateClientInput, CreateEnvironmentInput,
+    CreateFeatureInput, CreateMetricInput, CreatePipelineInput, CreateTeamInput,
+    CreateVariantAllocationInput, Environment, Feature, LoginInput as GqlLoginInput, LoginResponse,
+    Metric, Pipeline, RegisterUserInput as GqlRegisterUserInput,
+    ResetPasswordInput as GqlResetPasswordInput, Role,
     SetTemporaryPasswordInput as GqlSetTemporaryPasswordInput, Team, UpdateClientInput,
     UpdateEnvironmentInput, UpdateFeatureInput, UpdatePipelineInput, UpdateTeamInput,
     UpdateUserInput as GqlUpdateUserInput, UpdateVariantAllocationInput, User, VariantAllocation,
 };
 use crate::graphql::validator::{CreateInputValidator, UpdateInputValidator};
+use crate::logic::approval::ApprovalLogic;
 use crate::logic::client::ClientLogic;
 use crate::logic::context::ContextLogic;
 use crate::logic::environment::EnvironmentLogic;
@@ -1038,6 +1041,77 @@ impl MutationRoot {
         Ok(feature)
     }
 
+    /// Approve a pending change request and execute when quorum reached
+    async fn approve_change_request(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Change request ID")] request_id: ID,
+        #[graphql(desc = "Optional approval comment")] comment: Option<String>,
+    ) -> GqlResult<ApprovalRequest> {
+        let user = ctx
+            .data_opt::<crate::JwtUser>()
+            .cloned()
+            .ok_or_else(|| async_graphql::Error::new("User authentication not found"))?;
+        let logic = ctx.data::<Box<dyn ApprovalLogic>>()?;
+
+        let request_uuid = uuid::Uuid::try_from(request_id)
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+
+        let updated = logic
+            .approve_request(request_uuid, user.id, comment)
+            .await
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+
+        Ok(crate::graphql::schema::map_approval_request(updated))
+    }
+
+    /// Reject a pending change request
+    async fn reject_change_request(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Change request ID")] request_id: ID,
+        #[graphql(desc = "Reason for rejection")] comment: String,
+    ) -> GqlResult<ApprovalRequest> {
+        let user = ctx
+            .data_opt::<crate::JwtUser>()
+            .cloned()
+            .ok_or_else(|| async_graphql::Error::new("User authentication not found"))?;
+        let logic = ctx.data::<Box<dyn ApprovalLogic>>()?;
+
+        let request_uuid = uuid::Uuid::try_from(request_id)
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+
+        let updated = logic
+            .reject_request(request_uuid, user.id, Some(comment))
+            .await
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+
+        Ok(map_approval_request(updated))
+    }
+
+    /// Cancel a pending change request (by requester or admin)
+    async fn cancel_change_request(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Change request ID")] request_id: ID,
+    ) -> GqlResult<ApprovalRequest> {
+        let user = ctx
+            .data_opt::<crate::JwtUser>()
+            .cloned()
+            .ok_or_else(|| async_graphql::Error::new("User authentication not found"))?;
+        let logic = ctx.data::<Box<dyn ApprovalLogic>>()?;
+
+        let request_uuid = uuid::Uuid::try_from(request_id)
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+
+        let updated = logic
+            .cancel_request(request_uuid, user.id)
+            .await
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+
+        Ok(map_approval_request(updated))
+    }
+
     // User mutations
     async fn register_user(
         &self,
@@ -1778,12 +1852,19 @@ mod more_mutation_tests {
                 description: None,
                 feature_type: crate::database::entity::FeatureType::Contextual,
                 team_id: Uuid::new_v4(),
+                active: true,
                 created_at: chrono::Utc::now(),
                 kill_switch_enabled: false,
                 kill_switch_activated_at: None,
                 rollback_scheduled_at: None,
+                lifecycle_stage: "active".to_string(),
+                deprecated_at: None,
+                deprecation_notice: None,
+                last_evaluated_at: None,
+                evaluation_count_7d: 0,
+                evaluation_count_30d: 0,
+                evaluation_count_90d: 0,
                 dependencies: vec![],
-                active: true,
             })
         });
         repo.expect_get_feature_stages().returning(move |_| {
@@ -2544,6 +2625,162 @@ mod more_mutation_tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_approve_change_request_maps_response() {
+        #[derive(Clone)]
+        struct StubApprovalLogic {
+            expected_id: Uuid,
+            expected_user: Uuid,
+            response: crate::database::entity::ApprovalRequest,
+        }
+
+        #[async_trait::async_trait]
+        impl ApprovalLogic for StubApprovalLogic {
+            async fn maybe_create_stage_change_request(
+                &self,
+                _: &crate::database::entity::Feature,
+                _: &crate::database::entity::FeaturePipelineStage,
+                _: &str,
+                _: Uuid,
+            ) -> Result<Option<crate::database::entity::ApprovalRequest>, crate::Error>
+            {
+                Ok(None)
+            }
+
+            async fn approve_request(
+                &self,
+                request_id: Uuid,
+                approver_id: Uuid,
+                _comment: Option<String>,
+            ) -> Result<crate::database::entity::ApprovalRequest, crate::Error> {
+                assert_eq!(request_id, self.expected_id);
+                assert_eq!(approver_id, self.expected_user);
+                Ok(self.response.clone())
+            }
+
+            async fn reject_request(
+                &self,
+                _request_id: Uuid,
+                _approver_id: Uuid,
+                _comment: Option<String>,
+            ) -> Result<crate::database::entity::ApprovalRequest, crate::Error> {
+                Err(crate::Error::InvalidInput("not used".into()))
+            }
+
+            async fn cancel_request(
+                &self,
+                _request_id: Uuid,
+                _cancelled_by: Uuid,
+            ) -> Result<crate::database::entity::ApprovalRequest, crate::Error> {
+                Err(crate::Error::InvalidInput("not used".into()))
+            }
+
+            async fn get_request(
+                &self,
+                _request_id: Uuid,
+            ) -> Result<crate::database::entity::ApprovalRequest, crate::Error> {
+                Err(crate::Error::InvalidInput("not used".into()))
+            }
+
+            async fn list_requests_for_team(
+                &self,
+                _team_id: Option<Uuid>,
+                _statuses: Option<Vec<crate::database::entity::ApprovalStatus>>,
+                _page_number: Option<i32>,
+                _page_size: Option<i32>,
+            ) -> Result<(Vec<crate::database::entity::ApprovalRequest>, i64), crate::Error>
+            {
+                Err(crate::Error::InvalidInput("not used".into()))
+            }
+
+            async fn auto_approve_request(
+                &self,
+                _request: crate::database::entity::ApprovalRequest,
+            ) -> Result<crate::database::entity::ApprovalRequest, crate::Error> {
+                Err(crate::Error::InvalidInput("not used".into()))
+            }
+
+            fn clone_box(&self) -> Box<dyn ApprovalLogic> {
+                Box::new(self.clone())
+            }
+        }
+
+        let request_id = Uuid::new_v4();
+        let policy_id = Uuid::new_v4();
+        let feature_id = Uuid::new_v4();
+        let environment_id = Uuid::new_v4();
+        let approver_id = Uuid::new_v4();
+
+        let db_request = crate::database::entity::ApprovalRequest {
+            id: request_id,
+            policy_id,
+            feature_id,
+            environment_id: Some(environment_id),
+            change_type: "stage_change".into(),
+            change_payload: serde_json::json!({
+                "stage_id": "stage-1",
+                "next_status": "DEPLOYED"
+            }),
+            change_description: Some("Deploy to prod".into()),
+            requested_by: Uuid::new_v4(),
+            status: crate::database::entity::ApprovalStatus::Approved,
+            approved_count: 2,
+            rejected_count: 0,
+            executed_at: Some(Utc::now()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
+            .data::<Box<dyn ApprovalLogic>>(Box::new(StubApprovalLogic {
+                expected_id: request_id,
+                expected_user: approver_id,
+                response: db_request.clone(),
+            }))
+            .data(crate::JwtUser {
+                id: approver_id,
+                username: "approver".to_string(),
+                is_admin: false,
+                roles: vec!["Approver".to_string()],
+                token_hash: "hash".to_string(),
+            })
+            .finish();
+
+        let gql = r#"
+            mutation($id: ID!) {
+                approveChangeRequest(requestId: $id, comment: "Ship it") {
+                    id
+                    policyId
+                    featureId
+                    status
+                    approvedCount
+                }
+            }
+        "#;
+        let mut req = Request::new(gql);
+        req = req.variables(async_graphql::Variables::from_json(serde_json::json!({
+            "id": request_id.to_string()
+        })));
+
+        let resp = schema.execute(req).await;
+        assert!(
+            resp.errors.is_empty(),
+            "{}",
+            serde_json::to_string(&resp.errors).unwrap()
+        );
+        let data = resp.data.into_json().unwrap();
+        assert_eq!(data["approveChangeRequest"]["status"], "Approved");
+        assert_eq!(data["approveChangeRequest"]["approvedCount"], 2);
+        assert_eq!(
+            data["approveChangeRequest"]["policyId"],
+            policy_id.to_string()
+        );
+        assert_eq!(
+            data["approveChangeRequest"]["featureId"],
+            feature_id.to_string()
+        );
+    }
+
     // Helper function to create a mock feature for testing
     fn create_mock_feature() -> crate::graphql::schema::Feature {
         crate::graphql::schema::Feature {
@@ -2555,8 +2792,16 @@ mod more_mutation_tests {
             kill_switch_enabled: true,
             kill_switch_activated_at: None,
             rollback_scheduled_at: Some(Utc::now()),
+            lifecycle_stage: crate::graphql::schema::LifecycleStage::Active,
+            deprecated_at: None,
+            deprecation_notice: None,
+            last_evaluated_at: None,
+            evaluation_count_7d: 0,
+            evaluation_count_30d: 0,
+            evaluation_count_90d: 0,
             dependencies: vec![],
             team_id: async_graphql::ID::from(Uuid::new_v4().to_string()),
+            pending_approval_request_id: None,
         }
     }
 

@@ -23,6 +23,7 @@ impl ActorContext {
     }
 }
 
+pub mod approval;
 pub mod authorization;
 pub mod client;
 pub mod context;

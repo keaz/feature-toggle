@@ -44,6 +44,20 @@ pub enum RuleOperator {
     SemverLessThan,
 }
 
+#[derive(Enum, Copy, Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
+pub enum LifecycleStage {
+    Active,
+    Deprecated,
+    Archived,
+    Permanent,
+}
+
+impl Default for LifecycleStage {
+    fn default() -> Self {
+        LifecycleStage::Active
+    }
+}
+
 impl Default for RuleOperator {
     fn default() -> Self {
         RuleOperator::In
@@ -83,8 +97,23 @@ pub struct Feature {
     pub kill_switch_enabled: bool,
     pub kill_switch_activated_at: Option<chrono::DateTime<chrono::Utc>>,
     pub rollback_scheduled_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[graphql(name = "lifecycleStage")]
+    pub lifecycle_stage: LifecycleStage,
+    #[graphql(name = "deprecatedAt")]
+    pub deprecated_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[graphql(name = "deprecationNotice")]
+    pub deprecation_notice: Option<String>,
+    #[graphql(name = "lastEvaluatedAt")]
+    pub last_evaluated_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[graphql(name = "evaluationCount7d")]
+    pub evaluation_count_7d: i64,
+    #[graphql(name = "evaluationCount30d")]
+    pub evaluation_count_30d: i64,
+    #[graphql(name = "evaluationCount90d")]
+    pub evaluation_count_90d: i64,
     pub dependencies: Vec<ID>,
     pub team_id: ID,
+    pub pending_approval_request_id: Option<ID>,
 }
 
 #[ComplexObject]
@@ -189,6 +218,75 @@ impl Feature {
         let relationships = create_relationships(true, db_stages_for_rels, relationship_factory);
         Ok(relationships)
     }
+}
+
+#[derive(Enum, Copy, Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
+pub enum ApprovalRequestStatus {
+    #[graphql(name = "Pending")]
+    Pending,
+    #[graphql(name = "Approved")]
+    Approved,
+    #[graphql(name = "Rejected")]
+    Rejected,
+    #[graphql(name = "Cancelled")]
+    Cancelled,
+    #[graphql(name = "AutoApproved")]
+    AutoApproved,
+}
+
+#[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
+pub struct ApprovalRequest {
+    pub id: ID,
+    pub policy_id: ID,
+    pub feature_id: ID,
+    pub environment_id: Option<ID>,
+    pub change_type: String,
+    pub change_payload: async_graphql::Json<serde_json::Value>,
+    pub change_description: Option<String>,
+    pub requested_by: ID,
+    pub status: ApprovalRequestStatus,
+    pub approved_count: i32,
+    pub rejected_count: i32,
+    pub executed_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+pub fn map_approval_request(req: crate::database::entity::ApprovalRequest) -> ApprovalRequest {
+    let status = match req.status {
+        crate::database::entity::ApprovalStatus::Approved => ApprovalRequestStatus::Approved,
+        crate::database::entity::ApprovalStatus::Rejected => ApprovalRequestStatus::Rejected,
+        crate::database::entity::ApprovalStatus::Cancelled => ApprovalRequestStatus::Cancelled,
+        crate::database::entity::ApprovalStatus::AutoApproved => {
+            ApprovalRequestStatus::AutoApproved
+        }
+        crate::database::entity::ApprovalStatus::Pending => ApprovalRequestStatus::Pending,
+    };
+
+    ApprovalRequest {
+        id: req.id.into(),
+        policy_id: req.policy_id.into(),
+        feature_id: req.feature_id.into(),
+        environment_id: req.environment_id.map(ID::from),
+        change_type: req.change_type,
+        change_payload: async_graphql::Json(req.change_payload),
+        change_description: req.change_description,
+        requested_by: req.requested_by.into(),
+        status,
+        approved_count: req.approved_count,
+        rejected_count: req.rejected_count,
+        executed_at: req.executed_at,
+        created_at: req.created_at,
+        updated_at: req.updated_at,
+    }
+}
+
+#[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
+pub struct ApprovalRequestPage {
+    pub items: Vec<ApprovalRequest>,
+    pub total: i64,
+    pub page_number: i32,
+    pub page_size: i32,
 }
 
 fn relationship_factory(source_id: i32, target_id: i32) -> FeatureRelationship {

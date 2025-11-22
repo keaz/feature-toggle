@@ -1,3 +1,4 @@
+mod approval_workflow_test;
 mod client_integration;
 mod compound_rules_test;
 mod context_test;

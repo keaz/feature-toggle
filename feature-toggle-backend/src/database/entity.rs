@@ -45,6 +45,13 @@ pub struct Feature {
     pub kill_switch_enabled: bool,
     pub kill_switch_activated_at: Option<DateTime<Utc>>,
     pub rollback_scheduled_at: Option<DateTime<Utc>>,
+    pub lifecycle_stage: String,
+    pub deprecated_at: Option<DateTime<Utc>>,
+    pub deprecation_notice: Option<String>,
+    pub last_evaluated_at: Option<DateTime<Utc>>,
+    pub evaluation_count_7d: i64,
+    pub evaluation_count_30d: i64,
+    pub evaluation_count_90d: i64,
     pub dependencies: Vec<FeatureDependency>,
 }
 
@@ -230,6 +237,102 @@ pub struct Client {
     pub client_type: ClientType,
     pub api_key: String,
     pub web_origins: Option<Vec<String>>, // Populated when loading with joins
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub enum ApprovalStatus {
+    Pending,
+    Approved,
+    Rejected,
+    Cancelled,
+    AutoApproved,
+}
+
+impl ApprovalStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ApprovalStatus::Pending => "pending",
+            ApprovalStatus::Approved => "approved",
+            ApprovalStatus::Rejected => "rejected",
+            ApprovalStatus::Cancelled => "cancelled",
+            ApprovalStatus::AutoApproved => "auto_approved",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "approved" => ApprovalStatus::Approved,
+            "rejected" => ApprovalStatus::Rejected,
+            "cancelled" => ApprovalStatus::Cancelled,
+            "auto_approved" => ApprovalStatus::AutoApproved,
+            _ => ApprovalStatus::Pending,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub enum ApprovalVoteValue {
+    Approve,
+    Reject,
+}
+
+impl ApprovalVoteValue {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ApprovalVoteValue::Approve => "approve",
+            ApprovalVoteValue::Reject => "reject",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "reject" => ApprovalVoteValue::Reject,
+            _ => ApprovalVoteValue::Approve,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
+pub struct ApprovalPolicy {
+    pub id: Uuid,
+    pub team_id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub applies_to: String,
+    pub environment_ids: Option<Vec<Uuid>>,
+    pub required_approvers: i32,
+    pub approver_role_ids: Vec<Uuid>,
+    pub auto_approve_after_hours: Option<i32>,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
+pub struct ApprovalRequest {
+    pub id: Uuid,
+    pub policy_id: Uuid,
+    pub feature_id: Uuid,
+    pub environment_id: Option<Uuid>,
+    pub change_type: String,
+    pub change_payload: JsonValue,
+    pub change_description: Option<String>,
+    pub requested_by: Uuid,
+    pub status: ApprovalStatus,
+    pub approved_count: i32,
+    pub rejected_count: i32,
+    pub executed_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
+pub struct ApprovalVote {
+    pub id: Uuid,
+    pub request_id: Uuid,
+    pub approver_id: Uuid,
+    pub vote: ApprovalVoteValue,
+    pub comment: Option<String>,
+    pub created_at: DateTime<Utc>,
 }
 
 pub trait DBStage: Send + Sync {

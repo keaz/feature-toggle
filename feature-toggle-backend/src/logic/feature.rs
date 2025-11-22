@@ -1,15 +1,15 @@
 use crate::Error;
-use crate::database::entity::{DBStage, FeatureType as EntityFeatureType};
+use crate::database::entity::FeatureType as EntityFeatureType;
 use crate::database::feature::{
     CreateFeature, CreateFeatureStage, FeatureRepository, UpdateFeature,
 };
 use crate::graphql::schema::{
-    CreateFeatureInput, CreateFeatureStageInput, CreateRelationshipInput, Environment, Feature,
-    FeatureRelationship, FeatureStage, FeatureType as GraphQLFeatureType, UpdateFeatureInput,
+    CreateFeatureInput, CreateFeatureStageInput, CreateRelationshipInput, Feature,
+    FeatureType as GraphQLFeatureType, LifecycleStage, UpdateFeatureInput,
 };
+use crate::logic::approval::ApprovalLogic;
 use crate::logic::environment::EnvironmentLogic;
 use crate::logic::stage_builder::{build_stage_relationships, id_to_uuid};
-use crate::logic::{create_relationships, get_environment_map, map_stages};
 use async_graphql::ID;
 use feature_toggle_shared::constants::StageStatus;
 use uuid::Uuid;
@@ -265,11 +265,28 @@ pub fn feature_logic(
     activity_log_repository: Box<dyn crate::database::activity_log::ActivityLogRepository>,
     user_repository: Box<dyn crate::database::user::UserRepository>,
 ) -> Box<dyn FeatureLogic> {
+    feature_logic_with_approval(
+        repository,
+        environment_logic,
+        activity_log_repository,
+        user_repository,
+        None,
+    )
+}
+
+pub fn feature_logic_with_approval(
+    repository: Box<dyn FeatureRepository>,
+    environment_logic: Box<dyn EnvironmentLogic>,
+    activity_log_repository: Box<dyn crate::database::activity_log::ActivityLogRepository>,
+    user_repository: Box<dyn crate::database::user::UserRepository>,
+    approval_logic: Option<Box<dyn ApprovalLogic>>,
+) -> Box<dyn FeatureLogic> {
     Box::new(FeatureLogicImpl {
         repository,
         environment_logic,
         activity_log_repository,
         user_repository,
+        approval_logic,
     })
 }
 
@@ -278,6 +295,7 @@ struct FeatureLogicImpl {
     environment_logic: Box<dyn EnvironmentLogic>,
     activity_log_repository: Box<dyn crate::database::activity_log::ActivityLogRepository>,
     user_repository: Box<dyn crate::database::user::UserRepository>,
+    approval_logic: Option<Box<dyn ApprovalLogic>>,
 }
 
 impl Clone for FeatureLogicImpl {
@@ -287,6 +305,7 @@ impl Clone for FeatureLogicImpl {
             environment_logic: self.environment_logic.clone_box(),
             activity_log_repository: self.activity_log_repository.clone_box(),
             user_repository: self.user_repository.clone_box(),
+            approval_logic: self.approval_logic.as_ref().map(|a| a.clone_box()),
         }
     }
 }
@@ -444,12 +463,29 @@ impl FeatureLogicImpl {
             kill_switch_enabled: feature.kill_switch_enabled,
             kill_switch_activated_at: feature.kill_switch_activated_at,
             rollback_scheduled_at: feature.rollback_scheduled_at,
+            lifecycle_stage: Self::map_db_lifecycle_stage(&feature.lifecycle_stage),
+            deprecated_at: feature.deprecated_at,
+            deprecation_notice: feature.deprecation_notice.clone(),
+            last_evaluated_at: feature.last_evaluated_at,
+            evaluation_count_7d: feature.evaluation_count_7d,
+            evaluation_count_30d: feature.evaluation_count_30d,
+            evaluation_count_90d: feature.evaluation_count_90d,
             team_id: feature.team_id.into(),
             dependencies: feature
                 .dependencies
                 .into_iter()
                 .map(|d| d.depends_on_id.into())
                 .collect(),
+            pending_approval_request_id: None,
+        }
+    }
+
+    fn map_db_lifecycle_stage(stage: &str) -> LifecycleStage {
+        match stage.to_lowercase().as_str() {
+            "deprecated" => LifecycleStage::Deprecated,
+            "archived" => LifecycleStage::Archived,
+            "permanent" => LifecycleStage::Permanent,
+            _ => LifecycleStage::Active,
         }
     }
 }
@@ -909,18 +945,50 @@ impl DeploymentLogic for FeatureLogicImpl {
             StageChangeRequestType::Rollbacked => StageStatus::Rollbacked.as_str(),
         };
 
-        let stage = self.repository.get_stage_by_id(stage_uuid).await?;
+        let stage = self
+            .repository
+            .get_stage_by_id(stage_uuid)
+            .await?
+            .ok_or(Error::NotFound(stage_uuid))?;
 
-        if let Some(stage) = stage {
-            // Use the GraphQL validator to validate transition
-            if let Err(e) = crate::graphql::validator::feature::validate_stage_transition(
-                &stage.status,
-                next_status,
-            ) {
-                return Err(Error::InvalidInput(format!("{:?}", e)));
+        // Use the GraphQL validator to validate transition
+        if let Err(e) = crate::graphql::validator::feature::validate_stage_transition(
+            &stage.status,
+            next_status,
+        ) {
+            return Err(Error::InvalidInput(format!("{:?}", e)));
+        }
+
+        // If an approval policy applies, create a pending approval request instead of executing immediately.
+        let feature_id_for_stage = self
+            .repository
+            .get_feature_id_by_stage_id(stage_uuid)
+            .await?
+            .ok_or(Error::NotFound(stage_uuid))?;
+        if let Some(approval_logic) = &self.approval_logic {
+            let db_feature = self
+                .repository
+                .get_feature_by_id(feature_id_for_stage)
+                .await?;
+
+            if let Some(request) = approval_logic
+                .maybe_create_stage_change_request(&db_feature, &stage, next_status, user_id)
+                .await?
+            {
+                if next_status == "DEPLOYMENT_REQUESTED" || next_status == "ROLLBACK_REQUESTED" {
+                    let now = chrono::Utc::now();
+                    let updated =
+                        self.repository
+                            .request_stage_change(stage_uuid, next_status, user_id, now)
+                            .await?;
+                    if !updated {
+                        return Err(Error::NotFound(stage_uuid));
+                    }
+                }
+                let mut gql_feature = FeatureLogicImpl::map_entity_to_graphql_feature(db_feature);
+                gql_feature.pending_approval_request_id = Some(ID::from(request.id));
+                return Ok(gql_feature);
             }
-        } else {
-            return Err(Error::NotFound(stage_uuid));
         }
 
         let ok = match request {
@@ -945,136 +1013,132 @@ impl DeploymentLogic for FeatureLogicImpl {
         }
 
         // Load the owning feature of this stage and return it, mapped to GraphQL Feature
-        if let Some(fid) = self
+        let db_feature = self
             .repository
-            .get_feature_id_by_stage_id(stage_uuid)
-            .await?
-        {
-            let db_feature = self.repository.get_feature_by_id(fid).await?;
+            .get_feature_by_id(feature_id_for_stage)
+            .await?;
 
-            // Find the stage to get environment information
-            let stages = self
-                .repository
-                .get_feature_stages(db_feature.id.clone())
-                .await?;
-            let stage = stages.iter().find(|s| s.id == stage_uuid);
+        // Find the stage to get environment information
+        let stages = self
+            .repository
+            .get_feature_stages(db_feature.id.clone())
+            .await?;
+        let stage = stages.iter().find(|s| s.id == stage_uuid);
 
-            // Get environment name if stage is found
-            let environment_name = if let Some(stage) = stage {
-                match self
-                    .environment_logic
-                    .get_environment_by_id(ID::from(stage.environment_id))
-                    .await
-                {
-                    Ok(env) => Some(env.name),
-                    Err(_) => None,
-                }
-            } else {
-                None
-            };
-
-            // Log activity based on request type (ignore errors to not fail the operation)
-            let (activity_type, description) = match request {
-                StageChangeRequestType::Deployed => {
-                    let desc = if let Some(ref env_name) = environment_name {
-                        format!(
-                            "Deployed feature '{}' to environment '{}'",
-                            db_feature.key, env_name
-                        )
-                    } else {
-                        format!(
-                            "Deployed feature '{}' to stage '{}'",
-                            db_feature.key,
-                            stage_id.to_string()
-                        )
-                    };
-                    (
-                        crate::utils::activity_logger::activity_types::STAGE_DEPLOYED,
-                        desc,
-                    )
-                }
-                StageChangeRequestType::DeploymentRejected
-                | StageChangeRequestType::RollbackRejected => {
-                    let desc = if let Some(ref env_name) = environment_name {
-                        format!(
-                            "Rejected change request for feature '{}' environment '{}'",
-                            db_feature.key, env_name
-                        )
-                    } else {
-                        format!(
-                            "Rejected change request for feature '{}' stage '{}'",
-                            db_feature.key,
-                            stage_id.to_string()
-                        )
-                    };
-                    (
-                        crate::utils::activity_logger::activity_types::STAGE_REJECTED,
-                        desc,
-                    )
-                }
-                StageChangeRequestType::Rollbacked => {
-                    let desc = if let Some(ref env_name) = environment_name {
-                        format!(
-                            "Rolled back feature '{}' from environment '{}'",
-                            db_feature.key, env_name
-                        )
-                    } else {
-                        format!(
-                            "Rolled back feature '{}' from stage '{}'",
-                            db_feature.key,
-                            stage_id.to_string()
-                        )
-                    };
-                    (
-                        crate::utils::activity_logger::activity_types::STAGE_ROLLBACKED,
-                        desc,
-                    )
-                }
-                _ => {
-                    let desc = if let Some(ref env_name) = environment_name {
-                        format!(
-                            "Requested {} for feature '{}' environment '{}'",
-                            next_status, db_feature.key, env_name
-                        )
-                    } else {
-                        format!(
-                            "Requested {} for feature '{}' stage '{}'",
-                            next_status,
-                            db_feature.key,
-                            stage_id.to_string()
-                        )
-                    };
-                    ("stage_change_requested", desc)
-                }
-            };
-
-            let mut metadata = serde_json::json!({
-                "feature_id": db_feature.id.to_string(),
-                "feature_key": db_feature.key.clone(),
-                "stage_id": stage_id.to_string(),
-                "status": next_status,
-            });
-
-            // Add environment name to metadata if available
-            if let Some(env_name) = environment_name {
-                metadata["environment_name"] = serde_json::json!(env_name);
+        // Get environment name if stage is found
+        let environment_name = if let Some(stage) = stage {
+            match self
+                .environment_logic
+                .get_environment_by_id(ID::from(stage.environment_id))
+                .await
+            {
+                Ok(env) => Some(env.name),
+                Err(_) => None,
             }
+        } else {
+            None
+        };
 
-            let _ = crate::utils::activity_logger::log_activity(
-                &self.activity_log_repository,
-                activity_type,
-                crate::utils::activity_logger::entity_types::STAGE,
-                &stage_id.to_string(),
-                Some(user_id),
-                None,
-                description,
-                Some(metadata),
-            )
-            .await;
+        // Log activity based on request type (ignore errors to not fail the operation)
+        let (activity_type, description) = match request {
+            StageChangeRequestType::Deployed => {
+                let desc = if let Some(ref env_name) = environment_name {
+                    format!(
+                        "Deployed feature '{}' to environment '{}'",
+                        db_feature.key, env_name
+                    )
+                } else {
+                    format!(
+                        "Deployed feature '{}' to stage '{}'",
+                        db_feature.key,
+                        stage_id.to_string()
+                    )
+                };
+                (
+                    crate::utils::activity_logger::activity_types::STAGE_DEPLOYED,
+                    desc,
+                )
+            }
+            StageChangeRequestType::DeploymentRejected
+            | StageChangeRequestType::RollbackRejected => {
+                let desc = if let Some(ref env_name) = environment_name {
+                    format!(
+                        "Rejected change request for feature '{}' environment '{}'",
+                        db_feature.key, env_name
+                    )
+                } else {
+                    format!(
+                        "Rejected change request for feature '{}' stage '{}'",
+                        db_feature.key,
+                        stage_id.to_string()
+                    )
+                };
+                (
+                    crate::utils::activity_logger::activity_types::STAGE_REJECTED,
+                    desc,
+                )
+            }
+            StageChangeRequestType::Rollbacked => {
+                let desc = if let Some(ref env_name) = environment_name {
+                    format!(
+                        "Rolled back feature '{}' from environment '{}'",
+                        db_feature.key, env_name
+                    )
+                } else {
+                    format!(
+                        "Rolled back feature '{}' from stage '{}'",
+                        db_feature.key,
+                        stage_id.to_string()
+                    )
+                };
+                (
+                    crate::utils::activity_logger::activity_types::STAGE_ROLLBACKED,
+                    desc,
+                )
+            }
+            _ => {
+                let desc = if let Some(ref env_name) = environment_name {
+                    format!(
+                        "Requested {} for feature '{}' environment '{}'",
+                        next_status, db_feature.key, env_name
+                    )
+                } else {
+                    format!(
+                        "Requested {} for feature '{}' stage '{}'",
+                        next_status,
+                        db_feature.key,
+                        stage_id.to_string()
+                    )
+                };
+                ("stage_change_requested", desc)
+            }
+        };
 
-            return Ok(FeatureLogicImpl::map_entity_to_graphql_feature(db_feature));
+        let mut metadata = serde_json::json!({
+            "feature_id": db_feature.id.to_string(),
+            "feature_key": db_feature.key.clone(),
+            "stage_id": stage_id.to_string(),
+            "status": next_status,
+        });
+
+        // Add environment name to metadata if available
+        if let Some(env_name) = environment_name {
+            metadata["environment_name"] = serde_json::json!(env_name);
         }
-        Err(Error::NotFound(stage_uuid))
+
+        let _ = crate::utils::activity_logger::log_activity(
+            &self.activity_log_repository,
+            activity_type,
+            crate::utils::activity_logger::entity_types::STAGE,
+            &stage_id.to_string(),
+            Some(user_id),
+            None,
+            description,
+            Some(metadata),
+        )
+        .await;
+
+        Ok(FeatureLogicImpl::map_entity_to_graphql_feature(db_feature))
     }
 
     async fn get_feature_id_by_stage_id(&self, stage_id: ID) -> Result<Option<Uuid>, Error> {
@@ -1308,6 +1372,13 @@ mod test {
                     kill_switch_enabled: true,
                     kill_switch_activated_at: None,
                     rollback_scheduled_at: None,
+                    lifecycle_stage: "active".to_string(),
+                    deprecated_at: None,
+                    deprecation_notice: None,
+                    last_evaluated_at: None,
+                    evaluation_count_7d: 0,
+                    evaluation_count_30d: 0,
+                    evaluation_count_90d: 0,
                     dependencies: vec![],
                 })
             });
@@ -1428,11 +1499,18 @@ mod test {
                     description: Some("Updated description".to_string()),
                     feature_type: EntityFeatureType::Contextual,
                     team_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
-                    created_at: chrono::Utc::now(),
                     active: true,
+                    created_at: chrono::Utc::now(),
                     kill_switch_enabled: true,
                     kill_switch_activated_at: None,
                     rollback_scheduled_at: None,
+                    lifecycle_stage: "active".to_string(),
+                    deprecated_at: None,
+                    deprecation_notice: None,
+                    last_evaluated_at: None,
+                    evaluation_count_7d: 0,
+                    evaluation_count_30d: 0,
+                    evaluation_count_90d: 0,
                     dependencies: vec![],
                 })
             });
@@ -1495,11 +1573,18 @@ mod test {
                         description: Some("Test description".to_string()),
                         feature_type: EntityFeatureType::Simple,
                         team_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
+                        active: true,
                         created_at: chrono::Utc::now(),
                         kill_switch_enabled: true,
-                        active: true,
                         kill_switch_activated_at: None,
                         rollback_scheduled_at: None,
+                        lifecycle_stage: "active".to_string(),
+                        deprecated_at: None,
+                        deprecation_notice: None,
+                        last_evaluated_at: None,
+                        evaluation_count_7d: 0,
+                        evaluation_count_30d: 0,
+                        evaluation_count_90d: 0,
                         dependencies: vec![],
                     },
                     EntityFeature {
@@ -1508,11 +1593,18 @@ mod test {
                         description: Some("Another description".to_string()),
                         feature_type: EntityFeatureType::Contextual,
                         team_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
+                        active: true,
                         created_at: chrono::Utc::now(),
                         kill_switch_enabled: true,
-                        active: true,
                         kill_switch_activated_at: None,
                         rollback_scheduled_at: None,
+                        lifecycle_stage: "active".to_string(),
+                        deprecated_at: None,
+                        deprecation_notice: None,
+                        last_evaluated_at: None,
+                        evaluation_count_7d: 0,
+                        evaluation_count_30d: 0,
+                        evaluation_count_90d: 0,
                         dependencies: vec![],
                     },
                 ])
@@ -2145,7 +2237,8 @@ mod test {
         repository
             .expect_get_feature_id_by_stage_id()
             .with(mockall::predicate::eq(stage_id))
-            .never();
+            .times(1)
+            .returning(move |_| Ok(Some(feature_id)));
 
         repository
             .expect_get_feature_by_id()
@@ -2245,6 +2338,13 @@ mod test {
             kill_switch_enabled: true,
             kill_switch_activated_at: None,
             rollback_scheduled_at: Some(chrono::Utc::now() + chrono::Duration::minutes(30)),
+            lifecycle_stage: "active".to_string(),
+            deprecated_at: None,
+            deprecation_notice: None,
+            last_evaluated_at: None,
+            evaluation_count_7d: 0,
+            evaluation_count_30d: 0,
+            evaluation_count_90d: 0,
             dependencies: vec![],
         }
     }
@@ -2287,6 +2387,13 @@ mod test {
                 kill_switch_enabled: true,
                 kill_switch_activated_at: None,
                 rollback_scheduled_at: None,
+                lifecycle_stage: "active".to_string(),
+                deprecated_at: None,
+                deprecation_notice: None,
+                last_evaluated_at: None,
+                evaluation_count_7d: 0,
+                evaluation_count_30d: 0,
+                evaluation_count_90d: 0,
                 dependencies: vec![],
             },
             crate::database::entity::Feature {
@@ -2300,6 +2407,13 @@ mod test {
                 kill_switch_enabled: true,
                 kill_switch_activated_at: None,
                 rollback_scheduled_at: None,
+                lifecycle_stage: "active".to_string(),
+                deprecated_at: None,
+                deprecation_notice: None,
+                last_evaluated_at: None,
+                evaluation_count_7d: 0,
+                evaluation_count_30d: 0,
+                evaluation_count_90d: 0,
                 dependencies: vec![],
             },
         ];

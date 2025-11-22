@@ -1,4 +1,5 @@
 pub mod activity_log;
+pub mod approval;
 pub mod client;
 pub mod compound_rules;
 pub mod context;
