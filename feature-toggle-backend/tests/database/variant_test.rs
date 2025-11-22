@@ -3,13 +3,8 @@ use feature_toggle_backend::database::{
     entity::FeatureType,
     feature,
     init_pg_pool,
-    variant_allocations::CreateVariantAllocationInput,
 };
-use feature_toggle_backend::database::variant_allocations;
-use feature_toggle_backend::database::variant_allocations::VariantAllocationsRepository;
-use feature_toggle_backend::database::variant_allocations::VariantAllocationsRepositoryImpl;
-use feature_toggle_backend::database::variant_vals::VariantValueType;
-use mockall::predicate::eq;
+use feature_toggle_backend::database::entity::VariantValueType;
 use serde_json::json;
 use uuid::Uuid;
 

@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, group_id, context_key, operator, value, order_index,\n                      created_at, updated_at\n               FROM rule_conditions\n               WHERE group_id = $1\n               ORDER BY order_index, created_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "group_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "context_key",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "operator",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "value",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 5,
+        "name": "order_index",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 6,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "83a76959739a96f085e7b78b438bd5e15b08e7c0fec1f2549cac25509220d2c5"
+}

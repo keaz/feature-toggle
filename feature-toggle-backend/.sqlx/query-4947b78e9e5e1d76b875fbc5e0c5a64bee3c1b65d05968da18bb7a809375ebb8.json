@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT criteria_id, variant_control, weight\n                   FROM variant_allocations\n                   WHERE criteria_id = ANY($1)\n                   ORDER BY variant_control",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "criteria_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "variant_control",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "weight",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "4947b78e9e5e1d76b875fbc5e0c5a64bee3c1b65d05968da18bb7a809375ebb8"
+}

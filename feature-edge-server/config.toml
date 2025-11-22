@@ -7,8 +7,8 @@ backend_grpc = "http://127.0.0.1:50051"
 http_addr = "0.0.0.0:8081"
 
 # Client credentials for backend authentication
-client_id = "b0db39b8-1913-48e2-a7d4-217f090542f5"
-client_secret = "nEGM0I52Fo0S6uoeMTds6RnLCBQQ6CVgtnxgYeo24ZfA0KWR"
+client_id = "721d2cd3-cb81-4a03-a1fa-94a77ed9303e"
+client_secret = "CfVPv210XQDUnwXUjTmyZhDHhh3Ejy0IzH2xDNIkjCvqZtdN"
 
 # gRPC connection settings
 [grpc]

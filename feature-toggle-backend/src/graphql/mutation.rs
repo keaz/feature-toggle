@@ -5,12 +5,11 @@ use crate::graphql::create_user;
 use crate::graphql::schema::{
     AssignUserRolesInput, CreateClientInput, CreateEnvironmentInput, CreateFeatureInput,
     CreatePipelineInput, CreateTeamInput, CreateVariantAllocationInput, Environment, Feature,
-    LoginInput as GqlLoginInput, LoginResponse, Pipeline, RegisterUserInput as GqlRegisterUserInput,
-    ResetPasswordInput as GqlResetPasswordInput, Role,
+    LoginInput as GqlLoginInput, LoginResponse, Pipeline,
+    RegisterUserInput as GqlRegisterUserInput, ResetPasswordInput as GqlResetPasswordInput, Role,
     SetTemporaryPasswordInput as GqlSetTemporaryPasswordInput, Team, UpdateClientInput,
     UpdateEnvironmentInput, UpdateFeatureInput, UpdatePipelineInput, UpdateTeamInput,
-    UpdateUserInput as GqlUpdateUserInput, UpdateVariantAllocationInput, User,
-    VariantAllocation,
+    UpdateUserInput as GqlUpdateUserInput, UpdateVariantAllocationInput, User, VariantAllocation,
 };
 use crate::graphql::validator::{CreateInputValidator, UpdateInputValidator};
 use crate::logic::client::ClientLogic;
@@ -167,7 +166,7 @@ impl MutationRoot {
             if let Some(ref variants) = input.variants {
                 if !variants.is_empty() {
                     return Err(async_graphql::Error::new(
-                        "Variants can only be defined for Contextual features, not Simple features"
+                        "Variants can only be defined for Contextual features, not Simple features",
                     ));
                 }
             }
@@ -197,7 +196,7 @@ impl MutationRoot {
             if let Some(ref variants) = input.variants {
                 if !variants.is_empty() {
                     return Err(async_graphql::Error::new(
-                        "Variants can only be defined for Contextual features, not Simple features"
+                        "Variants can only be defined for Contextual features, not Simple features",
                     ));
                 }
             }
@@ -435,11 +434,91 @@ impl MutationRoot {
         let logic = ctx.data::<Box<dyn FeatureLogic>>()?;
         let feature_repository =
             ctx.data::<Box<dyn crate::database::feature::FeatureRepository>>()?;
-        let result = logic.set_stage_criteria(stage_id.clone(), criteria).await?;
+        let criteria_with_details = criteria.clone();
+        let mut result = logic
+            .set_stage_criteria(stage_id.clone(), criteria_with_details.clone())
+            .await?;
+
+        // Inline handling of variant allocations and rule groups (best-effort if pool is available)
+        if let Ok(pool) = ctx.data::<sqlx::PgPool>() {
+            let variant_repo =
+                crate::database::variant_allocations::variant_allocations_repository(pool.clone());
+            let rules_repo =
+                crate::database::compound_rules::compound_rules_repository(pool.clone());
+
+            // Align created criteria with provided inputs by priority
+            let mut created_sorted = result.clone();
+            created_sorted.sort_by_key(|c| c.priority);
+            let mut input_sorted = criteria_with_details.clone();
+            input_sorted.sort_by_key(|c| c.priority);
+
+            for (created, provided) in created_sorted.iter().zip(input_sorted.iter()) {
+                let crit_uuid = uuid::Uuid::try_from(created.id.clone()).map_err(|e| {
+                    async_graphql::Error::new(format!("Invalid criterion id: {}", e))
+                })?;
+
+                if let Some(allocs) = provided.variant_allocations.as_ref() {
+                    if !allocs.is_empty() {
+                        let db_allocs: Vec<
+                            crate::database::variant_allocations::CreateVariantAllocationInput,
+                        > = allocs
+                            .iter()
+                            .map(|a| crate::database::variant_allocations::CreateVariantAllocationInput {
+                                criteria_id: crit_uuid,
+                                variant_control: a.variant_control.clone(),
+                                weight: a.weight,
+                            })
+                            .collect();
+
+                        variant_repo.set_allocations(crit_uuid, db_allocs).await.map_err(|e| {
+                            async_graphql::Error::new(format!(
+                                "Failed to set variant allocations: {}",
+                                e
+                            ))
+                        })?;
+                    }
+                }
+
+                if let Some(groups) = provided.rule_groups.as_ref() {
+                    for group in groups {
+                        let db_input = crate::database::compound_rules::CreateRuleGroupInput {
+                            criteria_id: crit_uuid,
+                            logic_operator: match group.logic_operator {
+                                crate::graphql::schema::LogicOperator::And => {
+                                    crate::database::entity::LogicOperator::And
+                                }
+                                crate::graphql::schema::LogicOperator::Or => {
+                                    crate::database::entity::LogicOperator::Or
+                                }
+                            },
+                            conditions: group
+                                .conditions
+                                .iter()
+                                .map(|c| crate::database::compound_rules::CreateRuleConditionInput {
+                                    context_key: c.context_key.clone(),
+                                    operator: c.operator.to_db_string(),
+                                    value: c.value.0.clone(),
+                                    order_index: c.order_index,
+                                })
+                                .collect(),
+                        };
+
+                        rules_repo.create_rule_group(db_input).await.map_err(|e| {
+                            async_graphql::Error::new(format!(
+                                "Failed to create rule group: {}",
+                                e
+                            ))
+                        })?;
+                    }
+                }
+            }
+
+            // Reload criteria so the response (and broadcast) includes persisted allocations/groups
+            result = logic.get_stage_criteria(stage_id.clone()).await?;
+        }
 
         // After updating criterias for a stage, broadcast an UPSERT for the owning feature
-        if let (Ok(pool), Ok(updates_tx), Ok(feature_logic)) = (
-            ctx.data::<sqlx::PgPool>(),
+        if let (Ok(updates_tx), Ok(feature_logic)) = (
             ctx.data::<tokio::sync::broadcast::Sender<crate::grpc::pb::FeatureUpdate>>(),
             ctx.data::<Box<dyn FeatureLogic>>(),
         ) && let Ok(Some(feature_id)) = feature_logic
@@ -480,58 +559,89 @@ impl MutationRoot {
         let db_input = crate::database::compound_rules::CreateRuleGroupInput {
             criteria_id,
             logic_operator: match input.logic_operator {
-                crate::graphql::schema::LogicOperator::And => crate::database::entity::LogicOperator::And,
-                crate::graphql::schema::LogicOperator::Or => crate::database::entity::LogicOperator::Or,
-            },
-            conditions: input.conditions.into_iter().map(|c| {
-                crate::database::compound_rules::CreateRuleConditionInput {
-                    context_key: c.context_key,
-                    operator: c.operator.to_db_string(),
-                    value: c.value.0,
-                    order_index: c.order_index,
+                crate::graphql::schema::LogicOperator::And => {
+                    crate::database::entity::LogicOperator::And
                 }
-            }).collect(),
+                crate::graphql::schema::LogicOperator::Or => {
+                    crate::database::entity::LogicOperator::Or
+                }
+            },
+            conditions: input
+                .conditions
+                .into_iter()
+                .map(
+                    |c| crate::database::compound_rules::CreateRuleConditionInput {
+                        context_key: c.context_key,
+                        operator: c.operator.to_db_string(),
+                        value: c.value.0,
+                        order_index: c.order_index,
+                    },
+                )
+                .collect(),
         };
 
-        let rule_group = repo.create_rule_group(db_input).await
-            .map_err(|e| async_graphql::Error::new(format!("Failed to create rule group: {}", e)))?;
+        let rule_group = repo.create_rule_group(db_input).await.map_err(|e| {
+            async_graphql::Error::new(format!("Failed to create rule group: {}", e))
+        })?;
 
         // Get conditions for the created group
-        let conditions = repo.get_rule_conditions(rule_group.id).await
-            .map_err(|e| async_graphql::Error::new(format!("Failed to get rule conditions: {}", e)))?;
+        let conditions = repo.get_rule_conditions(rule_group.id).await.map_err(|e| {
+            async_graphql::Error::new(format!("Failed to get rule conditions: {}", e))
+        })?;
 
         Ok(crate::graphql::schema::CompoundRuleGroup {
             id: ID::from(rule_group.id),
             logic_operator: match rule_group.logic_operator {
-                crate::database::entity::LogicOperator::And => crate::graphql::schema::LogicOperator::And,
-                crate::database::entity::LogicOperator::Or => crate::graphql::schema::LogicOperator::Or,
-            },
-            conditions: conditions.into_iter().map(|c| {
-                let operator = match c.operator.to_uppercase().as_str() {
-                    "EQUALS" => crate::graphql::schema::RuleOperator::Equals,
-                    "NOTEQUALS" | "NOT_EQUALS" => crate::graphql::schema::RuleOperator::NotEquals,
-                    "GREATERTHAN" | "GREATER_THAN" => crate::graphql::schema::RuleOperator::GreaterThan,
-                    "LESSTHAN" | "LESS_THAN" => crate::graphql::schema::RuleOperator::LessThan,
-                    "GREATERTHANOREQUAL" | "GREATER_THAN_OR_EQUAL" => crate::graphql::schema::RuleOperator::GreaterThanOrEqual,
-                    "LESSTHANOREQUAL" | "LESS_THAN_OR_EQUAL" => crate::graphql::schema::RuleOperator::LessThanOrEqual,
-                    "CONTAINS" => crate::graphql::schema::RuleOperator::Contains,
-                    "STARTSWITH" | "STARTS_WITH" => crate::graphql::schema::RuleOperator::StartsWith,
-                    "ENDSWITH" | "ENDS_WITH" => crate::graphql::schema::RuleOperator::EndsWith,
-                    "REGEX" => crate::graphql::schema::RuleOperator::Regex,
-                    "IN" => crate::graphql::schema::RuleOperator::In,
-                    "NOTIN" | "NOT_IN" => crate::graphql::schema::RuleOperator::NotIn,
-                    "SEMVERGREATERTHAN" | "SEMVER_GREATER_THAN" => crate::graphql::schema::RuleOperator::SemverGreaterThan,
-                    "SEMVERLESSTHAN" | "SEMVER_LESS_THAN" => crate::graphql::schema::RuleOperator::SemverLessThan,
-                    _ => crate::graphql::schema::RuleOperator::In,
-                };
-                crate::graphql::schema::CompoundRuleCondition {
-                    id: ID::from(c.id),
-                    context_key: c.context_key,
-                    operator,
-                    value: async_graphql::Json(c.value),
-                    order_index: c.order_index,
+                crate::database::entity::LogicOperator::And => {
+                    crate::graphql::schema::LogicOperator::And
                 }
-            }).collect(),
+                crate::database::entity::LogicOperator::Or => {
+                    crate::graphql::schema::LogicOperator::Or
+                }
+            },
+            conditions: conditions
+                .into_iter()
+                .map(|c| {
+                    let operator = match c.operator.to_uppercase().as_str() {
+                        "EQUALS" => crate::graphql::schema::RuleOperator::Equals,
+                        "NOTEQUALS" | "NOT_EQUALS" => {
+                            crate::graphql::schema::RuleOperator::NotEquals
+                        }
+                        "GREATERTHAN" | "GREATER_THAN" => {
+                            crate::graphql::schema::RuleOperator::GreaterThan
+                        }
+                        "LESSTHAN" | "LESS_THAN" => crate::graphql::schema::RuleOperator::LessThan,
+                        "GREATERTHANOREQUAL" | "GREATER_THAN_OR_EQUAL" => {
+                            crate::graphql::schema::RuleOperator::GreaterThanOrEqual
+                        }
+                        "LESSTHANOREQUAL" | "LESS_THAN_OR_EQUAL" => {
+                            crate::graphql::schema::RuleOperator::LessThanOrEqual
+                        }
+                        "CONTAINS" => crate::graphql::schema::RuleOperator::Contains,
+                        "STARTSWITH" | "STARTS_WITH" => {
+                            crate::graphql::schema::RuleOperator::StartsWith
+                        }
+                        "ENDSWITH" | "ENDS_WITH" => crate::graphql::schema::RuleOperator::EndsWith,
+                        "REGEX" => crate::graphql::schema::RuleOperator::Regex,
+                        "IN" => crate::graphql::schema::RuleOperator::In,
+                        "NOTIN" | "NOT_IN" => crate::graphql::schema::RuleOperator::NotIn,
+                        "SEMVERGREATERTHAN" | "SEMVER_GREATER_THAN" => {
+                            crate::graphql::schema::RuleOperator::SemverGreaterThan
+                        }
+                        "SEMVERLESSTHAN" | "SEMVER_LESS_THAN" => {
+                            crate::graphql::schema::RuleOperator::SemverLessThan
+                        }
+                        _ => crate::graphql::schema::RuleOperator::In,
+                    };
+                    crate::graphql::schema::CompoundRuleCondition {
+                        id: ID::from(c.id),
+                        context_key: c.context_key,
+                        operator,
+                        value: async_graphql::Json(c.value),
+                        order_index: c.order_index,
+                    }
+                })
+                .collect(),
         })
     }
 
@@ -551,68 +661,97 @@ impl MutationRoot {
 
         let db_input = crate::database::compound_rules::UpdateRuleGroupInput {
             logic_operator: input.logic_operator.map(|op| match op {
-                crate::graphql::schema::LogicOperator::And => crate::database::entity::LogicOperator::And,
-                crate::graphql::schema::LogicOperator::Or => crate::database::entity::LogicOperator::Or,
+                crate::graphql::schema::LogicOperator::And => {
+                    crate::database::entity::LogicOperator::And
+                }
+                crate::graphql::schema::LogicOperator::Or => {
+                    crate::database::entity::LogicOperator::Or
+                }
             }),
             conditions: input.conditions.map(|conds| {
-                conds.into_iter().map(|c| {
-                    crate::database::compound_rules::CreateRuleConditionInput {
-                        context_key: c.context_key,
-                        operator: c.operator.to_db_string(),
-                        value: c.value.0,
-                        order_index: c.order_index,
-                    }
-                }).collect()
+                conds
+                    .into_iter()
+                    .map(
+                        |c| crate::database::compound_rules::CreateRuleConditionInput {
+                            context_key: c.context_key,
+                            operator: c.operator.to_db_string(),
+                            value: c.value.0,
+                            order_index: c.order_index,
+                        },
+                    )
+                    .collect()
             }),
         };
 
-        let rule_group = repo.update_rule_group(group_uuid, db_input).await
-            .map_err(|e| async_graphql::Error::new(format!("Failed to update rule group: {}", e)))?;
+        let rule_group = repo
+            .update_rule_group(group_uuid, db_input)
+            .await
+            .map_err(|e| {
+                async_graphql::Error::new(format!("Failed to update rule group: {}", e))
+            })?;
 
         // Get conditions for the updated group
-        let conditions = repo.get_rule_conditions(rule_group.id).await
-            .map_err(|e| async_graphql::Error::new(format!("Failed to get rule conditions: {}", e)))?;
+        let conditions = repo.get_rule_conditions(rule_group.id).await.map_err(|e| {
+            async_graphql::Error::new(format!("Failed to get rule conditions: {}", e))
+        })?;
 
         Ok(crate::graphql::schema::CompoundRuleGroup {
             id: ID::from(rule_group.id),
             logic_operator: match rule_group.logic_operator {
-                crate::database::entity::LogicOperator::And => crate::graphql::schema::LogicOperator::And,
-                crate::database::entity::LogicOperator::Or => crate::graphql::schema::LogicOperator::Or,
-            },
-            conditions: conditions.into_iter().map(|c| {
-                let operator = match c.operator.to_uppercase().as_str() {
-                    "EQUALS" => crate::graphql::schema::RuleOperator::Equals,
-                    "NOTEQUALS" | "NOT_EQUALS" => crate::graphql::schema::RuleOperator::NotEquals,
-                    "GREATERTHAN" | "GREATER_THAN" => crate::graphql::schema::RuleOperator::GreaterThan,
-                    "LESSTHAN" | "LESS_THAN" => crate::graphql::schema::RuleOperator::LessThan,
-                    "GREATERTHANOREQUAL" | "GREATER_THAN_OR_EQUAL" => crate::graphql::schema::RuleOperator::GreaterThanOrEqual,
-                    "LESSTHANOREQUAL" | "LESS_THAN_OR_EQUAL" => crate::graphql::schema::RuleOperator::LessThanOrEqual,
-                    "CONTAINS" => crate::graphql::schema::RuleOperator::Contains,
-                    "STARTSWITH" | "STARTS_WITH" => crate::graphql::schema::RuleOperator::StartsWith,
-                    "ENDSWITH" | "ENDS_WITH" => crate::graphql::schema::RuleOperator::EndsWith,
-                    "REGEX" => crate::graphql::schema::RuleOperator::Regex,
-                    "IN" => crate::graphql::schema::RuleOperator::In,
-                    "NOTIN" | "NOT_IN" => crate::graphql::schema::RuleOperator::NotIn,
-                    "SEMVERGREATERTHAN" | "SEMVER_GREATER_THAN" => crate::graphql::schema::RuleOperator::SemverGreaterThan,
-                    "SEMVERLESSTHAN" | "SEMVER_LESS_THAN" => crate::graphql::schema::RuleOperator::SemverLessThan,
-                    _ => crate::graphql::schema::RuleOperator::In,
-                };
-                crate::graphql::schema::CompoundRuleCondition {
-                    id: ID::from(c.id),
-                    context_key: c.context_key,
-                    operator,
-                    value: async_graphql::Json(c.value),
-                    order_index: c.order_index,
+                crate::database::entity::LogicOperator::And => {
+                    crate::graphql::schema::LogicOperator::And
                 }
-            }).collect(),
+                crate::database::entity::LogicOperator::Or => {
+                    crate::graphql::schema::LogicOperator::Or
+                }
+            },
+            conditions: conditions
+                .into_iter()
+                .map(|c| {
+                    let operator = match c.operator.to_uppercase().as_str() {
+                        "EQUALS" => crate::graphql::schema::RuleOperator::Equals,
+                        "NOTEQUALS" | "NOT_EQUALS" => {
+                            crate::graphql::schema::RuleOperator::NotEquals
+                        }
+                        "GREATERTHAN" | "GREATER_THAN" => {
+                            crate::graphql::schema::RuleOperator::GreaterThan
+                        }
+                        "LESSTHAN" | "LESS_THAN" => crate::graphql::schema::RuleOperator::LessThan,
+                        "GREATERTHANOREQUAL" | "GREATER_THAN_OR_EQUAL" => {
+                            crate::graphql::schema::RuleOperator::GreaterThanOrEqual
+                        }
+                        "LESSTHANOREQUAL" | "LESS_THAN_OR_EQUAL" => {
+                            crate::graphql::schema::RuleOperator::LessThanOrEqual
+                        }
+                        "CONTAINS" => crate::graphql::schema::RuleOperator::Contains,
+                        "STARTSWITH" | "STARTS_WITH" => {
+                            crate::graphql::schema::RuleOperator::StartsWith
+                        }
+                        "ENDSWITH" | "ENDS_WITH" => crate::graphql::schema::RuleOperator::EndsWith,
+                        "REGEX" => crate::graphql::schema::RuleOperator::Regex,
+                        "IN" => crate::graphql::schema::RuleOperator::In,
+                        "NOTIN" | "NOT_IN" => crate::graphql::schema::RuleOperator::NotIn,
+                        "SEMVERGREATERTHAN" | "SEMVER_GREATER_THAN" => {
+                            crate::graphql::schema::RuleOperator::SemverGreaterThan
+                        }
+                        "SEMVERLESSTHAN" | "SEMVER_LESS_THAN" => {
+                            crate::graphql::schema::RuleOperator::SemverLessThan
+                        }
+                        _ => crate::graphql::schema::RuleOperator::In,
+                    };
+                    crate::graphql::schema::CompoundRuleCondition {
+                        id: ID::from(c.id),
+                        context_key: c.context_key,
+                        operator,
+                        value: async_graphql::Json(c.value),
+                        order_index: c.order_index,
+                    }
+                })
+                .collect(),
         })
     }
 
-    async fn delete_rule_group(
-        &self,
-        ctx: &Context<'_>,
-        group_id: ID,
-    ) -> GqlResult<bool> {
+    async fn delete_rule_group(&self, ctx: &Context<'_>, group_id: ID) -> GqlResult<bool> {
         info!("Deleting rule group: {:?}", group_id);
 
         let pool = ctx.data::<sqlx::PgPool>()?;
@@ -621,8 +760,9 @@ impl MutationRoot {
         let group_uuid = uuid::Uuid::try_from(group_id)
             .map_err(|e| async_graphql::Error::new(format!("Invalid group ID: {}", e)))?;
 
-        repo.delete_rule_group(group_uuid).await
-            .map_err(|e| async_graphql::Error::new(format!("Failed to delete rule group: {}", e)))?;
+        repo.delete_rule_group(group_uuid).await.map_err(|e| {
+            async_graphql::Error::new(format!("Failed to delete rule group: {}", e))
+        })?;
 
         Ok(true)
     }
@@ -641,7 +781,8 @@ impl MutationRoot {
         allocations: Vec<CreateVariantAllocationInput>,
     ) -> GqlResult<Vec<VariantAllocation>> {
         let pool = ctx.data::<sqlx::PgPool>()?;
-        let repo = crate::database::variant_allocations::variant_allocations_repository(pool.clone());
+        let repo =
+            crate::database::variant_allocations::variant_allocations_repository(pool.clone());
 
         let criteria_uuid = uuid::Uuid::try_from(criteria_id.clone())
             .map_err(|e| async_graphql::Error::new(format!("Invalid criteria ID: {}", e)))?;
@@ -656,18 +797,25 @@ impl MutationRoot {
         }
 
         // Convert to database input structs
-        let db_allocations: Vec<crate::database::variant_allocations::CreateVariantAllocationInput> =
-            allocations
-                .into_iter()
-                .map(|input| crate::database::variant_allocations::CreateVariantAllocationInput {
+        let db_allocations: Vec<
+            crate::database::variant_allocations::CreateVariantAllocationInput,
+        > = allocations
+            .into_iter()
+            .map(
+                |input| crate::database::variant_allocations::CreateVariantAllocationInput {
                     criteria_id: criteria_uuid,
                     variant_control: input.variant_control,
                     weight: input.weight,
-                })
-                .collect();
+                },
+            )
+            .collect();
 
-        let result = repo.set_allocations(criteria_uuid, db_allocations).await
-            .map_err(|e| async_graphql::Error::new(format!("Failed to set variant allocations: {}", e)))?;
+        let result = repo
+            .set_allocations(criteria_uuid, db_allocations)
+            .await
+            .map_err(|e| {
+                async_graphql::Error::new(format!("Failed to set variant allocations: {}", e))
+            })?;
 
         // Convert to GraphQL types
         Ok(result
@@ -689,7 +837,8 @@ impl MutationRoot {
         #[graphql(desc = "Variant allocation data")] input: CreateVariantAllocationInput,
     ) -> GqlResult<VariantAllocation> {
         let pool = ctx.data::<sqlx::PgPool>()?;
-        let repo = crate::database::variant_allocations::variant_allocations_repository(pool.clone());
+        let repo =
+            crate::database::variant_allocations::variant_allocations_repository(pool.clone());
 
         let criteria_uuid = uuid::Uuid::try_from(criteria_id.clone())
             .map_err(|e| async_graphql::Error::new(format!("Invalid criteria ID: {}", e)))?;
@@ -700,8 +849,9 @@ impl MutationRoot {
             weight: input.weight,
         };
 
-        let alloc = repo.create_allocation(db_input).await
-            .map_err(|e| async_graphql::Error::new(format!("Failed to create variant allocation: {}", e)))?;
+        let alloc = repo.create_allocation(db_input).await.map_err(|e| {
+            async_graphql::Error::new(format!("Failed to create variant allocation: {}", e))
+        })?;
 
         Ok(VariantAllocation {
             id: alloc.id.to_string().into(),
@@ -719,7 +869,8 @@ impl MutationRoot {
         #[graphql(desc = "Updated allocation data")] input: UpdateVariantAllocationInput,
     ) -> GqlResult<VariantAllocation> {
         let pool = ctx.data::<sqlx::PgPool>()?;
-        let repo = crate::database::variant_allocations::variant_allocations_repository(pool.clone());
+        let repo =
+            crate::database::variant_allocations::variant_allocations_repository(pool.clone());
 
         let alloc_uuid = uuid::Uuid::try_from(allocation_id)
             .map_err(|e| async_graphql::Error::new(format!("Invalid allocation ID: {}", e)))?;
@@ -728,8 +879,12 @@ impl MutationRoot {
             weight: input.weight,
         };
 
-        let alloc = repo.update_allocation(alloc_uuid, db_input).await
-            .map_err(|e| async_graphql::Error::new(format!("Failed to update variant allocation: {}", e)))?;
+        let alloc = repo
+            .update_allocation(alloc_uuid, db_input)
+            .await
+            .map_err(|e| {
+                async_graphql::Error::new(format!("Failed to update variant allocation: {}", e))
+            })?;
 
         Ok(VariantAllocation {
             id: alloc.id.to_string().into(),
@@ -746,13 +901,15 @@ impl MutationRoot {
         #[graphql(desc = "ID of the variant allocation to delete")] allocation_id: ID,
     ) -> GqlResult<bool> {
         let pool = ctx.data::<sqlx::PgPool>()?;
-        let repo = crate::database::variant_allocations::variant_allocations_repository(pool.clone());
+        let repo =
+            crate::database::variant_allocations::variant_allocations_repository(pool.clone());
 
         let alloc_uuid = uuid::Uuid::try_from(allocation_id)
             .map_err(|e| async_graphql::Error::new(format!("Invalid allocation ID: {}", e)))?;
 
-        repo.delete_allocation(alloc_uuid).await
-            .map_err(|e| async_graphql::Error::new(format!("Failed to delete variant allocation: {}", e)))?;
+        repo.delete_allocation(alloc_uuid).await.map_err(|e| {
+            async_graphql::Error::new(format!("Failed to delete variant allocation: {}", e))
+        })?;
 
         Ok(true)
     }
@@ -1204,32 +1361,38 @@ async fn map_db_feature_to_full_for_broadcast(
             .into_iter()
             .map(|c| {
                 // Map rule groups
-                let rule_groups = c.rule_groups.into_iter().map(|group| {
-                    crate::grpc::pb::RuleGroup {
+                let rule_groups = c
+                    .rule_groups
+                    .into_iter()
+                    .map(|group| crate::grpc::pb::RuleGroup {
                         id: group.id.to_string(),
                         logic_operator: match group.logic_operator {
                             crate::database::entity::LogicOperator::And => "AND".to_string(),
                             crate::database::entity::LogicOperator::Or => "OR".to_string(),
                         },
-                        conditions: group.conditions.into_iter().map(|cond| {
-                            crate::grpc::pb::RuleCondition {
+                        conditions: group
+                            .conditions
+                            .into_iter()
+                            .map(|cond| crate::grpc::pb::RuleCondition {
                                 id: cond.id.to_string(),
                                 context_key: cond.context_key,
                                 operator: cond.operator,
                                 value: cond.value.to_string(),
                                 order_index: cond.order_index,
-                            }
-                        }).collect(),
-                    }
-                }).collect();
+                            })
+                            .collect(),
+                    })
+                    .collect();
 
                 // Map variant allocations
-                let variant_allocations = c.variant_allocations.into_iter().map(|alloc| {
-                    pb::VariantAllocation {
+                let variant_allocations = c
+                    .variant_allocations
+                    .into_iter()
+                    .map(|alloc| pb::VariantAllocation {
                         variant_control: alloc.variant_control,
                         weight: alloc.weight,
-                    }
-                }).collect();
+                    })
+                    .collect();
 
                 pb::StageCriterionFull {
                     id: c.id.to_string(),
@@ -1264,9 +1427,7 @@ async fn map_db_feature_to_full_for_broadcast(
     // Load variants from database only for Contextual features
     use crate::database::entity::FeatureType as EntityFeatureType;
     let variant_msgs = if matches!(f.feature_type, EntityFeatureType::Contextual) {
-        let db_variants = feature_repository
-            .get_feature_variants(f.id)
-            .await?;
+        let db_variants = feature_repository.get_feature_variants(f.id).await?;
 
         db_variants
             .into_iter()
@@ -1442,9 +1603,7 @@ mod tests {
         mock.expect_set_stage_criteria()
             .times(1)
             .withf(move |sid, crit| {
-                sid == &stage_id_clone
-                    && crit.len() == 1
-                    && crit[0].priority == 1
+                sid == &stage_id_clone && crit.len() == 1 && crit[0].priority == 1
             })
             .return_once(move |_, _| Ok(expected.clone()));
 
@@ -1481,8 +1640,10 @@ mod more_mutation_tests {
     use crate::database::entity::FeaturePipelineStage;
     use crate::database::feature::MockFeatureRepository;
     use crate::graphql::query::Query as GqlQuery;
+    use crate::grpc::pb;
     use crate::logic::context::MockContextLogic;
     use crate::logic::environment::MockEnvironmentLogic;
+    use crate::logic::feature::MockFeatureLogic;
     use async_graphql::{EmptySubscription, Request, Schema};
     use std::sync::Arc;
     use uuid::Uuid;
@@ -1552,6 +1713,113 @@ mod more_mutation_tests {
         );
         let data = resp.data.into_json().unwrap();
         assert_eq!(data["deleteContext"], true);
+    }
+
+    #[tokio::test]
+    async fn set_stage_criteria_broadcasts_feature_update_with_allocations() {
+        let stage_id = Uuid::new_v4();
+        let feature_id = Uuid::new_v4();
+
+        // Logic mock
+        let mut logic = MockFeatureLogic::new();
+        logic
+            .expect_set_stage_criteria()
+            .returning(|_, _| Ok(vec![]));
+        logic
+            .expect_get_feature_id_by_stage_id()
+            .returning(move |_| Ok(Some(feature_id)));
+
+        // Repo mock
+        let mut repo = MockFeatureRepository::new();
+        repo.expect_get_feature_by_id().returning(move |_| {
+            Ok(crate::database::entity::Feature {
+                id: feature_id,
+                key: "flag".into(),
+                description: None,
+                feature_type: crate::database::entity::FeatureType::Contextual,
+                team_id: Uuid::new_v4(),
+                created_at: chrono::Utc::now(),
+                kill_switch_enabled: false,
+                kill_switch_activated_at: None,
+                rollback_scheduled_at: None,
+                dependencies: vec![],
+                active: true,
+            })
+        });
+        repo.expect_get_feature_stages().returning(move |_| {
+            Ok(vec![FeaturePipelineStage {
+                id: stage_id,
+                feature_id,
+                environment_id: Uuid::new_v4(),
+                order_index: 0,
+                parent_stage_id: None,
+                position: "{}\"".trim_matches('"').to_string(),
+                enabled: true,
+                bucketing_key: None,
+                status: "DEPLOYED".into(),
+            }])
+        });
+        repo.expect_get_stage_criteria().returning(move |_| {
+            Ok(vec![crate::database::entity::StageCriterion {
+                id: Uuid::new_v4(),
+                stage_id,
+                priority: 0,
+                rule_groups: vec![],
+                variant_allocations: vec![crate::database::entity::VariantAllocationSimple {
+                    variant_control: "treatment".into(),
+                    weight: 100,
+                }],
+            }])
+        });
+        repo.expect_get_feature_variants().returning(move |_| {
+            Ok(vec![crate::database::entity::FeatureVariant {
+                id: Uuid::new_v4(),
+                feature_id,
+                control: "treatment".into(),
+                value: serde_json::json!(true),
+                value_type: crate::database::entity::VariantValueType::Boolean,
+                description: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            }])
+        });
+
+        let (updates_tx, mut updates_rx) = tokio::sync::broadcast::channel::<pb::FeatureUpdate>(4);
+
+        let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
+            .data::<Box<dyn crate::logic::feature::FeatureLogic>>(Box::new(logic))
+            .data::<Box<dyn crate::database::feature::FeatureRepository>>(Box::new(repo))
+            .data(updates_tx.clone())
+            .finish();
+
+        let gql = r#"
+            mutation($sid: ID!) {
+                setStageCriteria(stageId: $sid, criteria: [{ priority: 0 }]) { priority }
+            }
+        "#;
+        let mut req = Request::new(gql);
+        req = req.variables(async_graphql::Variables::from_json(
+            serde_json::json!({"sid": stage_id.to_string()}),
+        ));
+
+        let resp = schema.execute(req).await;
+        assert!(
+            resp.errors.is_empty(),
+            "{}",
+            serde_json::to_string(&resp.errors).unwrap()
+        );
+
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), updates_rx.recv())
+            .await
+            .expect("timed out waiting for feature update")
+            .expect("expected feature update");
+        assert_eq!(msg.action, pb::feature_update::Action::Upsert as i32);
+        let feature = msg.feature.expect("missing feature payload");
+        assert_eq!(feature.stages.len(), 1);
+        assert_eq!(
+            feature.stages[0].criterias[0].variant_allocations[0].variant_control,
+            "treatment"
+        );
     }
 
     #[tokio::test]

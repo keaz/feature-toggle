@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM variant_allocations WHERE criteria_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "865020cfafa9bf8965a3b486806b5f8963fea9f1dde3e2d34aea5c2f2f9cab3b"
+}

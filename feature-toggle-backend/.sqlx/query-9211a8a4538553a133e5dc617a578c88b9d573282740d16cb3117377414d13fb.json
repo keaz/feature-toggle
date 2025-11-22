@@ -1,0 +1,46 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, criteria_id, logic_operator as \"logic_operator: LogicOperator\",\n                      created_at, updated_at\n               FROM rule_groups\n               WHERE criteria_id = $1\n               ORDER BY created_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "criteria_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "logic_operator: LogicOperator",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 4,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "9211a8a4538553a133e5dc617a578c88b9d573282740d16cb3117377414d13fb"
+}

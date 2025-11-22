@@ -242,7 +242,7 @@ impl ContextLogic for ContextLogicImpl {
         Ok(map_db_to_gql(created))
     }
 
-    async fn update_context(&self, id: ID, input: UpdateContextInput) -> Result<GqlContext, Error> {
+async fn update_context(&self, id: ID, input: UpdateContextInput) -> Result<GqlContext, Error> {
         if let Some(k) = &input.key
             && k.trim().is_empty()
         {
@@ -329,6 +329,7 @@ mod tests {
     use crate::database::context::MockContextRepository;
     use crate::database::entity::{Context as DbContext, ContextEntry as DbContextEntry};
     use crate::database::feature::MockFeatureRepository;
+    use crate::grpc::pb;
 
     fn sample_db_context(team_id: Uuid) -> DbContext {
         DbContext {
@@ -477,6 +478,77 @@ mod tests {
         };
         let out = logic.update_context(ID::from(id), input).await.unwrap();
         assert_eq!(out.key, "country");
+    }
+
+    #[tokio::test]
+    async fn update_context_broadcasts_feature_updates() {
+        let mut repo = MockContextRepository::new();
+        let mut feature_repo = MockFeatureRepository::new();
+        let ctx_id = Uuid::new_v4();
+        let team_id = Uuid::new_v4();
+        let feature_id = Uuid::new_v4();
+
+        // Update returns the new context
+        repo.expect_update_context().returning(move |_id, _| {
+            Ok(DbContext {
+                id: ctx_id,
+                team_id,
+                key: "user.tier".into(),
+                entries: vec![],
+            })
+        });
+
+        // Feature IDs referencing this context
+        feature_repo
+            .expect_get_feature_ids_by_context_id()
+            .returning(move |_| Ok(vec![feature_id]));
+
+        // Feature fetch for broadcast
+        feature_repo
+            .expect_get_feature_by_id()
+            .returning(move |_| {
+                Ok(entity::Feature {
+                    id: feature_id,
+                    key: "example".into(),
+                    description: None,
+                    feature_type: entity::FeatureType::Contextual,
+                    team_id,
+                    created_at: chrono::Utc::now(),
+                    kill_switch_enabled: false,
+                    kill_switch_activated_at: None,
+                    rollback_scheduled_at: None,
+                    dependencies: vec![],
+                    active: true,
+                })
+            });
+
+        feature_repo
+            .expect_get_feature_stages()
+            .returning(|_| Ok(vec![]));
+        feature_repo
+            .expect_get_stage_criteria()
+            .returning(|_| Ok(vec![]));
+        feature_repo
+            .expect_get_feature_variants()
+            .returning(|_| Ok(vec![]));
+
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<pb::FeatureUpdate>(4);
+        let logic = super::context_logic(Box::new(repo), Box::new(feature_repo), tx.clone());
+
+        let _ = logic
+            .update_context(
+                ID::from(ctx_id),
+                UpdateContextInput {
+                    key: Some("user.tier".into()),
+                    entries: Some(vec!["gold".into()]),
+                },
+            )
+            .await
+            .expect("update should succeed");
+
+        let msg = rx.recv().await.expect("expected broadcast");
+        assert_eq!(msg.action, pb::feature_update::Action::Upsert as i32);
+        assert!(msg.feature.is_some(), "feature payload missing");
     }
 
     #[tokio::test]

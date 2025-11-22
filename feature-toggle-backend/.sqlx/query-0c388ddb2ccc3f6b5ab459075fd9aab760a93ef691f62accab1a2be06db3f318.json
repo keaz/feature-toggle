@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM rule_groups WHERE criteria_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0c388ddb2ccc3f6b5ab459075fd9aab760a93ef691f62accab1a2be06db3f318"
+}

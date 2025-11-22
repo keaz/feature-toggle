@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT c.key, COALESCE(ce.value, '') as \"value!\"\n               FROM contexts c\n               LEFT JOIN context_entries ce ON ce.context_id = c.id\n               WHERE c.team_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "key",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "value!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "42c941c2b70ec72e47d452d419feb385821b65dcdd9c504a730fdd2f05141171"
+}

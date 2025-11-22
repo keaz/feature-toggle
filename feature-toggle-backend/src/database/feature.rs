@@ -1,5 +1,5 @@
 use crate::database::entity::{Feature, FeatureDependency, FeaturePipelineStage, FeatureType};
-use crate::database::{handle_error, Error};
+use crate::database::{Error, handle_error};
 use chrono::{DateTime, Utc};
 use mockall::automock;
 use serde::{Deserialize, Serialize};
@@ -781,6 +781,45 @@ impl FeatureRepository for FeatureRepositoryImpl {
         &self,
         stage_id: Uuid,
     ) -> Result<Vec<crate::database::entity::StageCriterion>, Error> {
+        // Determine team_id for this stage to resolve context-derived values
+        let team_id = sqlx::query_scalar!(
+            r#"SELECT f.team_id
+               FROM features_pipeline_stages fps
+               JOIN features f ON f.id = fps.feature_id
+               WHERE fps.id = $1"#,
+            stage_id
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Error::DatabaseError)?;
+
+        if team_id.is_none() {
+            return Err(Error::NotFound(stage_id));
+        }
+        let team_id = team_id.unwrap();
+
+        // Preload context entries keyed by context key
+        let context_rows = sqlx::query!(
+            r#"SELECT c.key, COALESCE(ce.value, '') as "value!"
+               FROM contexts c
+               LEFT JOIN context_entries ce ON ce.context_id = c.id
+               WHERE c.team_id = $1"#,
+            team_id
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Error::DatabaseError)?;
+        let mut context_value_map: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for row in context_rows {
+            if !row.value.is_empty() {
+                context_value_map
+                    .entry(row.key)
+                    .or_insert_with(Vec::new)
+                    .push(row.value);
+            }
+        }
+
         let rows = sqlx::query!(
             r#"SELECT sc.id, sc.stage_id, sc.priority
                FROM feature_stage_criteria sc
@@ -862,16 +901,34 @@ impl FeatureRepository for FeatureRepositoryImpl {
                     (logic_operator, Vec::new())
                 });
 
-                if let (Some(condition_id), Some(context_key), Some(operator), Some(order_index)) =
-                    (row.condition_id, row.context_key, row.operator, row.order_index)
-                {
-                    entry.1.push(crate::database::entity::CompoundRuleCondition {
-                        id: condition_id,
-                        context_key,
-                        operator,
-                        value: row.value.unwrap_or(serde_json::Value::Null),
-                        order_index,
-                    });
+                if let (Some(condition_id), Some(context_key), Some(operator), Some(order_index)) = (
+                    row.condition_id,
+                    row.context_key,
+                    row.operator,
+                    row.order_index,
+                ) {
+                    let mut value = row.value.unwrap_or(serde_json::Value::Null);
+                    if operator.eq_ignore_ascii_case("IN") {
+                        if let Some(key_str) = value.as_str() {
+                            if let Some(entries) = context_value_map.get(key_str) {
+                                value = serde_json::Value::Array(
+                                    entries
+                                        .iter()
+                                        .map(|v| serde_json::Value::String(v.clone()))
+                                        .collect(),
+                                );
+                            }
+                        }
+                    }
+                    entry
+                        .1
+                        .push(crate::database::entity::CompoundRuleCondition {
+                            id: condition_id,
+                            context_key,
+                            operator,
+                            value,
+                            order_index,
+                        });
                 }
             }
         }
@@ -896,9 +953,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
                 stage_id: r.stage_id,
                 priority: r.priority,
                 rule_groups,
-                variant_allocations: allocations_map
-                    .remove(&r.id)
-                    .unwrap_or_else(Vec::new),
+                variant_allocations: allocations_map.remove(&r.id).unwrap_or_else(Vec::new),
             });
         }
         Ok(out)

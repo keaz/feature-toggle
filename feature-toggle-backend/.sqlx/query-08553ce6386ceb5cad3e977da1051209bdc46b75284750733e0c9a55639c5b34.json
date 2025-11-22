@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, criteria_id, variant_control, weight,\n                      created_at as \"created_at!\", updated_at as \"updated_at!\"\n               FROM variant_allocations\n               WHERE criteria_id = $1\n               ORDER BY variant_control",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "criteria_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "variant_control",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "weight",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "created_at!",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 5,
+        "name": "updated_at!",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "08553ce6386ceb5cad3e977da1051209bdc46b75284750733e0c9a55639c5b34"
+}

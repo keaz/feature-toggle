@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE rule_groups SET logic_operator = $1, updated_at = CURRENT_TIMESTAMP\n                       WHERE id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "fdd573f421459e120ef1c946f1dcbec8442f1997dc3d77d619931dc63964ea9f"
+}

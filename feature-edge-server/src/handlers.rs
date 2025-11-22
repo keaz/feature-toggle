@@ -69,38 +69,6 @@ pub fn map_proto_to_engine(f: &pb::FeatureFull) -> engine::Feature {
                 .criterias
                 .iter()
                 .map(|c| {
-                    // Map CriterionContext to StageContext
-                    let context = if let Some(ref ctx) = c.context {
-                        engine::StageContext {
-                            key: ctx.key.clone(),
-                            entries: ctx.entries.clone(),
-                        }
-                    } else {
-                        engine::StageContext {
-                            key: String::new(),
-                            entries: vec![],
-                        }
-                    };
-
-                    // Parse operator from protobuf string
-                    let operator = match c.operator.to_uppercase().as_str() {
-                        "EQUALS" => engine::Operator::Equals,
-                        "NOTEQUALS" | "NOT_EQUALS" => engine::Operator::NotEquals,
-                        "GREATERTHAN" | "GREATER_THAN" => engine::Operator::GreaterThan,
-                        "LESSTHAN" | "LESS_THAN" => engine::Operator::LessThan,
-                        "GREATERTHANOREQUAL" | "GREATER_THAN_OR_EQUAL" => engine::Operator::GreaterThanOrEqual,
-                        "LESSTHANOREQUAL" | "LESS_THAN_OR_EQUAL" => engine::Operator::LessThanOrEqual,
-                        "CONTAINS" => engine::Operator::Contains,
-                        "STARTSWITH" | "STARTS_WITH" => engine::Operator::StartsWith,
-                        "ENDSWITH" | "ENDS_WITH" => engine::Operator::EndsWith,
-                        "REGEX" => engine::Operator::Regex,
-                        "IN" => engine::Operator::In,
-                        "NOTIN" | "NOT_IN" => engine::Operator::NotIn,
-                        "SEMVERGREATERTHAN" | "SEMVER_GREATER_THAN" => engine::Operator::SemverGreaterThan,
-                        "SEMVERLESSTHAN" | "SEMVER_LESS_THAN" => engine::Operator::SemverLessThan,
-                        _ => engine::Operator::In, // Default to IN for unknown operators
-                    };
-
                     // Parse compound rules from protobuf
                     let rule_groups = c.rule_groups.iter().map(|group| {
                         let logic_operator = match group.logic_operator.to_uppercase().as_str() {
@@ -127,11 +95,13 @@ pub fn map_proto_to_engine(f: &pb::FeatureFull) -> engine::Feature {
                                 _ => engine::Operator::In,
                             };
 
+                            let value = serde_json::from_str(&cond.value)
+                                .unwrap_or_else(|_| serde_json::json!(cond.value.clone()));
+
                             engine::RuleCondition {
                                 context_key: cond.context_key.clone(),
                                 operator: cond_operator,
-                                value: serde_json::from_str(&cond.value)
-                                    .unwrap_or(serde_json::json!(cond.value.clone())),
+                                value,
                             }
                         }).collect();
 
@@ -150,15 +120,7 @@ pub fn map_proto_to_engine(f: &pb::FeatureFull) -> engine::Feature {
                     }).collect();
 
                     engine::StageCriterion {
-                        context_key: c.context_key.clone(),
-                        context,
-                        rollout_percentage: c.rollout_percentage,
-                        serve: if c.serve.is_empty() {
-                            None
-                        } else {
-                            Some(c.serve.clone())
-                        },
-                        operator,
+                        priority: c.priority,
                         rule_groups,
                         variant_allocations,
                     }

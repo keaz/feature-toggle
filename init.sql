@@ -20,6 +20,17 @@ DELETE FROM public.feature_stage_criteria;
 DELETE FROM public.features_pipeline_stages;
 
 DELETE FROM public.features;
+
+-- Align schema with simplified criteria (priority only)
+ALTER TABLE IF EXISTS public.feature_stage_criteria
+    DROP COLUMN IF EXISTS context_key,
+    DROP COLUMN IF EXISTS context_id,
+    DROP COLUMN IF EXISTS rollout_percentage,
+    DROP COLUMN IF EXISTS serve,
+    DROP COLUMN IF EXISTS operator;
+
+DROP INDEX IF EXISTS idx_feature_stage_criteria_serve;
+DROP INDEX IF EXISTS idx_feature_stage_criteria_operator;
 -- clients and origins
 DELETE FROM public.client_web_origins;
 

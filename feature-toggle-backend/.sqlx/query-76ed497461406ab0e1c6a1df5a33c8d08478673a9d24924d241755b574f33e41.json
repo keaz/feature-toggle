@@ -1,0 +1,53 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE variant_allocations\n               SET weight = $1,\n                   updated_at = CURRENT_TIMESTAMP\n               WHERE id = $2\n               RETURNING id, criteria_id, variant_control, weight,\n                         created_at as \"created_at!\", updated_at as \"updated_at!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "criteria_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "variant_control",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "weight",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "created_at!",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 5,
+        "name": "updated_at!",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "76ed497461406ab0e1c6a1df5a33c8d08478673a9d24924d241755b574f33e41"
+}

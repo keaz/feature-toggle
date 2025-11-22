@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT rg.id as group_id, rg.criteria_id, rg.logic_operator,\n                          rc.id as \"condition_id?\", rc.context_key as \"context_key?\",\n                          rc.operator as \"operator?\", rc.value as \"value?\",\n                          rc.order_index as \"order_index?\"\n                   FROM rule_groups rg\n                   LEFT JOIN rule_conditions rc ON rc.group_id = rg.id\n                   WHERE rg.criteria_id = ANY($1)\n                   ORDER BY rg.created_at, rc.order_index",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "group_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "criteria_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "logic_operator",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "condition_id?",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "context_key?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "operator?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "value?",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 7,
+        "name": "order_index?",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "e896a5aaa0eeffd590461a487e92a0dcb6dec26e54e56ad0057d39402f4c8c21"
+}

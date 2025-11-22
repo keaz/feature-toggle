@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT f.id\n               FROM features f\n               JOIN features_pipeline_stages s ON s.feature_id = f.id\n               JOIN feature_stage_contexts fsc ON fsc.stage_id = s.id\n               WHERE fsc.context_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a22e1c370709e555f5abf50944761d531c5bae4964ba741f03938f3f66a1e069"
+}

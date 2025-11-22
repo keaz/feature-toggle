@@ -486,6 +486,13 @@ pub fn evaluate(
     evaluation_context: FeatureEvaluationContext,
     feature: Feature,
 ) -> EvaluationResult {
+    // Evaluation walkthrough:
+    // 1) Kill switch: if the feature is disabled, short-circuit to false.
+    // 2) Resolve dependencies recursively; any failed dependency disables this feature.
+    // 3) Select the stage matching the requested environment; if missing or disabled, return default/disabled.
+    // 4) Evaluate criteria in priority order. Each criterion can have compound rule groups (OR of groups; AND within a group).
+    //    If a criterion matches, optionally select a variant via weighted allocations; otherwise return default false.
+    // 5) When a variant is selected, return its value; otherwise default to true for contextual flags.
     let flag_key = evaluation_context.flag_key.clone();
 
     // Kill switch check: if enabled is false, feature is disabled

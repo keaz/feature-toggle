@@ -548,6 +548,12 @@ pub struct StageCriterion {
 pub struct CreateStageCriterionInput {
     #[graphql(default = 0)]
     pub priority: i32,
+    /// Optional weighted variant allocations for this criterion
+    #[graphql(default)]
+    pub variant_allocations: Option<Vec<CreateVariantAllocationInput>>,
+    /// Optional compound rule groups for this criterion
+    #[graphql(default)]
+    pub rule_groups: Option<Vec<InlineRuleGroupInput>>,
 }
 
 // Compound rules GraphQL types
@@ -578,6 +584,13 @@ pub enum LogicOperator {
 #[derive(InputObject, Debug, Clone)]
 pub struct CreateRuleGroupInput {
     pub criteria_id: ID,
+    pub logic_operator: LogicOperator,
+    pub conditions: Vec<CreateRuleConditionInput>,
+}
+
+/// Rule group input used when nested under setStageCriteria (criteria_id inferred)
+#[derive(InputObject, Debug, Clone)]
+pub struct InlineRuleGroupInput {
     pub logic_operator: LogicOperator,
     pub conditions: Vec<CreateRuleConditionInput>,
 }
