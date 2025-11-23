@@ -7,11 +7,13 @@ use uuid::Uuid;
 pub struct CreateEnvironment {
     pub name: String,
     pub active: bool,
+    pub environment_type: Option<String>,
 }
 
 pub struct UpdateEnvironment {
     pub name: Option<String>,
     pub active: Option<bool>,
+    pub environment_type: Option<String>,
 }
 
 #[automock]
@@ -72,7 +74,7 @@ impl EnvironmentRepositoryImpl {
 impl EnvironmentRepository for EnvironmentRepositoryImpl {
     async fn get_environment_by_id(&self, id: Uuid) -> Result<Environment, Error> {
         let result = sqlx::query_as::<_, Environment>(
-            r#"SELECT id, name, active, team_id FROM environments WHERE id = $1"#,
+            r#"SELECT id, name, active, team_id, environment_type FROM environments WHERE id = $1"#,
         )
         .bind(id)
         .fetch_one(&self.pool)
@@ -88,7 +90,7 @@ impl EnvironmentRepository for EnvironmentRepositoryImpl {
         active: Option<bool>,
     ) -> Result<Vec<Environment>, Error> {
         let mut qb = QueryBuilder::<Postgres>::new(
-            "SELECT id, name, active, team_id FROM environments WHERE team_id = ",
+            "SELECT id, name, active, team_id, environment_type FROM environments WHERE team_id = ",
         );
         qb.push_bind(team_id);
 
@@ -140,7 +142,7 @@ impl EnvironmentRepository for EnvironmentRepositoryImpl {
         // Now get the paginated results
         let offset = (page_number - 1) * page_size;
         let mut qb = QueryBuilder::<Postgres>::new(
-            "SELECT id, name, active, team_id FROM environments WHERE team_id = ",
+            "SELECT id, name, active, team_id, environment_type FROM environments WHERE team_id = ",
         );
         qb.push_bind(team_id);
 
@@ -180,12 +182,16 @@ impl EnvironmentRepository for EnvironmentRepositoryImpl {
             }
         }
         let id = Uuid::new_v4();
+        let environment_type = input
+            .environment_type
+            .unwrap_or_else(|| "Development".to_string());
         let result = sqlx::query!(
-        r#"INSERT INTO environments (id, name, active, team_id) VALUES ($1, $2, $3, $4) RETURNING id,name,active, team_id"#,
+        r#"INSERT INTO environments (id, name, active, team_id, environment_type) VALUES ($1, $2, $3, $4, $5) RETURNING id,name,active, team_id, environment_type"#,
         id,
         input.name,
         input.active,
-        team_id
+        team_id,
+        environment_type
     )
             .fetch_one(&self.pool)
             .await;
@@ -196,6 +202,7 @@ impl EnvironmentRepository for EnvironmentRepositoryImpl {
             name: handled_error.name,
             active: handled_error.active,
             team_id: handled_error.team_id,
+            environment_type: handled_error.environment_type,
         })
     }
 
@@ -206,9 +213,10 @@ impl EnvironmentRepository for EnvironmentRepositoryImpl {
     ) -> Result<Environment, Error> {
         let existing_env = self.get_environment_by_id(id).await?;
         let result = sqlx::query!(
-            r#"UPDATE environments SET name = $1, active = $2 WHERE id = $3 RETURNING id, name, active,team_id"#,
+            r#"UPDATE environments SET name = $1, active = $2, environment_type = $3 WHERE id = $4 RETURNING id, name, active, team_id, environment_type"#,
             input.name.unwrap_or(existing_env.name),
             input.active.unwrap_or(existing_env.active),
+            input.environment_type.unwrap_or(existing_env.environment_type),
             id
         ).fetch_one(&self.pool)
             .await;
@@ -220,6 +228,7 @@ impl EnvironmentRepository for EnvironmentRepositoryImpl {
             name: environment.name,
             active: environment.active,
             team_id: environment.team_id,
+            environment_type: environment.environment_type,
         })
     }
 
@@ -248,6 +257,7 @@ mod tests {
             name: "Test Environment".to_string(),
             active: true,
             team_id: Uuid::new_v4(),
+            environment_type: "Development".to_string(),
         }
     }
 
@@ -255,6 +265,7 @@ mod tests {
         CreateEnvironment {
             name: "New Environment".to_string(),
             active: true,
+            environment_type: Some("Development".to_string()),
         }
     }
 
@@ -262,6 +273,7 @@ mod tests {
         UpdateEnvironment {
             name: Some("Updated Environment".to_string()),
             active: Some(false),
+            environment_type: Some("Production".to_string()),
         }
     }
 
@@ -364,6 +376,7 @@ mod tests {
             name: "New Environment".to_string(),
             active: true,
             team_id,
+            environment_type: "Development".to_string(),
         };
 
         mock_repo
@@ -394,6 +407,7 @@ mod tests {
             name: "Updated Environment".to_string(),
             active: false,
             team_id: Uuid::new_v4(),
+            environment_type: "Production".to_string(),
         };
 
         mock_repo

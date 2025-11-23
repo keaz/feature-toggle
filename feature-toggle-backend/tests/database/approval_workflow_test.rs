@@ -1,5 +1,5 @@
 use async_graphql::ID;
-use feature_toggle_backend::database::{approval, feature, init_pg_pool};
+use feature_toggle_backend::database::{approval, feature, init_pg_pool, role};
 use feature_toggle_backend::logic::approval::ApprovalRequestEvent;
 use feature_toggle_backend::logic::feature::StageChangeRequestType;
 use feature_toggle_backend::logic::{
@@ -18,12 +18,14 @@ async fn test_stage_change_creates_approval_request_when_policy_exists() {
         activity_log_repository.clone_box(),
     );
     let approval_repository = approval::approval_repository(pool.clone());
+    let role_repository = role::role_repository(pool.clone());
     let (approval_events_tx, _approval_events_rx) =
         tokio::sync::broadcast::channel::<ApprovalRequestEvent>(16);
     let approval_logic = approval_logic::approval_logic(
         approval_repository.clone(),
         feature_repository.clone_box(),
         environment_logic.clone(),
+        role_repository.clone(),
         approval_events_tx.clone(),
     );
     let feature_logic = feature_logic::feature_logic_with_approval(
@@ -83,12 +85,14 @@ async fn test_quorum_approvals_execute_stage_change() {
         activity_log_repository.clone_box(),
     );
     let approval_repository = approval::approval_repository(pool.clone());
+    let role_repository = role::role_repository(pool.clone());
     let (approval_events_tx, _approval_events_rx) =
         tokio::sync::broadcast::channel::<ApprovalRequestEvent>(16);
     let approval_logic = approval_logic::approval_logic(
         approval_repository.clone(),
         feature_repository.clone_box(),
         environment_logic.clone(),
+        role_repository.clone(),
         approval_events_tx.clone(),
     );
     let feature_logic = feature_logic::feature_logic_with_approval(

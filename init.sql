@@ -165,85 +165,98 @@ VALUES
 ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO
-    public.environments (id, name, active, team_id)
+    public.environments (id, name, active, team_id, environment_type)
 VALUES (
         '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
         'Test Environment',
         true,
-        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27'
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+        'Development'
     ),
     (
         '1ab6ca79-a4fc-44ba-87e2-12884edf17f7',
         'To Delete Environment',
         true,
-        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27'
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+        'Development'
     ),
     (
         '3eef17bc-9e06-411d-b5f4-7a786e68bb96',
         'For Update Environment',
         true,
-        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27'
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+        'Development'
     ),
     (
         '06f28625-df1d-499f-a4ee-5629a8b6a169',
         'For Stage 1 Environment',
         true,
-        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27'
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+        'Development'
     ),
     (
         '78ccc5d7-e1bb-4e41-b6ef-02adf5c0d017',
         'For Stage 2 Environment',
         true,
-        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27'
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+        'Development'
     ),
     -- Dedicated environments for compound rules tests
     (
         'aaaaaaaa-1111-1111-1111-111111111111',
         'Compound Rules Test Env 1',
         true,
-        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27'
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+        'Development'
     ),
     (
         'bbbbbbbb-2222-2222-2222-222222222222',
         'Compound Rules Test Env 2',
         true,
-        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27'
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+        'Development'
     ),
     (
         'cccccccc-3333-3333-3333-333333333333',
         'Compound Rules Test Env 3',
         true,
-        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27'
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+        'Development'
     ),
     (
         'dddddddd-4444-4444-4444-444444444444',
         'Compound Rules Test Env 4',
         true,
-        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27'
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+        'Development'
     ),
     (
         'eeeeeeee-5555-5555-5555-555555555555',
         'Compound Rules Test Env 5',
         true,
-        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27'
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+        'Development'
     ),
     (
         'ffffffff-6666-6666-6666-666666666666',
         'Compound Rules Test Env 6',
         true,
-        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27'
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+        'Development'
     ),
     (
         '11111111-7777-7777-7777-777777777777',
         'Compound Rules Test Env 7',
         true,
-        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27'
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+        'Development'
     ),
     (
         '9f9f9f9f-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
         'Approval Production',
         true,
-        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27'
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+        'Production'
     )
 ON CONFLICT (id) DO NOTHING;
 

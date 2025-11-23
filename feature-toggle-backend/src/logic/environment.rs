@@ -90,6 +90,7 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
             name: environment.name,
             active: environment.active,
             team_id: ID::from(environment.team_id),
+            environment_type: environment.environment_type,
         })
     }
 
@@ -111,6 +112,7 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
                 name: env.name,
                 active: env.active,
                 team_id: ID::from(env.team_id),
+                environment_type: env.environment_type,
             })
             .collect())
     }
@@ -135,6 +137,7 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
                 name: env.name,
                 active: env.active,
                 team_id: ID::from(env.team_id),
+                environment_type: env.environment_type,
             })
             .collect();
         Ok((mapped_environments, total))
@@ -149,6 +152,7 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
         let input = crate::database::environment::CreateEnvironment {
             name: input.name,
             active: input.active,
+            environment_type: input.environment_type,
         };
 
         if input.name.is_empty() {
@@ -189,6 +193,7 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
             name: environment.name,
             active: environment.active,
             team_id: ID::from(environment.team_id),
+            environment_type: environment.environment_type,
         })
     }
 
@@ -201,6 +206,7 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
         let input = crate::database::environment::UpdateEnvironment {
             name: input.name,
             active: input.active,
+            environment_type: input.environment_type,
         };
 
         let id = Uuid::try_from(id).unwrap();
@@ -234,6 +240,7 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
             name: environment.name,
             active: environment.active,
             team_id: ID::from(environment.team_id),
+            environment_type: environment.environment_type,
         })
     }
 
@@ -319,6 +326,7 @@ mod tests {
                     name: "Mock Environment".to_string(),
                     active: true,
                     team_id: Uuid::new_v4(), // Mock team ID
+                    environment_type: "Development".to_string(),
                 })
             });
 
@@ -363,6 +371,7 @@ mod tests {
         let input = CreateEnvironmentInput {
             name: "New Environment".to_string(),
             active: true,
+            environment_type: Some("Development".to_string()),
         };
         const ID: &str = "51ecc366-f1cd-4d3d-ab73-fa60bad98f27";
         let expected_id = Uuid::parse_str(ID).unwrap();
@@ -376,6 +385,7 @@ mod tests {
                     name: "New Environment".to_string(),
                     active: true,
                     team_id: Uuid::new_v4(),
+                    environment_type: "Development".to_string(),
                 })
             });
 
@@ -394,6 +404,7 @@ mod tests {
         let input = UpdateEnvironmentInput {
             name: Some("Updated Environment".to_string()),
             active: Some(true),
+            environment_type: Some("Production".to_string()),
         };
         const ID: &str = "51ecc366-f1cd-4d3d-ab73-fa60bad98f27";
         let expected_id = Uuid::parse_str(ID).unwrap();
@@ -409,6 +420,7 @@ mod tests {
                     name: "Updated Environment".to_string(),
                     active: true,
                     team_id: Uuid::new_v4(),
+                    environment_type: "Production".to_string(),
                 })
             });
 
@@ -428,6 +440,7 @@ mod tests {
         let input = UpdateEnvironmentInput {
             name: Some("Updated Environment".to_string()),
             active: Some(true),
+            environment_type: Some("Production".to_string()),
         };
         let expected_id = Uuid::parse_str(ENV_ID).unwrap();
         mock_repository
@@ -468,6 +481,7 @@ mod tests {
                     name: "Test Environment".to_string(),
                     active: true,
                     team_id: Uuid::new_v4(),
+                    environment_type: "Development".to_string(),
                 })
             });
 
@@ -523,12 +537,14 @@ mod tests {
                         name: "Test Environment".to_string(),
                         active: true,
                         team_id: Uuid::new_v4(),
+                        environment_type: "Development".to_string(),
                     },
                     crate::database::entity::Environment {
                         id: expected_id,
                         name: "Test Environment".to_string(),
                         active: true,
                         team_id: Uuid::new_v4(),
+                        environment_type: "Production".to_string(),
                     },
                 ])
             });
@@ -556,12 +572,14 @@ mod tests {
                 name: "Production".to_string(),
                 active: true,
                 team_id,
+                environment_type: "Production".to_string(),
             },
             crate::database::entity::Environment {
                 id: env2_id,
                 name: "Development".to_string(),
                 active: false,
                 team_id,
+                environment_type: "Development".to_string(),
             },
         ];
 

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "UPDATE environments SET name = $1, active = $2 WHERE id = $3 RETURNING id, name, active,team_id",
+  "query": "UPDATE environments SET name = $1, active = $2, environment_type = $3 WHERE id = $4 RETURNING id, name, active, team_id, environment_type",
   "describe": {
     "columns": [
       {
@@ -22,12 +22,18 @@
         "ordinal": 3,
         "name": "team_id",
         "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "environment_type",
+        "type_info": "Varchar"
       }
     ],
     "parameters": {
       "Left": [
         "Varchar",
         "Bool",
+        "Varchar",
         "Uuid"
       ]
     },
@@ -35,8 +41,9 @@
       false,
       false,
       false,
+      false,
       false
     ]
   },
-  "hash": "39b1322a3979a9c4424a7f5e6f2a66e72316c0958af1c5f0de0c6cead787edb9"
+  "hash": "e681279e874ade2ae6514d0e7ee22a1e55cb6751299f667c2dc817b8d0351290"
 }

@@ -253,6 +253,7 @@ mod tests {
                 name: "Test Environment".to_string(),
                 team_id: Default::default(),
                 active: true,
+                environment_type: "Development".to_string(),
             },
         );
 
@@ -263,6 +264,7 @@ mod tests {
                 name: "Another Environment".to_string(),
                 team_id: Default::default(),
                 active: true,
+                environment_type: "Development".to_string(),
             },
         );
 
@@ -340,6 +342,7 @@ mod tests {
                     name: "Test Environment".to_string(),
                     team_id: Default::default(),
                     active: true,
+                    environment_type: "Development".to_string(),
                 })
             });
 
@@ -387,6 +390,7 @@ mod tests {
                     name: "Environment 1".to_string(),
                     team_id: Default::default(),
                     active: true,
+                    environment_type: "Development".to_string(),
                 })
             });
 
@@ -400,6 +404,7 @@ mod tests {
                     name: "Environment 2".to_string(),
                     team_id: Default::default(),
                     active: true,
+                    environment_type: "Development".to_string(),
                 })
             });
 

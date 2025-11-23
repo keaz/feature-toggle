@@ -2,12 +2,12 @@ use crate::database::approval::DEFAULT_APPROVAL_PAGE_SIZE;
 use crate::database::entity::ApprovalStatus;
 use crate::graphql::create_user;
 use crate::graphql::schema::{
-    ActivityLog, ActivityLogPage, ApplicationStatus, ApprovalRequestPage, ApprovalRequestStatus,
-    Client, ClientType, ClientsPage, ContextsPage, Environment, EnvironmentsPage,
-    EvaluationByFeature, EvaluationCountFilter, EvaluationSummaryOutput,
+    ActivityLog, ActivityLogPage, ApplicationStatus, ApprovalPolicy, ApprovalRequestPage,
+    ApprovalRequestStatus, Client, ClientType, ClientsPage, ContextsPage, Environment,
+    EnvironmentsPage, EvaluationByFeature, EvaluationCountFilter, EvaluationSummaryOutput,
     EvaluationSummaryQueryInput, ExperimentAnalysis, Feature, FeatureGrowthPoint, FeatureType,
     FeaturesPage, JwtSecretResponse, Metric, MetricAnalysis, MetricResult, Pipeline, PipelinesPage,
-    Role, RolloutMetrics, Team, User, UsersPage, map_approval_request,
+    Role, RolloutMetrics, Team, User, UsersPage, map_approval_policy, map_approval_request,
 };
 use crate::graphql::subscription::calculate_time_range;
 use crate::logic::approval::ApprovalLogic;
@@ -269,6 +269,45 @@ impl Query {
             page_number: page_num,
             page_size: page_sz,
         })
+    }
+
+    async fn approval_policies(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Team ID")] team_id: ID,
+    ) -> GqlResult<Vec<ApprovalPolicy>> {
+        debug!("Fetching approval policies for team {team_id:?}");
+        let team_uuid = Uuid::try_from(team_id)
+            .map_err(|e| async_graphql::Error::new(format!("Invalid team id: {e}")))?;
+
+        let repo = ctx.data::<Box<dyn crate::database::approval::ApprovalRepository>>()?;
+
+        let policies = repo
+            .list_policies_for_team(team_uuid)
+            .await
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+
+        Ok(policies.into_iter().map(map_approval_policy).collect())
+    }
+
+    async fn approval_policy(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Policy ID")] policy_id: ID,
+    ) -> GqlResult<ApprovalPolicy> {
+        debug!("Fetching approval policy {policy_id:?}");
+        let policy_uuid = Uuid::try_from(policy_id)
+            .map_err(|e| async_graphql::Error::new(format!("Invalid policy id: {e}")))?;
+
+        let repo = ctx.data::<Box<dyn crate::database::approval::ApprovalRepository>>()?;
+
+        let policy = repo
+            .get_policy_by_id(policy_uuid)
+            .await
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?
+            .ok_or_else(|| async_graphql::Error::new("Policy not found"))?;
+
+        Ok(map_approval_policy(policy))
     }
 
     /// Get features with active kill switches
@@ -1734,6 +1773,7 @@ mod more_query_tests {
             name: "prod".into(),
             active: true,
             team_id: ID::from("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+            environment_type: "Production".to_string(),
         };
         let env_id_for_check = env_id.clone();
         mock.expect_get_environment_by_id()

@@ -54,6 +54,8 @@ pub mod activity_types {
     pub const STAGE_ROLLBACKED: &str = "stage_rollbacked";
 
     // Role activities
+    pub const ROLE_CREATED: &str = "role_created";
+    pub const ROLE_DELETED: &str = "role_deleted";
     pub const ROLE_ASSIGNED: &str = "role_assigned";
     pub const ROLE_REVOKED: &str = "role_revoked";
 }

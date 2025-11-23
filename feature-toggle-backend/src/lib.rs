@@ -65,12 +65,14 @@ pub async fn run() -> std::io::Result<()> {
         activity_log_repository.clone_box(),
     );
     let approval_repository = database::approval::approval_repository(db_pool.clone());
+    let role_repository = database::role::role_repository(db_pool.clone());
     let (approval_events_tx, _approval_events_rx) =
         tokio::sync::broadcast::channel::<logic::approval::ApprovalRequestEvent>(128);
     let approval_logic = logic::approval::approval_logic(
         approval_repository.clone(),
         feature_repository.clone_box(),
         environment_logic.clone(),
+        role_repository.clone(),
         approval_events_tx.clone(),
     );
     let team_logic = logic::team::team_logic(
@@ -213,6 +215,7 @@ pub async fn run() -> std::io::Result<()> {
             .data(activity_log_repository_arc.clone())
             .data(feature_repository_arc.clone())
             .data(feature_repository.clone())
+            .data(approval_repository.clone_box())
             .data(environment_logic.clone())
             .data(team_logic.clone())
             .data(pipeline_logic.clone())

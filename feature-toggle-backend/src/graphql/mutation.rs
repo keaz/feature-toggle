@@ -4,14 +4,17 @@ use crate::database::feature::FeatureRepository;
 use crate::graphql::create_user;
 use crate::graphql::schema::map_approval_request;
 use crate::graphql::schema::{
-    ApprovalRequest, AssignUserRolesInput, CreateClientInput, CreateEnvironmentInput,
-    CreateFeatureInput, CreateMetricInput, CreatePipelineInput, CreateTeamInput,
-    CreateVariantAllocationInput, Environment, Feature, LoginInput as GqlLoginInput, LoginResponse,
-    Metric, Pipeline, RegisterUserInput as GqlRegisterUserInput,
-    ResetPasswordInput as GqlResetPasswordInput, Role,
-    SetTemporaryPasswordInput as GqlSetTemporaryPasswordInput, Team, UpdateClientInput,
+    ApprovalPolicy, ApprovalRequest, AssignUserRolesInput,
+    CreateApprovalPolicyInput as GqlCreateApprovalPolicyInput, CreateClientInput,
+    CreateEnvironmentInput, CreateFeatureInput, CreateMetricInput, CreatePipelineInput,
+    CreateRoleInput, CreateTeamInput, CreateVariantAllocationInput, Environment, Feature,
+    LoginInput as GqlLoginInput, LoginResponse, Metric, Pipeline,
+    RegisterUserInput as GqlRegisterUserInput, ResetPasswordInput as GqlResetPasswordInput, Role,
+    SetTemporaryPasswordInput as GqlSetTemporaryPasswordInput, Team,
+    UpdateApprovalPolicyInput as GqlUpdateApprovalPolicyInput, UpdateClientInput,
     UpdateEnvironmentInput, UpdateFeatureInput, UpdatePipelineInput, UpdateTeamInput,
     UpdateUserInput as GqlUpdateUserInput, UpdateVariantAllocationInput, User, VariantAllocation,
+    map_approval_policy,
 };
 use crate::graphql::validator::{CreateInputValidator, UpdateInputValidator};
 use crate::logic::approval::ApprovalLogic;
@@ -1112,6 +1115,131 @@ impl MutationRoot {
         Ok(map_approval_request(updated))
     }
 
+    /// Create a new approval policy
+    async fn create_approval_policy(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Team ID")] team_id: ID,
+        #[graphql(desc = "Approval policy input")] input: GqlCreateApprovalPolicyInput,
+    ) -> GqlResult<ApprovalPolicy> {
+        let team_uuid = uuid::Uuid::try_from(team_id)
+            .map_err(|e| async_graphql::Error::new(format!("Invalid team id: {e}")))?;
+
+        let env_ids = input
+            .environment_ids
+            .map(|ids| {
+                ids.into_iter()
+                    .map(|id| {
+                        uuid::Uuid::try_from(id).map_err(|e| {
+                            async_graphql::Error::new(format!("Invalid environment id: {e}"))
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?;
+
+        let role_ids = input
+            .approver_role_ids
+            .into_iter()
+            .map(|id| {
+                uuid::Uuid::try_from(id)
+                    .map_err(|e| async_graphql::Error::new(format!("Invalid role id: {e}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let repo = ctx.data::<Box<dyn crate::database::approval::ApprovalRepository>>()?;
+
+        let policy = repo
+            .create_policy(crate::database::approval::CreateApprovalPolicyInput {
+                team_id: team_uuid,
+                name: input.name,
+                description: input.description,
+                applies_to: input.applies_to,
+                environment_ids: env_ids,
+                required_approvers: input.required_approvers,
+                approver_role_ids: role_ids,
+                auto_approve_after_hours: input.auto_approve_after_hours,
+                enabled: input.enabled.unwrap_or(true),
+            })
+            .await
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+
+        Ok(map_approval_policy(policy))
+    }
+
+    /// Update an existing approval policy
+    async fn update_approval_policy(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Policy ID")] policy_id: ID,
+        #[graphql(desc = "Update input")] input: GqlUpdateApprovalPolicyInput,
+    ) -> GqlResult<ApprovalPolicy> {
+        let policy_uuid = uuid::Uuid::try_from(policy_id)
+            .map_err(|e| async_graphql::Error::new(format!("Invalid policy id: {e}")))?;
+
+        let env_ids = input
+            .environment_ids
+            .map(|ids| {
+                ids.into_iter()
+                    .map(|id| {
+                        uuid::Uuid::try_from(id).map_err(|e| {
+                            async_graphql::Error::new(format!("Invalid environment id: {e}"))
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?;
+
+        let role_ids = input
+            .approver_role_ids
+            .map(|ids| {
+                ids.into_iter()
+                    .map(|id| {
+                        uuid::Uuid::try_from(id)
+                            .map_err(|e| async_graphql::Error::new(format!("Invalid role id: {e}")))
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?;
+
+        let repo = ctx.data::<Box<dyn crate::database::approval::ApprovalRepository>>()?;
+
+        let policy = repo
+            .update_policy(
+                policy_uuid,
+                crate::database::approval::UpdateApprovalPolicyInput {
+                    name: input.name,
+                    description: input.description,
+                    applies_to: input.applies_to,
+                    environment_ids: env_ids,
+                    required_approvers: input.required_approvers,
+                    approver_role_ids: role_ids,
+                    auto_approve_after_hours: input.auto_approve_after_hours,
+                    enabled: input.enabled,
+                },
+            )
+            .await
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+
+        Ok(map_approval_policy(policy))
+    }
+
+    /// Delete an approval policy
+    async fn delete_approval_policy(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Policy ID")] policy_id: ID,
+    ) -> GqlResult<bool> {
+        let policy_uuid = uuid::Uuid::try_from(policy_id)
+            .map_err(|e| async_graphql::Error::new(format!("Invalid policy id: {e}")))?;
+
+        let repo = ctx.data::<Box<dyn crate::database::approval::ApprovalRepository>>()?;
+
+        repo.delete_policy(policy_uuid)
+            .await
+            .map_err(|e| async_graphql::Error::new(e.to_string()))
+    }
+
     // User mutations
     async fn register_user(
         &self,
@@ -1334,6 +1462,52 @@ impl MutationRoot {
                 description: t.description,
             })
             .collect())
+    }
+
+    async fn create_role(&self, ctx: &Context<'_>, input: CreateRoleInput) -> GqlResult<Role> {
+        info!("Creating role '{}'", input.name);
+        let jwt_user = ctx.data::<crate::JwtUser>()?;
+        if !jwt_user.is_admin {
+            return Err(async_graphql::Error::new(
+                "Unauthorized: Admin access required",
+            ));
+        }
+
+        let actor = Some(crate::logic::ActorContext::new(
+            jwt_user.id,
+            jwt_user.username.clone(),
+        ));
+        let logic = ctx.data::<Box<dyn RoleLogic>>()?;
+        let role = logic
+            .create_role(input.name, input.description, actor)
+            .await?;
+
+        Ok(Role {
+            id: role.id,
+            name: role.name,
+            description: role.description,
+            created_at: role.created_at,
+            updated_at: role.updated_at,
+        })
+    }
+
+    async fn delete_role(&self, ctx: &Context<'_>, id: ID) -> GqlResult<bool> {
+        info!("Deleting role: {id:?}");
+        let jwt_user = ctx.data::<crate::JwtUser>()?;
+        if !jwt_user.is_admin {
+            return Err(async_graphql::Error::new(
+                "Unauthorized: Admin access required",
+            ));
+        }
+
+        let actor = Some(crate::logic::ActorContext::new(
+            jwt_user.id,
+            jwt_user.username.clone(),
+        ));
+        let logic = ctx.data::<Box<dyn RoleLogic>>()?;
+        logic.delete_role(id, actor).await?;
+
+        Ok(true)
     }
 
     async fn assign_user_roles(
@@ -1989,6 +2163,145 @@ mod more_mutation_tests {
         );
         let data = resp.data.into_json().unwrap();
         assert_eq!(data["assignUserRoles"][0]["name"], "Approver");
+    }
+
+    #[tokio::test]
+    async fn test_create_role_mutation() {
+        use crate::logic::role::MockRoleLogic;
+        let mut mock = MockRoleLogic::new();
+        let admin_id = Uuid::new_v4();
+        let role_id = ID::from(Uuid::new_v4());
+
+        mock.expect_create_role()
+            .times(1)
+            .return_once(move |name, description, actor| {
+                assert_eq!(name, "Observer");
+                assert_eq!(description, "Read only");
+                assert_eq!(actor.as_ref().map(|a| a.id), Some(admin_id));
+                Ok(crate::logic::role::GqlRole {
+                    id: role_id.clone(),
+                    name: "Observer".to_string(),
+                    description: "Read only".to_string(),
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                    updated_at: chrono::Utc::now().to_rfc3339(),
+                })
+            });
+
+        let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
+            .data::<Box<dyn crate::logic::role::RoleLogic>>(Box::new(mock))
+            .data(crate::JwtUser {
+                id: admin_id,
+                username: "admin".to_string(),
+                is_admin: true,
+                roles: vec![],
+                token_hash: "hash".to_string(),
+            })
+            .finish();
+
+        let gql = r#"
+            mutation($input: CreateRoleInput!) {
+                createRole(input: $input) {
+                    id
+                    name
+                    description
+                }
+            }
+        "#;
+        let mut req = Request::new(gql);
+        req = req.variables(async_graphql::Variables::from_json(serde_json::json!({
+            "input": { "name": "Observer", "description": "Read only" }
+        })));
+
+        let resp = schema.execute(req).await;
+        assert!(
+            resp.errors.is_empty(),
+            "{}",
+            serde_json::to_string(&resp.errors).unwrap()
+        );
+        let data = resp.data.into_json().unwrap();
+        assert_eq!(data["createRole"]["name"], "Observer");
+    }
+
+    #[tokio::test]
+    async fn test_create_role_requires_admin() {
+        use crate::logic::role::MockRoleLogic;
+        let mock = MockRoleLogic::new();
+
+        let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
+            .data::<Box<dyn crate::logic::role::RoleLogic>>(Box::new(mock))
+            .data(crate::JwtUser {
+                id: Uuid::new_v4(),
+                username: "user".to_string(),
+                is_admin: false,
+                roles: vec![],
+                token_hash: "hash".to_string(),
+            })
+            .finish();
+
+        let gql = r#"
+            mutation($input: CreateRoleInput!) {
+                createRole(input: $input) {
+                    id
+                }
+            }
+        "#;
+        let mut req = Request::new(gql);
+        req = req.variables(async_graphql::Variables::from_json(serde_json::json!({
+            "input": { "name": "Observer", "description": "Read only" }
+        })));
+
+        let resp = schema.execute(req).await;
+        assert!(
+            !resp.errors.is_empty(),
+            "expected admin guard to block createRole"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_role_mutation() {
+        use crate::logic::role::MockRoleLogic;
+        let mut mock = MockRoleLogic::new();
+        let admin_id = Uuid::new_v4();
+        let role_id = ID::from(Uuid::new_v4());
+        let expected_role_id = role_id.clone();
+
+        mock.expect_delete_role()
+            .times(1)
+            .return_once(move |id, actor| {
+                assert_eq!(id, expected_role_id);
+                assert_eq!(actor.as_ref().map(|a| a.id), Some(admin_id));
+                Ok(())
+            });
+
+        let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
+            .data::<Box<dyn crate::logic::role::RoleLogic>>(Box::new(mock))
+            .data(crate::JwtUser {
+                id: admin_id,
+                username: "admin".to_string(),
+                is_admin: true,
+                roles: vec![],
+                token_hash: "hash".to_string(),
+            })
+            .finish();
+
+        let gql = r#"
+            mutation($id: ID!) {
+                deleteRole(id: $id)
+            }
+        "#;
+        let mut req = Request::new(gql);
+        req = req.variables(async_graphql::Variables::from_json(serde_json::json!({
+            "id": role_id.to_string()
+        })));
+
+        let resp = schema.execute(req).await;
+        assert!(
+            resp.errors.is_empty(),
+            "{}",
+            serde_json::to_string(&resp.errors).unwrap()
+        );
+        let data = resp.data.into_json().unwrap();
+        assert_eq!(data["deleteRole"], true);
     }
 
     #[tokio::test]
@@ -2816,6 +3129,7 @@ mod more_mutation_tests {
         let input = crate::graphql::schema::CreateEnvironmentInput {
             name: "staging".to_string(),
             active: true,
+            environment_type: Some("Development".to_string()),
         };
 
         let expected = crate::graphql::schema::Environment {
@@ -2823,6 +3137,7 @@ mod more_mutation_tests {
             name: "staging".to_string(),
             team_id: ID::from(team_id),
             active: true,
+            environment_type: "Development".to_string(),
         };
 
         let team_id_clone = team_id;
@@ -2877,6 +3192,7 @@ mod more_mutation_tests {
         let input = crate::graphql::schema::UpdateEnvironmentInput {
             name: Some("production".to_string()),
             active: Some(false),
+            environment_type: Some("Production".to_string()),
         };
 
         let expected = crate::graphql::schema::Environment {
@@ -2884,6 +3200,7 @@ mod more_mutation_tests {
             name: "production".to_string(),
             team_id: ID::from(Uuid::new_v4()),
             active: false,
+            environment_type: "Production".to_string(),
         };
 
         let env_id_clone = env_id;

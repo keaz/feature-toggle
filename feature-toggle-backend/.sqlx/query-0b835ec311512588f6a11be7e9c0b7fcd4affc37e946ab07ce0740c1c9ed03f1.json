@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO environments (id, name, active, team_id) VALUES ($1, $2, $3, $4) RETURNING id,name,active, team_id",
+  "query": "INSERT INTO environments (id, name, active, team_id, environment_type) VALUES ($1, $2, $3, $4, $5) RETURNING id,name,active, team_id, environment_type",
   "describe": {
     "columns": [
       {
@@ -22,6 +22,11 @@
         "ordinal": 3,
         "name": "team_id",
         "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "environment_type",
+        "type_info": "Varchar"
       }
     ],
     "parameters": {
@@ -29,15 +34,17 @@
         "Uuid",
         "Varchar",
         "Bool",
-        "Uuid"
+        "Uuid",
+        "Varchar"
       ]
     },
     "nullable": [
       false,
       false,
       false,
+      false,
       false
     ]
   },
-  "hash": "6af467cf2805a0dbf604d239c9060dd45e86205390ad14e6d9cf27e4ec3d9845"
+  "hash": "0b835ec311512588f6a11be7e9c0b7fcd4affc37e946ab07ce0740c1c9ed03f1"
 }

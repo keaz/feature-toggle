@@ -289,6 +289,73 @@ pub struct ApprovalRequestPage {
     pub page_size: i32,
 }
 
+#[derive(Enum, Copy, Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
+pub enum AppliesTo {
+    #[graphql(name = "all")]
+    All,
+    #[graphql(name = "production_only")]
+    ProductionOnly,
+    #[graphql(name = "specific_environments")]
+    SpecificEnvironments,
+}
+
+#[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
+pub struct ApprovalPolicy {
+    pub id: ID,
+    pub team_id: ID,
+    pub name: String,
+    pub description: Option<String>,
+    pub applies_to: String,
+    pub environment_ids: Option<Vec<ID>>,
+    pub required_approvers: i32,
+    pub approver_role_ids: Vec<ID>,
+    pub auto_approve_after_hours: Option<i32>,
+    pub enabled: bool,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+pub fn map_approval_policy(policy: crate::database::entity::ApprovalPolicy) -> ApprovalPolicy {
+    ApprovalPolicy {
+        id: policy.id.into(),
+        team_id: policy.team_id.into(),
+        name: policy.name,
+        description: policy.description,
+        applies_to: policy.applies_to,
+        environment_ids: policy
+            .environment_ids
+            .map(|ids| ids.into_iter().map(ID::from).collect()),
+        required_approvers: policy.required_approvers,
+        approver_role_ids: policy.approver_role_ids.into_iter().map(ID::from).collect(),
+        auto_approve_after_hours: policy.auto_approve_after_hours,
+        enabled: policy.enabled,
+        created_at: policy.created_at,
+    }
+}
+
+#[derive(InputObject, Clone, Debug, Serialize, Deserialize)]
+pub struct CreateApprovalPolicyInput {
+    pub name: String,
+    pub description: Option<String>,
+    pub applies_to: String,
+    pub environment_ids: Option<Vec<ID>>,
+    pub required_approvers: i32,
+    pub approver_role_ids: Vec<ID>,
+    pub auto_approve_after_hours: Option<i32>,
+    pub enabled: Option<bool>,
+}
+
+#[derive(InputObject, Clone, Debug, Serialize, Deserialize)]
+pub struct UpdateApprovalPolicyInput {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub applies_to: Option<String>,
+    pub environment_ids: Option<Vec<ID>>,
+    pub required_approvers: Option<i32>,
+    pub approver_role_ids: Option<Vec<ID>>,
+    pub auto_approve_after_hours: Option<i32>,
+    pub enabled: Option<bool>,
+}
+
 fn relationship_factory(source_id: i32, target_id: i32) -> FeatureRelationship {
     FeatureRelationship {
         source_id,
@@ -360,6 +427,7 @@ pub struct Environment {
     pub name: String,
     pub team_id: ID,
     pub active: bool,
+    pub environment_type: String,
 }
 
 #[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
@@ -463,6 +531,7 @@ pub struct CreateEnvironmentInput {
     #[graphql(validator(min_length = 3, max_length = 50))]
     pub name: String,
     pub active: bool,
+    pub environment_type: Option<String>,
 }
 
 #[derive(InputObject, Debug)]
@@ -526,6 +595,7 @@ pub struct UpdateEnvironmentInput {
     #[graphql(validator(min_length = 3, max_length = 50))]
     pub name: Option<String>,
     pub active: Option<bool>,
+    pub environment_type: Option<String>,
 }
 
 #[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
@@ -988,6 +1058,12 @@ pub struct Role {
 #[derive(InputObject, Debug)]
 pub struct AssignUserRolesInput {
     pub role_ids: Vec<ID>,
+}
+
+#[derive(InputObject, Debug)]
+pub struct CreateRoleInput {
+    pub name: String,
+    pub description: String,
 }
 
 #[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]

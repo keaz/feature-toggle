@@ -20,6 +20,17 @@ pub struct CreateApprovalPolicyInput {
     pub enabled: bool,
 }
 
+pub struct UpdateApprovalPolicyInput {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub applies_to: Option<String>,
+    pub environment_ids: Option<Vec<Uuid>>,
+    pub required_approvers: Option<i32>,
+    pub approver_role_ids: Option<Vec<Uuid>>,
+    pub auto_approve_after_hours: Option<i32>,
+    pub enabled: Option<bool>,
+}
+
 pub struct CreateApprovalRequestInput {
     pub policy_id: Uuid,
     pub feature_id: Uuid,
@@ -44,6 +55,12 @@ pub trait ApprovalRepository: Send + Sync {
         &self,
         input: CreateApprovalPolicyInput,
     ) -> Result<ApprovalPolicy, Error>;
+    async fn update_policy(
+        &self,
+        id: Uuid,
+        input: UpdateApprovalPolicyInput,
+    ) -> Result<ApprovalPolicy, Error>;
+    async fn delete_policy(&self, id: Uuid) -> Result<bool, Error>;
     async fn list_policies_for_team(&self, team_id: Uuid) -> Result<Vec<ApprovalPolicy>, Error>;
     async fn get_policy_by_id(&self, id: Uuid) -> Result<Option<ApprovalPolicy>, Error>;
 
@@ -189,6 +206,80 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
         .await;
 
         handle_error(Some(id), result)
+    }
+
+    async fn update_policy(
+        &self,
+        id: Uuid,
+        input: UpdateApprovalPolicyInput,
+    ) -> Result<ApprovalPolicy, Error> {
+        // First fetch the existing policy
+        let existing = self
+            .get_policy_by_id(id)
+            .await?
+            .ok_or(Error::NotFound(id))?;
+
+        // Build update with optional fields
+        let name = input.name.unwrap_or(existing.name);
+        let description = input.description.or(existing.description);
+        let applies_to = input.applies_to.unwrap_or(existing.applies_to);
+        let environment_ids = input.environment_ids.or(existing.environment_ids);
+        let required_approvers = input
+            .required_approvers
+            .unwrap_or(existing.required_approvers);
+        let approver_role_ids = input
+            .approver_role_ids
+            .unwrap_or(existing.approver_role_ids);
+        let auto_approve_after_hours = input
+            .auto_approve_after_hours
+            .or(existing.auto_approve_after_hours);
+        let enabled = input.enabled.unwrap_or(existing.enabled);
+
+        let result = sqlx::query_as::<_, ApprovalPolicy>(
+            r#"
+            UPDATE approval_policies
+            SET name = $2,
+                description = $3,
+                applies_to = $4,
+                environment_ids = $5,
+                required_approvers = $6,
+                approver_role_ids = $7,
+                auto_approve_after_hours = $8,
+                enabled = $9
+            WHERE id = $1
+            RETURNING id, team_id, name, description, applies_to, environment_ids, required_approvers,
+                      approver_role_ids, auto_approve_after_hours, enabled, created_at
+            "#,
+        )
+        .bind(id)
+        .bind(name)
+        .bind(description)
+        .bind(applies_to)
+        .bind(environment_ids.as_deref())
+        .bind(required_approvers)
+        .bind(&approver_role_ids)
+        .bind(auto_approve_after_hours)
+        .bind(enabled)
+        .fetch_one(&self.pool)
+        .await;
+
+        handle_error(Some(id), result)
+    }
+
+    async fn delete_policy(&self, id: Uuid) -> Result<bool, Error> {
+        let result = sqlx::query(
+            r#"
+            DELETE FROM approval_policies WHERE id = $1
+            "#,
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await;
+
+        match result {
+            Ok(result) => Ok(result.rows_affected() > 0),
+            Err(e) => Err(Error::DatabaseError(e)),
+        }
     }
 
     async fn create_request(

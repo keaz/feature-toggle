@@ -12,6 +12,7 @@ pub struct Environment {
     pub name: String,
     pub active: bool,
     pub team_id: Uuid,
+    pub environment_type: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]

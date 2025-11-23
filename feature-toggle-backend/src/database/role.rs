@@ -26,6 +26,8 @@ pub trait RoleRepository: Send + Sync {
     async fn get_all_roles(&self) -> Result<Vec<Role>, Error>;
     async fn get_role_by_id(&self, id: Uuid) -> Result<Role, Error>;
     async fn get_role_by_name(&self, name: &str) -> Result<Role, Error>;
+    async fn create_role(&self, name: &str, description: &str) -> Result<Role, Error>;
+    async fn delete_role(&self, id: Uuid) -> Result<(), Error>;
     async fn get_user_roles(&self, user_id: Uuid) -> Result<Vec<Role>, Error>;
     async fn assign_user_roles(
         &self,
@@ -53,6 +55,19 @@ fn handle_error<T>(id: Option<Uuid>, result: Result<T, sqlx::Error>) -> Result<T
             } else {
                 Err(Error::InvalidInput("Role not found".to_string()))
             }
+        }
+        Err(sqlx::Error::Database(db_err)) => {
+            if let Some(code) = db_err.code()
+                && code == "23505"
+            {
+                let field = match db_err.constraint() {
+                    Some(c) if c.contains("roles_name_key") => "role name",
+                    Some(c) if c.contains("user_roles_user_id_role_id_key") => "user role",
+                    _ => "record",
+                };
+                return Err(Error::RecordAlreadyExists(field.to_string()));
+            }
+            Err(Error::DatabaseError(sqlx::Error::Database(db_err)))
         }
         Err(e) => Err(Error::DatabaseError(e.into())),
     }
@@ -93,6 +108,35 @@ impl RoleRepository for RoleRepositoryImpl {
         .await;
 
         handle_error(None, result)
+    }
+
+    async fn create_role(&self, name: &str, description: &str) -> Result<Role, Error> {
+        let result = sqlx::query_as!(
+            Role,
+            r#"INSERT INTO roles (name, description) 
+               VALUES ($1, $2) 
+               RETURNING id, name, description, created_at, updated_at"#,
+            name,
+            description
+        )
+        .fetch_one(&self.pool)
+        .await;
+
+        handle_error(None, result)
+    }
+
+    async fn delete_role(&self, id: Uuid) -> Result<(), Error> {
+        let result = sqlx::query("DELETE FROM roles WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await;
+
+        let res = handle_error(Some(id), result)?;
+        if res.rows_affected() == 0 {
+            return Err(Error::NotFound(id));
+        }
+
+        Ok(())
     }
 
     async fn get_user_roles(&self, user_id: Uuid) -> Result<Vec<Role>, Error> {
@@ -259,5 +303,40 @@ mod tests {
 
         let result = mock.user_has_role(user_id, role_name).await.unwrap();
         assert!(result);
+    }
+
+    #[tokio::test]
+    async fn test_create_role() {
+        let mut mock = MockRoleRepository::new();
+        let expected_role = Role {
+            id: Uuid::new_v4(),
+            name: "Custom".to_string(),
+            description: "Custom role".to_string(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        mock.expect_create_role()
+            .with(eq("Custom"), eq("Custom role"))
+            .times(1)
+            .return_once(move |_, _| Ok(expected_role.clone()));
+
+        let created = mock.create_role("Custom", "Custom role").await.unwrap();
+        assert_eq!(created.name, "Custom");
+        assert_eq!(created.description, "Custom role");
+    }
+
+    #[tokio::test]
+    async fn test_delete_role() {
+        let mut mock = MockRoleRepository::new();
+        let role_id = Uuid::new_v4();
+
+        mock.expect_delete_role()
+            .with(eq(role_id))
+            .times(1)
+            .return_once(|_| Ok(()));
+
+        let result = mock.delete_role(role_id).await;
+        assert!(result.is_ok());
     }
 }

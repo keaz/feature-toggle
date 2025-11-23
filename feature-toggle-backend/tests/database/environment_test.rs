@@ -38,6 +38,7 @@ async fn test_create_environment() {
     let input = CreateEnvironment {
         name: unique_name.clone(),
         active: true,
+        environment_type: Some("Development".to_string()),
     };
     let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
     let result = repository.create_environment(team_id, input).await;
@@ -56,6 +57,7 @@ async fn test_create_existing_environment() {
     let input = CreateEnvironment {
         name: "Test Environment".to_string(),
         active: true,
+        environment_type: Some("Development".to_string()),
     };
     let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
     let result = repository.create_environment(team_id, input).await;
@@ -77,6 +79,7 @@ async fn test_update_environment() {
     let input = UpdateEnvironment {
         name: Some("Updated Environment".to_string()),
         active: Some(false),
+        environment_type: None,
     };
     let result = repository.update_environment(id, input).await;
 
@@ -95,6 +98,7 @@ async fn test_not_found_update_environment() {
     let input = UpdateEnvironment {
         name: Some("Non-existent Environment".to_string()),
         active: Some(true),
+        environment_type: None,
     };
     let result = repository.update_environment(id, input).await;
 

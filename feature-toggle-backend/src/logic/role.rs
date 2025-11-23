@@ -1,9 +1,12 @@
 use crate::Error;
 use crate::database::entity::Role;
 use crate::database::role::RoleRepository;
+use crate::utils::activity_logger;
 use async_graphql::ID;
 use mockall::automock;
 use uuid::Uuid;
+
+pub const SYSTEM_ROLE_NAMES: &[&str] = &["Approver", "Requester", "Team Admin"];
 
 #[derive(Clone, Debug)]
 pub struct GqlRole {
@@ -38,6 +41,17 @@ pub trait RoleLogic: Send + Sync {
     async fn get_all_roles(&self) -> Result<Vec<GqlRole>, Error>;
     async fn get_role_by_id(&self, id: ID) -> Result<GqlRole, Error>;
     async fn get_user_roles(&self, user_id: ID) -> Result<Vec<GqlRole>, Error>;
+    async fn create_role(
+        &self,
+        name: String,
+        description: String,
+        actor: Option<crate::logic::ActorContext>,
+    ) -> Result<GqlRole, Error>;
+    async fn delete_role(
+        &self,
+        id: ID,
+        actor: Option<crate::logic::ActorContext>,
+    ) -> Result<(), Error>;
     async fn assign_user_roles(
         &self,
         user_id: ID,
@@ -78,6 +92,19 @@ impl Clone for RoleLogicImpl {
     }
 }
 
+fn actor_details(actor: &Option<crate::logic::ActorContext>) -> (Option<Uuid>, Option<String>) {
+    actor
+        .as_ref()
+        .map(|a| a.as_option())
+        .unwrap_or((None, None))
+}
+
+fn is_system_role(name: &str) -> bool {
+    SYSTEM_ROLE_NAMES
+        .iter()
+        .any(|r| r.eq_ignore_ascii_case(name))
+}
+
 #[async_trait::async_trait]
 impl RoleLogic for RoleLogicImpl {
     async fn get_all_roles(&self) -> Result<Vec<GqlRole>, Error> {
@@ -97,6 +124,77 @@ impl RoleLogic for RoleLogicImpl {
         Ok(roles.into_iter().map(GqlRole::from).collect())
     }
 
+    async fn create_role(
+        &self,
+        name: String,
+        description: String,
+        actor: Option<crate::logic::ActorContext>,
+    ) -> Result<GqlRole, Error> {
+        let trimmed_name = name.trim();
+        if trimmed_name.is_empty() {
+            return Err(Error::InvalidInput("Role name cannot be empty".to_string()));
+        }
+
+        let trimmed_description = description.trim();
+        if trimmed_description.is_empty() {
+            return Err(Error::InvalidInput(
+                "Role description cannot be empty".to_string(),
+            ));
+        }
+
+        let role = self
+            .repository
+            .create_role(trimmed_name, trimmed_description)
+            .await?;
+
+        let (actor_id, actor_name) = actor_details(&actor);
+        let _ = activity_logger::log_activity(
+            &self.activity_log_repository,
+            activity_logger::activity_types::ROLE_CREATED,
+            activity_logger::entity_types::ROLE,
+            &role.id.to_string(),
+            actor_id,
+            actor_name.clone(),
+            format!("Created role '{}'", role.name),
+            None,
+        )
+        .await;
+
+        Ok(GqlRole::from(role))
+    }
+
+    async fn delete_role(
+        &self,
+        id: ID,
+        actor: Option<crate::logic::ActorContext>,
+    ) -> Result<(), Error> {
+        let role_id = Uuid::try_from(id).map_err(|e| Error::InvalidInput(e.to_string()))?;
+        let role = self.repository.get_role_by_id(role_id).await?;
+
+        if is_system_role(&role.name) {
+            return Err(Error::InvalidInput(
+                "System roles cannot be deleted".to_string(),
+            ));
+        }
+
+        self.repository.delete_role(role_id).await?;
+
+        let (actor_id, actor_name) = actor_details(&actor);
+        let _ = activity_logger::log_activity(
+            &self.activity_log_repository,
+            activity_logger::activity_types::ROLE_DELETED,
+            activity_logger::entity_types::ROLE,
+            &role_id.to_string(),
+            actor_id,
+            actor_name,
+            format!("Deleted role '{}'", role.name),
+            None,
+        )
+        .await;
+
+        Ok(())
+    }
+
     async fn assign_user_roles(
         &self,
         user_id: ID,
@@ -112,10 +210,7 @@ impl RoleLogic for RoleLogicImpl {
         let role_uuids = role_uuids.map_err(|e| Error::InvalidInput(e.to_string()))?;
 
         // Extract actor information for repository call (needs Uuid) and activity logging
-        let (actor_id, actor_name) = actor
-            .as_ref()
-            .map(|a| a.as_option())
-            .unwrap_or((None, None));
+        let (actor_id, actor_name) = actor_details(&actor);
 
         self.repository
             .assign_user_roles(user_uuid, role_uuids.clone(), actor_id)
@@ -161,6 +256,7 @@ mod tests {
     use super::*;
     use crate::database::activity_log::{ActivityLogRepository, MockActivityLogRepository};
     use crate::database::role::MockRoleRepository;
+    use mockall::predicate::eq;
     use uuid::Uuid;
 
     fn create_mock_activity_log() -> Box<dyn ActivityLogRepository> {
@@ -256,5 +352,96 @@ mod tests {
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].name, "Approver");
+    }
+
+    #[tokio::test]
+    async fn test_create_role_success() {
+        let mut mock_repo = MockRoleRepository::new();
+        let role_id = Uuid::new_v4();
+
+        mock_repo
+            .expect_create_role()
+            .with(eq("Analyst"), eq("Can read reports"))
+            .times(1)
+            .return_once(move |name, description| {
+                Ok(Role {
+                    id: role_id,
+                    name: name.to_string(),
+                    description: description.to_string(),
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                })
+            });
+
+        let logic = role_logic(Box::new(mock_repo), create_mock_activity_log());
+        let created = logic
+            .create_role("Analyst ".into(), "Can read reports".into(), None)
+            .await
+            .unwrap();
+
+        assert_eq!(created.name, "Analyst");
+    }
+
+    #[tokio::test]
+    async fn test_create_role_rejects_empty_name() {
+        let mut mock_repo = MockRoleRepository::new();
+        mock_repo.expect_create_role().times(0);
+
+        let logic = role_logic(Box::new(mock_repo), create_mock_activity_log());
+        let result = logic.create_role("   ".into(), "desc".into(), None).await;
+
+        assert!(matches!(result, Err(Error::InvalidInput(_))));
+    }
+
+    #[tokio::test]
+    async fn test_delete_role_blocks_system_role() {
+        let mut mock_repo = MockRoleRepository::new();
+        let role_id = Uuid::new_v4();
+        mock_repo
+            .expect_get_role_by_id()
+            .times(1)
+            .return_once(move |_| {
+                Ok(Role {
+                    id: role_id,
+                    name: "Approver".to_string(),
+                    description: "System role".to_string(),
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                })
+            });
+        mock_repo.expect_delete_role().times(0);
+
+        let logic = role_logic(Box::new(mock_repo), create_mock_activity_log());
+        let result = logic.delete_role(ID::from(role_id), None).await;
+
+        assert!(matches!(result, Err(Error::InvalidInput(_))));
+    }
+
+    #[tokio::test]
+    async fn test_delete_role_success() {
+        let mut mock_repo = MockRoleRepository::new();
+        let role_id = Uuid::new_v4();
+        mock_repo
+            .expect_get_role_by_id()
+            .times(1)
+            .return_once(move |_| {
+                Ok(Role {
+                    id: role_id,
+                    name: "Custom".to_string(),
+                    description: "Custom role".to_string(),
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                })
+            });
+        mock_repo
+            .expect_delete_role()
+            .with(eq(role_id))
+            .times(1)
+            .return_once(|_| Ok(()));
+
+        let logic = role_logic(Box::new(mock_repo), create_mock_activity_log());
+        let result = logic.delete_role(ID::from(role_id), None).await;
+
+        assert!(result.is_ok());
     }
 }

@@ -977,10 +977,10 @@ impl DeploymentLogic for FeatureLogicImpl {
             {
                 if next_status == "DEPLOYMENT_REQUESTED" || next_status == "ROLLBACK_REQUESTED" {
                     let now = chrono::Utc::now();
-                    let updated =
-                        self.repository
-                            .request_stage_change(stage_uuid, next_status, user_id, now)
-                            .await?;
+                    let updated = self
+                        .repository
+                        .request_stage_change(stage_uuid, next_status, user_id, now)
+                        .await?;
                     if !updated {
                         return Err(Error::NotFound(stage_uuid));
                     }
@@ -1691,6 +1691,7 @@ mod test {
                     name: "Test Environment".to_string(),
                     active: true,
                     team_id: ID::from(Uuid::new_v4()),
+                    environment_type: "Development".to_string(),
                 })
             });
 
@@ -1778,6 +1779,7 @@ mod test {
                     name: "Test Environment".to_string(),
                     active: true,
                     team_id: ID::from(Uuid::new_v4()),
+                    environment_type: "Development".to_string(),
                 })
             });
 
@@ -1860,6 +1862,7 @@ mod test {
                     name: "Test Environment".to_string(),
                     active: true,
                     team_id: ID::from(Uuid::new_v4()),
+                    environment_type: "Development".to_string(),
                 })
             });
 
@@ -1941,6 +1944,7 @@ mod test {
                     name: "Test Environment".to_string(),
                     active: true,
                     team_id: ID::from(Uuid::new_v4()),
+                    environment_type: "Development".to_string(),
                 })
             });
 
@@ -2023,6 +2027,7 @@ mod test {
                     name: "Test Environment".to_string(),
                     active: true,
                     team_id: ID::from(Uuid::new_v4()),
+                    environment_type: "Development".to_string(),
                 })
             });
 
@@ -2105,6 +2110,7 @@ mod test {
                     name: "Test Environment".to_string(),
                     active: true,
                     team_id: ID::from(Uuid::new_v4()),
+                    environment_type: "Development".to_string(),
                 })
             });
 
