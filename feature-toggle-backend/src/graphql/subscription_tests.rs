@@ -2,6 +2,7 @@
 mod tests {
 use super::*;
 use crate::logic::approval::{ApprovalLogic, ApprovalRequestEvent, MockApprovalLogic};
+use crate::database::approval::MockApprovalRepository;
 use crate::logic::feature_evaluation::{MockFeatureEvaluationLogic, EvaluationRatePoint, EvaluationSummary};
 use async_graphql::{Schema, Context, Request};
 use futures_util::stream::StreamExt;
@@ -212,10 +213,18 @@ use serde_json::json;
         };
 
         let mut mock_logic = MockApprovalLogic::new();
+        let mut mock_repo = MockApprovalRepository::new();
         mock_logic.expect_list_requests_for_team().returning(move |team, _, _, _| {
             assert_eq!(team, Some(team_id));
             Ok((vec![request_entity.clone()], 1))
         });
+        mock_repo
+            .expect_list_votes_for_request()
+            .times(1)
+            .returning(|_| Ok(vec![]));
+        mock_repo
+            .expect_clone_box()
+            .returning(|| Box::new(MockApprovalRepository::new()));
 
         let (tx, _rx) = tokio::sync::broadcast::channel::<ApprovalRequestEvent>(4);
 
@@ -225,6 +234,7 @@ use serde_json::json;
             FeatureEvaluationSubscription,
         )
         .data(Box::new(mock_logic) as Box<dyn ApprovalLogic>)
+        .data(Box::new(mock_repo) as Box<dyn crate::database::approval::ApprovalRepository>)
         .data(tx.clone())
         .finish();
 
@@ -247,6 +257,7 @@ use serde_json::json;
         tx.send(ApprovalRequestEvent {
             request: updated_request.clone(),
             team_id,
+            votes: vec![],
         })
         .unwrap();
 

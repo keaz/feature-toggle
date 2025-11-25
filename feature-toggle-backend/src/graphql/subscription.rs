@@ -1161,24 +1161,37 @@ impl FeatureEvaluationSubscription {
             Err(err) => return stream_failure(err),
         };
 
-        let initial_requests = match logic
+        let (initial_requests, votes_lookup) = match logic
             .list_requests_for_team(Some(team_uuid), None, None, None)
             .await
         {
-            Ok((requests, _)) => requests,
+            Ok((requests, _)) => {
+                let repo = match ctx.data::<Box<dyn crate::database::approval::ApprovalRepository>>() {
+                    Ok(r) => r.clone_box(),
+                    Err(err) => return stream_failure(err),
+                };
+                let mut votes_map = std::collections::HashMap::new();
+                for req in requests.iter() {
+                    if let Ok(votes) = repo.list_votes_for_request(req.id).await {
+                        votes_map.insert(req.id, votes);
+                    }
+                }
+                (requests, votes_map)
+            }
             Err(err) => return stream_failure(async_graphql::Error::new(format!("{err:?}"))),
         };
 
         let stream = stream! {
             for request in initial_requests {
-                yield Ok(map_approval_request(request));
+                let votes = votes_lookup.get(&request.id).cloned().unwrap_or_default();
+                yield Ok(map_approval_request(request, votes));
             }
 
             loop {
                 match events_rx.recv().await {
                     Ok(event) => {
                         if event.team_id == team_uuid {
-                            yield Ok(map_approval_request(event.request.clone()));
+                            yield Ok(map_approval_request(event.request.clone(), event.votes.clone()));
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,

@@ -112,8 +112,20 @@ async fn test_delete_environment() {
     let pool = init_pg_pool().await;
     let repository = environment::environment_repository(pool);
 
-    let id = Uuid::parse_str("1ab6ca79-a4fc-44ba-87e2-12884edf17f7").unwrap();
-    let result = repository.delete_environment(id).await;
+    let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+    let env = repository
+        .create_environment(
+            team_id,
+            CreateEnvironment {
+                name: format!("Temp Env {}", Uuid::new_v4()),
+                active: true,
+                environment_type: Some("Development".into()),
+            },
+        )
+        .await
+        .expect("env to be created");
+
+    let result = repository.delete_environment(env.id).await;
 
     assert!(result.is_ok());
 }

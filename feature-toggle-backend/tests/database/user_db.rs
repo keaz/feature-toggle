@@ -53,30 +53,34 @@ async fn existence_checks() {
 #[tokio::test]
 async fn create_and_update_user_and_last_login() {
     let repo = repo().await;
+    let suffix = Uuid::new_v4().to_string();
+    let username = format!("charlie-{suffix}");
+    let email = format!("charlie-{suffix}@example.com");
     // Create
     let created = repo
         .create_user(CreateUser {
-            username: "charlie".into(),
+            username: username.clone(),
             password_hash: "hash".into(),
             first_name: "Charlie".into(),
             last_name: "Chaplin".into(),
-            email: "charlie@example.com".into(),
+            email: email.clone(),
             is_admin: false,
             is_temporary_password: false,
         })
         .await
         .unwrap();
 
-    assert_eq!(created.username, "charlie");
-    assert_eq!(created.email, "charlie@example.com");
+    assert_eq!(created.username, username);
+    assert_eq!(created.email, email);
 
     // Update some fields
+    let updated_email = format!("charles-{suffix}@example.com");
     let updated = repo
         .update_user(UpdateUser {
             id: created.id,
             first_name: Some("Charles".into()),
             last_name: None,
-            email: Some("charles@example.com".into()),
+            email: Some(updated_email.clone()),
             is_admin: Some(true),
             enabled: Some(true),
         })
@@ -84,7 +88,7 @@ async fn create_and_update_user_and_last_login() {
         .unwrap();
 
     assert_eq!(updated.first_name, "Charles");
-    assert_eq!(updated.email, "charles@example.com");
+    assert_eq!(updated.email, updated_email);
     assert!(updated.is_admin);
 
     // Update last login

@@ -3,8 +3,8 @@ use crate::database::approval::{
     ApprovalRepository, CreateApprovalRequestInput, CreateApprovalVoteInput,
 };
 use crate::database::entity::{
-    ApprovalPolicy, ApprovalRequest, ApprovalStatus, ApprovalVoteValue, Feature as DbFeature,
-    FeaturePipelineStage, SENTINEL_UUID,
+    ApprovalPolicy, ApprovalRequest, ApprovalStatus, ApprovalVote, ApprovalVoteValue,
+    Feature as DbFeature, FeaturePipelineStage, SENTINEL_UUID,
 };
 use crate::database::feature::FeatureRepository;
 use crate::database::role::RoleRepository;
@@ -16,11 +16,8 @@ use mockall::automock;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-fn status_requires_interception(status: &str) -> bool {
-    matches!(
-        status,
-        "DEPLOYED" | "ROLLBACKED" | "DEPLOYMENT_REQUESTED" | "ROLLBACK_REQUESTED"
-    )
+pub(crate) fn status_requires_interception(status: &str) -> bool {
+    matches!(status, "DEPLOYMENT_REQUESTED" | "ROLLBACK_REQUESTED")
 }
 
 fn policy_applies(policy: &ApprovalPolicy, env_id: Uuid, env_type: &str) -> bool {
@@ -44,6 +41,7 @@ fn policy_applies(policy: &ApprovalPolicy, env_id: Uuid, env_type: &str) -> bool
 pub struct ApprovalRequestEvent {
     pub request: ApprovalRequest,
     pub team_id: Uuid,
+    pub votes: Vec<ApprovalVote>,
 }
 
 #[automock]
@@ -108,6 +106,7 @@ pub fn approval_logic(
     environment_logic: Box<dyn EnvironmentLogic>,
     role_repository: Box<dyn RoleRepository>,
     approval_events_tx: broadcast::Sender<ApprovalRequestEvent>,
+    feature_updates_tx: broadcast::Sender<crate::grpc::pb::FeatureUpdate>,
 ) -> Box<dyn ApprovalLogic> {
     Box::new(ApprovalLogicImpl {
         approval_repository,
@@ -115,6 +114,7 @@ pub fn approval_logic(
         environment_logic,
         role_repository,
         approval_events_tx,
+        feature_updates_tx,
     })
 }
 
@@ -125,9 +125,29 @@ struct ApprovalLogicImpl {
     environment_logic: Box<dyn EnvironmentLogic>,
     role_repository: Box<dyn RoleRepository>,
     approval_events_tx: broadcast::Sender<ApprovalRequestEvent>,
+    feature_updates_tx: broadcast::Sender<crate::grpc::pb::FeatureUpdate>,
 }
 
 impl ApprovalLogicImpl {
+    async fn notify_edge_servers(&self, feature_id: Uuid) {
+        if let Ok(db_feature) = self.feature_repository.get_feature_by_id(feature_id).await {
+            if let Ok(full) = crate::graphql::mutation::map_db_feature_to_full_for_broadcast(
+                self.feature_repository.as_ref(),
+                db_feature,
+            )
+            .await
+            {
+                let _ = self.feature_updates_tx.send(crate::grpc::pb::FeatureUpdate {
+                    message_id: uuid::Uuid::new_v4().to_string(),
+                    action: crate::grpc::pb::feature_update::Action::Upsert as i32,
+                    feature: Some(full),
+                    feature_key: String::new(),
+                    error: String::new(),
+                });
+            }
+        }
+    }
+
     async fn get_applicable_policy(
         &self,
         team_id: Uuid,
@@ -167,11 +187,18 @@ impl ApprovalLogicImpl {
         Ok(applicable.into_iter().next())
     }
 
-    fn publish_event(&self, request: &ApprovalRequest, team_id: Uuid) {
+    async fn publish_event(&self, request: &ApprovalRequest, team_id: Uuid) -> Result<(), Error> {
+        let votes = self
+            .approval_repository
+            .list_votes_for_request(request.id)
+            .await
+            .unwrap_or_default();
         let _ = self.approval_events_tx.send(ApprovalRequestEvent {
             request: request.clone(),
             team_id,
+            votes,
         });
+        Ok(())
     }
 
     async fn policy_team_id(&self, policy_id: Uuid) -> Result<Uuid, Error> {
@@ -249,7 +276,7 @@ impl ApprovalLogicImpl {
             )
             .await?;
 
-        self.publish_event(&updated, team_id);
+        self.publish_event(&updated, team_id).await?;
 
         if matches!(updated.status, ApprovalStatus::Approved) {
             if let Err(exec_err) = self.execute_change(&updated, approver_id).await {
@@ -265,7 +292,11 @@ impl ApprovalLogicImpl {
                 .approval_repository
                 .update_request_status(request_id, ApprovalStatus::Approved, Some(Utc::now()))
                 .await?;
-            self.publish_event(&final_request, team_id);
+            self.publish_event(&final_request, team_id).await?;
+
+            // Notify edge servers about the feature update after approval
+            self.notify_edge_servers(updated.feature_id).await;
+
             return Ok(final_request);
         }
 
@@ -282,7 +313,11 @@ impl ApprovalLogicImpl {
                 .approval_repository
                 .update_request_status(request_id, ApprovalStatus::Rejected, None)
                 .await?;
-            self.publish_event(&final_request, team_id);
+            self.publish_event(&final_request, team_id).await?;
+
+            // Notify edge servers about the feature update after rejection
+            self.notify_edge_servers(updated.feature_id).await;
+
             return Ok(final_request);
         }
 
@@ -351,8 +386,8 @@ impl ApprovalLogic for ApprovalLogicImpl {
         };
 
         let approval_target_status = match next_status {
-            "DEPLOYMENT_REQUESTED" => StageStatus::Deployed.as_str(),
-            "ROLLBACK_REQUESTED" => StageStatus::Rollbacked.as_str(),
+            "DEPLOYMENT_REQUESTED" => StageStatus::DeploymentApproved.as_str(),
+            "ROLLBACK_REQUESTED" => StageStatus::RollbackApproved.as_str(),
             other => other,
         };
         let rejection_target_status = match next_status {
@@ -360,6 +395,7 @@ impl ApprovalLogic for ApprovalLogicImpl {
             "ROLLBACK_REQUESTED" => StageStatus::RollbackRejected.as_str(),
             other => other,
         };
+        let after_status = approval_target_status;
 
         let change_payload = serde_json::json!({
             "stage_id": stage.id.to_string(),
@@ -369,6 +405,8 @@ impl ApprovalLogic for ApprovalLogicImpl {
             "previous_status": stage.status,
             "feature_id": feature.id.to_string(),
             "environment_id": stage.environment_id.to_string(),
+            "before": { "status": stage.status },
+            "after": { "status": after_status },
         });
 
         let request = self
@@ -386,6 +424,9 @@ impl ApprovalLogic for ApprovalLogicImpl {
                 requested_by,
             })
             .await?;
+
+        // Notify subscribers about the newly created request so dashboards/badges update immediately.
+        self.publish_event(&request, feature.team_id).await?;
 
         Ok(Some(request))
     }
@@ -422,11 +463,38 @@ impl ApprovalLogic for ApprovalLogicImpl {
             .ok_or(Error::NotFound(request_id))?;
         let team_id = self.policy_team_id(existing.policy_id).await?;
 
+        let stage_reset: Option<(Uuid, String)> = if existing.change_type == "stage_change" {
+            let stage_id = existing
+                .change_payload
+                .get("stage_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| Uuid::parse_str(s).ok());
+            let previous_status = existing
+                .change_payload
+                .get("previous_status")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            match (stage_id, previous_status) {
+                (Some(id), Some(status)) => Some((id, status)),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
         let updated = self
             .approval_repository
             .update_request_status(request_id, ApprovalStatus::Cancelled, None)
             .await?;
-        self.publish_event(&updated, team_id);
+
+        if let Some((stage_id, status)) = stage_reset {
+            let _ = self
+                .feature_repository
+                .reset_stage_status(stage_id, status.as_str())
+                .await;
+        }
+
+        self.publish_event(&updated, team_id).await?;
         Ok(updated)
     }
 
@@ -461,7 +529,11 @@ impl ApprovalLogic for ApprovalLogicImpl {
             .approval_repository
             .update_request_status(request.id, ApprovalStatus::AutoApproved, Some(Utc::now()))
             .await?;
-        self.publish_event(&updated, team_id);
+        self.publish_event(&updated, team_id).await?;
+
+        // Notify edge servers about the feature update after auto-approval
+        self.notify_edge_servers(request.feature_id).await;
+
         Ok(updated)
     }
 
@@ -474,9 +546,10 @@ impl ApprovalLogic for ApprovalLogicImpl {
 mod tests {
     use super::*;
     use crate::database::approval::MockApprovalRepository;
-    use crate::database::entity::Role;
+    use crate::database::entity::{FeatureType, Role};
     use crate::database::feature::MockFeatureRepository;
     use crate::database::role::MockRoleRepository;
+    use crate::graphql::schema::Environment;
     use crate::logic::environment::MockEnvironmentLogic;
     use chrono::Utc;
 
@@ -569,6 +642,11 @@ mod tests {
             .times(1)
             .returning(move |_, _| Ok(request.clone()));
 
+        approval_repo
+            .expect_list_votes_for_request()
+            .times(1)
+            .returning(move |_| Ok(vec![]));
+
         role_repo.expect_clone_box().returning(|| {
             let mut mock = MockRoleRepository::new();
             mock.expect_clone_box()
@@ -577,12 +655,14 @@ mod tests {
         });
 
         let (tx, _rx) = tokio::sync::broadcast::channel(10);
+        let (updates_tx, _updates_rx) = tokio::sync::broadcast::channel(10);
         let logic = approval_logic(
             Box::new(approval_repo),
             Box::new(feature_repo),
             Box::new(env_logic),
             Box::new(role_repo),
             tx,
+            updates_tx,
         );
 
         let result = logic.approve_request(request_id, approver_id, None).await;
@@ -684,12 +764,14 @@ mod tests {
         });
 
         let (tx, _rx) = tokio::sync::broadcast::channel(10);
+        let (updates_tx, _updates_rx) = tokio::sync::broadcast::channel(10);
         let logic = approval_logic(
             Box::new(approval_repo),
             Box::new(feature_repo),
             Box::new(env_logic),
             Box::new(role_repo),
             tx,
+            updates_tx,
         );
 
         let result = logic.approve_request(request_id, approver_id, None).await;
@@ -701,5 +783,349 @@ mod tests {
                 .to_string()
                 .contains("does not have any of the required roles")
         );
+    }
+
+    #[tokio::test]
+    async fn test_maybe_create_stage_change_request_emits_event() {
+        let mut approval_repo = MockApprovalRepository::new();
+        let feature_repo = MockFeatureRepository::new();
+        let mut env_logic = MockEnvironmentLogic::new();
+        let role_repo = MockRoleRepository::new();
+
+        let team_id = Uuid::new_v4();
+        let environment_id = Uuid::new_v4();
+        let stage_id = Uuid::new_v4();
+        let policy_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+        let requested_by = Uuid::new_v4();
+
+        let feature = DbFeature {
+            id: Uuid::new_v4(),
+            key: "checkout_new".into(),
+            description: Some("New checkout flow".into()),
+            feature_type: FeatureType::Simple,
+            team_id,
+            active: true,
+            created_at: Utc::now(),
+            kill_switch_enabled: false,
+            kill_switch_activated_at: None,
+            rollback_scheduled_at: None,
+            lifecycle_stage: "active".into(),
+            deprecated_at: None,
+            deprecation_notice: None,
+            last_evaluated_at: None,
+            evaluation_count_7d: 0,
+            evaluation_count_30d: 0,
+            evaluation_count_90d: 0,
+            dependencies: vec![],
+        };
+
+        let stage = FeaturePipelineStage {
+            id: stage_id,
+            feature_id: feature.id,
+            environment_id,
+            order_index: 0,
+            parent_stage_id: None,
+            position: "production".into(),
+            enabled: false,
+            bucketing_key: None,
+            status: "NOT_DEPLOYED".into(),
+        };
+
+        let policy = ApprovalPolicy {
+            id: policy_id,
+            team_id,
+            name: "Prod approvals".into(),
+            description: None,
+            applies_to: "production_only".into(),
+            environment_ids: None,
+            required_approvers: 1,
+            approver_role_ids: vec![Uuid::new_v4()],
+            auto_approve_after_hours: None,
+            enabled: true,
+            created_at: Utc::now(),
+        };
+
+        let created_request = ApprovalRequest {
+            id: request_id,
+            policy_id,
+            feature_id: feature.id,
+            environment_id: Some(environment_id),
+            change_type: "stage_change".into(),
+            change_payload: serde_json::json!({
+                "stage_id": stage_id.to_string(),
+                "next_status": "DEPLOYMENT_REQUESTED"
+            }),
+            change_description: Some("Stage NOT_DEPLOYED -> DEPLOYMENT_REQUESTED".into()),
+            requested_by,
+            status: ApprovalStatus::Pending,
+            approved_count: 0,
+            rejected_count: 0,
+            executed_at: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        env_logic
+            .expect_get_environment_by_id()
+            .with(mockall::predicate::eq(ID::from(environment_id)))
+            .returning(move |_| {
+                Ok(Environment {
+                    id: ID::from(environment_id),
+                    name: "Production".into(),
+                    active: true,
+                    team_id: ID::from(team_id),
+                    environment_type: "Production".into(),
+                })
+            });
+
+        approval_repo
+            .expect_list_policies_for_team()
+            .with(mockall::predicate::eq(team_id))
+            .return_once(move |_| Ok(vec![policy.clone()]));
+
+        approval_repo
+            .expect_create_request()
+            .times(1)
+            .return_once(move |input| {
+                assert_eq!(input.policy_id, policy_id);
+                assert_eq!(input.feature_id, created_request.feature_id);
+                assert_eq!(input.environment_id, Some(environment_id));
+                assert_eq!(input.change_type, "stage_change");
+                Ok(created_request.clone())
+            });
+
+        approval_repo
+            .expect_list_votes_for_request()
+            .times(1)
+            .returning(move |_| Ok(vec![]));
+
+        let (tx, mut rx) = tokio::sync::broadcast::channel(8);
+        let (updates_tx, _updates_rx) = tokio::sync::broadcast::channel(8);
+        let logic = approval_logic(
+            Box::new(approval_repo),
+            Box::new(feature_repo),
+            Box::new(env_logic),
+            Box::new(role_repo),
+            tx,
+            updates_tx,
+        );
+
+        let result = logic
+            .maybe_create_stage_change_request(
+                &feature,
+                &stage,
+                "DEPLOYMENT_REQUESTED",
+                requested_by,
+            )
+            .await
+            .unwrap();
+
+        assert!(result.is_some());
+        let event = rx.recv().await.expect("event should be published");
+        assert_eq!(event.request.id, request_id);
+        assert_eq!(event.team_id, team_id);
+    }
+
+    #[tokio::test]
+    async fn test_approve_request_publishes_events_on_status_change() {
+        let mut approval_repo = MockApprovalRepository::new();
+        let mut role_repo = MockRoleRepository::new();
+        let mut feature_repo = MockFeatureRepository::new();
+        let env_logic = MockEnvironmentLogic::new();
+
+        let request_id = Uuid::new_v4();
+        let policy_id = Uuid::new_v4();
+        let stage_id = Uuid::new_v4();
+        let team_id = Uuid::new_v4();
+        let approver_id = Uuid::new_v4();
+        let required_role_id = Uuid::new_v4();
+
+        let pending_request = ApprovalRequest {
+            id: request_id,
+            policy_id,
+            feature_id: Uuid::new_v4(),
+            environment_id: Some(Uuid::new_v4()),
+            change_type: "stage_change".into(),
+            change_payload: serde_json::json!({
+                "stage_id": stage_id.to_string(),
+                "next_status": "DEPLOYED",
+                "approval_target_status": "DEPLOYED"
+            }),
+            change_description: Some("Promote to prod".into()),
+            requested_by: Uuid::new_v4(),
+            status: ApprovalStatus::Pending,
+            approved_count: 0,
+            rejected_count: 0,
+            executed_at: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let policy = ApprovalPolicy {
+            id: policy_id,
+            team_id,
+            name: "Prod approvals".into(),
+            description: None,
+            applies_to: "all".into(),
+            environment_ids: None,
+            required_approvers: 1,
+            approver_role_ids: vec![required_role_id],
+            auto_approve_after_hours: None,
+            enabled: true,
+            created_at: Utc::now(),
+        };
+
+        let approved_request = ApprovalRequest {
+            status: ApprovalStatus::Approved,
+            approved_count: 1,
+            updated_at: Utc::now(),
+            ..pending_request.clone()
+        };
+
+        let final_request = ApprovalRequest {
+            executed_at: Some(Utc::now()),
+            ..approved_request.clone()
+        };
+
+        // Extract feature_id before moving pending_request
+        let feature_id_for_notify = pending_request.feature_id;
+
+        approval_repo
+            .expect_get_request_by_id()
+            .with(mockall::predicate::eq(request_id))
+            .times(1)
+            .returning(move |_| Ok(Some(pending_request.clone())));
+
+        approval_repo
+            .expect_get_policy_by_id()
+            .with(mockall::predicate::eq(policy_id))
+            .times(1)
+            .returning(move |_| Ok(Some(policy.clone())));
+
+        role_repo
+            .expect_user_has_role()
+            .with(
+                mockall::predicate::eq(approver_id),
+                mockall::predicate::eq("Approver"),
+            )
+            .times(1)
+            .returning(|_, _| Ok(true));
+
+        role_repo
+            .expect_get_user_roles()
+            .with(mockall::predicate::eq(approver_id))
+            .times(1)
+            .returning(move |_| {
+                Ok(vec![Role {
+                    id: required_role_id,
+                    name: "Release Manager".into(),
+                    description: "Can approve prod".into(),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                }])
+            });
+
+        approval_repo
+            .expect_add_vote()
+            .times(1)
+            .returning(move |_, _| Ok(approved_request.clone()));
+
+        approval_repo
+            .expect_list_votes_for_request()
+            .times(2)
+            .returning(move |_| Ok(vec![]));
+
+        feature_repo
+            .expect_approve_or_reject_stage_change()
+            .with(
+                mockall::predicate::eq(stage_id),
+                mockall::predicate::eq("DEPLOYED"),
+                mockall::predicate::eq(approver_id),
+            )
+            .times(1)
+            .returning(|_, _, _| Ok(true));
+
+        // Add expectation for notify_edge_servers calling get_feature_by_id
+        feature_repo
+            .expect_get_feature_by_id()
+            .with(mockall::predicate::eq(feature_id_for_notify))
+            .times(1)
+            .returning(move |_| {
+                Ok(DbFeature {
+                    id: feature_id_for_notify,
+                    key: "test_feature".into(),
+                    description: Some("Test feature".into()),
+                    feature_type: FeatureType::Simple,
+                    team_id: Uuid::new_v4(),
+                    active: true,
+                    created_at: Utc::now(),
+                    kill_switch_enabled: false,
+                    kill_switch_activated_at: None,
+                    rollback_scheduled_at: None,
+                    lifecycle_stage: "active".into(),
+                    deprecated_at: None,
+                    deprecation_notice: None,
+                    last_evaluated_at: None,
+                    evaluation_count_7d: 0,
+                    evaluation_count_30d: 0,
+                    evaluation_count_90d: 0,
+                    dependencies: vec![],
+                })
+            });
+
+        // Add expectation for get_feature_stages
+        feature_repo
+            .expect_get_feature_stages()
+            .times(..=1)
+            .returning(|_| Ok(vec![]));
+
+        // Add expectation for get_feature_variants (for Simple features it's empty)
+        feature_repo
+            .expect_get_feature_variants()
+            .times(..=1)
+            .returning(|_| Ok(vec![]));
+
+        approval_repo
+            .expect_update_request_status()
+            .times(1)
+            .returning(move |_, _, _| Ok(final_request.clone()));
+
+        role_repo.expect_clone_box().returning(|| {
+            let mut mock = MockRoleRepository::new();
+            mock.expect_clone_box()
+                .returning(|| Box::new(MockRoleRepository::new()));
+            Box::new(mock)
+        });
+
+        let (tx, mut rx) = tokio::sync::broadcast::channel(8);
+        let (updates_tx, _updates_rx) = tokio::sync::broadcast::channel(8);
+        let logic = approval_logic(
+            Box::new(approval_repo),
+            Box::new(feature_repo),
+            Box::new(env_logic),
+            Box::new(role_repo),
+            tx,
+            updates_tx,
+        );
+
+        let updated = logic
+            .approve_request(request_id, approver_id, Some("looks good".into()))
+            .await
+            .unwrap();
+
+        assert_eq!(updated.status, ApprovalStatus::Approved);
+
+        // First event is after vote, second after final status update
+        let first_event = rx.recv().await.expect("first event missing");
+        assert_eq!(first_event.request.id, request_id);
+        assert_eq!(first_event.request.status, ApprovalStatus::Approved);
+
+        let second_event = rx.recv().await.expect("second event missing");
+        assert_eq!(second_event.request.id, request_id);
+        assert_eq!(second_event.request.status, ApprovalStatus::Approved);
+        assert!(second_event.request.executed_at.is_some());
+        assert_eq!(first_event.team_id, team_id);
+        assert_eq!(second_event.team_id, team_id);
     }
 }

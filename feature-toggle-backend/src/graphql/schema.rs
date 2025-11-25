@@ -250,9 +250,32 @@ pub struct ApprovalRequest {
     pub executed_at: Option<chrono::DateTime<chrono::Utc>>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub votes: Vec<ApprovalVote>,
 }
 
-pub fn map_approval_request(req: crate::database::entity::ApprovalRequest) -> ApprovalRequest {
+#[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
+pub struct ApprovalVote {
+    pub id: ID,
+    pub approver_id: ID,
+    pub vote: String,
+    pub comment: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+fn map_approval_vote(vote: crate::database::entity::ApprovalVote) -> ApprovalVote {
+    ApprovalVote {
+        id: vote.id.into(),
+        approver_id: vote.approver_id.into(),
+        vote: vote.vote.as_str().to_string(),
+        comment: vote.comment,
+        created_at: vote.created_at,
+    }
+}
+
+pub fn map_approval_request(
+    req: crate::database::entity::ApprovalRequest,
+    votes: Vec<crate::database::entity::ApprovalVote>,
+) -> ApprovalRequest {
     let status = match req.status {
         crate::database::entity::ApprovalStatus::Approved => ApprovalRequestStatus::Approved,
         crate::database::entity::ApprovalStatus::Rejected => ApprovalRequestStatus::Rejected,
@@ -278,6 +301,7 @@ pub fn map_approval_request(req: crate::database::entity::ApprovalRequest) -> Ap
         executed_at: req.executed_at,
         created_at: req.created_at,
         updated_at: req.updated_at,
+        votes: votes.into_iter().map(map_approval_vote).collect(),
     }
 }
 

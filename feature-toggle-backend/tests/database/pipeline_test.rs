@@ -159,8 +159,17 @@ async fn test_delete_pipeline() {
     let pool = init_pg_pool().await;
     let repository = pipeline::pipeline_repository(pool);
 
-    let id = Uuid::parse_str("3eef17bc-9e06-411d-b5f4-7a786e68bb97").unwrap();
-    let result = repository.delete_pipeline(id).await;
+    let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+    let pipeline_id = repository
+        .create_pipeline(CreatePipeline {
+            team_id,
+            name: format!("Delete Pipeline {}", Uuid::new_v4()),
+            stages: vec![],
+        })
+        .await
+        .expect("pipeline to be created");
+
+    let result = repository.delete_pipeline(pipeline_id).await;
 
     assert!(result.is_ok());
 }

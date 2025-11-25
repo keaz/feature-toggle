@@ -32,12 +32,23 @@ impl RoleAuthorizer {
                 }
             }
             // Approver role operations
-            "DEPLOYMENT_REJECTED" | "DEPLOYED" | "ROLLBACK_REJECTED" | "ROLLBACKED" => {
+            "DEPLOYMENT_REJECTED" | "ROLLBACK_REJECTED" => {
                 if Self::has_approver_role(user_roles) {
                     Ok(())
                 } else {
                     Err(Error::InvalidInput(
                         "Only users with 'Approver' role can approve or reject requests"
+                            .to_string(),
+                    ))
+                }
+            }
+            // Finalize deployment/rollback after approvals: either Requester or Approver can execute
+            "DEPLOYED" | "ROLLBACKED" => {
+                if Self::has_requester_role(user_roles) || Self::has_approver_role(user_roles) {
+                    Ok(())
+                } else {
+                    Err(Error::InvalidInput(
+                        "Only users with 'Requester' or 'Approver' role can execute deployments or rollbacks"
                             .to_string(),
                     ))
                 }
@@ -122,12 +133,12 @@ mod tests {
         let approver_roles = vec!["Approver".to_string()];
         let no_roles = vec![];
 
-        // Test deployment approval - requires Approver role
+        // Test deployment execution - requires Requester or Approver role
         assert!(
             RoleAuthorizer::authorize_stage_change_request(&approver_roles, "DEPLOYED").is_ok()
         );
         assert!(
-            RoleAuthorizer::authorize_stage_change_request(&requester_roles, "DEPLOYED").is_err()
+            RoleAuthorizer::authorize_stage_change_request(&requester_roles, "DEPLOYED").is_ok()
         );
         assert!(RoleAuthorizer::authorize_stage_change_request(&no_roles, "DEPLOYED").is_err());
 
@@ -141,12 +152,12 @@ mod tests {
                 .is_err()
         );
 
-        // Test rollback approval - requires Approver role
+        // Test rollback execution - requires Requester or Approver role
         assert!(
             RoleAuthorizer::authorize_stage_change_request(&approver_roles, "ROLLBACKED").is_ok()
         );
         assert!(
-            RoleAuthorizer::authorize_stage_change_request(&requester_roles, "ROLLBACKED").is_err()
+            RoleAuthorizer::authorize_stage_change_request(&requester_roles, "ROLLBACKED").is_ok()
         );
 
         // Test rollback rejection - requires Approver role

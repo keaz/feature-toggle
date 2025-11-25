@@ -5,6 +5,7 @@ use feature_toggle_backend::logic::feature::StageChangeRequestType;
 use feature_toggle_backend::logic::{
     approval as approval_logic, environment, feature as feature_logic,
 };
+use feature_toggle_backend::grpc::pb::FeatureUpdate;
 use uuid::Uuid;
 
 #[tokio::test]
@@ -21,12 +22,15 @@ async fn test_stage_change_creates_approval_request_when_policy_exists() {
     let role_repository = role::role_repository(pool.clone());
     let (approval_events_tx, _approval_events_rx) =
         tokio::sync::broadcast::channel::<ApprovalRequestEvent>(16);
+    let (feature_updates_tx, _feature_updates_rx) =
+        tokio::sync::broadcast::channel::<FeatureUpdate>(16);
     let approval_logic = approval_logic::approval_logic(
         approval_repository.clone(),
         feature_repository.clone_box(),
         environment_logic.clone(),
         role_repository.clone(),
         approval_events_tx.clone(),
+        feature_updates_tx.clone(),
     );
     let feature_logic = feature_logic::feature_logic_with_approval(
         feature_repository.clone_box(),
@@ -39,10 +43,16 @@ async fn test_stage_change_creates_approval_request_when_policy_exists() {
     let stage_id = Uuid::parse_str("9f9f9f9f-cccc-4ccc-cccc-aaaaaaaaaaaa").unwrap();
     let requester = Uuid::parse_str("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb").unwrap();
 
+    // Reset stage status to a pending state for deterministic transition
+    sqlx::query!("UPDATE features_pipeline_stages SET status = 'NOT_DEPLOYED' WHERE id = $1", stage_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
     let feature = feature_logic
         .request_stage_change(
             ID::from(stage_id),
-            StageChangeRequestType::Deployed,
+            StageChangeRequestType::DeploymentRequested,
             requester,
         )
         .await
@@ -88,12 +98,15 @@ async fn test_quorum_approvals_execute_stage_change() {
     let role_repository = role::role_repository(pool.clone());
     let (approval_events_tx, _approval_events_rx) =
         tokio::sync::broadcast::channel::<ApprovalRequestEvent>(16);
+    let (feature_updates_tx, _feature_updates_rx) =
+        tokio::sync::broadcast::channel::<FeatureUpdate>(16);
     let approval_logic = approval_logic::approval_logic(
         approval_repository.clone(),
         feature_repository.clone_box(),
         environment_logic.clone(),
         role_repository.clone(),
         approval_events_tx.clone(),
+        feature_updates_tx.clone(),
     );
     let feature_logic = feature_logic::feature_logic_with_approval(
         feature_repository.clone_box(),
@@ -108,10 +121,15 @@ async fn test_quorum_approvals_execute_stage_change() {
     let approver_one = Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").unwrap();
     let approver_two = Uuid::parse_str("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb").unwrap();
 
+    sqlx::query!("UPDATE features_pipeline_stages SET status = 'NOT_DEPLOYED' WHERE id = $1", stage_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
     let feature = feature_logic
         .request_stage_change(
             ID::from(stage_id),
-            StageChangeRequestType::Deployed,
+            StageChangeRequestType::DeploymentRequested,
             requester,
         )
         .await
@@ -143,5 +161,5 @@ async fn test_quorum_approvals_execute_stage_change() {
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(status, "DEPLOYED");
+    assert_eq!(status, "DEPLOYMENT_APPROVED");
 }

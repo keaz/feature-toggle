@@ -1,4 +1,7 @@
-use feature_toggle_backend::database::feature::CreateStageCriterion;
+use feature_toggle_backend::database::entity::FeatureType;
+use feature_toggle_backend::database::feature::{
+    CreateFeature, CreateFeatureStage, CreateStageCriterion,
+};
 use feature_toggle_backend::database::{feature, init_pg_pool};
 use uuid::Uuid;
 
@@ -41,8 +44,30 @@ async fn test_set_stage_criteria_replaces_existing() {
     let pool = init_pg_pool().await;
     let repo = feature::feature_repository(pool);
 
-    // Use a different stage that doesn't interfere with variant tests
-    let stage_id = Uuid::parse_str("1ab6ca79-a4fc-44ba-87e2-12884edf17f7").unwrap();
+    // Create an isolated feature + stage for this test to avoid cross-test interference
+    let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+    let env_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+    let stage_id = Uuid::new_v4();
+    let feature_id = repo
+        .create_feature(CreateFeature {
+            team_id,
+            key: format!("criteria-replace-{}", Uuid::new_v4()),
+            description: None,
+            feature_type: FeatureType::Simple,
+            stages: vec![CreateFeatureStage {
+                id: stage_id,
+                environment_id: env_id,
+                order_index: 0,
+                parent_stage: None,
+                position: "{ x: 0, y: 0 }".to_string(),
+                enabled: true,
+                bucketing_key: None,
+            }],
+            dependencies: vec![],
+            variants: None,
+        })
+        .await
+        .expect("feature to be created for criteria test");
 
     // First set some initial criteria
     let initial_crit = vec![
@@ -63,6 +88,9 @@ async fn test_set_stage_criteria_replaces_existing() {
     assert_eq!(updated.len(), 1);
     let c = &updated[0];
     assert_eq!(c.stage_id, stage_id);
+
+    // Cleanup
+    let _ = repo.delete_feature(feature_id).await;
 }
 
 #[tokio::test]

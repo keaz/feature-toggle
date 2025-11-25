@@ -74,6 +74,10 @@ pub trait ApprovalRepository: Send + Sync {
         input: CreateApprovalVoteInput,
         required_approvers: i32,
     ) -> Result<ApprovalRequest, Error>;
+    async fn list_votes_for_request(
+        &self,
+        request_id: Uuid,
+    ) -> Result<Vec<crate::database::entity::ApprovalVote>, Error>;
     async fn update_request_status(
         &self,
         request_id: Uuid,
@@ -415,6 +419,25 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
         .bind(executed_at)
         .map(Self::map_request_row)
         .fetch_one(&self.pool)
+        .await;
+
+        handle_error(Some(request_id), result)
+    }
+
+    async fn list_votes_for_request(
+        &self,
+        request_id: Uuid,
+    ) -> Result<Vec<crate::database::entity::ApprovalVote>, Error> {
+        let result = sqlx::query_as::<_, crate::database::entity::ApprovalVote>(
+            r#"
+            SELECT id, request_id, approver_id, vote, comment, created_at
+            FROM approval_votes
+            WHERE request_id = $1
+            ORDER BY created_at ASC
+            "#,
+        )
+        .bind(request_id)
+        .fetch_all(&self.pool)
         .await;
 
         handle_error(Some(request_id), result)

@@ -299,8 +299,21 @@ async fn test_delete_feature() {
     let pool = init_pg_pool().await;
     let repository = feature::feature_repository(pool);
 
-    let id = Uuid::parse_str("3eef17bc-9e06-411d-b5f4-7a786e68bb97").unwrap();
-    let result = repository.delete_feature(id).await;
+    let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+    let feature_id = repository
+        .create_feature(CreateFeature {
+            team_id,
+            key: format!("Delete me {}", Uuid::new_v4()),
+            description: Some("temp feature".to_string()),
+            feature_type: FeatureType::Simple,
+            stages: vec![],
+            dependencies: vec![],
+            variants: None,
+        })
+        .await
+        .expect("feature to be created for delete");
+
+    let result = repository.delete_feature(feature_id).await;
 
     assert!(result.is_ok());
 }
@@ -626,8 +639,20 @@ async fn test_emergency_disable_feature_integration() {
     let pool = init_pg_pool().await;
     let repository = feature::feature_repository(pool);
 
-    // Use existing test feature
-    let feature_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+    // Create an isolated feature so repeated runs don't depend on seed state
+    let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+    let feature_id = repository
+        .create_feature(CreateFeature {
+            team_id,
+            key: format!("kill-switch-{}", Uuid::new_v4()),
+            description: Some("temp for kill switch".into()),
+            feature_type: FeatureType::Simple,
+            stages: vec![],
+            dependencies: vec![],
+            variants: None,
+        })
+        .await
+        .expect("feature to create");
 
     // Get initial state
     let initial_feature = repository.get_feature_by_id(feature_id).await.unwrap();
@@ -666,6 +691,8 @@ async fn test_emergency_disable_feature_integration() {
         .emergency_enable_feature(feature_id)
         .await
         .unwrap();
+
+    let _ = repository.delete_feature(feature_id).await;
 }
 
 #[tokio::test]

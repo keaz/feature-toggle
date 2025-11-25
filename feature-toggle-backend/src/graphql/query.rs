@@ -242,6 +242,7 @@ impl Query {
         let team_uuid = Uuid::try_from(team_id.clone())
             .map_err(|e| async_graphql::Error::new(format!("Invalid team id: {e}")))?;
         let logic = ctx.data::<Box<dyn ApprovalLogic>>()?;
+        let repo = ctx.data::<Box<dyn crate::database::approval::ApprovalRepository>>()?;
 
         let status_filters = statuses.map(|status_list| {
             status_list
@@ -263,8 +264,21 @@ impl Query {
         let page_num = page_number.unwrap_or(1).max(1);
         let page_sz = page_size.unwrap_or(DEFAULT_APPROVAL_PAGE_SIZE).max(1);
 
+        let mut votes_map = std::collections::HashMap::new();
+        for req in requests.iter() {
+            if let Ok(votes) = repo.list_votes_for_request(req.id).await {
+                votes_map.insert(req.id, votes);
+            }
+        }
+
         Ok(ApprovalRequestPage {
-            items: requests.into_iter().map(map_approval_request).collect(),
+            items: requests
+                .into_iter()
+                .map(|req| {
+                    let votes = votes_map.remove(&req.id).unwrap_or_default();
+                    map_approval_request(req, votes)
+                })
+                .collect(),
             total,
             page_number: page_num,
             page_size: page_sz,
@@ -2343,6 +2357,7 @@ mod more_query_tests {
     #[tokio::test]
     async fn test_approval_requests_query_returns_data() {
         let team_id = Uuid::new_v4();
+        let mut mock_repo = crate::database::approval::MockApprovalRepository::new();
         let request_entity = crate::database::entity::ApprovalRequest {
             id: Uuid::new_v4(),
             policy_id: Uuid::new_v4(),
@@ -2371,6 +2386,13 @@ mod more_query_tests {
                 assert_eq!(team, Some(team_id));
                 Ok((vec![mock_payload.clone()], 1))
             });
+        mock_repo
+            .expect_list_votes_for_request()
+            .times(1)
+            .returning(|_| Ok(vec![]));
+        mock_repo
+            .expect_clone_box()
+            .returning(|| Box::new(crate::database::approval::MockApprovalRepository::new()));
 
         let schema = Schema::build(
             super::Query,
@@ -2378,6 +2400,7 @@ mod more_query_tests {
             EmptySubscription,
         )
         .data::<Box<dyn ApprovalLogic>>(Box::new(mock_logic))
+        .data::<Box<dyn crate::database::approval::ApprovalRepository>>(Box::new(mock_repo))
         .finish();
 
         let mut req = Request::new(

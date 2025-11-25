@@ -68,12 +68,18 @@ pub async fn run() -> std::io::Result<()> {
     let role_repository = database::role::role_repository(db_pool.clone());
     let (approval_events_tx, _approval_events_rx) =
         tokio::sync::broadcast::channel::<logic::approval::ApprovalRequestEvent>(128);
+
+    // Create a broadcast channel for feature updates shared between GraphQL mutations and gRPC streaming
+    let (updates_tx, _updates_rx) =
+        tokio::sync::broadcast::channel::<crate::grpc::pb::FeatureUpdate>(128);
+
     let approval_logic = logic::approval::approval_logic(
         approval_repository.clone(),
         feature_repository.clone_box(),
         environment_logic.clone(),
         role_repository.clone(),
         approval_events_tx.clone(),
+        updates_tx.clone(),
     );
     let team_logic = logic::team::team_logic(
         database::team::team_repository(db_pool.clone()),
@@ -91,9 +97,6 @@ pub async fn run() -> std::io::Result<()> {
         database::user::user_repository(db_pool.clone()),
         Some(approval_logic.clone()),
     );
-    // Create a broadcast channel for feature updates shared between GraphQL mutations and gRPC streaming
-    let (updates_tx, _updates_rx) =
-        tokio::sync::broadcast::channel::<crate::grpc::pb::FeatureUpdate>(128);
 
     let client_logic = logic::client::client_logic(
         database::client::client_repository(db_pool.clone()),

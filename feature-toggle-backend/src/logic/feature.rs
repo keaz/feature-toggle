@@ -951,7 +951,70 @@ impl DeploymentLogic for FeatureLogicImpl {
             .await?
             .ok_or(Error::NotFound(stage_uuid))?;
 
-        // Use the GraphQL validator to validate transition
+        // If no approval gating, validate transition immediately to fail fast before any DB side effects.
+        if self.approval_logic.is_none() {
+            if let Err(e) = crate::graphql::validator::feature::validate_stage_transition(
+                &stage.status,
+                next_status,
+            ) {
+                return Err(Error::InvalidInput(format!("{:?}", e)));
+            }
+        }
+
+        let mut feature_id_for_stage: Option<Uuid> = None;
+
+        // If an approval policy applies, create a pending approval request instead of executing immediately.
+        if let Some(approval_logic) = &self.approval_logic {
+            if crate::logic::approval::status_requires_interception(next_status) {
+                // Set a pending status to indicate a gated action while approvals are collected.
+                let pending_status = match next_status {
+                    "DEPLOYED" | "DEPLOYMENT_REJECTED" => StageStatus::DeploymentRequested.as_str(),
+                    "ROLLBACKED" | "ROLLBACK_REJECTED" => StageStatus::RollbackRequested.as_str(),
+                    other => other,
+                };
+
+                // Validate the transition to the pending state before further DB work.
+                if let Err(e) = crate::graphql::validator::feature::validate_stage_transition(
+                    &stage.status,
+                    pending_status,
+                ) {
+                    return Err(Error::InvalidInput(format!("{:?}", e)));
+                }
+
+                feature_id_for_stage = Some(
+                    self.repository
+                        .get_feature_id_by_stage_id(stage_uuid)
+                        .await?
+                        .ok_or(Error::NotFound(stage_uuid))?,
+                );
+
+                let db_feature = self
+                    .repository
+                    .get_feature_by_id(feature_id_for_stage.unwrap())
+                    .await?;
+
+                if let Some(request) = approval_logic
+                    .maybe_create_stage_change_request(&db_feature, &stage, next_status, user_id)
+                    .await?
+                {
+                    if pending_status == "DEPLOYMENT_REQUESTED" || pending_status == "ROLLBACK_REQUESTED" {
+                        let now = chrono::Utc::now();
+                        let updated = self
+                            .repository
+                            .request_stage_change(stage_uuid, pending_status, user_id, now)
+                            .await?;
+                        if !updated {
+                            return Err(Error::NotFound(stage_uuid));
+                        }
+                    }
+                    let mut gql_feature = FeatureLogicImpl::map_entity_to_graphql_feature(db_feature);
+                    gql_feature.pending_approval_request_id = Some(ID::from(request.id));
+                    return Ok(gql_feature);
+                }
+            }
+        }
+
+        // No approval gating: validate and apply directly.
         if let Err(e) = crate::graphql::validator::feature::validate_stage_transition(
             &stage.status,
             next_status,
@@ -959,37 +1022,14 @@ impl DeploymentLogic for FeatureLogicImpl {
             return Err(Error::InvalidInput(format!("{:?}", e)));
         }
 
-        // If an approval policy applies, create a pending approval request instead of executing immediately.
-        let feature_id_for_stage = self
-            .repository
-            .get_feature_id_by_stage_id(stage_uuid)
-            .await?
-            .ok_or(Error::NotFound(stage_uuid))?;
-        if let Some(approval_logic) = &self.approval_logic {
-            let db_feature = self
+        let feature_id_for_stage = match feature_id_for_stage {
+            Some(id) => id,
+            None => self
                 .repository
-                .get_feature_by_id(feature_id_for_stage)
-                .await?;
-
-            if let Some(request) = approval_logic
-                .maybe_create_stage_change_request(&db_feature, &stage, next_status, user_id)
+                .get_feature_id_by_stage_id(stage_uuid)
                 .await?
-            {
-                if next_status == "DEPLOYMENT_REQUESTED" || next_status == "ROLLBACK_REQUESTED" {
-                    let now = chrono::Utc::now();
-                    let updated = self
-                        .repository
-                        .request_stage_change(stage_uuid, next_status, user_id, now)
-                        .await?;
-                    if !updated {
-                        return Err(Error::NotFound(stage_uuid));
-                    }
-                }
-                let mut gql_feature = FeatureLogicImpl::map_entity_to_graphql_feature(db_feature);
-                gql_feature.pending_approval_request_id = Some(ID::from(request.id));
-                return Ok(gql_feature);
-            }
-        }
+                .ok_or(Error::NotFound(stage_uuid))?,
+        };
 
         let ok = match request {
             StageChangeRequestType::DeploymentRequested
@@ -1754,7 +1794,7 @@ mod test {
                 Ok(create_entity_feature_with_stage_status(
                     feature_id,
                     stage_id,
-                    "DEPLOYMENT_REQUESTED",
+                    "DEPLOYMENT_APPROVED",
                 ))
             });
 
@@ -1797,7 +1837,7 @@ mod test {
             )
             .await;
 
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "{}", result.unwrap_err());
     }
 
     #[tokio::test]
@@ -1808,7 +1848,7 @@ mod test {
         let stage_id = Uuid::new_v4();
         let feature_id = Uuid::new_v4();
         let user_id = Uuid::new_v4();
-        let stage = create_pipeline_stage_with_status(stage_id, feature_id, "DEPLOYMENT_REQUESTED");
+        let stage = create_pipeline_stage_with_status(stage_id, feature_id, "DEPLOYMENT_APPROVED");
 
         let stage_clone_for_lookup = stage.clone();
         repository
@@ -1838,7 +1878,7 @@ mod test {
                 Ok(create_entity_feature_with_stage_status(
                     feature_id,
                     stage_id,
-                    "DEPLOYMENT_REQUESTED",
+                    "DEPLOYMENT_APPROVED",
                 ))
             });
 
@@ -1880,7 +1920,7 @@ mod test {
             )
             .await;
 
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "{}", result.unwrap_err());
     }
 
     #[tokio::test]
@@ -2056,7 +2096,7 @@ mod test {
         let stage_id = Uuid::new_v4();
         let feature_id = Uuid::new_v4();
         let user_id = Uuid::new_v4();
-        let stage = create_pipeline_stage_with_status(stage_id, feature_id, "ROLLBACK_REQUESTED");
+        let stage = create_pipeline_stage_with_status(stage_id, feature_id, "ROLLBACK_APPROVED");
 
         let stage_clone_for_lookup = stage.clone();
         repository
@@ -2086,7 +2126,7 @@ mod test {
                 Ok(create_entity_feature_with_stage_status(
                     feature_id,
                     stage_id,
-                    "ROLLBACK_REQUESTED",
+                    "ROLLBACK_APPROVED",
                 ))
             });
 
@@ -2128,7 +2168,7 @@ mod test {
             )
             .await;
 
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "{}", result.unwrap_err());
     }
 
     #[tokio::test]

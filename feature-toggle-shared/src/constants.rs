@@ -2,9 +2,11 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StageStatus {
     DeploymentRequested,
+    DeploymentApproved,
     DeploymentRejected,
     Deployed,
     RollbackRequested,
+    RollbackApproved,
     RollbackRejected,
     Rollbacked,
 }
@@ -14,9 +16,11 @@ impl StageStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
             StageStatus::DeploymentRequested => "DEPLOYMENT_REQUESTED",
+            StageStatus::DeploymentApproved => "DEPLOYMENT_APPROVED",
             StageStatus::DeploymentRejected => "DEPLOYMENT_REJECTED",
             StageStatus::Deployed => "DEPLOYED",
             StageStatus::RollbackRequested => "ROLLBACK_REQUESTED",
+            StageStatus::RollbackApproved => "ROLLBACK_APPROVED",
             StageStatus::RollbackRejected => "ROLLBACK_REJECTED",
             StageStatus::Rollbacked => "ROLLBACKED",
         }
@@ -26,9 +30,11 @@ impl StageStatus {
     pub fn from_str(status: &str) -> Option<Self> {
         match status {
             "DEPLOYMENT_REQUESTED" => Some(StageStatus::DeploymentRequested),
+            "DEPLOYMENT_APPROVED" => Some(StageStatus::DeploymentApproved),
             "DEPLOYMENT_REJECTED" => Some(StageStatus::DeploymentRejected),
             "DEPLOYED" => Some(StageStatus::Deployed),
             "ROLLBACK_REQUESTED" => Some(StageStatus::RollbackRequested),
+            "ROLLBACK_APPROVED" => Some(StageStatus::RollbackApproved),
             "ROLLBACK_REJECTED" => Some(StageStatus::RollbackRejected),
             "ROLLBACKED" => Some(StageStatus::Rollbacked),
             _ => None,
@@ -52,6 +58,10 @@ mod tests {
             StageStatus::DeploymentRequested.as_str(),
             "DEPLOYMENT_REQUESTED"
         );
+        assert_eq!(
+            StageStatus::DeploymentApproved.as_str(),
+            "DEPLOYMENT_APPROVED"
+        );
         assert_eq!(StageStatus::Deployed.as_str(), "DEPLOYED");
         assert_eq!(StageStatus::RollbackRejected.as_str(), "ROLLBACK_REJECTED");
     }
@@ -61,6 +71,10 @@ mod tests {
         assert_eq!(
             StageStatus::from_str("DEPLOYMENT_REQUESTED"),
             Some(StageStatus::DeploymentRequested)
+        );
+        assert_eq!(
+            StageStatus::from_str("DEPLOYMENT_APPROVED"),
+            Some(StageStatus::DeploymentApproved)
         );
         assert_eq!(
             StageStatus::from_str("DEPLOYED"),
@@ -82,9 +96,11 @@ mod tests {
     fn test_round_trip_conversion() {
         let statuses = [
             StageStatus::DeploymentRequested,
+            StageStatus::DeploymentApproved,
             StageStatus::DeploymentRejected,
             StageStatus::Deployed,
             StageStatus::RollbackRequested,
+            StageStatus::RollbackApproved,
             StageStatus::RollbackRejected,
             StageStatus::Rollbacked,
         ];

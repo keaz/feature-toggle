@@ -254,6 +254,9 @@ pub trait FeatureRepository: Send + Sync {
         user_id: Uuid,
     ) -> Result<bool, Error>;
 
+    // Reset a stage to a prior status (used when approval flows are cancelled)
+    async fn reset_stage_status(&self, stage_id: Uuid, status: &str) -> Result<bool, Error>;
+
     // Kill switch functionality for emergency feature disable/enable
     async fn emergency_disable_feature(
         &self,
@@ -529,7 +532,6 @@ impl FeatureRepositoryImpl {
                        parent_stage_id = $3,
                        position = $4,
                        bucketing_key = $5,
-                       enabled = $7
                    WHERE id = $6"#,
             )
             .bind(stage.environment_id)
@@ -538,7 +540,6 @@ impl FeatureRepositoryImpl {
             .bind(&stage.position)
             .bind(stage.bucketing_key.clone())
             .bind(stage.id)
-            .bind(stage.enabled)
             .execute(&mut *tx)
             .await;
 
@@ -1526,6 +1527,24 @@ impl FeatureRepository for FeatureRepositoryImpl {
         .bind(enabled)
         .bind(user_id)
         .bind(now)
+        .bind(stage_id)
+        .execute(&self.pool)
+        .await;
+        let res = handle_error(Some(stage_id), result)?;
+        Ok(res.rows_affected() == 1)
+    }
+
+    async fn reset_stage_status(&self, stage_id: Uuid, status: &str) -> Result<bool, Error> {
+        let result = sqlx::query(
+            r#"UPDATE features_pipeline_stages
+               SET status = $1,
+                   requested_user = NULL,
+                   requested_time = NULL,
+                   approved_user = NULL,
+                   approved_time = NULL
+               WHERE id = $2"#,
+        )
+        .bind(status)
         .bind(stage_id)
         .execute(&self.pool)
         .await;

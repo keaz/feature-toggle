@@ -56,10 +56,12 @@ impl UpdateInputValidator for UpdateFeatureInput {
 // State transition validation for feature stage deployment workflow
 // Allowed transitions:
 // NOT_DEPLOYED -> DEPLOYMENT_REQUESTED
-// DEPLOYMENT_REQUESTED -> DEPLOYMENT_REJECTED | DEPLOYED
+// DEPLOYMENT_REQUESTED -> DEPLOYMENT_REJECTED | DEPLOYMENT_APPROVED
+// DEPLOYMENT_APPROVED -> DEPLOYED
 // DEPLOYMENT_REJECTED -> DEPLOYMENT_REQUESTED
 // DEPLOYED -> ROLLBACK_REQUESTED
-// ROLLBACK_REQUESTED -> ROLLBACK_REJECTED | ROLLBACKED
+// ROLLBACK_REQUESTED -> ROLLBACK_REJECTED | ROLLBACK_APPROVED
+// ROLLBACK_APPROVED -> ROLLBACKED
 // ROLLBACK_REJECTED -> ROLLBACK_REQUESTED
 // ROLLBACKED -> DEPLOYMENT_REQUESTED
 pub fn validate_stage_transition(current: &str, next: &str) -> Result<(), Error> {
@@ -74,7 +76,11 @@ pub fn validate_stage_transition(current: &str, next: &str) -> Result<(), Error>
     allowed.insert("NOT_DEPLOYED", HashSet::from(["DEPLOYMENT_REQUESTED"]));
     allowed.insert(
         "DEPLOYMENT_REQUESTED",
-        HashSet::from(["DEPLOYMENT_REJECTED", "DEPLOYED"]),
+        HashSet::from(["DEPLOYMENT_REJECTED", "DEPLOYMENT_APPROVED"]),
+    );
+    allowed.insert(
+        "DEPLOYMENT_APPROVED",
+        HashSet::from(["DEPLOYED"]),
     );
     allowed.insert(
         "DEPLOYMENT_REJECTED",
@@ -83,7 +89,11 @@ pub fn validate_stage_transition(current: &str, next: &str) -> Result<(), Error>
     allowed.insert("DEPLOYED", HashSet::from(["ROLLBACK_REQUESTED"]));
     allowed.insert(
         "ROLLBACK_REQUESTED",
-        HashSet::from(["ROLLBACK_REJECTED", "ROLLBACKED"]),
+        HashSet::from(["ROLLBACK_REJECTED", "ROLLBACK_APPROVED"]),
+    );
+    allowed.insert(
+        "ROLLBACK_APPROVED",
+        HashSet::from(["ROLLBACKED"]),
     );
     allowed.insert("ROLLBACK_REJECTED", HashSet::from(["ROLLBACK_REQUESTED"]));
     allowed.insert("ROLLBACKED", HashSet::from(["DEPLOYMENT_REQUESTED"]));
@@ -108,11 +118,13 @@ mod tests {
     fn test_allowed_transitions() {
         assert!(validate_stage_transition("NOT_DEPLOYED", "DEPLOYMENT_REQUESTED").is_ok());
         assert!(validate_stage_transition("DEPLOYMENT_REQUESTED", "DEPLOYMENT_REJECTED").is_ok());
-        assert!(validate_stage_transition("DEPLOYMENT_REQUESTED", "DEPLOYED").is_ok());
+        assert!(validate_stage_transition("DEPLOYMENT_REQUESTED", "DEPLOYMENT_APPROVED").is_ok());
+        assert!(validate_stage_transition("DEPLOYMENT_APPROVED", "DEPLOYED").is_ok());
         assert!(validate_stage_transition("DEPLOYMENT_REJECTED", "DEPLOYMENT_REQUESTED").is_ok());
         assert!(validate_stage_transition("DEPLOYED", "ROLLBACK_REQUESTED").is_ok());
         assert!(validate_stage_transition("ROLLBACK_REQUESTED", "ROLLBACK_REJECTED").is_ok());
-        assert!(validate_stage_transition("ROLLBACK_REQUESTED", "ROLLBACKED").is_ok());
+        assert!(validate_stage_transition("ROLLBACK_REQUESTED", "ROLLBACK_APPROVED").is_ok());
+        assert!(validate_stage_transition("ROLLBACK_APPROVED", "ROLLBACKED").is_ok());
         assert!(validate_stage_transition("ROLLBACK_REJECTED", "ROLLBACK_REQUESTED").is_ok());
         assert!(validate_stage_transition("ROLLBACKED", "DEPLOYMENT_REQUESTED").is_ok());
     }
@@ -124,5 +136,7 @@ mod tests {
         assert!(validate_stage_transition("DEPLOYMENT_REJECTED", "DEPLOYED").is_err());
         assert!(validate_stage_transition("ROLLBACKED", "DEPLOYED").is_err());
         assert!(validate_stage_transition("ROLLBACK_REJECTED", "DEPLOYED").is_err());
+        assert!(validate_stage_transition("DEPLOYMENT_APPROVED", "ROLLBACK_REQUESTED").is_err());
+        assert!(validate_stage_transition("ROLLBACK_APPROVED", "DEPLOYMENT_REQUESTED").is_err());
     }
 }

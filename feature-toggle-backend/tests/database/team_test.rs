@@ -34,15 +34,16 @@ async fn test_create_team() {
     let pool = init_pg_pool().await;
     let repository = team::team_repository(pool);
 
+    let name = format!("New Team {}", Uuid::new_v4());
     let input = CreateTeam {
-        name: "New Team 2".to_string(),
+        name: name.clone(),
         description: "Description of the new environment".to_string(),
     };
     let result = repository.create_team(input).await;
 
     assert!(result.is_ok());
     let environment = result.unwrap();
-    assert_eq!(environment.name, "New Team 2");
+    assert_eq!(environment.name, name);
     assert_eq!(
         environment.description,
         "Description of the new environment".to_string()
@@ -89,8 +90,15 @@ async fn test_delete_team() {
     let pool = init_pg_pool().await;
     let repository = team::team_repository(pool);
 
-    let id = Uuid::parse_str("1ab6ca79-a4fc-44ba-87e2-12884edf17f7").unwrap();
-    let result = repository.delete_team(id).await;
+    let created = repository
+        .create_team(CreateTeam {
+            name: format!("Delete Team {}", Uuid::new_v4()),
+            description: "temp team".to_string(),
+        })
+        .await
+        .expect("team should be created");
+
+    let result = repository.delete_team(created.id).await;
 
     assert!(result.is_ok());
 }

@@ -293,6 +293,26 @@ impl ApprovalVoteValue {
     }
 }
 
+// Enable sqlx to decode votes stored as TEXT
+impl sqlx::Type<sqlx::Postgres> for ApprovalVoteValue {
+    fn type_info() -> sqlx::postgres::PgTypeInfo {
+        <&str as sqlx::Type<sqlx::Postgres>>::type_info()
+    }
+
+    fn compatible(ty: &sqlx::postgres::PgTypeInfo) -> bool {
+        <&str as sqlx::Type<sqlx::Postgres>>::compatible(ty)
+    }
+}
+
+impl<'r> sqlx::Decode<'r, sqlx::Postgres> for ApprovalVoteValue {
+    fn decode(
+        value: sqlx::postgres::PgValueRef<'r>,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let s = <&str as sqlx::Decode<sqlx::Postgres>>::decode(value)?;
+        Ok(ApprovalVoteValue::from_str(s))
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
 pub struct ApprovalPolicy {
     pub id: Uuid,
