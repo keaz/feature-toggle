@@ -15,8 +15,9 @@ pub struct FeatureEvaluationContext {
 
 #[derive(Deserialize, Clone, Debug)]
 pub struct ContextObject {
-    #[serde(rename = "bucketingKey")]
-    pub bucketing_key: String,
+    // Support both targetingKey (OFREP standard) and bucketingKey (legacy)
+    #[serde(alias = "bucketingKey", rename = "targetingKey")]
+    pub targeting_key: String,
     #[serde(rename = "environment_id")]
     pub environment_id: String,
     #[serde(flatten)]
@@ -40,24 +41,21 @@ pub struct EvaluationResult {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum EvaluationReason {
-    Static,           // Feature is statically enabled/disabled (kill switch)
-    Default,          // Default value returned (feature not found, stage not found, etc.)
-    TargetingMatch,   // Criteria matched for this user
-    Split,            // User is in rollout percentage
-    Cached,           // Value returned from cache
-    DependencyFailed, // Feature disabled due to dependency failure
-    Disabled,         // Stage or feature is disabled
+    Static,         // Feature is statically enabled/disabled (kill switch)
+    TargetingMatch, // Criteria matched for this user
+    Split,          // User is in rollout percentage
+    Disabled,       // Stage or feature is disabled
+    Unknown,        // Unknown reason (catch-all)
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ErrorCode {
-    FlagNotFound,
-    TypeMismatch,
-    TargetingKeyMissing,
-    EnvironmentNotFound,
-    InvalidContext,
-    EvaluationError,
+    ParseError,          // Malformed request/JSON
+    TargetingKeyMissing, // Required targetingKey missing
+    InvalidContext,      // Invalid context structure
+    General,             // General evaluation error
+    FlagNotFound,        // Flag doesn't exist
 }
 
 // Feature data structures
@@ -398,10 +396,10 @@ fn passes_stage_criteria(
         .iter()
         .any(|crit| !crit.variant_allocations.is_empty());
     let user_bucket = if needs_bucket {
-        // Use bucketing_key from stage or default to bucketingKey from context
-        let sticky_key = stage.bucketing_key.as_deref().unwrap_or("bucketingKey");
-        let sticky_val = if sticky_key == "bucketingKey" {
-            ec.context.bucketing_key.clone()
+        // Use bucketing_key from stage or default to targetingKey from context
+        let sticky_key = stage.bucketing_key.as_deref().unwrap_or("targetingKey");
+        let sticky_val = if sticky_key == "targetingKey" {
+            ec.context.targeting_key.clone()
         } else {
             match get_context_attribute(&ec.context, sticky_key) {
                 Some(v) => v,
@@ -409,7 +407,7 @@ fn passes_stage_criteria(
                     return CriteriaEvaluationResult {
                         matched: false,
                         variant: None,
-                        reason: EvaluationReason::Default,
+                        reason: EvaluationReason::Unknown,
                     };
                 }
             }
@@ -419,7 +417,7 @@ fn passes_stage_criteria(
             return CriteriaEvaluationResult {
                 matched: false,
                 variant: None,
-                reason: EvaluationReason::Default,
+                reason: EvaluationReason::Unknown,
             };
         }
 
@@ -464,7 +462,7 @@ fn passes_stage_criteria(
     CriteriaEvaluationResult {
         matched: false,
         variant: None,
-        reason: EvaluationReason::Default,
+        reason: EvaluationReason::Unknown,
     }
 }
 
@@ -512,7 +510,7 @@ pub fn evaluate(
                 flag_key,
                 value: JsonValue::Bool(false),
                 variant: None,
-                reason: EvaluationReason::DependencyFailed,
+                reason: EvaluationReason::Disabled,
                 error_code: None,
                 metadata: None,
             };
@@ -530,8 +528,8 @@ pub fn evaluate(
                 flag_key,
                 value: JsonValue::Bool(false),
                 variant: None,
-                reason: EvaluationReason::Default,
-                error_code: Some(ErrorCode::EnvironmentNotFound),
+                reason: EvaluationReason::Unknown,
+                error_code: Some(ErrorCode::FlagNotFound),
                 metadata: None,
             };
         }
@@ -591,7 +589,7 @@ mod tests {
         let context = FeatureEvaluationContext {
             flag_key: "test-feature".to_string(),
             context: ContextObject {
-                bucketing_key: "user123".to_string(),
+                targeting_key: "user123".to_string(),
                 environment_id: "env1".to_string(),
                 attributes: context_attrs,
             },
@@ -648,7 +646,7 @@ mod tests {
         let context = FeatureEvaluationContext {
             flag_key: "test-feature".to_string(),
             context: ContextObject {
-                bucketing_key: "user123".to_string(),
+                targeting_key: "user123".to_string(),
                 environment_id: "env1".to_string(),
                 attributes: HashMap::new(),
             },
@@ -962,7 +960,7 @@ mod tests {
         let context = FeatureEvaluationContext {
             flag_key: "age-restricted-feature".to_string(),
             context: ContextObject {
-                bucketing_key: "user456".to_string(),
+                targeting_key: "user456".to_string(),
                 environment_id: "env1".to_string(),
                 attributes: context_attrs,
             },
@@ -1021,7 +1019,7 @@ mod tests {
         let context = FeatureEvaluationContext {
             flag_key: "corporate-feature".to_string(),
             context: ContextObject {
-                bucketing_key: "user789".to_string(),
+                targeting_key: "user789".to_string(),
                 environment_id: "env1".to_string(),
                 attributes: context_attrs,
             },
@@ -1080,7 +1078,7 @@ mod tests {
         attrs.insert("tier".to_string(), json!("premium"));
 
         let ctx = ContextObject {
-            bucketing_key: "user123".to_string(),
+            targeting_key: "user123".to_string(),
             environment_id: "env1".to_string(),
             attributes: attrs,
         };
@@ -1111,7 +1109,7 @@ mod tests {
         attrs.insert("tier".to_string(), json!("free"));
 
         let ctx = ContextObject {
-            bucketing_key: "user123".to_string(),
+            targeting_key: "user123".to_string(),
             environment_id: "env1".to_string(),
             attributes: attrs,
         };
@@ -1142,7 +1140,7 @@ mod tests {
         attrs.insert("beta_user".to_string(), json!("true"));
 
         let ctx = ContextObject {
-            bucketing_key: "user123".to_string(),
+            targeting_key: "user123".to_string(),
             environment_id: "env1".to_string(),
             attributes: attrs,
         };
@@ -1173,7 +1171,7 @@ mod tests {
         attrs.insert("beta_user".to_string(), json!("false"));
 
         let ctx = ContextObject {
-            bucketing_key: "user123".to_string(),
+            targeting_key: "user123".to_string(),
             environment_id: "env1".to_string(),
             attributes: attrs,
         };
@@ -1204,7 +1202,7 @@ mod tests {
         attrs.insert("account_value".to_string(), json!("5000"));
 
         let ctx = ContextObject {
-            bucketing_key: "user123".to_string(),
+            targeting_key: "user123".to_string(),
             environment_id: "env1".to_string(),
             attributes: attrs,
         };
@@ -1234,7 +1232,7 @@ mod tests {
         attrs.insert("country".to_string(), json!("CA"));
 
         let ctx = ContextObject {
-            bucketing_key: "user123".to_string(),
+            targeting_key: "user123".to_string(),
             environment_id: "env1".to_string(),
             attributes: attrs,
         };
@@ -1258,7 +1256,7 @@ mod tests {
         attrs.insert("plan".to_string(), json!("enterprise"));
 
         let ctx = ContextObject {
-            bucketing_key: "user123".to_string(),
+            targeting_key: "user123".to_string(),
             environment_id: "env1".to_string(),
             attributes: attrs,
         };
@@ -1289,7 +1287,7 @@ mod tests {
         attrs.insert("beta_user".to_string(), json!("true"));
 
         let ctx = ContextObject {
-            bucketing_key: "user123".to_string(),
+            targeting_key: "user123".to_string(),
             environment_id: "env1".to_string(),
             attributes: attrs,
         };
@@ -1328,7 +1326,7 @@ mod tests {
     #[test]
     fn test_empty_rule_group() {
         let ctx = ContextObject {
-            bucketing_key: "user123".to_string(),
+            targeting_key: "user123".to_string(),
             environment_id: "env1".to_string(),
             attributes: HashMap::new(),
         };
@@ -1344,7 +1342,7 @@ mod tests {
     #[test]
     fn test_empty_rule_groups_array() {
         let ctx = ContextObject {
-            bucketing_key: "user123".to_string(),
+            targeting_key: "user123".to_string(),
             environment_id: "env1".to_string(),
             attributes: HashMap::new(),
         };
@@ -1359,7 +1357,7 @@ mod tests {
         // tier attribute is missing
 
         let ctx = ContextObject {
-            bucketing_key: "user123".to_string(),
+            targeting_key: "user123".to_string(),
             environment_id: "env1".to_string(),
             attributes: attrs,
         };
@@ -1392,7 +1390,7 @@ mod tests {
         let context = FeatureEvaluationContext {
             flag_key: "premium-feature".to_string(),
             context: ContextObject {
-                bucketing_key: "user123".to_string(),
+                targeting_key: "user123".to_string(),
                 environment_id: "env1".to_string(),
                 attributes: attrs,
             },
@@ -1655,7 +1653,7 @@ mod tests {
         let context = FeatureEvaluationContext {
             flag_key: "ab-test-feature".to_string(),
             context: ContextObject {
-                bucketing_key: "user-42".to_string(), // This will generate a deterministic bucket
+                targeting_key: "user-42".to_string(), // This will generate a deterministic bucket
                 environment_id: "env1".to_string(),
                 attributes: context_attrs,
             },
@@ -1729,7 +1727,7 @@ mod tests {
         let context = FeatureEvaluationContext {
             flag_key: "regional-test".to_string(),
             context: ContextObject {
-                bucketing_key: "user-100".to_string(), // Choose a key that falls in low bucket
+                targeting_key: "user-100".to_string(), // Choose a key that falls in low bucket
                 environment_id: "env1".to_string(),
                 attributes: context_attrs,
             },

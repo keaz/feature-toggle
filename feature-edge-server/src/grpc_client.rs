@@ -148,6 +148,9 @@ pub async fn load_user_assignments(app: &AppState) -> Result<usize, tonic::Statu
                     } else {
                         Some(a.variant)
                     },
+                    // When loading from database, we don't have the original reason
+                    // Use TargetingMatch as a reasonable default for assigned users
+                    reason: evaluation_engine::EvaluationReason::TargetingMatch,
                 },
             );
             count += 1;

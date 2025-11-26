@@ -19,6 +19,7 @@ mod pb {
 pub struct CachedAssignment {
     pub value: serde_json::Value,
     pub variant: Option<String>,
+    pub reason: evaluation_engine::EvaluationReason,
 }
 
 pub struct ClientInfoCache {
@@ -195,9 +196,20 @@ fn setup_logger() -> actix_web::Result<(), Box<dyn std::error::Error>> {
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(handlers::evaluate_handler, handlers::health_handler),
-    components(schemas(handlers::EvaluateHttpRequest, handlers::EvaluateHttpResponse, handlers::EvaluateContext)),
-    tags((name = "edge", description = "Edge evaluation API"))
+    paths(handlers::evaluate_handler, handlers::health_handler, handlers::ofrep_evaluate_flag),
+    components(schemas(
+        handlers::EvaluateHttpRequest,
+        handlers::EvaluateHttpResponse,
+        handlers::EvaluateContext,
+        handlers::OFREPContext,
+        handlers::OFREPEvaluationRequest,
+        handlers::OFREPSuccessResponse,
+        handlers::OFREPErrorResponse
+    )),
+    tags(
+        (name = "edge", description = "Edge evaluation API"),
+        (name = "ofrep", description = "OpenFeature Remote Evaluation Protocol (OFREP) endpoints")
+    )
 )]
 struct ApiDoc;
 
@@ -285,6 +297,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .service(SwaggerUi::new("/docs/{_:.*}").url("/api-doc/openapi.json", openapi.clone()))
             .route("/health", web::get().to(handlers::health_handler))
             .route("/evaluate", web::post().to(handlers::evaluate_handler))
+            // OFREP (OpenFeature Remote Evaluation Protocol) endpoint
+            .route("/ofrep/v1/evaluate/flags/{key}", web::post().to(handlers::ofrep_evaluate_flag))
     })
     .bind(http_addr)?
     .run()
@@ -326,6 +340,7 @@ mod tests {
             CachedAssignment {
                 value: serde_json::json!(true),
                 variant: None,
+                reason: evaluation_engine::EvaluationReason::TargetingMatch,
             },
         );
         state.assigned_cache.insert(
@@ -333,6 +348,7 @@ mod tests {
             CachedAssignment {
                 value: serde_json::json!(true),
                 variant: None,
+                reason: evaluation_engine::EvaluationReason::TargetingMatch,
             },
         );
         state.assigned_cache.insert(
@@ -340,6 +356,7 @@ mod tests {
             CachedAssignment {
                 value: serde_json::json!(true),
                 variant: None,
+                reason: evaluation_engine::EvaluationReason::TargetingMatch,
             },
         );
 
@@ -423,5 +440,109 @@ mod tests {
 
         // Test non-existent key
         assert!(mapped_cache.get("non_existent").await.is_none());
+    }
+
+    #[test]
+    fn test_ofrep_context_serialization() {
+        use handlers::{OFREPContext, OFREPEvaluationRequest};
+        use std::collections::HashMap;
+
+        // Test that OFREPContext properly deserializes with both targetingKey and attributes
+        let json_str = r#"{"targetingKey":"user-123","environment_id":"env-prod","country":"US"}"#;
+        let context: OFREPContext = serde_json::from_str(json_str).unwrap();
+
+        assert_eq!(context.targeting_key, "user-123");
+        assert_eq!(context.attributes.get("environment_id").unwrap(), "env-prod");
+        assert_eq!(context.attributes.get("country").unwrap(), "US");
+
+        // Test that it works with minimal attributes
+        let minimal_json = r#"{"targetingKey":"user-456"}"#;
+        let minimal_context: OFREPContext = serde_json::from_str(minimal_json).unwrap();
+        assert_eq!(minimal_context.targeting_key, "user-456");
+        assert!(minimal_context.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_ofrep_response_serialization() {
+        use handlers::{OFREPSuccessResponse, OFREPErrorResponse};
+
+        // Test success response
+        let success = OFREPSuccessResponse {
+            key: None, // Key should be None for single eval success
+            value: Some(serde_json::json!(true)),
+            reason: "TARGETING_MATCH".to_string(),
+            variant: Some("treatment".to_string()),
+            metadata: None,
+        };
+
+        let json = serde_json::to_string(&success).unwrap();
+        assert!(!json.contains("\"key\":"));  // key should be omitted when None
+        assert!(json.contains("\"value\":true"));
+        assert!(json.contains("\"reason\":\"TARGETING_MATCH\""));
+
+        // Test error response
+        let error = OFREPErrorResponse {
+            key: "test-flag".to_string(),
+            error_code: "FLAG_NOT_FOUND".to_string(),
+            error_details: Some("The requested flag does not exist".to_string()),
+        };
+
+        let error_json = serde_json::to_string(&error).unwrap();
+        assert!(error_json.contains("\"key\":\"test-flag\""));
+        assert!(error_json.contains("\"errorCode\":\"FLAG_NOT_FOUND\""));
+        assert!(error_json.contains("\"errorDetails\":"));
+    }
+
+    #[test]
+    fn test_ofrep_evaluation_reasons_are_valid() {
+        // Verify all evaluation reasons match OFREP spec (using JSON serialization)
+        let valid_reasons = vec!["STATIC", "TARGETING_MATCH", "SPLIT", "DISABLED", "UNKNOWN"];
+
+        // Test that our engine reasons serialize correctly to JSON (SCREAMING_SNAKE_CASE)
+        let reason1 = evaluation_engine::EvaluationReason::Static;
+        let json1 = serde_json::to_string(&reason1).unwrap().trim_matches('"').to_string();
+        assert!(valid_reasons.contains(&json1.as_str()), "Reason '{}' not in OFREP spec", json1);
+
+        let reason2 = evaluation_engine::EvaluationReason::TargetingMatch;
+        let json2 = serde_json::to_string(&reason2).unwrap().trim_matches('"').to_string();
+        assert!(valid_reasons.contains(&json2.as_str()), "Reason '{}' not in OFREP spec", json2);
+
+        let reason3 = evaluation_engine::EvaluationReason::Split;
+        let json3 = serde_json::to_string(&reason3).unwrap().trim_matches('"').to_string();
+        assert!(valid_reasons.contains(&json3.as_str()), "Reason '{}' not in OFREP spec", json3);
+
+        let reason4 = evaluation_engine::EvaluationReason::Disabled;
+        let json4 = serde_json::to_string(&reason4).unwrap().trim_matches('"').to_string();
+        assert!(valid_reasons.contains(&json4.as_str()), "Reason '{}' not in OFREP spec", json4);
+
+        let reason5 = evaluation_engine::EvaluationReason::Unknown;
+        let json5 = serde_json::to_string(&reason5).unwrap().trim_matches('"').to_string();
+        assert!(valid_reasons.contains(&json5.as_str()), "Reason '{}' not in OFREP spec", json5);
+    }
+
+    #[test]
+    fn test_ofrep_error_codes_are_valid() {
+        // Verify all error codes match OFREP spec (using JSON serialization)
+        let valid_codes = vec!["PARSE_ERROR", "TARGETING_KEY_MISSING", "INVALID_CONTEXT", "GENERAL", "FLAG_NOT_FOUND"];
+
+        let code1 = evaluation_engine::ErrorCode::ParseError;
+        let json1 = serde_json::to_string(&code1).unwrap().trim_matches('"').to_string();
+        assert!(valid_codes.contains(&json1.as_str()), "Error code '{}' not in OFREP spec", json1);
+
+        let code2 = evaluation_engine::ErrorCode::TargetingKeyMissing;
+        let json2 = serde_json::to_string(&code2).unwrap().trim_matches('"').to_string();
+        assert!(valid_codes.contains(&json2.as_str()), "Error code '{}' not in OFREP spec", json2);
+
+        let code3 = evaluation_engine::ErrorCode::InvalidContext;
+        let json3 = serde_json::to_string(&code3).unwrap().trim_matches('"').to_string();
+        assert!(valid_codes.contains(&json3.as_str()), "Error code '{}' not in OFREP spec", json3);
+
+        let code4 = evaluation_engine::ErrorCode::General;
+        let json4 = serde_json::to_string(&code4).unwrap().trim_matches('"').to_string();
+        assert!(valid_codes.contains(&json4.as_str()), "Error code '{}' not in OFREP spec", json4);
+
+        let code5 = evaluation_engine::ErrorCode::FlagNotFound;
+        let json5 = serde_json::to_string(&code5).unwrap().trim_matches('"').to_string();
+        assert!(valid_codes.contains(&json5.as_str()), "Error code '{}' not in OFREP spec", json5);
     }
 }
