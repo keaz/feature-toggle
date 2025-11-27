@@ -531,7 +531,7 @@ impl FeatureRepositoryImpl {
                        order_index = $2,
                        parent_stage_id = $3,
                        position = $4,
-                       bucketing_key = $5,
+                       bucketing_key = $5
                    WHERE id = $6"#,
             )
             .bind(stage.environment_id)
@@ -722,12 +722,15 @@ impl FeatureRepositoryImpl {
             FeatureType::Contextual => "Contextual",
         };
 
+        let key = input.key.clone().unwrap_or(existing_feature.key);
+        let description = input.description.clone().or(existing_feature.description);
+        let id = input.id;
         let result = sqlx::query!(
             r#"UPDATE features SET key = $1, description = $2, feature_type = $3 WHERE id = $4"#,
-            input.key.clone().unwrap_or(existing_feature.key),
-            input.description.clone().or(existing_feature.description),
+            key,
+            description,
             feature_type_str,
-            input.id
+            id
         )
         .execute(&mut *tx)
         .await;
