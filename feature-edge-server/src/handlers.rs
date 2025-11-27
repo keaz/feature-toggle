@@ -52,6 +52,58 @@ pub struct EvaluateHttpResponse {
     pub metadata: Option<serde_json::Value>,
 }
 
+// ===== OFREP (OpenFeature Remote Evaluation Protocol) Models =====
+
+/// OFREP-compliant evaluation context
+#[derive(Deserialize, ToSchema, Clone, Debug)]
+pub struct OFREPContext {
+    /// Targeting key for user identification (OFREP standard field)
+    #[serde(rename = "targetingKey")]
+    pub targeting_key: String,
+    /// Dynamic attributes (flattened into the context object)
+    #[serde(flatten)]
+    pub attributes: std::collections::HashMap<String, serde_json::Value>,
+}
+
+/// OFREP single flag evaluation request
+#[derive(Deserialize, ToSchema, Clone)]
+pub struct OFREPEvaluationRequest {
+    /// Evaluation context with targetingKey and custom attributes
+    pub context: OFREPContext,
+}
+
+/// OFREP successful evaluation response
+#[derive(Serialize, ToSchema)]
+pub struct OFREPSuccessResponse {
+    /// Flag key (only included in error responses for single eval, always in bulk)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// The resolved value (omitted for code defaults)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
+    /// The reason for the evaluation result
+    pub reason: String,
+    /// The variant name that was served (if any)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variant: Option<String>,
+    /// Optional metadata about the evaluation
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
+}
+
+/// OFREP error response
+#[derive(Serialize, ToSchema)]
+pub struct OFREPErrorResponse {
+    /// Flag key
+    pub key: String,
+    /// Error code
+    #[serde(rename = "errorCode")]
+    pub error_code: String,
+    /// Optional error details
+    #[serde(rename = "errorDetails", skip_serializing_if = "Option::is_none")]
+    pub error_details: Option<String>,
+}
+
 /// Map protobuf feature to evaluation engine format
 pub fn map_proto_to_engine(f: &pb::FeatureFull) -> engine::Feature {
     let stages = f
@@ -183,7 +235,7 @@ pub fn map_http_context_to_engine(
     engine::FeatureEvaluationContext {
         flag_key: feature_key,
         context: engine::ContextObject {
-            bucketing_key: ctx.bucketing_key,
+            targeting_key: ctx.bucketing_key,
             environment_id: ctx.environment_id,
             attributes: ctx.attributes,
         },
@@ -388,13 +440,13 @@ pub async fn evaluate_handler(
             .map(|entry| entry.value().clone());
 
         if let Some(cached_assignment) = cached {
-            // Cached assignment - return cached result with variant
+            // Cached assignment - return cached result with original reason (not "CACHED")
             (
                 engine::EvaluationResult {
                     flag_key: feature_key.clone(),
                     value: cached_assignment.value,
                     variant: cached_assignment.variant,
-                    reason: engine::EvaluationReason::Cached,
+                    reason: cached_assignment.reason,
                     error_code: None,
                     metadata: None,
                 },
@@ -451,6 +503,7 @@ pub async fn evaluate_handler(
                 crate::CachedAssignment {
                     value: result.value.clone(),
                     variant: result.variant.clone(),
+                    reason: result.reason.clone(),
                 },
             );
             // Lock-free push - no await needed!
@@ -500,4 +553,225 @@ pub async fn health_handler(app: web::Data<AppState>) -> impl Responder {
     } else {
         HttpResponse::ServiceUnavailable().body("UNAVAILABLE")
     }
+}
+
+// ===== OFREP (OpenFeature Remote Evaluation Protocol) Handlers =====
+
+/// Extract credentials from Authorization header or X-API-Key header
+fn extract_auth_from_headers(http_req: &actix_web::HttpRequest, app: &AppState) -> (String, String) {
+    // Try Bearer token first
+    if let Some(auth_header) = http_req.headers().get("authorization") {
+        if let Ok(auth_str) = auth_header.to_str() {
+            if auth_str.starts_with("Bearer ") {
+                let token = &auth_str[7..];
+                // For now, we don't parse JWT - just use the token as client_id
+                // In production, you'd validate the JWT and extract client_id
+                return (token.to_string(), String::new());
+            }
+        }
+    }
+
+    // Try X-API-Key
+    if let Some(api_key) = http_req.headers().get("x-api-key") {
+        if let Ok(key_str) = api_key.to_str() {
+            return (key_str.to_string(), String::new());
+        }
+    }
+
+    // Fallback to app defaults
+    (app.client_id.clone(), app.client_secret.clone())
+}
+
+/// Map OFREP context to engine context
+fn map_ofrep_context_to_engine(flag_key: String, ofrep_ctx: OFREPContext) -> engine::FeatureEvaluationContext {
+    // Extract environment_id from attributes or use a default
+    let environment_id = ofrep_ctx
+        .attributes
+        .get("environment_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("default")
+        .to_string();
+
+    engine::FeatureEvaluationContext {
+        flag_key,
+        context: engine::ContextObject {
+            targeting_key: ofrep_ctx.targeting_key,
+            environment_id,
+            attributes: ofrep_ctx.attributes,
+        },
+    }
+}
+
+/// OFREP handler for single flag evaluation
+/// Spec: POST /ofrep/v1/evaluate/flags/{key}
+#[utoipa::path(
+    post,
+    path = "/ofrep/v1/evaluate/flags/{key}",
+    request_body = OFREPEvaluationRequest,
+    params(
+        ("key" = String, Path, description = "Feature flag key")
+    ),
+    responses(
+        (status = 200, description = "Successful evaluation", body = OFREPSuccessResponse),
+        (status = 400, description = "Invalid request", body = OFREPErrorResponse),
+        (status = 404, description = "Flag not found", body = OFREPErrorResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Server error", body = OFREPErrorResponse)
+    ),
+    tag = "ofrep"
+)]
+pub async fn ofrep_evaluate_flag(
+    http_req: actix_web::HttpRequest,
+    app: web::Data<AppState>,
+    path: web::Path<String>,
+    req: web::Json<OFREPEvaluationRequest>,
+) -> actix_web::Result<HttpResponse> {
+    let feature_key = path.into_inner();
+    let req = req.into_inner();
+
+    // Extract credentials from headers (OFREP standard)
+    let (client_id, client_secret) = extract_auth_from_headers(&http_req, &app);
+
+    // Validate targetingKey is not empty
+    if req.context.targeting_key.is_empty() {
+        return Ok(HttpResponse::BadRequest().json(OFREPErrorResponse {
+            key: feature_key,
+            error_code: "TARGETING_KEY_MISSING".to_string(),
+            error_details: Some("targetingKey is required and cannot be empty".to_string()),
+        }));
+    }
+
+    // Fetch client information for origin validation
+    let client_info = get_or_fetch_client_info(&app, &client_id, &client_secret).await;
+
+    // Validate web origin for web clients
+    if let Some(ref client_info) = client_info {
+        if !validate_web_origin(&http_req, client_info) {
+            return Err(actix_web::error::ErrorUnauthorized(
+                "Invalid origin for web client",
+            ));
+        }
+    }
+
+    // Get feature from cache or backend
+    let feature = match get_or_fetch_feature(&app, &feature_key, &client_id, &client_secret).await {
+        Some(f) => f,
+        None => {
+            // OFREP: Return 404 for missing flags
+            return Ok(HttpResponse::NotFound().json(OFREPErrorResponse {
+                key: feature_key,
+                error_code: "FLAG_NOT_FOUND".to_string(),
+                error_details: Some("The requested feature flag does not exist".to_string()),
+            }));
+        }
+    };
+
+    // Kill switch: disable feature if not active
+    if !feature.active {
+        app.purge_assignments_for_feature(&feature.id).await;
+        return Ok(HttpResponse::Ok().json(OFREPSuccessResponse {
+            key: None,
+            value: Some(serde_json::json!(false)),
+            reason: "DISABLED".to_string(),
+            variant: None,
+            metadata: None,
+        }));
+    }
+
+    // Check environment stage enabled
+    let environment_id = req.context.attributes
+        .get("environment_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("default");
+
+    let stage_enabled = feature
+        .stages
+        .iter()
+        .find(|s| s.environment_id == environment_id)
+        .map(|s| s.enabled)
+        .unwrap_or(false);
+
+    if !stage_enabled {
+        return Ok(HttpResponse::Ok().json(OFREPSuccessResponse {
+            key: None,
+            value: Some(serde_json::json!(false)),
+            reason: "DISABLED".to_string(),
+            variant: None,
+            metadata: None,
+        }));
+    }
+
+    // Extract user_id from targeting_key
+    let user_id = req.context.targeting_key.clone();
+
+    // Check cache for sticky assignment
+    let (mut result, _prior_assignment) = {
+        let cache_key = assignment_key(&user_id, &feature.id, environment_id);
+        let cached = app
+            .assigned_cache
+            .get(&cache_key)
+            .map(|entry| entry.value().clone());
+
+        if let Some(cached_assignment) = cached {
+            // Return cached result with original reason
+            (
+                engine::EvaluationResult {
+                    flag_key: feature_key.clone(),
+                    value: cached_assignment.value,
+                    variant: cached_assignment.variant,
+                    reason: cached_assignment.reason,
+                    error_code: None,
+                    metadata: None,
+                },
+                true,
+            )
+        } else {
+            // Perform fresh evaluation
+            let ec = map_ofrep_context_to_engine(feature_key.clone(), req.context.clone());
+            let result = engine::evaluate(ec, (*feature).clone());
+            (result, false)
+        }
+    };
+
+    // For Simple features, ensure value is always boolean and variant is None
+    if feature.feature_type == "Simple" {
+        let is_enabled = result.value.as_bool().unwrap_or(false);
+        result.value = serde_json::json!(is_enabled);
+        result.variant = None;
+    }
+
+    // Cache successful assignments
+    let should_cache = result.variant.is_some() || result.value.as_bool().unwrap_or(false);
+    if should_cache {
+        let cache_key = assignment_key(&user_id, &feature.id, environment_id);
+        app.assigned_cache.insert(
+            cache_key,
+            crate::CachedAssignment {
+                value: result.value.clone(),
+                variant: result.variant.clone(),
+                reason: result.reason.clone(),
+            },
+        );
+
+        // Queue for backend persistence
+        app.pending_assignments.push(crate::grpc_client::UserAssignment {
+            user_id,
+            feature_id: feature.id.clone(),
+            environment_id: environment_id.to_string(),
+            assigned: true,
+            variant: result.variant.clone(),
+        });
+    }
+
+    // Convert reason to SCREAMING_SNAKE_CASE string
+    let reason = format!("{:?}", result.reason).to_uppercase();
+
+    // OFREP response: no "key" field for single evaluation success
+    Ok(HttpResponse::Ok().json(OFREPSuccessResponse {
+        key: None,
+        value: Some(result.value),
+        reason,
+        variant: result.variant,
+        metadata: None,
+    }))
 }

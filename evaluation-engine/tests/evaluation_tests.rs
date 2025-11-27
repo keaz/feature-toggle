@@ -9,7 +9,7 @@ use std::collections::HashMap;
 fn mk_ctx(
     flag_key: &str,
     env: &str,
-    bucketing_key: &str,
+    targeting_key: &str,
     attrs: &[(&str, &str)],
 ) -> FeatureEvaluationContext {
     let mut attributes = HashMap::new();
@@ -20,7 +20,7 @@ fn mk_ctx(
     FeatureEvaluationContext {
         flag_key: flag_key.to_string(),
         context: ContextObject {
-            bucketing_key: bucketing_key.to_string(),
+            targeting_key: targeting_key.to_string(),
             environment_id: env.to_string(),
             attributes,
         },
@@ -117,8 +117,8 @@ fn evaluate_requires_matching_environment_stage() {
     };
     let result = evaluation_engine::evaluate(ctx, feature);
     assert_eq!(result.value, json!(false));
-    assert_eq!(result.reason, EvaluationReason::Default);
-    assert_eq!(result.error_code, Some(ErrorCode::EnvironmentNotFound));
+    assert_eq!(result.reason, EvaluationReason::Unknown);
+    assert_eq!(result.error_code, Some(ErrorCode::FlagNotFound));
 }
 
 #[test]
@@ -203,7 +203,7 @@ fn evaluate_fails_when_user_not_in_allowed_values() {
     );
     let result = evaluation_engine::evaluate(ctx, feature);
     assert_eq!(result.value, json!(false));
-    assert_eq!(result.reason, EvaluationReason::Default);
+    assert_eq!(result.reason, EvaluationReason::Unknown);
 }
 
 #[test]
@@ -325,7 +325,7 @@ fn evaluate_dependency_failed() {
 
     let result = evaluation_engine::evaluate(ctx, feature);
     assert_eq!(result.value, json!(false));
-    assert_eq!(result.reason, EvaluationReason::DependencyFailed);
+    assert_eq!(result.reason, EvaluationReason::Disabled);
 }
 
 #[test]
@@ -429,7 +429,7 @@ fn evaluate_missing_bucketing_key_attribute() {
     };
     let result = evaluation_engine::evaluate(ctx, feature);
     assert_eq!(result.value, json!(false));
-    assert_eq!(result.reason, EvaluationReason::Default);
+    assert_eq!(result.reason, EvaluationReason::Unknown);
 }
 
 #[test]
