@@ -90,6 +90,7 @@ pub struct EvaluationEvent {
     pub evaluated_at: std::time::SystemTime,
     pub prior_assignment: bool,
     pub variant: Option<String>,
+    pub variant_value: Option<serde_json::Value>,
 }
 
 /// Cache for pre-mapped engine::Feature to avoid repeated allocations

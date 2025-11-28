@@ -167,7 +167,8 @@ message FeatureEvaluationEvent {
   string user_context = 7; // extracted user identifier for easier querying
   int64 evaluated_at_unix_ms = 8; // timestamp when evaluation occurred
   bool prior_assignment = 9; // true if this was a cached/sticky assignment, false for fresh evaluation
-  string variant = 10; // Optional variant name that was served
+  string variant = 10; // Optional variant name that was served (e.g., "control", "treatment")
+  string variant_value = 11; // Optional variant value as JSON string (e.g., '{"color": "blue"}', '42', 'true')
 }
 
 // Request message for pushing evaluation events

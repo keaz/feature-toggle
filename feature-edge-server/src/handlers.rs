@@ -209,9 +209,22 @@ pub fn map_proto_to_engine(f: &pb::FeatureFull) -> engine::Feature {
     let variants = f
         .variants
         .iter()
-        .map(|v| engine::FeatureVariant {
-            control: v.control.clone(),
-            value: serde_json::from_str(&v.value).unwrap_or(serde_json::json!(v.value.clone())),
+        .map(|v| {
+            let value = serde_json::from_str(&v.value).unwrap_or_else(|e| {
+                error!(
+                    "Failed to parse variant value for control '{}' in feature '{}': {}. Raw value: '{}'",
+                    v.control,
+                    f.key,
+                    e,
+                    v.value
+                );
+                // If parsing fails, treat the raw string as a JSON string value
+                serde_json::json!(v.value.clone())
+            });
+            engine::FeatureVariant {
+                control: v.control.clone(),
+                value,
+            }
         })
         .collect();
 
@@ -485,6 +498,11 @@ pub async fn evaluate_handler(
         evaluated_at: std::time::SystemTime::now(),
         prior_assignment,
         variant: result.variant.clone(),
+        variant_value: if result.variant.is_some() {
+            Some(result.value.clone())
+        } else {
+            None
+        },
     };
 
     // Non-blocking send - if channel is full, this will fail silently (unbounded so shouldn't happen)

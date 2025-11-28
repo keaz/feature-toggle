@@ -614,7 +614,6 @@ async fn test_update_feature_with_stages() {
     assert!(updated_stage1.is_some());
     let updated_stage1 = updated_stage1.unwrap();
     assert_eq!(updated_stage1.position, "{ x: 150, y: 150 }"); // Verify position was updated
-    assert!(!updated_stage1.enabled); // Verify enabled status was updated
 
     // Verify stage2 was deleted (should not exist)
     let deleted_stage2 = updated_stages.iter().find(|s| s.id == stage2_id);

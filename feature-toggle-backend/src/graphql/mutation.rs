@@ -1000,7 +1000,7 @@ impl MutationRoot {
         let feature_repo = ctx.data::<Box<dyn crate::database::feature::FeatureRepository>>()?;
         let update_txn =
             ctx.data::<tokio::sync::broadcast::Sender<crate::grpc::pb::FeatureUpdate>>()?;
-            
+
         notify_edge(feature_repo.as_ref(), update_txn, feature_id).await;
 
         Ok(crate::graphql::schema::map_approval_request(updated, votes))
@@ -1032,6 +1032,12 @@ impl MutationRoot {
             .list_votes_for_request(request_uuid)
             .await
             .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+
+        let feature_repo = ctx.data::<Box<dyn crate::database::feature::FeatureRepository>>()?;
+        let update_txn =
+            ctx.data::<tokio::sync::broadcast::Sender<crate::grpc::pb::FeatureUpdate>>()?;
+
+        notify_edge(feature_repo.as_ref(), update_txn, updated.feature_id).await;
 
         Ok(map_approval_request(updated, votes))
     }
@@ -3051,7 +3057,8 @@ mod more_mutation_tests {
             .returning(|_| Ok(vec![]));
 
         // Create broadcast channel for notify_edge
-        let (updates_tx, _updates_rx) = tokio::sync::broadcast::channel::<crate::grpc::pb::FeatureUpdate>(1);
+        let (updates_tx, _updates_rx) =
+            tokio::sync::broadcast::channel::<crate::grpc::pb::FeatureUpdate>(1);
 
         let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
             .data::<Box<dyn ApprovalLogic>>(Box::new(StubApprovalLogic {
@@ -3060,7 +3067,9 @@ mod more_mutation_tests {
                 response: db_request.clone(),
             }))
             .data::<Box<dyn crate::database::approval::ApprovalRepository>>(Box::new(mock_repo))
-            .data::<Box<dyn crate::database::feature::FeatureRepository>>(Box::new(mock_feature_repo))
+            .data::<Box<dyn crate::database::feature::FeatureRepository>>(Box::new(
+                mock_feature_repo,
+            ))
             .data(updates_tx)
             .data(crate::JwtUser {
                 id: approver_id,

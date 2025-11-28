@@ -624,11 +624,11 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
 
         // Convert proto context to engine context format
         let mut attributes = std::collections::HashMap::new();
-        let mut bucketing_key = String::new();
+        let mut targeting_key = String::new();
 
         for c in req.context {
             if c.key == "bucketingKey" {
-                bucketing_key = c.value;
+                targeting_key = c.value;
             } else {
                 attributes.insert(c.key, serde_json::json!(c.value));
             }
@@ -637,7 +637,7 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
         let ec = engine::FeatureEvaluationContext {
             flag_key: db_feature.key,
             context: engine::ContextObject {
-                bucketing_key,
+                targeting_key,
                 environment_id: req.environment_id,
                 attributes,
             },
@@ -1004,7 +1004,8 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
         }
 
         let mut map = self.requested_keys.write().await;
-        map.insert(client_id, subscription_keys.clone());
+        let entry = map.entry(client_id).or_default();
+        entry.extend(subscription_keys.iter().cloned());
         log::info!(
             "gRPC: Updated requested_keys for client {} with {} feature keys",
             client_id,
@@ -1060,7 +1061,7 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
         // Subscribe to shared broadcaster for live updates
         let mut rx = self.updates_tx.subscribe();
         let out_tx_clone = out_tx.clone();
-        let subscription_keys_for_filter = subscription_keys.clone();
+        let requested_keys_clone = self.requested_keys.clone();
 
         tokio::spawn(async move {
             loop {
@@ -1073,10 +1074,13 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
                             update.feature_key.clone()
                         };
 
-                        // Determine if we should send this update:
-                        // - If subscribe_all is true, send everything (edge servers)
-                        // - Otherwise, check if the key is in the subscription set
-                        let should_send = subscription_keys_for_filter.contains(&key_for_update);
+                        // Read current subscription keys from shared map (allows dynamic updates)
+                        let should_send = {
+                            let map = requested_keys_clone.read().await;
+                            map.get(&client_id)
+                                .map(|keys| keys.contains(&key_for_update))
+                                .unwrap_or(false)
+                        };
 
                         if should_send {
                             log::info!(
@@ -1218,13 +1222,19 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
                 Some(event.variant.clone())
             };
 
-            // For evaluation_value, we need to parse from the variant or use the boolean result
-            // If there's a variant, try to parse it as JSON, otherwise use the boolean
-            let evaluation_value = if let Some(ref v) = variant {
-                // Try to parse variant value as JSON, fallback to string
-                serde_json::from_str::<serde_json::Value>(v)
+            // For evaluation_value, use variant_value if provided, otherwise use the boolean result
+            // variant_value comes from the edge server and contains the actual variant value as JSON
+            let evaluation_value = if !event.variant_value.is_empty() {
+                // Parse the variant_value JSON string
+                serde_json::from_str::<serde_json::Value>(&event.variant_value)
                     .ok()
-                    .or_else(|| Some(serde_json::json!(v)))
+                    .or_else(|| {
+                        log::warn!(
+                            "Failed to parse variant_value as JSON for feature '{}', using as string",
+                            event.feature_key
+                        );
+                        Some(serde_json::json!(event.variant_value))
+                    })
             } else {
                 Some(serde_json::json!(event.evaluation_result))
             };

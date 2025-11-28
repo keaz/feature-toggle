@@ -467,6 +467,10 @@ pub async fn run_evaluation_flush_task(
                 evaluated_at_unix_ms,
                 prior_assignment: event.prior_assignment,
                 variant: event.variant.clone().unwrap_or_default(),
+                variant_value: event.variant_value
+                    .as_ref()
+                    .map(|v| serde_json::to_string(v).unwrap_or_default())
+                    .unwrap_or_default(),
             });
         }
 
