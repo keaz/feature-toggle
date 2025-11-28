@@ -39,6 +39,8 @@ pub struct ActivityLogFilter {
     pub to_date: Option<DateTime<Utc>>,
     pub limit: Option<i32>,
     pub offset: Option<i32>,
+    /// Optional team filter (best-effort, applied in GraphQL layer where entity lookups are available)
+    pub team_id: Option<Uuid>,
 }
 
 #[cfg_attr(test, mockall::automock)]
@@ -308,6 +310,7 @@ mod tests {
         assert!(filter.actor_id.is_none());
         assert!(filter.from_date.is_none());
         assert!(filter.to_date.is_none());
+        assert!(filter.team_id.is_none());
     }
 
     #[test]
@@ -324,6 +327,7 @@ mod tests {
             to_date: Some(Utc::now()),
             limit: Some(20),
             offset: Some(0),
+            team_id: None,
         };
 
         assert_eq!(

@@ -564,6 +564,7 @@ impl Query {
         #[graphql(desc = "End time for evaluation data")] to_time: DateTime<Utc>,
         #[graphql(desc = "Filter by environment ID")] environment_id: Option<String>,
         #[graphql(desc = "Filter by client ID")] client_id: Option<ID>,
+        #[graphql(desc = "Filter by team ID")] team_id: Option<ID>,
         #[graphql(desc = "Maximum number of results to return")] limit: Option<i32>,
         #[graphql(desc = "Number of results to skip (for pagination)")] offset: Option<i32>,
     ) -> GqlResult<Vec<EvaluationByFeature>> {
@@ -588,6 +589,14 @@ impl Query {
             None
         };
 
+        let team_uuid = if let Some(id) = team_id {
+            Some(uuid::Uuid::parse_str(&id.to_string()).map_err(|e| {
+                async_graphql::Error::new(format!("Invalid team ID format: {}", e))
+            })?)
+        } else {
+            None
+        };
+
         // Use logic to fetch evaluations grouped by feature; delegate to repository internally
         let results = logic
             .get_evaluations_by_feature(
@@ -595,6 +604,7 @@ impl Query {
                 to_time,
                 environment_id,
                 client_uuid,
+                team_uuid,
                 limit,
                 offset,
             )
@@ -635,6 +645,7 @@ impl Query {
         #[graphql(desc = "Filter activities until this date")] to_date: Option<DateTime<Utc>>,
         #[graphql(desc = "Page number (1-based)")] page_number: Option<i32>,
         #[graphql(desc = "Page size (default 20)")] page_size: Option<i32>,
+        #[graphql(desc = "Filter by team ID (best effort via entity lookups)")] team_id: Option<ID>,
     ) -> GqlResult<ActivityLogPage> {
         debug!(
             "Fetching recent activities with filters - types: {:?}, entity: {:?}",
@@ -663,6 +674,14 @@ impl Query {
         // Calculate offset
         let offset = (page_num - 1) * page_sz;
 
+        let team_uuid = if let Some(id) = team_id {
+            Some(uuid::Uuid::parse_str(&id.to_string()).map_err(|e| {
+                async_graphql::Error::new(format!("Invalid team ID format: {}", e))
+            })?)
+        } else {
+            None
+        };
+
         // Build filter
         let filter = crate::database::activity_log::ActivityLogFilter {
             activity_types,
@@ -673,6 +692,7 @@ impl Query {
             to_date,
             limit: Some(page_sz),
             offset: Some(offset),
+            team_id: team_uuid,
         };
 
         // Call the repository method
@@ -682,16 +702,34 @@ impl Query {
             .map_err(|e| async_graphql::Error::new(format!("Database error: {}", e)))?;
 
         // Get feature repository and environment logic to resolve entity details
-        let feature_repo =
+        let feature_repo_arc =
             ctx.data::<std::sync::Arc<Box<dyn crate::database::feature::FeatureRepository>>>()?;
-        let feature_repo = feature_repo.as_ref();
+        let feature_repo = feature_repo_arc.as_ref();
 
+        let client_logic = ctx.data::<Box<dyn crate::logic::client::ClientLogic>>()?;
+        let pipeline_logic = ctx.data::<Box<dyn crate::logic::pipeline::PipelineLogic>>()?;
         let environment_logic =
             ctx.data::<Box<dyn crate::logic::environment::EnvironmentLogic>>()?;
 
         // Convert database results to GraphQL types and enrich with entity details
         let mut items = Vec::new();
-        for a in activities {
+        let mut filtered_count: i64 = 0;
+        for a in activities.into_iter() {
+            if let Some(team_uuid) = team_uuid {
+                if !crate::graphql::subscription::activity_matches_team(
+                    &a,
+                    team_uuid,
+                    &feature_repo_arc,
+                    &environment_logic,
+                    &client_logic,
+                    &pipeline_logic,
+                )
+                .await
+                {
+                    continue;
+                }
+            }
+            filtered_count += 1;
             let entity_details = resolve_entity_details(
                 &a.entity_type,
                 &a.entity_id,
@@ -719,7 +757,11 @@ impl Query {
             items,
             page_number: page_num,
             page_size: page_sz,
-            total,
+            total: if team_uuid.is_some() {
+                filtered_count
+            } else {
+                total
+            },
         })
     }
 
@@ -807,6 +849,14 @@ impl Query {
             None
         };
 
+        let team_uuid = if let Some(id) = filter.team_id {
+            Some(uuid::Uuid::parse_str(&id.to_string()).map_err(|e| {
+                async_graphql::Error::new(format!("Invalid team ID format: {}", e))
+            })?)
+        } else {
+            None
+        };
+
         let count = logic
             .count_evaluations(
                 filter.from_date,
@@ -814,6 +864,7 @@ impl Query {
                 filter.environment_id,
                 client_uuid,
                 filter.feature_key,
+                team_uuid,
             )
             .await
             .map_err(|e| {
@@ -847,6 +898,14 @@ impl Query {
             None
         };
 
+        let team_uuid = if let Some(id) = input.team_id {
+            Some(uuid::Uuid::parse_str(&id.to_string()).map_err(|e| {
+                async_graphql::Error::new(format!("Invalid team ID format: {}", e))
+            })?)
+        } else {
+            None
+        };
+
         // Calculate time range based on period
         let now = chrono::Utc::now();
         let (from_time, to_time) =
@@ -857,6 +916,7 @@ impl Query {
                 input.feature_key,
                 input.environment_id,
                 client_uuid,
+                team_uuid,
                 from_time,
                 to_time,
             )
@@ -909,6 +969,14 @@ impl Query {
             None => None,
         };
 
+        let team_id = match input.team_id.as_ref().map(|s| uuid::Uuid::parse_str(s)) {
+            Some(Ok(id)) => Some(id),
+            Some(Err(_)) => {
+                return Err(async_graphql::Error::new("Invalid team ID format"));
+            }
+            None => None,
+        };
+
         let logic =
             ctx.data::<Box<dyn crate::logic::feature_evaluation::FeatureEvaluationLogic>>()?;
 
@@ -923,6 +991,7 @@ impl Query {
                 input.feature_key,
                 input.environment_id,
                 client_id,
+                team_id,
                 from_time,
                 to_time,
                 input.interval_minutes,
@@ -1006,6 +1075,14 @@ impl Query {
             None => None,
         };
 
+        let team_id = match input.team_id.as_ref().map(|s| uuid::Uuid::parse_str(s)) {
+            Some(Ok(id)) => Some(id),
+            Some(Err(_)) => {
+                return Err(async_graphql::Error::new("Invalid team ID format"));
+            }
+            None => None,
+        };
+
         let logic =
             ctx.data::<Box<dyn crate::logic::feature_evaluation::FeatureEvaluationLogic>>()?;
 
@@ -1015,6 +1092,7 @@ impl Query {
                 input.feature_key,
                 input.environment_id,
                 client_id,
+                team_id,
                 input.from_time,
                 input.to_time,
                 input.interval_minutes,

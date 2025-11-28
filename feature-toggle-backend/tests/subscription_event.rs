@@ -55,6 +55,7 @@ impl FeatureEvaluationLogic for StubLogic {
         _: Option<String>,
         _: Option<String>,
         _: Option<uuid::Uuid>,
+        _: Option<uuid::Uuid>,
         _: chrono::DateTime<Utc>,
         _: chrono::DateTime<Utc>,
         _: i32,
@@ -65,6 +66,7 @@ impl FeatureEvaluationLogic for StubLogic {
         &self,
         _: Option<String>,
         _: Option<String>,
+        _: Option<uuid::Uuid>,
         _: Option<uuid::Uuid>,
         _: chrono::DateTime<Utc>,
         _: chrono::DateTime<Utc>,
@@ -78,6 +80,7 @@ impl FeatureEvaluationLogic for StubLogic {
         _: Option<String>,
         _: Option<uuid::Uuid>,
         _: Option<String>,
+        _: Option<uuid::Uuid>,
     ) -> Result<i64, FeatureEvaluationLogicError> {
         Ok(0)
     }
@@ -86,6 +89,7 @@ impl FeatureEvaluationLogic for StubLogic {
         _: chrono::DateTime<Utc>,
         _: chrono::DateTime<Utc>,
         _: Option<String>,
+        _: Option<uuid::Uuid>,
         _: Option<uuid::Uuid>,
         _: Option<i32>,
         _: Option<i32>,

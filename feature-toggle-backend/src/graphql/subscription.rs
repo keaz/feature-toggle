@@ -8,7 +8,7 @@ use std::pin::Pin;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use crate::database::activity_log::{ActivityLogFilter, ActivityLogRepository};
+use crate::database::activity_log::{ActivityLogFilter, ActivityLogRepository, ActivityLogRow};
 use crate::database::feature_evaluation::{
     EvaluationByFeature, EvaluationRatePoint, EvaluationSummary,
 };
@@ -17,6 +17,7 @@ use crate::logic::approval::{ApprovalLogic, ApprovalRequestEvent};
 use crate::logic::client::ClientLogic;
 use crate::logic::feature::FeatureLogic;
 use crate::logic::feature_evaluation::{FeatureEvaluationEvent, FeatureEvaluationLogic};
+use crate::logic::pipeline::PipelineLogic;
 use std::sync::Arc;
 
 /// Typed alias for GraphQL subscription streams returned by resolvers.
@@ -129,6 +130,7 @@ async fn load_rates(
     feature_key: Option<String>,
     environment_id: Option<String>,
     client_id: Option<Uuid>,
+    team_id: Option<Uuid>,
     from_time: DateTime<Utc>,
     to_time: DateTime<Utc>,
     interval_minutes: i32,
@@ -138,6 +140,7 @@ async fn load_rates(
             feature_key,
             environment_id,
             client_id,
+            team_id,
             from_time,
             to_time,
             interval_minutes,
@@ -153,12 +156,20 @@ async fn load_summary(
     feature_key: Option<String>,
     environment_id: Option<String>,
     client_id: Option<Uuid>,
+    team_id: Option<Uuid>,
     from_time: DateTime<Utc>,
     to_time: DateTime<Utc>,
     generated_at: DateTime<Utc>,
 ) -> Result<GqlEvaluationSummary, String> {
     logic
-        .get_evaluation_summary(feature_key, environment_id, client_id, from_time, to_time)
+        .get_evaluation_summary(
+            feature_key,
+            environment_id,
+            client_id,
+            team_id,
+            from_time,
+            to_time,
+        )
         .await
         .map(|summary| map_summary(summary, generated_at))
         .map_err(|e| format!("Failed to get evaluation summary: {}", e))
@@ -169,6 +180,7 @@ async fn load_dashboard_data(
     logic: &Box<dyn FeatureEvaluationLogic>,
     input: &EvaluationRatesInput,
     client_id: Option<Uuid>,
+    team_id: Option<Uuid>,
     from_time: DateTime<Utc>,
     to_time: DateTime<Utc>,
     generated_at: DateTime<Utc>,
@@ -178,6 +190,7 @@ async fn load_dashboard_data(
             input.feature_key.clone(),
             input.environment_id.clone(),
             client_id,
+            team_id,
             from_time,
             to_time,
             input.interval_minutes,
@@ -186,6 +199,7 @@ async fn load_dashboard_data(
             input.feature_key.clone(),
             input.environment_id.clone(),
             client_id,
+            team_id,
             from_time,
             to_time,
         )
@@ -206,6 +220,7 @@ async fn load_evaluations_by_feature(
     logic: &Box<dyn FeatureEvaluationLogic>,
     input: &EvaluationsByFeatureLiveInput,
     client_id: Option<Uuid>,
+    team_id: Option<Uuid>,
     sequence: i64,
     emitted_at: DateTime<Utc>,
 ) -> Result<Vec<GqlEvaluationByFeatureRow>, String> {
@@ -216,6 +231,7 @@ async fn load_evaluations_by_feature(
             to_time,
             input.environment_id.clone(),
             client_id,
+            team_id,
             input.limit,
             input.offset,
         )
@@ -243,6 +259,7 @@ async fn load_system_metrics(
     feature_logic: &Box<dyn FeatureLogic>,
     client_logic: &Box<dyn ClientLogic>,
     evaluation_logic: &Box<dyn FeatureEvaluationLogic>,
+    team_id: Option<Uuid>,
 ) -> Result<GqlSystemMetrics, String> {
     let now = Utc::now();
 
@@ -263,6 +280,8 @@ async fn load_system_metrics(
     let evaluation_logic_yesterday = evaluation_logic.clone();
     let evaluation_logic_summary = evaluation_logic.clone();
 
+    let team_id_arg = team_id.clone().map(ID::from);
+
     let (
         total_features_result,
         active_clients_result,
@@ -271,18 +290,19 @@ async fn load_system_metrics(
         evaluations_yesterday_result,
         summary_7d_result,
     ) = tokio::join!(
-        feature_logic_clone.count_features(None),
-        client_logic_active.count_clients(None, Some(true)),
-        client_logic_total.count_clients(None, None),
-        evaluation_logic_today.count_evaluations(today_start, today_end, None, None, None),
+        feature_logic_clone.count_features(team_id_arg.clone()),
+        client_logic_active.count_clients(team_id_arg.clone(), Some(true)),
+        client_logic_total.count_clients(team_id_arg.clone(), None),
+        evaluation_logic_today.count_evaluations(today_start, today_end, None, None, None, team_id.clone()),
         evaluation_logic_yesterday.count_evaluations(
             yesterday_start,
             yesterday_end,
             None,
             None,
-            None
+            None,
+            team_id.clone()
         ),
-        evaluation_logic_summary.get_evaluation_summary(None, None, None, from_7d, to_7d)
+        evaluation_logic_summary.get_evaluation_summary(None, None, None, team_id.clone(), from_7d, to_7d)
     );
 
     match (
@@ -361,6 +381,8 @@ pub struct EvaluationRatesInput {
     pub environment_id: Option<String>,
     #[graphql(name = "clientId")]
     pub client_id: Option<String>,
+    #[graphql(name = "teamId")]
+    pub team_id: Option<String>,
     #[graphql(name = "fromTime")]
     pub from_time: DateTime<Utc>,
     #[graphql(name = "toTime")]
@@ -378,6 +400,8 @@ pub struct EvaluationRatesInputWithPeriod {
     pub environment_id: Option<String>,
     #[graphql(name = "clientId")]
     pub client_id: Option<String>,
+    #[graphql(name = "teamId")]
+    pub team_id: Option<String>,
     pub period: TimePeriod,
     #[graphql(name = "intervalMinutes")]
     pub interval_minutes: i32,
@@ -392,6 +416,8 @@ pub struct EvaluationSummaryInput {
     pub environment_id: Option<String>,
     #[graphql(name = "clientId")]
     pub client_id: Option<String>,
+    #[graphql(name = "teamId")]
+    pub team_id: Option<String>,
     pub period: TimePeriod,
 }
 
@@ -462,6 +488,8 @@ pub struct EvaluationsByFeatureLiveInput {
     pub environment_id: Option<String>,
     #[graphql(name = "clientId")]
     pub client_id: Option<String>,
+    #[graphql(name = "teamId")]
+    pub team_id: Option<String>,
     #[graphql(name = "limit")]
     pub limit: Option<i32>,
     #[graphql(name = "offset")]
@@ -512,6 +540,10 @@ impl FeatureEvaluationSubscription {
             Ok(id) => id,
             Err(err) => return stream_error(err),
         };
+        let team_id = match parse_optional_uuid(&input.team_id, "team ID") {
+            Ok(id) => id,
+            Err(err) => return stream_error(err),
+        };
 
         let logic = match get_evaluation_logic(ctx) {
             Ok(logic) => logic,
@@ -531,6 +563,7 @@ impl FeatureEvaluationSubscription {
                 input.feature_key.clone(),
                 input.environment_id.clone(),
                 client_id,
+                team_id,
                 from_time,
                 to_time,
                 input.interval_minutes,
@@ -550,6 +583,7 @@ impl FeatureEvaluationSubscription {
                             input.feature_key.clone(),
                             input.environment_id.clone(),
                             client_id,
+                            team_id,
                             from_time,
                             to_time,
                             input.interval_minutes,
@@ -594,6 +628,10 @@ impl FeatureEvaluationSubscription {
             Ok(id) => id,
             Err(err) => return stream_error(err),
         };
+        let team_id = match parse_optional_uuid(&input.team_id, "team ID") {
+            Ok(id) => id,
+            Err(err) => return stream_error(err),
+        };
 
         let logic = match get_evaluation_logic(ctx) {
             Ok(logic) => logic,
@@ -613,6 +651,7 @@ impl FeatureEvaluationSubscription {
                 input.feature_key.clone(),
                 input.environment_id.clone(),
                 client_id,
+                team_id,
                 input.from_time,
                 upper,
                 input.interval_minutes,
@@ -631,6 +670,7 @@ impl FeatureEvaluationSubscription {
                             input.feature_key.clone(),
                             input.environment_id.clone(),
                             client_id,
+                            team_id,
                             input.from_time,
                             upper,
                             input.interval_minutes,
@@ -665,6 +705,10 @@ impl FeatureEvaluationSubscription {
             Ok(id) => id,
             Err(err) => return stream_error(err),
         };
+        let team_id = match parse_optional_uuid(&input.team_id, "team ID") {
+            Ok(id) => id,
+            Err(err) => return stream_error(err),
+        };
 
         let logic = match get_evaluation_logic(ctx) {
             Ok(logic) => logic,
@@ -684,6 +728,7 @@ impl FeatureEvaluationSubscription {
                 input.feature_key.clone(),
                 input.environment_id.clone(),
                 client_id,
+                team_id,
                 from_time,
                 to_time,
                 now,
@@ -703,6 +748,7 @@ impl FeatureEvaluationSubscription {
                             input.feature_key.clone(),
                             input.environment_id.clone(),
                             client_id,
+                            team_id,
                             from_time,
                             to_time,
                             now,
@@ -746,6 +792,10 @@ impl FeatureEvaluationSubscription {
             Ok(id) => id,
             Err(err) => return stream_error(err),
         };
+        let team_id = match parse_optional_uuid(&input.team_id, "team ID") {
+            Ok(id) => id,
+            Err(err) => return stream_error(err),
+        };
 
         let logic = match get_evaluation_logic(ctx) {
             Ok(logic) => logic,
@@ -764,6 +814,7 @@ impl FeatureEvaluationSubscription {
                 &logic,
                 &input,
                 client_id,
+                team_id,
                 input.from_time,
                 upper,
                 now,
@@ -781,6 +832,7 @@ impl FeatureEvaluationSubscription {
                             &logic,
                             &input,
                             client_id,
+                            team_id,
                             input.from_time,
                             upper,
                             now,
@@ -808,6 +860,10 @@ impl FeatureEvaluationSubscription {
             Ok(id) => id,
             Err(err) => return stream_error(err),
         };
+        let team_id = match parse_optional_uuid(&input.team_id, "team ID") {
+            Ok(id) => id,
+            Err(err) => return stream_error(err),
+        };
 
         let logic = match get_evaluation_logic(ctx) {
             Ok(logic) => logic,
@@ -822,7 +878,7 @@ impl FeatureEvaluationSubscription {
         let mut seq: i64 = 0;
         let stream = stream! {
             let emitted_at = Utc::now();
-            match load_evaluations_by_feature(&logic, &input, client_id, seq, emitted_at).await {
+            match load_evaluations_by_feature(&logic, &input, client_id, team_id, seq, emitted_at).await {
                 Ok(rows) => {
                     log::debug!(
                         "[subscriptions] evaluations_by_feature_live sending {} rows (seq={})",
@@ -842,7 +898,7 @@ impl FeatureEvaluationSubscription {
                         seq += 1;
                         log::debug!("[subscriptions] evaluation event received; recomputing evaluations by feature");
                         let emitted_at = Utc::now();
-                        match load_evaluations_by_feature(&logic, &input, client_id, seq, emitted_at).await {
+                        match load_evaluations_by_feature(&logic, &input, client_id, team_id, seq, emitted_at).await {
                             Ok(rows) => {
                                 log::debug!(
                                     "[subscriptions] evaluations_by_feature_live sending {} rows (seq={})",
@@ -870,7 +926,11 @@ impl FeatureEvaluationSubscription {
     ///
     /// # Returns
     /// Stream of system-wide metrics including feature count, client counts, evaluation counts, and success rates
-    async fn system_metrics(&self, ctx: &Context<'_>) -> GqlStream<GqlSystemMetrics> {
+    async fn system_metrics(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Filter metrics by team (optional)")] team_id: Option<ID>,
+    ) -> GqlStream<GqlSystemMetrics> {
         let feature_logic = match ctx.data::<Box<dyn FeatureLogic>>() {
             Ok(l) => l.clone(),
             Err(_) => {
@@ -890,13 +950,21 @@ impl FeatureEvaluationSubscription {
             Err(err) => return stream_failure(err),
         };
 
+        let team_uuid = match team_id {
+            Some(id) => match Uuid::try_from(id.clone()) {
+                Ok(uuid) => Some(uuid),
+                Err(_) => return stream_error("Invalid team ID format"),
+            },
+            None => None,
+        };
+
         let mut events_rx = match evaluation_events_receiver(ctx) {
             Ok(rx) => rx,
             Err(err) => return stream_failure(err),
         };
 
         let stream = stream! {
-            match load_system_metrics(&feature_logic, &client_logic, &evaluation_logic).await {
+            match load_system_metrics(&feature_logic, &client_logic, &evaluation_logic, team_uuid).await {
                 Ok(metrics) => yield Ok(metrics),
                 Err(err) => yield Err(err.into()),
             }
@@ -905,7 +973,7 @@ impl FeatureEvaluationSubscription {
                 match events_rx.recv().await {
                     Ok(_) => {
                         log::debug!("[subscriptions] evaluation event received; recomputing system metrics");
-                        match load_system_metrics(&feature_logic, &client_logic, &evaluation_logic).await {
+                        match load_system_metrics(&feature_logic, &client_logic, &evaluation_logic, team_uuid).await {
                             Ok(metrics) => yield Ok(metrics),
                             Err(err) => yield Err(err.into()),
                         }
@@ -934,6 +1002,7 @@ impl FeatureEvaluationSubscription {
         page_size: Option<i32>,
         page_number: Option<i32>,
         activity_types: Option<Vec<String>>,
+        #[graphql(desc = "Filter by team ID (best effort via entity lookups)")] team_id: Option<ID>,
     ) -> GqlStream<GqlActivityLogPage> {
         let activity_repo = match ctx.data::<Arc<Box<dyn ActivityLogRepository>>>() {
             Ok(repo) => repo.clone(),
@@ -941,18 +1010,45 @@ impl FeatureEvaluationSubscription {
                 return stream_error("Activity log repository not found in context");
             }
         };
+        let feature_repo = match ctx.data::<Arc<Box<dyn crate::database::feature::FeatureRepository>>>() {
+            Ok(repo) => repo.clone(),
+            Err(_) => return stream_error("Feature repository not found in context"),
+        };
+        let client_logic = match ctx.data::<Box<dyn ClientLogic>>() {
+            Ok(l) => l.clone(),
+            Err(_) => return stream_error("Client logic not found in context"),
+        };
+        let pipeline_logic = match ctx.data::<Box<dyn PipelineLogic>>() {
+            Ok(l) => l.clone(),
+            Err(_) => return stream_error("Pipeline logic not found in context"),
+        };
+        let environment_logic = match ctx.data::<Box<dyn crate::logic::environment::EnvironmentLogic>>() {
+            Ok(l) => l.clone(),
+            Err(_) => return stream_error("Environment logic not found in context"),
+        };
 
         // Set default pagination
         let page_sz = page_size.unwrap_or(10);
         let page_num = page_number.unwrap_or(1);
 
+        let team_uuid = team_id.and_then(|id| Uuid::try_from(id).ok());
+
         // Helper closure to fetch activities
         let fetch_activities =
             |repo: &Arc<Box<dyn ActivityLogRepository>>,
+             feature_repo: &Arc<Box<dyn crate::database::feature::FeatureRepository>>,
+             environment_logic: &Box<dyn crate::logic::environment::EnvironmentLogic>,
+             client_logic: &Box<dyn ClientLogic>,
+             pipeline_logic: &Box<dyn PipelineLogic>,
              page_sz: i32,
              page_num: i32,
-             activity_types: &Option<Vec<String>>| {
+             activity_types: &Option<Vec<String>>,
+             team_id: Option<Uuid>| {
                 let repo_clone = repo.clone();
+                let feature_repo = feature_repo.clone();
+                let env_logic = environment_logic.clone();
+                let client_logic = client_logic.clone();
+                let pipeline_logic = pipeline_logic.clone();
                 let activity_types_clone = activity_types.clone();
                 async move {
                     let offset = (page_num - 1) * page_sz;
@@ -966,13 +1062,40 @@ impl FeatureEvaluationSubscription {
                         to_date: None,
                         limit: Some(page_sz),
                         offset: Some(offset),
+                        team_id: None,
                     };
 
                     match repo_clone.get_activities_paginated(filter).await {
                         Ok((activities, total)) => {
-                            let items = activities
+                            let filtered = if let Some(team_uuid) = team_id {
+                                let mut keep = Vec::new();
+                                for a in activities {
+                                    if activity_matches_team(
+                                        &a,
+                                        team_uuid,
+                                        &feature_repo,
+                                        &env_logic,
+                                        &client_logic,
+                                        &pipeline_logic,
+                                    )
+                                    .await {
+                                        keep.push(a);
+                                    }
+                                }
+                                keep
+                            } else {
+                                activities
+                            };
+
+                            let filtered_total = if team_id.is_some() {
+                                filtered.len() as i64
+                            } else {
+                                total
+                            };
+
+                            let items = filtered
                                 .into_iter()
-                                .map(|a| GqlActivityLog {
+                                .map(|a: ActivityLogRow| GqlActivityLog {
                                     id: a.id.to_string(),
                                     activity_type: a.activity_type,
                                     entity_type: a.entity_type,
@@ -989,7 +1112,7 @@ impl FeatureEvaluationSubscription {
                                 items,
                                 page_number: page_num,
                                 page_size: page_sz,
-                                total,
+                                total: filtered_total,
                             })
                         }
                         Err(e) => Err(format!("Failed to fetch activities: {}", e)),
@@ -1000,7 +1123,7 @@ impl FeatureEvaluationSubscription {
         // Create a stream that updates every 45 seconds
         let stream = stream! {
             // Send initial data immediately
-            match fetch_activities(&activity_repo, page_sz, page_num, &activity_types).await {
+            match fetch_activities(&activity_repo, &feature_repo, &environment_logic, &client_logic, &pipeline_logic, page_sz, page_num, &activity_types, team_uuid).await {
                 Ok(page) => {
                     yield Ok(page);
                 }
@@ -1017,7 +1140,7 @@ impl FeatureEvaluationSubscription {
             loop {
                 interval.tick().await;
                 log::debug!("[subscriptions] recent_activities interval tick; fetching updates");
-                match fetch_activities(&activity_repo, page_sz, page_num, &activity_types).await {
+                match fetch_activities(&activity_repo, &feature_repo, &environment_logic, &client_logic, &pipeline_logic, page_sz, page_num, &activity_types, team_uuid).await {
                     Ok(page) => {
                         yield Ok(page);
                     }
@@ -1264,6 +1387,14 @@ pub struct GqlSystemMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::activity_log::ActivityLogRow;
+    use crate::database::entity::{Feature, FeatureType};
+    use crate::database::feature::MockFeatureRepository;
+    use crate::logic::client::MockClientLogic;
+    use crate::logic::environment::MockEnvironmentLogic;
+    use crate::logic::pipeline::MockPipelineLogic;
+    use mockall::predicate;
+    use serde_json::json;
 
     /// Test basic subscription input validation
     #[test]
@@ -1273,6 +1404,7 @@ mod tests {
             feature_key: None,
             environment_id: None,
             client_id: None,
+            team_id: None,
             from_time: now - chrono::Duration::hours(2),
             to_time: now,
             interval_minutes: 0, // invalid
@@ -1301,6 +1433,7 @@ mod tests {
             feature_key: Some("test_feature".to_string()),
             environment_id: Some("prod".to_string()),
             client_id: Some("123e4567-e89b-12d3-a456-426614174000".to_string()),
+            team_id: None,
             from_time: from,
             to_time: now,
             interval_minutes: 5,
@@ -1314,10 +1447,265 @@ mod tests {
             feature_key: Some("test_feature".to_string()),
             environment_id: Some("prod".to_string()),
             client_id: None,
+            team_id: None,
             period: TimePeriod::H24,
         };
         assert_eq!(summary_input.feature_key.as_ref().unwrap(), "test_feature");
         assert_eq!(summary_input.environment_id.as_ref().unwrap(), "prod");
         assert!(summary_input.client_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn activity_matches_team_handles_stage_metadata_lookup() {
+        let team_id = Uuid::new_v4();
+        let feature_id = Uuid::new_v4();
+        let stage_id = Uuid::new_v4();
+
+        let activity = ActivityLogRow {
+            id: Uuid::new_v4(),
+            activity_type: "stage_deployed".into(),
+            entity_type: "stage".into(),
+            entity_id: stage_id.to_string(),
+            actor_id: None,
+            actor_name: None,
+            description: "deployed".into(),
+            metadata: Some(json!({
+                "feature_id": feature_id.to_string(),
+                "stage_id": stage_id.to_string()
+            })),
+            created_at: Utc::now(),
+        };
+
+        let mut feature_repo = MockFeatureRepository::new();
+        feature_repo
+            .expect_get_feature_by_id()
+            .with(predicate::eq(feature_id))
+            .returning(move |_| {
+                Ok(Feature {
+                    id: feature_id,
+                    key: "feat".into(),
+                    description: None,
+                    feature_type: FeatureType::Simple,
+                    team_id,
+                    active: true,
+                    created_at: Utc::now(),
+                    kill_switch_enabled: false,
+                    kill_switch_activated_at: None,
+                    rollback_scheduled_at: None,
+                    lifecycle_stage: "live".into(),
+                    deprecated_at: None,
+                    deprecation_notice: None,
+                    last_evaluated_at: None,
+                    evaluation_count_7d: 0,
+                    evaluation_count_30d: 0,
+                    evaluation_count_90d: 0,
+                    dependencies: vec![],
+                })
+            });
+        feature_repo
+            .expect_get_feature_id_by_stage_id()
+            .returning(|_| Ok(None));
+
+        let feature_repo: Arc<Box<dyn crate::database::feature::FeatureRepository>> =
+            Arc::new(Box::new(feature_repo));
+        let env_logic: Box<dyn crate::logic::environment::EnvironmentLogic> =
+            Box::new(MockEnvironmentLogic::new());
+        let client_logic: Box<dyn crate::logic::client::ClientLogic> =
+            Box::new(MockClientLogic::new());
+        let pipeline_logic: Box<dyn crate::logic::pipeline::PipelineLogic> =
+            Box::new(MockPipelineLogic::new());
+
+        assert!(
+            activity_matches_team(
+                &activity,
+                team_id,
+                &feature_repo,
+                &env_logic,
+                &client_logic,
+                &pipeline_logic,
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn activity_matches_team_rejects_stage_from_other_team() {
+        let team_id = Uuid::new_v4();
+        let other_team = Uuid::new_v4();
+        let stage_id = Uuid::new_v4();
+        let feature_id = Uuid::new_v4();
+
+        let activity = ActivityLogRow {
+            id: Uuid::new_v4(),
+            activity_type: "stage_deployed".into(),
+            entity_type: "stage".into(),
+            entity_id: stage_id.to_string(),
+            actor_id: None,
+            actor_name: None,
+            description: "deployed".into(),
+            metadata: None,
+            created_at: Utc::now(),
+        };
+
+        let mut feature_repo = MockFeatureRepository::new();
+        feature_repo
+            .expect_get_feature_id_by_stage_id()
+            .with(predicate::eq(stage_id))
+            .return_once(move |_| Ok(Some(feature_id)));
+        feature_repo
+            .expect_get_feature_by_id()
+            .with(predicate::eq(feature_id))
+            .returning(move |_| {
+                Ok(Feature {
+                    id: feature_id,
+                    key: "feat".into(),
+                    description: None,
+                    feature_type: FeatureType::Simple,
+                    team_id: other_team,
+                    active: true,
+                    created_at: Utc::now(),
+                    kill_switch_enabled: false,
+                    kill_switch_activated_at: None,
+                    rollback_scheduled_at: None,
+                    lifecycle_stage: "live".into(),
+                    deprecated_at: None,
+                    deprecation_notice: None,
+                    last_evaluated_at: None,
+                    evaluation_count_7d: 0,
+                    evaluation_count_30d: 0,
+                    evaluation_count_90d: 0,
+                    dependencies: vec![],
+                })
+            });
+
+        let feature_repo: Arc<Box<dyn crate::database::feature::FeatureRepository>> =
+            Arc::new(Box::new(feature_repo));
+        let env_logic: Box<dyn crate::logic::environment::EnvironmentLogic> =
+            Box::new(MockEnvironmentLogic::new());
+        let client_logic: Box<dyn crate::logic::client::ClientLogic> =
+            Box::new(MockClientLogic::new());
+        let pipeline_logic: Box<dyn crate::logic::pipeline::PipelineLogic> =
+            Box::new(MockPipelineLogic::new());
+
+        assert!(
+            !activity_matches_team(
+                &activity,
+                team_id,
+                &feature_repo,
+                &env_logic,
+                &client_logic,
+                &pipeline_logic,
+            )
+            .await
+        );
+    }
+}
+/// Determine whether an activity belongs to the specified team.
+/// Uses best-effort lookups on associated entities and metadata.
+pub async fn activity_matches_team(
+    activity: &crate::database::activity_log::ActivityLogRow,
+    team_id: Uuid,
+    feature_repo: &Arc<Box<dyn crate::database::feature::FeatureRepository>>,
+    environment_logic: &Box<dyn crate::logic::environment::EnvironmentLogic>,
+    client_logic: &Box<dyn crate::logic::client::ClientLogic>,
+    pipeline_logic: &Box<dyn crate::logic::pipeline::PipelineLogic>,
+) -> bool {
+    // Helper to extract a team id from metadata
+    let metadata_team_id = activity
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("teamId").or_else(|| m.get("team_id")))
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok());
+
+    // Return early if metadata explicitly carries the team id
+    if metadata_team_id == Some(team_id) {
+        return true;
+    }
+
+    // Shared helpers for reuse below
+    let feature_repo = feature_repo.as_ref().as_ref();
+
+    let metadata_feature_id = activity
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("feature_id").or_else(|| m.get("featureId")))
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok());
+
+    let metadata_environment_id = activity
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("environment_id").or_else(|| m.get("environmentId")))
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok());
+
+    match activity.entity_type.as_str() {
+        "team" => activity.entity_id == team_id.to_string(),
+        "feature" => {
+            if let Ok(fid) = Uuid::parse_str(&activity.entity_id) {
+                if let Ok(f) = feature_repo.get_feature_by_id(fid).await {
+                    return f.team_id == team_id;
+                }
+            }
+            metadata_team_id.map(|id| id == team_id).unwrap_or(false)
+        }
+        "stage" => {
+            // Try to resolve via metadata feature reference first
+            if let Some(fid) = metadata_feature_id {
+                if let Ok(f) = feature_repo.get_feature_by_id(fid).await {
+                    if f.team_id == team_id {
+                        return true;
+                    }
+                }
+            }
+
+            // Then try to resolve via stage id -> feature id
+            if let Ok(stage_uuid) = Uuid::parse_str(&activity.entity_id) {
+                if let Ok(Some(fid)) = feature_repo.get_feature_id_by_stage_id(stage_uuid).await {
+                    if let Ok(feature) = feature_repo.get_feature_by_id(fid).await {
+                        if feature.team_id == team_id {
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            // Finally, fall back to environment metadata if present
+            if let Some(env_id) = metadata_environment_id {
+                if let Ok(env) = environment_logic.get_environment_by_id(ID::from(env_id)).await {
+                    if env.team_id == ID::from(team_id) {
+                        return true;
+                    }
+                }
+            }
+
+            metadata_team_id.map(|id| id == team_id).unwrap_or(false)
+        }
+        "environment" => {
+            if let Ok(eid) = Uuid::parse_str(&activity.entity_id) {
+                if let Ok(env) = environment_logic.get_environment_by_id(ID::from(eid)).await {
+                    return env.team_id == ID::from(team_id);
+                }
+            }
+            metadata_team_id.map(|id| id == team_id).unwrap_or(false)
+        }
+        "client" => {
+            if let Ok(cid) = Uuid::parse_str(&activity.entity_id) {
+                if let Ok(c) = client_logic.get_client_by_id(ID::from(cid)).await {
+                    return c.team_id == ID::from(team_id);
+                }
+            }
+            metadata_team_id.map(|id| id == team_id).unwrap_or(false)
+        }
+        "pipeline" => {
+            if let Ok(pid) = Uuid::parse_str(&activity.entity_id) {
+                if let Ok(p) = pipeline_logic.get_pipeline_by_id(ID::from(pid)).await {
+                    return p.team_id == ID::from(team_id);
+                }
+            }
+            metadata_team_id.map(|id| id == team_id).unwrap_or(false)
+        }
+        _ => metadata_team_id.map(|id| id == team_id).unwrap_or(false),
     }
 }

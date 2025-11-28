@@ -7,6 +7,10 @@ use crate::graphql::schema::{
 use async_graphql::ID;
 use uuid::Uuid;
 
+#[cfg(test)]
+use mockall::automock;
+
+#[cfg_attr(test, automock)]
 #[async_trait::async_trait]
 pub trait ClientLogic: Send + Sync {
     fn clone_box(&self) -> Box<dyn ClientLogic>;

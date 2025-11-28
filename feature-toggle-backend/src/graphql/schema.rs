@@ -1113,6 +1113,7 @@ pub struct EvaluationCountFilter {
     pub environment_id: Option<String>,
     pub client_id: Option<ID>,
     pub feature_key: Option<String>,
+    pub team_id: Option<ID>,
 }
 
 // Input type for evaluation summary query
@@ -1122,6 +1123,7 @@ pub struct EvaluationSummaryQueryInput {
     pub environment_id: Option<String>,
     pub client_id: Option<ID>,
     pub feature_key: Option<String>,
+    pub team_id: Option<ID>,
 }
 
 // Output type for evaluation summary

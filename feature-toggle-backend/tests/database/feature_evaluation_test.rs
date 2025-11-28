@@ -84,6 +84,7 @@ async fn test_get_evaluations_seeded() {
     let repo = repo().await;
     // Use seeded feature_key from init.sql if available
     let filter = FeatureEvaluationFilter {
+        team_id: None,
         feature_key: Some("test-feature-create".to_string()),
         environment_id: None,
         client_id: None,
@@ -102,6 +103,7 @@ async fn test_get_evaluations_seeded() {
 async fn test_get_evaluation_count() {
     let repo = repo().await;
     let filter = FeatureEvaluationFilter {
+        team_id: None,
         feature_key: Some("test-feature-create".to_string()),
         environment_id: None,
         client_id: None,
@@ -127,6 +129,7 @@ async fn test_get_evaluation_rates_and_summary() {
             Some("test-feature-create".to_string()),
             None,
             None,
+            None,
             from_time,
             to_time,
             60,
@@ -138,6 +141,7 @@ async fn test_get_evaluation_rates_and_summary() {
     let summary = repo
         .get_evaluation_summary(
             Some("test-feature-create".to_string()),
+            None,
             None,
             None,
             from_time,

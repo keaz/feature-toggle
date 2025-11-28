@@ -70,7 +70,7 @@ use serde_json::json;
         };
         
         mock_logic.expect_get_evaluation_summary()
-            .returning(move |_, _, _, _, _| Ok(expected_summary.clone()));
+            .returning(move |_, _, _, _, _, _| Ok(expected_summary.clone()));
 
         let schema = Schema::build(
             async_graphql::EmptyQuery, 
@@ -156,7 +156,7 @@ use serde_json::json;
         ];
         
         mock_logic.expect_get_evaluation_rates()
-            .returning(move |_, _, _, _, _, _| Ok(mock_rates.clone()));
+            .returning(move |_, _, _, _, _, _, _| Ok(mock_rates.clone()));
 
         let schema = Schema::build(
             async_graphql::EmptyQuery, 

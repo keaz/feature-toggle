@@ -1159,11 +1159,17 @@ impl DeploymentLogic for FeatureLogicImpl {
             "feature_key": db_feature.key.clone(),
             "stage_id": stage_id.to_string(),
             "status": next_status,
+            "team_id": db_feature.team_id.to_string(),
+            "teamId": db_feature.team_id.to_string(),
         });
 
         // Add environment name to metadata if available
         if let Some(env_name) = environment_name {
             metadata["environment_name"] = serde_json::json!(env_name);
+        }
+        // Capture environment identifier to support team scoping of activity feeds
+        if let Some(stage) = stage {
+            metadata["environment_id"] = serde_json::json!(stage.environment_id.to_string());
         }
 
         let _ = crate::utils::activity_logger::log_activity(

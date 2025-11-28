@@ -56,6 +56,7 @@ pub trait FeatureEvaluationLogic: Send + Sync {
         feature_key: Option<String>,
         environment_id: Option<String>,
         client_id: Option<Uuid>,
+        team_id: Option<Uuid>,
         from_time: DateTime<Utc>,
         to_time: DateTime<Utc>,
         interval_minutes: i32,
@@ -68,6 +69,7 @@ pub trait FeatureEvaluationLogic: Send + Sync {
         feature_key: Option<String>,
         environment_id: Option<String>,
         client_id: Option<Uuid>,
+        team_id: Option<Uuid>,
         from_time: DateTime<Utc>,
         to_time: DateTime<Utc>,
     ) -> Result<EvaluationSummary, FeatureEvaluationLogicError>;
@@ -80,6 +82,7 @@ pub trait FeatureEvaluationLogic: Send + Sync {
         environment_id: Option<String>,
         client_id: Option<Uuid>,
         feature_key: Option<String>,
+        team_id: Option<Uuid>,
     ) -> Result<i64, FeatureEvaluationLogicError>;
 
     /// Aggregated evaluations grouped by feature key (top features analytics)
@@ -89,6 +92,7 @@ pub trait FeatureEvaluationLogic: Send + Sync {
         to_time: DateTime<Utc>,
         environment_id: Option<String>,
         client_id: Option<Uuid>,
+        team_id: Option<Uuid>,
         limit: Option<i32>,
         offset: Option<i32>,
     ) -> Result<
@@ -252,6 +256,7 @@ impl FeatureEvaluationLogic for FeatureEvaluationLogicImpl {
         feature_key: Option<String>,
         environment_id: Option<String>,
         client_id: Option<Uuid>,
+        team_id: Option<Uuid>,
         from_time: DateTime<Utc>,
         to_time: DateTime<Utc>,
         interval_minutes: i32,
@@ -284,6 +289,7 @@ impl FeatureEvaluationLogic for FeatureEvaluationLogicImpl {
                 feature_key,
                 environment_id,
                 client_id,
+                team_id,
                 from_time,
                 to_time,
                 interval_minutes,
@@ -299,6 +305,7 @@ impl FeatureEvaluationLogic for FeatureEvaluationLogicImpl {
         feature_key: Option<String>,
         environment_id: Option<String>,
         client_id: Option<Uuid>,
+        team_id: Option<Uuid>,
         from_time: DateTime<Utc>,
         to_time: DateTime<Utc>,
     ) -> Result<EvaluationSummary, FeatureEvaluationLogicError> {
@@ -319,7 +326,14 @@ impl FeatureEvaluationLogic for FeatureEvaluationLogicImpl {
 
         let summary = self
             .repository
-            .get_evaluation_summary(feature_key, environment_id, client_id, from_time, to_time)
+            .get_evaluation_summary(
+                feature_key,
+                environment_id,
+                client_id,
+                team_id,
+                from_time,
+                to_time,
+            )
             .await?;
 
         Ok(summary)
@@ -332,6 +346,7 @@ impl FeatureEvaluationLogic for FeatureEvaluationLogicImpl {
         environment_id: Option<String>,
         client_id: Option<Uuid>,
         feature_key: Option<String>,
+        team_id: Option<Uuid>,
     ) -> Result<i64, FeatureEvaluationLogicError> {
         // Validate time range (max 7 days for count queries to prevent performance issues)
         let duration = to_date - from_date;
@@ -350,6 +365,7 @@ impl FeatureEvaluationLogic for FeatureEvaluationLogicImpl {
 
         // Build filter for the repository query
         let filter = FeatureEvaluationFilter {
+            team_id,
             feature_key,
             environment_id,
             client_id,
@@ -371,6 +387,7 @@ impl FeatureEvaluationLogic for FeatureEvaluationLogicImpl {
         to_time: DateTime<Utc>,
         environment_id: Option<String>,
         client_id: Option<Uuid>,
+        team_id: Option<Uuid>,
         limit: Option<i32>,
         offset: Option<i32>,
     ) -> Result<
@@ -396,6 +413,7 @@ impl FeatureEvaluationLogic for FeatureEvaluationLogicImpl {
                 to_time,
                 environment_id,
                 client_id,
+                team_id,
                 limit,
                 offset,
             )
@@ -627,9 +645,9 @@ mod tests {
 
         mock_repo
             .expect_get_evaluation_rates()
-            .withf(|_, _, _, _, _, interval| *interval == 15)
+            .withf(|_, _, _, _, _, _, interval| *interval == 15)
             .times(1)
-            .return_once(move |_, _, _, _, _, _| Ok(expected_rates));
+            .return_once(move |_, _, _, _, _, _, _| Ok(expected_rates));
 
         let logic = feature_evaluation_logic(Box::new(mock_repo));
 
@@ -637,6 +655,7 @@ mod tests {
             .get_evaluation_rates(
                 Some("test-feature".to_string()),
                 Some("env-123".to_string()),
+                None,
                 None,
                 from_time,
                 to_time,
@@ -659,7 +678,7 @@ mod tests {
         let to_time = Utc::now();
 
         let result = logic
-            .get_evaluation_rates(None, None, None, from_time, to_time, 15)
+            .get_evaluation_rates(None, None, None, None, from_time, to_time, 15)
             .await;
 
         assert!(result.is_err());
@@ -672,6 +691,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_evaluation_rates_scoped_to_team() {
+        let mut mock_repo = MockFeatureEvaluationRepository::new();
+        let from_time = Utc::now() - chrono::Duration::hours(2);
+        let to_time = Utc::now();
+        let team_id = Uuid::new_v4();
+
+        mock_repo
+            .expect_get_evaluation_rates()
+            .withf(move |_, _, _, team, _, _, _| team.is_some() && team.unwrap() == team_id)
+            .times(1)
+            .return_once(|_, _, _, _, _, _, _| Ok(Vec::new()));
+
+        let logic = feature_evaluation_logic(Box::new(mock_repo));
+        let result = logic
+            .get_evaluation_rates(
+                None,
+                None,
+                None,
+                Some(team_id),
+                from_time,
+                to_time,
+                5,
+            )
+            .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
     async fn test_get_evaluation_rates_future_time() {
         let mock_repo = MockFeatureEvaluationRepository::new();
         let logic = feature_evaluation_logic(Box::new(mock_repo));
@@ -680,7 +728,7 @@ mod tests {
         let to_time = Utc::now() + chrono::Duration::hours(2);
 
         let result = logic
-            .get_evaluation_rates(None, None, None, from_time, to_time, 15)
+            .get_evaluation_rates(None, None, None, None, from_time, to_time, 15)
             .await;
 
         assert!(result.is_err());
@@ -702,7 +750,7 @@ mod tests {
 
         let result = logic
             .get_evaluation_rates(
-                None, None, None, from_time, to_time, 0, // Invalid interval
+                None, None, None, None, from_time, to_time, 0, // Invalid interval
             )
             .await;
 
@@ -716,7 +764,7 @@ mod tests {
 
         let result = logic
             .get_evaluation_rates(
-                None, None, None, from_time, to_time, 61, // Invalid interval (> 60)
+                None, None, None, None, from_time, to_time, 61, // Invalid interval (> 60)
             )
             .await;
 
@@ -742,7 +790,7 @@ mod tests {
         mock_repo
             .expect_get_evaluation_summary()
             .times(1)
-            .return_once(move |_, _, _, _, _| Ok(expected_summary));
+            .return_once(move |_, _, _, _, _, _| Ok(expected_summary));
 
         let logic = feature_evaluation_logic(Box::new(mock_repo));
 
@@ -750,6 +798,7 @@ mod tests {
             .get_evaluation_summary(
                 Some("test-feature".to_string()),
                 Some("env-123".to_string()),
+                None,
                 None,
                 from_time,
                 to_time,
@@ -772,7 +821,7 @@ mod tests {
         let to_time = Utc::now();
 
         let result = logic
-            .get_evaluation_summary(None, None, None, from_time, to_time)
+            .get_evaluation_summary(None, None, None, None, from_time, to_time)
             .await;
 
         assert!(result.is_err());
@@ -797,6 +846,7 @@ mod tests {
         let logic = feature_evaluation_logic(Box::new(mock_repo));
 
         let filter = FeatureEvaluationFilter {
+            team_id: None,
             feature_key: Some("test-feature".to_string()),
             environment_id: None,
             client_id: None,
@@ -826,6 +876,7 @@ mod tests {
         let logic = feature_evaluation_logic(Box::new(mock_repo));
 
         let filter = FeatureEvaluationFilter {
+            team_id: None,
             feature_key: Some("test-feature".to_string()),
             environment_id: None,
             client_id: None,
