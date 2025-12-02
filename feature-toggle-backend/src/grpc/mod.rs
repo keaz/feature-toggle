@@ -397,7 +397,6 @@ impl FeatureEvaluationSvc {
             stages.push(engine::FeatureStage {
                 environment_id: s.environment_id.to_string(),
                 enabled: s.enabled,
-                bucketing_key: s.bucketing_key,
                 criterias: mapped_criteria,
             });
         }
@@ -506,7 +505,6 @@ impl FeatureEvaluationSvc {
                 order_index: s.order_index,
                 position: s.position.clone(),
                 enabled: s.enabled,
-                bucketing_key: s.bucketing_key.clone().unwrap_or_default(),
                 criterias,
             });
         }

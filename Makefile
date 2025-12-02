@@ -18,7 +18,10 @@ NETWORK       ?= $(PROJECT)_default
 
 .PHONY: help build build-backend build-edge up down clean logs test \
         login buildx-setup buildx-backend buildx-edge buildx-all \
-        push-backend push-edge push-all status restart-backend restart-edge restart-db logs-backend logs-edge logs-db up-logs
+        push-backend push-edge push-all \
+        build-backend-latest-arch build-edge-latest-arch build-all-latest-arch \
+        push-backend-latest-arch push-edge-latest-arch push-all-latest-arch \
+        status restart-backend restart-edge restart-db logs-backend logs-edge logs-db up-logs
 
 # Default target
 help:
@@ -39,6 +42,12 @@ help:
 	@echo "  push-backend-alpha-arch- From git TAG, build+push per-arch alpha tags (e.g., v1.2.3-alpha-amd64, v1.2.3-alpha-arm64)"
 	@echo "  push-edge-alpha-arch   - From git TAG, build+push per-arch alpha tags for edge"
 	@echo "  push-all-alpha-arch    - Run both per-arch alpha pushes"
+	@echo "  build-backend-latest-arch - Build per-arch latest tags locally (e.g., amd64-latest, arm64-latest)"
+	@echo "  build-edge-latest-arch - Build per-arch latest tags locally for edge"
+	@echo "  build-all-latest-arch  - Run both per-arch latest builds locally"
+	@echo "  push-backend-latest-arch - Build+push per-arch latest tags (e.g., amd64-latest, arm64-latest)"
+	@echo "  push-edge-latest-arch  - Build+push per-arch latest tags for edge"
+	@echo "  push-all-latest-arch   - Run both per-arch latest pushes"
 	@echo "  login                  - Docker Hub login using DOCKER_USERNAME/DOCKER_PASSWORD or DOCKERHUB_TOKEN"
 	@echo "  up                     - Start all services with docker-compose"
 	@echo "  up-logs                - Start all services and follow logs"
@@ -140,11 +149,12 @@ build-backend-alpha-arch: buildx-setup
 	@set -e; \
 	for plat in $(PLATFORMS_LIST); do \
 	  arch=$${plat#linux/}; \
-	  echo "Building locally $(IMAGE_BACKEND):$(TAG_BASE)-alpha-$$arch for $$plat"; \
+	  echo "Building locally $(IMAGE_BACKEND):$(TAG_BASE)-alpha-$$arch and $$arch-latest for $$plat"; \
 	  docker buildx build \
 	    --platform $$plat \
 	    -f feature-toggle-backend/Dockerfile \
 	    -t $(IMAGE_BACKEND):$(TAG_BASE)-alpha-$$arch \
+	    -t $(IMAGE_BACKEND):$$arch-latest \
 	    --provenance=false \
 	    --sbom=false \
 	    --load \
@@ -155,11 +165,12 @@ build-edge-alpha-arch: buildx-setup
 	@set -e; \
 	for plat in $(PLATFORMS_LIST); do \
 	  arch=$${plat#linux/}; \
-	  echo "Building locally $(IMAGE_EDGE):$(TAG_BASE)-alpha-$$arch for $$plat"; \
+	  echo "Building locally $(IMAGE_EDGE):$(TAG_BASE)-alpha-$$arch and $$arch-latest for $$plat"; \
 	  docker buildx build \
 	    --platform $$plat \
 	    -f feature-edge-server/Dockerfile \
 	    -t $(IMAGE_EDGE):$(TAG_BASE)-alpha-$$arch \
+	    -t $(IMAGE_EDGE):$$arch-latest \
 	    --provenance=false \
 	    --sbom=false \
 	    --load \
@@ -173,11 +184,12 @@ push-backend-alpha-arch: buildx-setup
 	@set -e; \
 	for plat in $(PLATFORMS_LIST); do \
 	  arch=$${plat#linux/}; \
-	  echo "Pushing $(IMAGE_BACKEND):$(TAG_BASE)-alpha-$$arch for $$plat"; \
+	  echo "Pushing $(IMAGE_BACKEND):$(TAG_BASE)-alpha-$$arch and $$arch-latest for $$plat"; \
 	  docker buildx build \
 	    --platform $$plat \
 	    -f feature-toggle-backend/Dockerfile \
 	    -t $(IMAGE_BACKEND):$(TAG_BASE)-alpha-$$arch \
+	    -t $(IMAGE_BACKEND):$$arch-latest \
 	    --provenance=false \
 	    --sbom=false \
 	    --push \
@@ -188,11 +200,12 @@ push-edge-alpha-arch: buildx-setup
 	@set -e; \
 	for plat in $(PLATFORMS_LIST); do \
 	  arch=$${plat#linux/}; \
-	  echo "Pushing $(IMAGE_EDGE):$(TAG_BASE)-alpha-$$arch for $$plat"; \
+	  echo "Pushing $(IMAGE_EDGE):$(TAG_BASE)-alpha-$$arch and $$arch-latest for $$plat"; \
 	  docker buildx build \
 	    --platform $$plat \
 	    -f feature-edge-server/Dockerfile \
 	    -t $(IMAGE_EDGE):$(TAG_BASE)-alpha-$$arch \
+	    -t $(IMAGE_EDGE):$$arch-latest \
 	    --provenance=false \
 	    --sbom=false \
 	    --push \
@@ -200,6 +213,72 @@ push-edge-alpha-arch: buildx-setup
 	done
 
 push-all-alpha-arch: push-backend-alpha-arch push-edge-alpha-arch
+
+# Per-arch latest tags build locally
+build-backend-latest-arch: buildx-setup
+	@set -e; \
+	for plat in $(PLATFORMS_LIST); do \
+	  arch=$${plat#linux/}; \
+	  echo "Building locally $(IMAGE_BACKEND):$$arch-latest for $$plat"; \
+	  docker buildx build \
+	    --platform $$plat \
+	    -f feature-toggle-backend/Dockerfile \
+	    -t $(IMAGE_BACKEND):$$arch-latest \
+	    --provenance=false \
+	    --sbom=false \
+	    --load \
+	    . ; \
+	done
+
+build-edge-latest-arch: buildx-setup
+	@set -e; \
+	for plat in $(PLATFORMS_LIST); do \
+	  arch=$${plat#linux/}; \
+	  echo "Building locally $(IMAGE_EDGE):$$arch-latest for $$plat"; \
+	  docker buildx build \
+	    --platform $$plat \
+	    -f feature-edge-server/Dockerfile \
+	    -t $(IMAGE_EDGE):$$arch-latest \
+	    --provenance=false \
+	    --sbom=false \
+	    --load \
+	    . ; \
+	done
+
+build-all-latest-arch: build-backend-latest-arch build-edge-latest-arch
+
+# Per-arch latest tags push
+push-backend-latest-arch: buildx-setup
+	@set -e; \
+	for plat in $(PLATFORMS_LIST); do \
+	  arch=$${plat#linux/}; \
+	  echo "Pushing $(IMAGE_BACKEND):$$arch-latest for $$plat"; \
+	  docker buildx build \
+	    --platform $$plat \
+	    -f feature-toggle-backend/Dockerfile \
+	    -t $(IMAGE_BACKEND):$$arch-latest \
+	    --provenance=false \
+	    --sbom=false \
+	    --push \
+	    . ; \
+	done
+
+push-edge-latest-arch: buildx-setup
+	@set -e; \
+	for plat in $(PLATFORMS_LIST); do \
+	  arch=$${plat#linux/}; \
+	  echo "Pushing $(IMAGE_EDGE):$$arch-latest for $$plat"; \
+	  docker buildx build \
+	    --platform $$plat \
+	    -f feature-edge-server/Dockerfile \
+	    -t $(IMAGE_EDGE):$$arch-latest \
+	    --provenance=false \
+	    --sbom=false \
+	    --push \
+	    . ; \
+	done
+
+push-all-latest-arch: push-backend-latest-arch push-edge-latest-arch
 
 # Start services
 up:

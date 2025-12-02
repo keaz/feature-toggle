@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, feature_id, environment_id, order_index, parent_stage_id, position, bucketing_key, status, enabled \n            FROM features_pipeline_stages WHERE feature_id = $1",
+  "query": "SELECT id, feature_id, environment_id, order_index, parent_stage_id, position, status, enabled\n            FROM features_pipeline_stages WHERE feature_id = $1",
   "describe": {
     "columns": [
       {
@@ -35,16 +35,11 @@
       },
       {
         "ordinal": 6,
-        "name": "bucketing_key",
-        "type_info": "Varchar"
-      },
-      {
-        "ordinal": 7,
         "name": "status",
         "type_info": "Text"
       },
       {
-        "ordinal": 8,
+        "ordinal": 7,
         "name": "enabled",
         "type_info": "Bool"
       }
@@ -61,10 +56,9 @@
       false,
       true,
       false,
-      true,
       false,
       false
     ]
   },
-  "hash": "3a8e54be87ef7c3fcee229f072c706e27157fd8122fb1fb8598278e9b926b54b"
+  "hash": "74b3d48183264fbc3488398898b98acc3c83f21f41cff2ddd242bee03cd822c1"
 }

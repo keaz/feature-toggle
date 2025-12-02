@@ -947,13 +947,6 @@ VALUES (
     )
 ON CONFLICT (id) DO NOTHING;
 
--- Optionally set bucketing_key for a known stage
-UPDATE public.features_pipeline_stages
-SET
-    bucketing_key = 'userId'
-WHERE
-    id = '3eef17bc-9e06-411d-b5f4-7a786e68bb96';
-
 -- Set status to DEPLOYED for seeded stages to keep tests passing
 UPDATE public.features_pipeline_stages
 SET

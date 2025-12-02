@@ -65,7 +65,6 @@ pub struct FeaturePipelineStage {
     pub parent_stage_id: Option<Uuid>,
     pub position: String,
     pub enabled: bool,
-    pub bucketing_key: Option<String>,
     pub status: String,
 }
 

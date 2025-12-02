@@ -103,7 +103,6 @@ async fn test_create_feature_with_stages() {
         parent_stage: None,
         position: String::from("{ x: 250, y: 250 }"),
         enabled: true,
-        bucketing_key: None,
     };
     let input = CreateFeature {
         team_id,
@@ -119,7 +118,6 @@ async fn test_create_feature_with_stages() {
                 parent_stage: Some(Box::new(parent)),
                 position: String::from("{ x: 500, y: 500 }"),
                 enabled: true,
-                bucketing_key: None,
             },
         ],
         dependencies: vec![],
@@ -242,7 +240,6 @@ async fn test_update_feature_with_existing_stages() {
             parent_stage: None,
             position: String::from("{ x: 200, y: 200 }"),
             enabled: false,
-            bucketing_key: None,
         }],
         dependencies: vec![],
         variants: None,
@@ -418,7 +415,6 @@ async fn test_create_feature_with_stages_verification() {
         parent_stage: None,
         position: String::from("{ x: 250, y: 250 }"),
         enabled: true,
-        bucketing_key: None,
     };
 
     // Create child stage that depends on parent
@@ -429,7 +425,6 @@ async fn test_create_feature_with_stages_verification() {
         parent_stage: Some(Box::new(parent.clone())),
         position: String::from("{ x: 500, y: 500 }"),
         enabled: true,
-        bucketing_key: None,
     };
 
     // Create feature with stages
@@ -509,7 +504,6 @@ async fn test_update_feature_with_stages() {
         parent_stage: None,
         position: String::from("{ x: 100, y: 100 }"),
         enabled: true,
-        bucketing_key: None,
     };
 
     let stage2 = CreateFeatureStage {
@@ -519,7 +513,6 @@ async fn test_update_feature_with_stages() {
         parent_stage: Some(Box::new(stage1.clone())),
         position: String::from("{ x: 200, y: 200 }"),
         enabled: true,
-        bucketing_key: None,
     };
 
     // Create initial feature with stages
@@ -557,7 +550,6 @@ async fn test_update_feature_with_stages() {
         parent_stage: None,
         position: String::from("{ x: 150, y: 150 }"), // Updated position
         enabled: false,                               // Updated enabled status
-        bucketing_key: None,
     };
 
     // Create a new stage3 (new stage)
@@ -568,7 +560,6 @@ async fn test_update_feature_with_stages() {
         parent_stage: None,
         position: String::from("{ x: 300, y: 300 }"),
         enabled: true,
-        bucketing_key: None,
     };
 
     // Update the feature

@@ -21,7 +21,6 @@ async fn test_variant_value_types() {
         parent_stage: None,
         position: json!({"x": 100, "y": 100}).to_string(),
         enabled: true,
-        bucketing_key: None,
     };
 
     // Test all variant value types

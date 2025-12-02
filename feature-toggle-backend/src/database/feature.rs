@@ -62,7 +62,6 @@ pub struct CreateFeatureStage {
     pub parent_stage: Option<Box<CreateFeatureStage>>,
     pub position: String,
     pub enabled: bool,
-    pub bucketing_key: Option<String>,
 }
 
 impl CreateFeatureStage {
@@ -80,7 +79,6 @@ impl CreateFeatureStage {
             parent_stage,
             position,
             enabled: false,
-            bucketing_key: None,
         }
     }
 }
@@ -168,7 +166,6 @@ struct FeaturePipelineStageRow {
     pub order_index: i32,
     pub parent_stage_id: Option<Uuid>,
     pub position: String,
-    pub bucketing_key: Option<String>,
     pub status: String,
     pub enabled: bool,
 }
@@ -398,10 +395,6 @@ impl FeatureRepositoryImpl {
             .map(|stage| stage.position.clone())
             .collect::<Vec<String>>();
 
-        let bucketing_keys: Vec<Option<String>> = stages
-            .iter()
-            .map(|stage| stage.bucketing_key.clone())
-            .collect();
         let statuses: Vec<String> = stages
             .iter()
             .map(|stage| {
@@ -415,16 +408,15 @@ impl FeatureRepositoryImpl {
         let enabled_values: Vec<bool> = stages.iter().map(|stage| stage.enabled).collect();
 
         let result = sqlx::query(
-            r#"INSERT INTO features_pipeline_stages (id, feature_id, environment_id, order_index, parent_stage_id, position, bucketing_key, status, enabled)
+            r#"INSERT INTO features_pipeline_stages (id, feature_id, environment_id, order_index, parent_stage_id, position, status, enabled)
                SELECT unnest($1::uuid[]) AS id,
                unnest($2::uuid[]) AS feature_id,
                unnest($3::uuid[]) AS environment_id,
                unnest($4::int[]) AS order_index,
                unnest($5::uuid[]) AS parent_stage_id,
                unnest($6::varchar[]) AS position,
-               unnest($7::varchar[]) AS bucketing_key,
-               unnest($8::text[]) AS status,
-               unnest($9::bool[]) AS enabled
+               unnest($7::text[]) AS status,
+               unnest($8::bool[]) AS enabled
                "#,
         )
             .bind(ids)
@@ -433,7 +425,6 @@ impl FeatureRepositoryImpl {
             .bind(order_indices)
             .bind(parent_stage_ids as &[Option<Uuid>])
             .bind(positions)
-            .bind(&bucketing_keys[..])
             .bind(&statuses[..])
             .bind(&enabled_values[..])
             .execute(&mut *tx)
@@ -530,15 +521,13 @@ impl FeatureRepositoryImpl {
                    SET environment_id = $1,
                        order_index = $2,
                        parent_stage_id = $3,
-                       position = $4,
-                       bucketing_key = $5
-                   WHERE id = $6"#,
+                       position = $4
+                   WHERE id = $5"#,
             )
             .bind(stage.environment_id)
             .bind(stage.order_index)
             .bind(parent_stage_id)
             .bind(&stage.position)
-            .bind(stage.bucketing_key.clone())
             .bind(stage.id)
             .execute(&mut *tx)
             .await;
@@ -748,7 +737,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
     async fn get_stage_by_id(&self, stage_id: Uuid) -> Result<Option<FeaturePipelineStage>, Error> {
         let result = sqlx::query_as!(
             FeaturePipelineStageRow,
-            r#"SELECT id, feature_id, environment_id, order_index, parent_stage_id, position, bucketing_key, status, enabled 
+            r#"SELECT id, feature_id, environment_id, order_index, parent_stage_id, position, status, enabled
             FROM features_pipeline_stages WHERE id = $1"#,
             stage_id
         )
@@ -765,7 +754,6 @@ impl FeatureRepository for FeatureRepositoryImpl {
                 parent_stage_id: stage.parent_stage_id,
                 position: stage.position,
                 enabled: stage.enabled, // Use the actual enabled field from database
-                bucketing_key: stage.bucketing_key,
                 status: stage.status,
             }
         });
@@ -779,7 +767,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
     ) -> Result<Vec<FeaturePipelineStage>, Error> {
         let result = sqlx::query_as!(
             FeaturePipelineStageRow,
-            r#"SELECT id, feature_id, environment_id, order_index, parent_stage_id, position, bucketing_key, status, enabled 
+            r#"SELECT id, feature_id, environment_id, order_index, parent_stage_id, position, status, enabled
             FROM features_pipeline_stages WHERE feature_id = $1"#,
             feature_id
         )
@@ -797,7 +785,6 @@ impl FeatureRepository for FeatureRepositoryImpl {
                 parent_stage_id: r.parent_stage_id,
                 position: r.position,
                 enabled: r.enabled, // Use the actual enabled field from database
-                bucketing_key: r.bucketing_key,
                 status: r.status,
             })
             .collect::<Vec<FeaturePipelineStage>>();
@@ -2040,7 +2027,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
                f.lifecycle_stage, f.deprecated_at, f.deprecation_notice, f.last_evaluated_at,
                f.evaluation_count_7d, f.evaluation_count_30d, f.evaluation_count_90d,
                s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
-               s.parent_stage_id, s.position, s.bucketing_key, s.status, s.enabled
+               s.parent_stage_id, s.position, s.status, s.enabled
                FROM features f
                INNER JOIN features_pipeline_stages s ON f.id = s.feature_id
                WHERE s.status IN ('DEPLOYMENT_REQUESTED', 'ROLLBACK_REQUESTED')"#,
@@ -2123,7 +2110,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
                f.lifecycle_stage, f.deprecated_at, f.deprecation_notice, f.last_evaluated_at,
                f.evaluation_count_7d, f.evaluation_count_30d, f.evaluation_count_90d,
                s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
-               s.parent_stage_id, s.position, s.bucketing_key, s.status, s.enabled
+               s.parent_stage_id, s.position, s.status, s.enabled
                FROM features f
                LEFT JOIN features_pipeline_stages s ON f.id = s.feature_id
                WHERE f.kill_switch_enabled = false"#,

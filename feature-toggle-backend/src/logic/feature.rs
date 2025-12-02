@@ -393,7 +393,6 @@ impl FeatureLogicImpl {
                     order_index: stage.order_index,
                     position: stage.position,
                     enabled: false,
-                    bucketing_key: stage.bucketing_key.clone(),
                     parent_stage: None,
                 })
             })
@@ -2414,7 +2413,6 @@ mod test {
             parent_stage_id: None,
             position: "{ \"x\": 0, \"y\": 0 }".to_string(),
             enabled: true,
-            bucketing_key: None,
             status: status.to_string(),
         }
     }

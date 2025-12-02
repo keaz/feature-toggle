@@ -170,18 +170,6 @@ impl Feature {
 
         let mut stages = map_stages(true, &environment_map, &db_stages_for_env, stage_factory);
 
-        // Populate bucketing_key on stages from the database entity
-        // Since there is no way to map the bucketing_key during the initial map_stages, we do it here
-        use std::collections::HashMap;
-        let bucketing_map: HashMap<String, Option<String>> = db_stages
-            .iter()
-            .map(|s| (s.id.to_string(), s.bucketing_key.clone()))
-            .collect();
-        for stage in stages.iter_mut() {
-            if let Some(b) = bucketing_map.get(&stage.id.to_string()) {
-                stage.bucketing_key = b.clone();
-            }
-        }
         // Populate status on stages from the database entity
         let status_map: std::collections::HashMap<String, String> = db_stages
             .iter()
@@ -398,7 +386,6 @@ fn stage_factory(
         environment,
         order_index,
         position,
-        bucketing_key: None,
         status: "NOT_DEPLOYED".to_string(),
     }
 }
@@ -415,7 +402,6 @@ pub struct FeatureStage {
     pub environment: Environment,
     pub order_index: i32,
     pub position: String,
-    pub bucketing_key: Option<String>,
     pub status: String,
 }
 

@@ -61,7 +61,6 @@ async fn test_set_stage_criteria_replaces_existing() {
                 parent_stage: None,
                 position: "{ x: 0, y: 0 }".to_string(),
                 enabled: true,
-                bucketing_key: None,
             }],
             dependencies: vec![],
             variants: None,

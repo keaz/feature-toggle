@@ -828,7 +828,6 @@ mod tests {
             parent_stage_id: None,
             position: "production".into(),
             enabled: false,
-            bucketing_key: None,
             status: "NOT_DEPLOYED".into(),
         };
 

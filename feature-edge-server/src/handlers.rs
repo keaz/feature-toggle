@@ -112,11 +112,6 @@ pub fn map_proto_to_engine(f: &pb::FeatureFull) -> engine::Feature {
         .map(|s| engine::FeatureStage {
             environment_id: s.environment_id.clone(),
             enabled: s.enabled,
-            bucketing_key: if s.bucketing_key.is_empty() {
-                None
-            } else {
-                Some(s.bucketing_key.clone())
-            },
             criterias: s
                 .criterias
                 .iter()
@@ -427,22 +422,10 @@ pub async fn evaluate_handler(
         }));
     }
 
-    let stage = stage.unwrap();
-    let bucketing_key = if stage.bucketing_key.is_some() {
-        stage.bucketing_key.as_ref().unwrap().as_str()
-    } else {
-        "bucketingKey"
-    };
+    let _stage = stage.unwrap();
 
-    // Extract user_id from bucketing_key attribute or use default bucketing_key
-    let user_id_opt = if bucketing_key == "bucketingKey" {
-        Some(req.context.bucketing_key.clone())
-    } else {
-        req.context
-            .attributes
-            .get(bucketing_key)
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-    };
+    // Use targeting_key from request context (OpenFeature standard)
+    let user_id_opt = Some(req.context.bucketing_key.clone());
 
     // Perform evaluation (check cache first if we have a user_id)
     let (mut result, prior_assignment) = if let Some(user_id) = &user_id_opt {

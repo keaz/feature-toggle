@@ -81,7 +81,6 @@ pub struct FeatureVariant {
 pub struct FeatureStage {
     pub environment_id: String,
     pub enabled: bool,
-    pub bucketing_key: Option<String>,
     pub criterias: Vec<StageCriterion>,
 }
 
@@ -396,22 +395,8 @@ fn passes_stage_criteria(
         .iter()
         .any(|crit| !crit.variant_allocations.is_empty());
     let user_bucket = if needs_bucket {
-        // Use bucketing_key from stage or default to targetingKey from context
-        let sticky_key = stage.bucketing_key.as_deref().unwrap_or("targetingKey");
-        let sticky_val = if sticky_key == "targetingKey" {
-            ec.context.targeting_key.clone()
-        } else {
-            match get_context_attribute(&ec.context, sticky_key) {
-                Some(v) => v,
-                None => {
-                    return CriteriaEvaluationResult {
-                        matched: false,
-                        variant: None,
-                        reason: EvaluationReason::Unknown,
-                    };
-                }
-            }
-        };
+        // Always use targeting_key from evaluation context (OpenFeature standard)
+        let sticky_val = ec.context.targeting_key.clone();
 
         if sticky_val.is_empty() {
             return CriteriaEvaluationResult {
@@ -605,7 +590,6 @@ mod tests {
             stages: vec![FeatureStage {
                 environment_id: "env1".to_string(),
                 enabled: true,
-                bucketing_key: None,
                 criterias: vec![StageCriterion {
                     priority: 0,
                     rule_groups: vec![RuleGroup {
@@ -976,7 +960,6 @@ mod tests {
             stages: vec![FeatureStage {
                 environment_id: "env1".to_string(),
                 enabled: true,
-                bucketing_key: None,
                 criterias: vec![StageCriterion {
                     priority: 0,
                     rule_groups: vec![RuleGroup {
@@ -1035,7 +1018,6 @@ mod tests {
             stages: vec![FeatureStage {
                 environment_id: "env1".to_string(),
                 enabled: true,
-                bucketing_key: None,
                 criterias: vec![StageCriterion {
                     priority: 0,
                     rule_groups: vec![RuleGroup {
@@ -1406,7 +1388,6 @@ mod tests {
             stages: vec![FeatureStage {
                 environment_id: "env1".to_string(),
                 enabled: true,
-                bucketing_key: None,
                 criterias: vec![StageCriterion {
                     priority: 0,
                     rule_groups: vec![RuleGroup {
@@ -1669,7 +1650,6 @@ mod tests {
             stages: vec![FeatureStage {
                 environment_id: "env1".to_string(),
                 enabled: true,
-                bucketing_key: None,
                 criterias: vec![StageCriterion {
                     priority: 0,
                     rule_groups: vec![],
@@ -1743,7 +1723,6 @@ mod tests {
             stages: vec![FeatureStage {
                 environment_id: "env1".to_string(),
                 enabled: true,
-                bucketing_key: None,
                 criterias: vec![StageCriterion {
                     priority: 0,
                     rule_groups: vec![],

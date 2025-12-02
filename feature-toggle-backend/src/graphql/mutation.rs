@@ -1675,7 +1675,6 @@ pub(crate) async fn map_db_feature_to_full_for_broadcast(
             order_index: s.order_index,
             position: s.position.clone(),
             enabled: s.enabled,
-            bucketing_key: s.bucketing_key.clone().unwrap_or_default(),
             criterias,
         });
     }
@@ -2025,7 +2024,6 @@ mod more_mutation_tests {
                 parent_stage_id: None,
                 position: "{}\"".trim_matches('"').to_string(),
                 enabled: true,
-                bucketing_key: None,
                 status: "DEPLOYED".into(),
             }])
         });

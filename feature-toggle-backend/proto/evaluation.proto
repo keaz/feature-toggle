@@ -69,7 +69,8 @@ message FeatureStageFull {
   int32 order_index = 3;
   string position = 4;
   bool enabled = 5;
-  string bucketing_key = 6;
+  // bucketing_key removed - now using targetingKey from evaluation request per OpenFeature standard
+  reserved 6;
   repeated StageCriterionFull criterias = 7;
 }
 

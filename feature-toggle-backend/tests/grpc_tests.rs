@@ -95,7 +95,6 @@ async fn evaluate_validation_errors() {
                     parent_stage_id: None,
                     position: "Start".into(),
                     enabled: true,
-                    bucketing_key: None,
                     status: "NOT_DEPLOYED".into(),
                 }])
             } else {
@@ -259,7 +258,6 @@ async fn evaluate_auth_and_success() {
                     parent_stage_id: None,
                     position: "Start".into(),
                     enabled: true,
-                    bucketing_key: None,
                     status: "NOT_DEPLOYED".into(),
                 }])
             } else {
@@ -400,7 +398,6 @@ async fn get_feature_by_key_and_stream_branches() {
                     parent_stage_id: None,
                     position: "Start".into(),
                     enabled: true,
-                    bucketing_key: None,
                     status: "NOT_DEPLOYED".into(),
                 }])
             } else {

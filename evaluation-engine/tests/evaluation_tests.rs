@@ -36,7 +36,6 @@ fn stage(
     FeatureStage {
         environment_id: env.to_string(),
         enabled,
-        bucketing_key: bucketing.map(|s| s.to_string()),
         criterias,
     }
 }
@@ -406,14 +405,16 @@ fn evaluate_multiple_criteria_first_match_wins() {
 
 #[test]
 fn evaluate_missing_bucketing_key_attribute() {
+    // This test now verifies that targeting_key is always used (OpenFeature standard)
+    // Previously tested custom bucketing key fallback - no longer supported
     let ctx = mk_ctx("feat", "env-a", "user123", &[("role", "admin")]);
-    // Stage expects "org_id" but it's not provided
     let crit = criterion(
         vec![rule("role", Operator::In, json!(["admin"]))],
         Some("treatment"),
         0,
     );
-    let stg = stage("env-a", true, Some("org_id"), vec![crit]);
+    // No custom bucketing key - always uses targeting_key from context
+    let stg = stage("env-a", true, None, vec![crit]);
     let feature = Feature {
         id: "test-id".to_string(),
         key: "test-key".to_string(),
@@ -428,8 +429,9 @@ fn evaluate_missing_bucketing_key_attribute() {
         }],
     };
     let result = evaluation_engine::evaluate(ctx, feature);
-    assert_eq!(result.value, json!(false));
-    assert_eq!(result.reason, EvaluationReason::Unknown);
+    // Should succeed because targeting_key is always available
+    assert_eq!(result.value, json!(true));
+    assert_eq!(result.reason, EvaluationReason::TargetingMatch);
 }
 
 #[test]

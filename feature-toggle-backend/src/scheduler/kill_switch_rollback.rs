@@ -179,7 +179,6 @@ impl KillSwitchRollbackScheduler {
                 order_index: s.order_index,
                 position: s.position.clone(),
                 enabled: s.enabled,
-                bucketing_key: s.bucketing_key.clone().unwrap_or_default(),
                 criterias,
             });
         }

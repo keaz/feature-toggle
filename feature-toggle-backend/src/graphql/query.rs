@@ -1422,7 +1422,6 @@ async fn resolve_entity_details(
                                     "status": stage.status,
                                     "order_index": stage.order_index,
                                     "position": stage.position,
-                                    "bucketing_key": stage.bucketing_key,
                                     "environment": environment.as_ref().map(|env| serde_json::json!({
                                         "id": env.id.to_string(),
                                         "name": env.name,
