@@ -1,4 +1,4 @@
-use feature_toggle_backend::database::entity::FeatureType;
+use feature_toggle_backend::database::entity::{FeatureType, VariantSelectionMode};
 use feature_toggle_backend::database::feature::{
     CreateFeature, CreateFeatureStage, CreateStageCriterion,
 };
@@ -22,7 +22,7 @@ async fn test_get_stage_criteria_returns_seeded_values() {
 
     let mut priorities: Vec<i32> = criteria.iter().map(|c| c.priority).collect();
     priorities.sort_unstable();
-    assert_eq!(priorities, vec![0, 1]);
+    assert_eq!(priorities, vec![0, 1, 2, 3]);
 }
 
 #[tokio::test]
@@ -70,14 +70,26 @@ async fn test_set_stage_criteria_replaces_existing() {
 
     // First set some initial criteria
     let initial_crit = vec![
-        CreateStageCriterion { priority: 0 },
-        CreateStageCriterion { priority: 1 },
+        CreateStageCriterion {
+            priority: 0,
+            variant_selection_mode: VariantSelectionMode::WeightedSplit,
+            selected_variant_control: None,
+        },
+        CreateStageCriterion {
+            priority: 1,
+            variant_selection_mode: VariantSelectionMode::WeightedSplit,
+            selected_variant_control: None,
+        },
     ];
 
     let _ = repo.set_stage_criteria(stage_id, initial_crit).await;
 
     // Now replace them with a single criterion
-    let crit = vec![CreateStageCriterion { priority: 0 }];
+    let crit = vec![CreateStageCriterion {
+        priority: 0,
+        variant_selection_mode: VariantSelectionMode::WeightedSplit,
+        selected_variant_control: None,
+    }];
 
     let set_result = repo.set_stage_criteria(stage_id, crit).await;
     assert!(set_result.is_ok());
@@ -99,7 +111,11 @@ async fn test_set_stage_criteria_stage_not_found() {
 
     let non_existing_stage = Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").unwrap();
 
-    let crit = vec![CreateStageCriterion { priority: 0 }];
+    let crit = vec![CreateStageCriterion {
+        priority: 0,
+        variant_selection_mode: VariantSelectionMode::WeightedSplit,
+        selected_variant_control: None,
+    }];
 
     let result = repo.set_stage_criteria(non_existing_stage, crit).await;
     assert!(result.is_err());

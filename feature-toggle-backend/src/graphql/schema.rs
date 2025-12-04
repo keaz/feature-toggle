@@ -711,6 +711,21 @@ pub struct UpdateClientInput {
     pub web_origins: Option<Vec<String>>,
 }
 
+// Variant selection mode enum
+#[derive(Enum, Copy, Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
+pub enum VariantSelectionMode {
+    #[graphql(name = "WEIGHTED_SPLIT")]
+    WeightedSplit,
+    #[graphql(name = "SPECIFIC_VARIANT")]
+    SpecificVariant,
+}
+
+impl Default for VariantSelectionMode {
+    fn default() -> Self {
+        VariantSelectionMode::WeightedSplit
+    }
+}
+
 // Stage criteria GraphQL types
 #[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
 pub struct StageCriterion {
@@ -721,6 +736,10 @@ pub struct StageCriterion {
     /// Weighted variant allocations for multi-variant traffic splits
     /// If present, overrides the simple serve field with weighted distribution
     pub variant_allocations: Vec<VariantAllocation>,
+    /// Mode for variant selection: WEIGHTED_SPLIT or SPECIFIC_VARIANT
+    pub variant_selection_mode: VariantSelectionMode,
+    /// The specific variant to return when mode is SPECIFIC_VARIANT
+    pub selected_variant_control: Option<String>,
 }
 
 #[derive(InputObject, Debug, Clone)]
@@ -733,6 +752,11 @@ pub struct CreateStageCriterionInput {
     /// Optional compound rule groups for this criterion
     #[graphql(default)]
     pub rule_groups: Option<Vec<InlineRuleGroupInput>>,
+    /// Mode for variant selection: WEIGHTED_SPLIT or SPECIFIC_VARIANT
+    #[graphql(default)]
+    pub variant_selection_mode: Option<VariantSelectionMode>,
+    /// The specific variant to return when mode is SPECIFIC_VARIANT
+    pub selected_variant_control: Option<String>,
 }
 
 // Compound rules GraphQL types

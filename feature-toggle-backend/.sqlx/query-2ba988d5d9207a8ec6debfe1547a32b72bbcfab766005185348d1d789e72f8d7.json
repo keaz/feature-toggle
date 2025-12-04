@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO feature_stage_criteria(id, stage_id, priority, variant_selection_mode, selected_variant_control)\n                       SELECT unnest($1::uuid[]), unnest($2::uuid[]), unnest($3::int[]), unnest($4::variant_selection_mode[]), unnest($5::text[])",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "UuidArray",
+        "Int4Array",
+        {
+          "Custom": {
+            "name": "variant_selection_mode[]",
+            "kind": {
+              "Array": {
+                "Custom": {
+                  "name": "variant_selection_mode",
+                  "kind": {
+                    "Enum": [
+                      "WEIGHTED_SPLIT",
+                      "SPECIFIC_VARIANT"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "TextArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2ba988d5d9207a8ec6debfe1547a32b72bbcfab766005185348d1d789e72f8d7"
+}

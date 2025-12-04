@@ -1,7 +1,7 @@
 use evaluation_engine::{
     ContextObject, ErrorCode, EvaluationReason, Feature, FeatureEvaluationContext, FeatureStage,
     FeatureVariant, LogicOperator, Operator, RuleCondition, RuleGroup, StageCriterion,
-    VariantAllocation,
+    VariantAllocation, VariantSelectionMode,
 };
 use serde_json::json;
 use std::collections::HashMap;
@@ -67,6 +67,8 @@ fn criterion(rules: Vec<RuleCondition>, variant: Option<&str>, priority: i32) ->
                 }]
             })
             .unwrap_or_default(),
+        variant_selection_mode: VariantSelectionMode::WeightedSplit,
+        selected_variant_control: None,
     }
 }
 

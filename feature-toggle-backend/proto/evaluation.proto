@@ -61,6 +61,8 @@ message StageCriterionFull {
   int32 priority = 3; // Evaluation priority (lower values evaluated first)
   repeated RuleGroup rule_groups = 4; // Compound rules for advanced targeting
   repeated VariantAllocation variant_allocations = 5; // Weighted variant allocations (overrides serve field when present)
+  string variant_selection_mode = 6; // "WEIGHTED_SPLIT" or "SPECIFIC_VARIANT"
+  string selected_variant_control = 7; // The specific variant to return when mode is SPECIFIC_VARIANT
 }
 
 message FeatureStageFull {

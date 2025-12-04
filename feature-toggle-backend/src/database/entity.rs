@@ -90,6 +90,20 @@ pub enum VariantValueType {
     Json,
 }
 
+// Enum for variant selection mode (maps to Postgres ENUM)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[sqlx(type_name = "variant_selection_mode", rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum VariantSelectionMode {
+    WeightedSplit,
+    SpecificVariant,
+}
+
+impl Default for VariantSelectionMode {
+    fn default() -> Self {
+        VariantSelectionMode::WeightedSplit
+    }
+}
+
 // Feature variant entity
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
 pub struct FeatureVariant {
@@ -153,6 +167,11 @@ pub struct StageCriterion {
     /// Loaded separately and populated when criteria are fetched
     #[serde(default)]
     pub variant_allocations: Vec<VariantAllocationSimple>,
+    /// Mode for variant selection: WEIGHTED_SPLIT or SPECIFIC_VARIANT
+    #[serde(default)]
+    pub variant_selection_mode: VariantSelectionMode,
+    /// The specific variant to return when mode is SPECIFIC_VARIANT
+    pub selected_variant_control: Option<String>,
 }
 
 /// Compound rule group with conditions for StageCriterion

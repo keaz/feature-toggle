@@ -109,6 +109,19 @@ impl Default for Operator {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum VariantSelectionMode {
+    WeightedSplit,
+    SpecificVariant,
+}
+
+impl Default for VariantSelectionMode {
+    fn default() -> Self {
+        VariantSelectionMode::WeightedSplit
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct StageCriterion {
     pub priority: i32,
@@ -118,6 +131,11 @@ pub struct StageCriterion {
     /// If present, overrides the simple serve field with weighted distribution
     #[serde(default)]
     pub variant_allocations: Vec<VariantAllocation>,
+    /// Mode for variant selection: WEIGHTED_SPLIT or SPECIFIC_VARIANT
+    #[serde(default)]
+    pub variant_selection_mode: VariantSelectionMode,
+    /// The specific variant to return when mode is SPECIFIC_VARIANT
+    pub selected_variant_control: Option<String>,
 }
 
 // Compound rule structures for AND/OR logic
@@ -389,11 +407,14 @@ fn passes_stage_criteria(
         };
     }
 
-    // Only compute a sticky bucket if any criterion needs weighted allocation
+    // Only compute a sticky bucket if any criterion uses weighted split mode
     let needs_bucket = stage
         .criterias
         .iter()
-        .any(|crit| !crit.variant_allocations.is_empty());
+        .any(|crit| {
+            crit.variant_selection_mode == VariantSelectionMode::WeightedSplit
+                && !crit.variant_allocations.is_empty()
+        });
     let user_bucket = if needs_bucket {
         // Always use targeting_key from evaluation context (OpenFeature standard)
         let sticky_val = ec.context.targeting_key.clone();
@@ -429,11 +450,20 @@ fn passes_stage_criteria(
         };
 
         if matches {
-            let selected_variant = if !crit.variant_allocations.is_empty() {
-                user_bucket
-                    .and_then(|bucket| select_variant_by_weight(&crit.variant_allocations, bucket))
-            } else {
-                None
+            let selected_variant = match crit.variant_selection_mode {
+                VariantSelectionMode::SpecificVariant => {
+                    // Return the specific variant for all users
+                    crit.selected_variant_control.clone()
+                }
+                VariantSelectionMode::WeightedSplit => {
+                    // Use weighted distribution based on user bucket
+                    if !crit.variant_allocations.is_empty() {
+                        user_bucket
+                            .and_then(|bucket| select_variant_by_weight(&crit.variant_allocations, bucket))
+                    } else {
+                        None
+                    }
+                }
             };
 
             return CriteriaEvaluationResult {
@@ -604,6 +634,8 @@ mod tests {
                         variant_control: "treatment".to_string(),
                         weight: 100,
                     }],
+                    variant_selection_mode: VariantSelectionMode::WeightedSplit,
+                    selected_variant_control: None,
                 }],
             }],
             variants: vec![
@@ -974,6 +1006,8 @@ mod tests {
                         variant_control: "adult-content".to_string(),
                         weight: 100,
                     }],
+                    variant_selection_mode: VariantSelectionMode::WeightedSplit,
+                    selected_variant_control: None,
                 }],
             }],
             variants: vec![
@@ -1032,6 +1066,8 @@ mod tests {
                         variant_control: "corporate-variant".to_string(),
                         weight: 100,
                     }],
+                    variant_selection_mode: VariantSelectionMode::WeightedSplit,
+                    selected_variant_control: None,
                 }],
             }],
             variants: vec![
@@ -1409,6 +1445,8 @@ mod tests {
                         variant_control: "premium-variant".to_string(),
                         weight: 100,
                     }],
+                    variant_selection_mode: VariantSelectionMode::WeightedSplit,
+                    selected_variant_control: None,
                 }],
             }],
             variants: vec![FeatureVariant {
@@ -1667,6 +1705,8 @@ mod tests {
                             weight: 50,
                         },
                     ],
+                    variant_selection_mode: VariantSelectionMode::WeightedSplit,
+                    selected_variant_control: None,
                 }],
             }],
             variants: vec![
@@ -1736,6 +1776,8 @@ mod tests {
                             weight: 50,
                         },
                     ],
+                    variant_selection_mode: VariantSelectionMode::WeightedSplit,
+                    selected_variant_control: None,
                 }],
             }],
             variants: vec![

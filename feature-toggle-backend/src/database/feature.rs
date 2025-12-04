@@ -12,6 +12,9 @@ use uuid::Uuid;
 pub struct CreateStageCriterion {
     #[serde(default)]
     pub priority: i32,
+    #[serde(default)]
+    pub variant_selection_mode: crate::database::entity::VariantSelectionMode,
+    pub selected_variant_control: Option<String>,
 }
 
 /// Represents feature growth data at a specific time bucket
@@ -835,7 +838,9 @@ impl FeatureRepository for FeatureRepositoryImpl {
         }
 
         let rows = sqlx::query!(
-            r#"SELECT sc.id, sc.stage_id, sc.priority
+            r#"SELECT sc.id, sc.stage_id, sc.priority,
+                      sc.variant_selection_mode::text as "variant_selection_mode!",
+                      sc.selected_variant_control
                FROM feature_stage_criteria sc
                WHERE sc.stage_id = $1
                ORDER BY sc.priority ASC, sc.id"#,
@@ -962,12 +967,19 @@ impl FeatureRepository for FeatureRepositoryImpl {
                 })
                 .collect();
 
+            let variant_selection_mode = match r.variant_selection_mode.to_uppercase().as_str() {
+                "SPECIFIC_VARIANT" => crate::database::entity::VariantSelectionMode::SpecificVariant,
+                _ => crate::database::entity::VariantSelectionMode::WeightedSplit,
+            };
+
             out.push(crate::database::entity::StageCriterion {
                 id: r.id,
                 stage_id: r.stage_id,
                 priority: r.priority,
                 rule_groups,
                 variant_allocations: allocations_map.remove(&r.id).unwrap_or_else(Vec::new),
+                variant_selection_mode,
+                selected_variant_control: r.selected_variant_control,
             });
         }
         Ok(out)
@@ -1005,15 +1017,28 @@ impl FeatureRepository for FeatureRepositoryImpl {
             let ids: Vec<Uuid> = criteria.iter().map(|_| Uuid::new_v4()).collect();
             let stage_ids: Vec<Uuid> = vec![stage_id; criteria.len()];
             let priorities: Vec<i32> = criteria.iter().map(|c| c.priority).collect();
+            let modes: Vec<String> = criteria
+                .iter()
+                .map(|c| match c.variant_selection_mode {
+                    crate::database::entity::VariantSelectionMode::WeightedSplit => "WEIGHTED_SPLIT".to_string(),
+                    crate::database::entity::VariantSelectionMode::SpecificVariant => "SPECIFIC_VARIANT".to_string(),
+                })
+                .collect();
+            let selected_variants: Vec<Option<String>> = criteria
+                .iter()
+                .map(|c| c.selected_variant_control.clone())
+                .collect();
 
             handle_error(
                 None,
                 sqlx::query!(
-                    r#"INSERT INTO feature_stage_criteria(id, stage_id, priority)
-                       SELECT unnest($1::uuid[]), unnest($2::uuid[]), unnest($3::int[])"#,
+                    r#"INSERT INTO feature_stage_criteria(id, stage_id, priority, variant_selection_mode, selected_variant_control)
+                       SELECT unnest($1::uuid[]), unnest($2::uuid[]), unnest($3::int[]), unnest($4::variant_selection_mode[]), unnest($5::text[])"#,
                     &ids[..],
                     &stage_ids[..],
-                    &priorities[..]
+                    &priorities[..],
+                    &modes[..] as &[String],
+                    &selected_variants[..] as &[Option<String>]
                 )
                 .execute(&mut *tx)
                 .await,

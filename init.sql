@@ -1439,6 +1439,86 @@ VALUES
     )
 ON CONFLICT (id) DO NOTHING;
 
+-- ========================================
+-- Test Data for Variant Selection Modes
+-- ========================================
+-- Demonstrates both WEIGHTED_SPLIT and SPECIFIC_VARIANT modes
+
+-- Add a test criterion with SPECIFIC_VARIANT mode
+-- This criterion will always return 'treatment-a' regardless of user
+INSERT INTO
+    public.feature_stage_criteria (
+        id,
+        stage_id,
+        priority,
+        variant_selection_mode,
+        selected_variant_control
+    )
+VALUES (
+        '55555555-5555-4555-8555-555555555555',
+        '3eef17bc-9e06-411d-b5f4-7a786e68bb96',
+        2,
+        'SPECIFIC_VARIANT',
+        'treatment-a'
+    )
+ON CONFLICT (id) DO NOTHING;
+
+-- Add another criterion with WEIGHTED_SPLIT mode (default behavior)
+-- This will use the variant allocations for weighted distribution
+INSERT INTO
+    public.feature_stage_criteria (
+        id,
+        stage_id,
+        priority,
+        variant_selection_mode,
+        selected_variant_control
+    )
+VALUES (
+        '66666666-6666-4666-8666-666666666666',
+        '3eef17bc-9e06-411d-b5f4-7a786e68bb96',
+        3,
+        'WEIGHTED_SPLIT',
+        NULL
+    )
+ON CONFLICT (id) DO NOTHING;
+
+-- Add variant allocations for the WEIGHTED_SPLIT criterion
+INSERT INTO
+    public.variant_allocations (
+        id,
+        criteria_id,
+        variant_control,
+        weight,
+        created_at,
+        updated_at
+    )
+VALUES
+    (
+        '0a666666-6666-4666-8666-666666666661',
+        '66666666-6666-4666-8666-666666666666',
+        'control',
+        30,
+        now(),
+        now()
+    ),
+    (
+        '0a666666-6666-4666-8666-666666666662',
+        '66666666-6666-4666-8666-666666666666',
+        'treatment-a',
+        30,
+        now(),
+        now()
+    ),
+    (
+        '0a666666-6666-4666-8666-666666666663',
+        '66666666-6666-4666-8666-666666666666',
+        'treatment-b',
+        40,
+        now(),
+        now()
+    )
+ON CONFLICT (id) DO NOTHING;
+
 -- Add pipeline stages for kill switch test features
 INSERT INTO
     public.features_pipeline_stages (

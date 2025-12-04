@@ -912,6 +912,15 @@ impl StageLogic for FeatureLogicImpl {
                 |c| -> Result<crate::database::feature::CreateStageCriterion, Error> {
                     Ok(crate::database::feature::CreateStageCriterion {
                         priority: c.priority,
+                        variant_selection_mode: match c.variant_selection_mode.unwrap_or_default() {
+                            crate::graphql::schema::VariantSelectionMode::WeightedSplit => {
+                                crate::database::entity::VariantSelectionMode::WeightedSplit
+                            }
+                            crate::graphql::schema::VariantSelectionMode::SpecificVariant => {
+                                crate::database::entity::VariantSelectionMode::SpecificVariant
+                            }
+                        },
+                        selected_variant_control: c.selected_variant_control,
                     })
                 },
             )
@@ -1290,6 +1299,15 @@ fn map_db_criterion_to_gql(
         priority: sc.priority,
         rule_groups,
         variant_allocations,
+        variant_selection_mode: match sc.variant_selection_mode {
+            crate::database::entity::VariantSelectionMode::WeightedSplit => {
+                crate::graphql::schema::VariantSelectionMode::WeightedSplit
+            }
+            crate::database::entity::VariantSelectionMode::SpecificVariant => {
+                crate::graphql::schema::VariantSelectionMode::SpecificVariant
+            }
+        },
+        selected_variant_control: sc.selected_variant_control,
     }
 }
 

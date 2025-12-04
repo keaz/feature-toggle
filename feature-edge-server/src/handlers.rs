@@ -190,10 +190,22 @@ pub fn map_proto_to_engine(f: &pb::FeatureFull) -> engine::Feature {
                         })
                         .collect();
 
+                    // Parse variant selection mode
+                    let variant_selection_mode = match c.variant_selection_mode.to_uppercase().as_str() {
+                        "SPECIFIC_VARIANT" => engine::VariantSelectionMode::SpecificVariant,
+                        _ => engine::VariantSelectionMode::WeightedSplit,
+                    };
+
                     engine::StageCriterion {
                         priority: c.priority,
                         rule_groups,
                         variant_allocations,
+                        variant_selection_mode,
+                        selected_variant_control: if c.selected_variant_control.is_empty() {
+                            None
+                        } else {
+                            Some(c.selected_variant_control.clone())
+                        },
                     }
                 })
                 .collect(),

@@ -1,7 +1,7 @@
 use feature_toggle_backend::database::compound_rules::{
     CreateRuleConditionInput, CreateRuleGroupInput, UpdateRuleGroupInput, compound_rules_repository,
 };
-use feature_toggle_backend::database::entity::LogicOperator;
+use feature_toggle_backend::database::entity::{LogicOperator, VariantSelectionMode};
 use feature_toggle_backend::database::feature::{CreateStageCriterion, feature_repository};
 use feature_toggle_backend::database::init_pg_pool;
 use serde_json::json;
@@ -18,7 +18,11 @@ async fn test_create_rule_group_with_conditions() {
     let stage_id = Uuid::parse_str("aaaaaaaa-1111-4111-8111-111111111111").unwrap();
 
     // Create a criterion to attach rule groups to
-    let criteria = vec![CreateStageCriterion { priority: 0 }];
+    let criteria = vec![CreateStageCriterion {
+        priority: 0,
+        variant_selection_mode: VariantSelectionMode::WeightedSplit,
+        selected_variant_control: None,
+    }];
 
     let created_criteria = feature_repo
         .set_stage_criteria(stage_id, criteria)
@@ -80,7 +84,11 @@ async fn test_get_rule_groups_by_criteria() {
     // Use a dedicated stage for this test to avoid interference
     let stage_id = Uuid::parse_str("bbbbbbbb-2222-4222-8222-222222222222").unwrap();
 
-    let criteria = vec![CreateStageCriterion { priority: 0 }];
+    let criteria = vec![CreateStageCriterion {
+        priority: 0,
+        variant_selection_mode: VariantSelectionMode::WeightedSplit,
+        selected_variant_control: None,
+    }];
 
     let created_criteria = feature_repo
         .set_stage_criteria(stage_id, criteria)
@@ -158,7 +166,11 @@ async fn test_update_rule_group() {
     // Use a dedicated stage for this test to avoid interference
     let stage_id = Uuid::parse_str("cccccccc-3333-4333-8333-333333333333").unwrap();
 
-    let criteria = vec![CreateStageCriterion { priority: 0 }];
+    let criteria = vec![CreateStageCriterion {
+        priority: 0,
+        variant_selection_mode: VariantSelectionMode::WeightedSplit,
+        selected_variant_control: None,
+    }];
 
     let created_criteria = feature_repo
         .set_stage_criteria(stage_id, criteria)
@@ -221,7 +233,11 @@ async fn test_delete_rule_group() {
     // Use a dedicated stage for this test to avoid interference
     let stage_id = Uuid::parse_str("dddddddd-4444-4444-8444-444444444444").unwrap();
 
-    let criteria = vec![CreateStageCriterion { priority: 0 }];
+    let criteria = vec![CreateStageCriterion {
+        priority: 0,
+        variant_selection_mode: VariantSelectionMode::WeightedSplit,
+        selected_variant_control: None,
+    }];
 
     let created_criteria = feature_repo
         .set_stage_criteria(stage_id, criteria)
@@ -267,7 +283,11 @@ async fn test_all_operators() {
     // Use a dedicated stage for this test to avoid interference
     let stage_id = Uuid::parse_str("eeeeeeee-5555-4555-8555-555555555555").unwrap();
 
-    let criteria = vec![CreateStageCriterion { priority: 0 }];
+    let criteria = vec![CreateStageCriterion {
+        priority: 0,
+        variant_selection_mode: VariantSelectionMode::WeightedSplit,
+        selected_variant_control: None,
+    }];
 
     let created_criteria = feature_repo
         .set_stage_criteria(stage_id, criteria)
@@ -328,7 +348,11 @@ async fn test_complex_compound_rules() {
     // Use a dedicated stage for this test to avoid interference
     let stage_id = Uuid::parse_str("ffffffff-6666-4666-8666-666666666666").unwrap();
 
-    let criteria = vec![CreateStageCriterion { priority: 0 }];
+    let criteria = vec![CreateStageCriterion {
+        priority: 0,
+        variant_selection_mode: VariantSelectionMode::WeightedSplit,
+        selected_variant_control: None,
+    }];
 
     let created_criteria = feature_repo
         .set_stage_criteria(stage_id, criteria)
@@ -400,7 +424,11 @@ async fn test_cascade_delete_rule_groups_with_criteria() {
     let stage_id = Uuid::parse_str("11111111-7777-4777-8777-777777777777").unwrap();
 
     // Create criterion with rule groups
-    let criteria = vec![CreateStageCriterion { priority: 0 }];
+    let criteria = vec![CreateStageCriterion {
+        priority: 0,
+        variant_selection_mode: VariantSelectionMode::WeightedSplit,
+        selected_variant_control: None,
+    }];
 
     let created_criteria = feature_repo
         .set_stage_criteria(stage_id, criteria)

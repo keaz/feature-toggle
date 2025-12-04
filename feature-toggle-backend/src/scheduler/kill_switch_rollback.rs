@@ -169,6 +169,15 @@ impl KillSwitchRollbackScheduler {
                         priority: c.priority,
                         rule_groups,
                         variant_allocations,
+                        variant_selection_mode: match c.variant_selection_mode {
+                            crate::database::entity::VariantSelectionMode::WeightedSplit => {
+                                "WEIGHTED_SPLIT".to_string()
+                            }
+                            crate::database::entity::VariantSelectionMode::SpecificVariant => {
+                                "SPECIFIC_VARIANT".to_string()
+                            }
+                        },
+                        selected_variant_control: c.selected_variant_control.unwrap_or_default(),
                     }
                 })
                 .collect::<Vec<_>>();

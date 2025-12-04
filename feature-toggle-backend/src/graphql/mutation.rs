@@ -1665,6 +1665,15 @@ pub(crate) async fn map_db_feature_to_full_for_broadcast(
                     priority: c.priority,
                     rule_groups,
                     variant_allocations,
+                    variant_selection_mode: match c.variant_selection_mode {
+                        crate::database::entity::VariantSelectionMode::WeightedSplit => {
+                            "WEIGHTED_SPLIT".to_string()
+                        }
+                        crate::database::entity::VariantSelectionMode::SpecificVariant => {
+                            "SPECIFIC_VARIANT".to_string()
+                        }
+                    },
+                    selected_variant_control: c.selected_variant_control.unwrap_or_default(),
                 }
             })
             .collect::<Vec<_>>();
@@ -1862,6 +1871,8 @@ mod tests {
             priority: 1,
             rule_groups: vec![],
             variant_allocations: vec![],
+            variant_selection_mode: crate::graphql::schema::VariantSelectionMode::WeightedSplit,
+            selected_variant_control: None,
         }];
         let stage_id_clone = stage_id.clone();
         mock.expect_set_stage_criteria()
@@ -2037,6 +2048,8 @@ mod more_mutation_tests {
                     variant_control: "treatment".into(),
                     weight: 100,
                 }],
+                variant_selection_mode: crate::database::entity::VariantSelectionMode::WeightedSplit,
+                selected_variant_control: None,
             }])
         });
         repo.expect_get_feature_variants().returning(move |_| {
