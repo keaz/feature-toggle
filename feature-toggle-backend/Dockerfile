@@ -44,7 +44,7 @@ RUN printf '[workspace]\nresolver = "3"\nmembers = [\n    "evaluation-engine",\n
 
 # Build the backend service in offline mode using docker profile for smaller size
 ENV SQLX_OFFLINE=true
-RUN cargo build --release --bin feature-toggle-backend
+RUN cargo build --profile docker --bin feature-toggle-backend
 
 # Runtime stage
 FROM debian:trixie-slim

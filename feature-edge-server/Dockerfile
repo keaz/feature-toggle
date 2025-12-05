@@ -40,7 +40,7 @@ COPY feature-toggle-backend/proto/ ./feature-toggle-backend/proto/
 RUN printf '[workspace]\nresolver = "3"\nmembers = [\n    "evaluation-engine",\n    "feature-edge-server",\n    "feature-toggle-shared",\n]' > Cargo.toml
 
 # Build the edge server service using docker profile for smaller size
-RUN cargo build --release --bin feature-edge-server
+RUN cargo build --profile docker --bin feature-edge-server
 
 # Runtime stage
 FROM debian:trixie-slim
