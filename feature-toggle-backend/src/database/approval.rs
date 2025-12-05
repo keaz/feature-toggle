@@ -499,7 +499,6 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
         if let Some(values) = status_values.clone() {
             if !select_has_where {
                 select_builder.push(" WHERE ");
-                select_has_where = true;
             } else {
                 select_builder.push(" AND ");
             }
@@ -510,7 +509,6 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
 
             if !count_has_where {
                 count_builder.push(" WHERE ");
-                count_has_where = true;
             } else {
                 count_builder.push(" AND ");
             }

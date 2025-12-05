@@ -722,7 +722,7 @@ impl FeatureCrudLogic for FeatureLogicImpl {
         let mut mapped_features = Vec::new();
         for feature in features {
             // Create feature with properly mapped stages
-            let mut mapped_feature = Self::map_entity_to_graphql_feature(feature);
+            let mapped_feature = Self::map_entity_to_graphql_feature(feature);
             mapped_features.push(mapped_feature);
         }
 

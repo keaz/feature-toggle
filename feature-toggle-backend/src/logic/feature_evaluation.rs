@@ -142,6 +142,7 @@ impl FeatureEvaluationLogicImpl {
         }
     }
 
+    #[allow(deprecated)]
     fn emit_event(&self, row: &FeatureEvaluationRow) {
         if let Some(tx) = &self.events_tx {
             // Ignore error if there are no active subscribers.

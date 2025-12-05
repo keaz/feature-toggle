@@ -339,7 +339,7 @@ impl UserLogic for UserLogicImpl {
         id: ID,
         current_password: String,
         new_password: String,
-        actor: Option<crate::logic::ActorContext>,
+        _actor: Option<crate::logic::ActorContext>,
     ) -> Result<(), Error> {
         let user_id = Uuid::try_from(id).unwrap();
 

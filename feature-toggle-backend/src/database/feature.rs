@@ -114,6 +114,7 @@ pub struct UpdateFeature {
 }
 
 #[derive(Debug, sqlx::FromRow, Clone)]
+#[allow(dead_code)]
 struct Features {
     feature_id: Uuid,
     feature_key: String,
@@ -1846,7 +1847,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
         team_id: Option<Uuid>,
     ) -> Result<RolloutMetricsData, Error> {
         // Build the base WHERE clause for team filtering
-        let team_filter = if team_id.is_some() {
+        let _team_filter = if team_id.is_some() {
             "AND f.team_id = $1"
         } else {
             ""

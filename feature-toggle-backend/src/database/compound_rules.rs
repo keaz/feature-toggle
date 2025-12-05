@@ -223,7 +223,7 @@ impl CompoundRulesRepository for CompoundRulesRepositoryImpl {
         info!("DB: update_rule_group group_id={group_id}");
 
         // Ensure group exists
-        let existing = self.get_rule_group_by_id(group_id).await?;
+        let _existing = self.get_rule_group_by_id(group_id).await?;
 
         // Update logic operator if provided
         if let Some(logic_operator) = input.logic_operator {

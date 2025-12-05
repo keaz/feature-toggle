@@ -8,6 +8,7 @@ pub mod pipeline;
 pub mod team;
 
 pub trait CreateInputValidator {
+    #[allow(async_fn_in_trait)]
     async fn validate(
         &self,
         team_id: Option<ID>,
@@ -16,6 +17,7 @@ pub trait CreateInputValidator {
 }
 
 pub trait UpdateInputValidator {
+    #[allow(async_fn_in_trait)]
     async fn validate(&self, id: Option<ID>, ctx: &Context<'_>)
     -> async_graphql::Result<(), Error>;
 }

@@ -7,11 +7,13 @@ use actix_web::dev::{Service, ServiceRequest, ServiceResponse, Transform, forwar
 use futures_util::future::{LocalBoxFuture, Ready, ready};
 use std::rc::Rc;
 
+#[allow(dead_code)]
 pub struct SessionGuard {
     ui_origin: String,
 }
 
 impl SessionGuard {
+    #[allow(dead_code)]
     pub fn new(ui_origin: String) -> Self {
         Self { ui_origin }
     }
@@ -37,6 +39,7 @@ where
     }
 }
 
+#[allow(dead_code)]
 pub struct SessionGuardMiddleware<S> {
     service: Rc<S>,
     ui_origin: String,

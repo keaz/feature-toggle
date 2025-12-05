@@ -162,7 +162,7 @@ impl ApprovalLogicImpl {
             .approval_repository
             .list_policies_for_team(team_id)
             .await?;
-        let mut applicable: Vec<ApprovalPolicy> = policies
+        let applicable: Vec<ApprovalPolicy> = policies
             .into_iter()
             .filter(|policy| {
                 policy_applies(

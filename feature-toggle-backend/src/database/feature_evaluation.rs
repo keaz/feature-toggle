@@ -1,14 +1,18 @@
+#![allow(deprecated)]
+
 use serde::{Deserialize, Serialize};
 use sqlx::types::chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 #[derive(sqlx::FromRow, Debug, Clone, Serialize, Deserialize)]
+#[allow(deprecated)]
 pub struct FeatureEvaluationRow {
     pub id: Uuid,
     pub feature_key: String,
     pub environment_id: String,
     pub client_id: Uuid,
     pub evaluated_at: DateTime<Utc>,
+    #[allow(deprecated)]
     #[deprecated(
         note = "Use evaluation_success for success tracking and evaluation_value for the actual value"
     )]
@@ -26,11 +30,13 @@ pub struct FeatureEvaluationRow {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(deprecated)]
 pub struct CreateFeatureEvaluation {
     pub feature_key: String,
     pub environment_id: String,
     pub client_id: Uuid,
     pub evaluated_at: DateTime<Utc>,
+    #[allow(deprecated)]
     #[deprecated(
         note = "Use evaluation_success for success tracking and evaluation_value for the actual value"
     )]
@@ -196,6 +202,7 @@ impl PgFeatureEvaluationRepository {
 
     /// Insert a single batch of evaluations (max 1000 items)
     /// Private helper method for bulk_create_evaluations
+    #[allow(deprecated)]
     async fn insert_evaluation_batch(
         &self,
         evaluations: &[CreateFeatureEvaluation],
@@ -263,6 +270,7 @@ impl PgFeatureEvaluationRepository {
 
 #[async_trait::async_trait]
 impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
+    #[allow(deprecated)]
     async fn create_evaluation(
         &self,
         evaluation: CreateFeatureEvaluation,

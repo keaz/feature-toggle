@@ -301,8 +301,8 @@ impl FeatureEvaluationSvc {
     async fn map_db_feature_to_engine(&self, f: db::Feature) -> Result<engine::Feature, Status> {
         let repo = &self.feature_repo;
         let db::Feature {
-            kill_switch_enabled,
-            rollback_scheduled_at,
+            kill_switch_enabled: _kill_switch_enabled,
+            rollback_scheduled_at: _rollback_scheduled_at,
             ..
         } = f;
 
