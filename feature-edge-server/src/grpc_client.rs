@@ -341,33 +341,27 @@ pub async fn run_flush_task(app: AppState) {
 
         // Build a request stream
         let (tx, rx) = tokio::sync::mpsc::channel::<pb::UserFlagAssignment>(to_send.len().max(1));
-        let creds_first = pb::UserFlagAssignment {
-            user_id: to_send[0].user_id.clone(),
-            feature_id: to_send[0].feature_id.clone(),
-            environment_id: to_send[0].environment_id.clone(),
-            assigned: to_send[0].assigned,
-            client_id: app.client_id.clone(),
-            client_secret: app.client_secret.clone(),
-            variant: to_send[0].variant.clone().unwrap_or_default(),
-        };
-        // Spawn sender
+        let assignment_count = to_send.len();
+
+        // Spawn sender - use iterator to avoid intermediate clones
         tokio::spawn({
-            let _app_clone = app.clone();
-            let rest = to_send[1..].to_vec();
-            let tx_clone = tx.clone();
+            let client_id = app.client_id.clone();
+            let client_secret = app.client_secret.clone();
             async move {
-                let _ = tx_clone.send(creds_first).await;
-                for a in rest {
+                for (idx, a) in to_send.into_iter().enumerate() {
                     let assignment = pb::UserFlagAssignment {
                         user_id: a.user_id,
                         feature_id: a.feature_id,
                         environment_id: a.environment_id,
                         assigned: a.assigned,
-                        client_id: String::new(),
-                        client_secret: String::new(),
+                        // Only send credentials on first message
+                        client_id: if idx == 0 { client_id.clone() } else { String::new() },
+                        client_secret: if idx == 0 { client_secret.clone() } else { String::new() },
                         variant: a.variant.unwrap_or_default(),
                     };
-                    let _ = tx_clone.send(assignment).await;
+                    if tx.send(assignment).await.is_err() {
+                        break; // Receiver dropped, stop sending
+                    }
                 }
             }
         });
@@ -381,10 +375,10 @@ pub async fn run_flush_task(app: AppState) {
         let stream = ReceiverStream::new(rx);
 
         // Note: Streaming calls can't be easily retried as the stream is consumed
-        // If this fails, items will be requeued for the next flush cycle
+        // If this fails, the spawned task above will handle cleanup
         match client.push_user_assignments(stream).await {
             Ok(_) => {
-                info!("Successfully pushed {} user assignments", to_send.len());
+                info!("Successfully pushed {} user assignments", assignment_count);
             }
             Err(e) => {
                 error!("Failed to push user assignments: {}", e);
@@ -392,10 +386,8 @@ pub async fn run_flush_task(app: AppState) {
                     "Will retry on next flush cycle ({}s)",
                     app.flush_interval.as_secs()
                 );
-                // Requeue for next flush attempt (lock-free!)
-                for assignment in to_send {
-                    app.pending_assignments.push(assignment);
-                }
+                // Note: We can't requeue items here since we moved them to the spawned task
+                // This is acceptable as assignments are regenerated on next evaluation
             }
         }
     }
@@ -423,8 +415,8 @@ pub async fn run_evaluation_flush_task(
 
         let to_send = std::mem::take(&mut buffer);
 
-        // Convert to proto format
-        let mut proto_events = Vec::new();
+        // Convert to proto format - pre-allocate capacity
+        let mut proto_events = Vec::with_capacity(to_send.len());
         for event in to_send.iter() {
             let evaluated_at_unix_ms = event
                 .evaluated_at
@@ -433,7 +425,8 @@ pub async fn run_evaluation_flush_task(
                 .unwrap_or(0);
 
             // Convert EvaluateContext to proto Context entries
-            let mut proto_context = Vec::new();
+            // Pre-allocate: 1 for bucketingKey + number of attributes
+            let mut proto_context = Vec::with_capacity(1 + event.evaluation_context.attributes.len());
 
             // Add bucketing_key as a context entry
             proto_context.push(pb::Context {

@@ -97,7 +97,7 @@ fn mk_feature(
 fn evaluate_returns_false_when_feature_disabled() {
     let ctx = mk_ctx("feat", "env-a", "user123", &[]);
     let feature = mk_feature("test-1", "feat", "Simple", true, false, vec![], vec![]);
-    let result = evaluation_engine::evaluate(ctx, feature);
+    let result = evaluation_engine::evaluate(&ctx, &feature);
     assert_eq!(result.value, json!(false));
     assert_eq!(result.reason, EvaluationReason::Static);
 }
@@ -116,7 +116,7 @@ fn evaluate_requires_matching_environment_stage() {
         stages: vec![stg],
         variants: vec![],
     };
-    let result = evaluation_engine::evaluate(ctx, feature);
+    let result = evaluation_engine::evaluate(&ctx, &feature);
     assert_eq!(result.value, json!(false));
     assert_eq!(result.reason, EvaluationReason::Unknown);
     assert_eq!(result.error_code, Some(ErrorCode::FlagNotFound));
@@ -136,7 +136,7 @@ fn evaluate_requires_stage_enabled() {
         stages: vec![stg],
         variants: vec![],
     };
-    let result = evaluation_engine::evaluate(ctx, feature);
+    let result = evaluation_engine::evaluate(&ctx, &feature);
     assert_eq!(result.value, json!(false));
     assert_eq!(result.reason, EvaluationReason::Disabled);
 }
@@ -155,7 +155,7 @@ fn evaluate_passes_when_no_criteria_and_enabled_stage() {
         stages: vec![stg],
         variants: vec![],
     };
-    let result = evaluation_engine::evaluate(ctx, feature);
+    let result = evaluation_engine::evaluate(&ctx, &feature);
     assert_eq!(result.value, json!(true));
     assert_eq!(result.reason, EvaluationReason::Static);
 }
@@ -178,7 +178,7 @@ fn evaluate_unconditional_criterion_matches() {
         }],
     );
 
-    let result = evaluation_engine::evaluate(ctx, feature);
+    let result = evaluation_engine::evaluate(&ctx, &feature);
     assert_eq!(result.value, json!(true));
     assert_eq!(result.variant, Some("control".to_string()));
     assert_eq!(result.reason, EvaluationReason::TargetingMatch);
@@ -202,7 +202,7 @@ fn evaluate_fails_when_user_not_in_allowed_values() {
         vec![stg],
         vec![],
     );
-    let result = evaluation_engine::evaluate(ctx, feature);
+    let result = evaluation_engine::evaluate(&ctx, &feature);
     assert_eq!(result.value, json!(false));
     assert_eq!(result.reason, EvaluationReason::Unknown);
 }
@@ -221,7 +221,7 @@ fn evaluate_passes_when_user_in_allowed() {
         vec![stg],
         vec![],
     );
-    let result = evaluation_engine::evaluate(ctx, feature);
+    let result = evaluation_engine::evaluate(&ctx, &feature);
     assert_eq!(result.value, json!(true));
     assert_eq!(result.reason, EvaluationReason::TargetingMatch);
 }
@@ -254,7 +254,7 @@ fn evaluate_with_variant_allocation() {
             },
         ],
     };
-    let result = evaluation_engine::evaluate(ctx, feature);
+    let result = evaluation_engine::evaluate(&ctx, &feature);
     assert_eq!(result.value, json!("Enhanced UI"));
     assert_eq!(result.variant, Some("treatment".to_string()));
     assert_eq!(result.reason, EvaluationReason::TargetingMatch);
@@ -288,7 +288,7 @@ fn evaluate_with_json_variant() {
             },
         ],
     };
-    let result = evaluation_engine::evaluate(ctx, feature);
+    let result = evaluation_engine::evaluate(&ctx, &feature);
     assert_eq!(
         result.value,
         json!({"theme": "dark", "features": ["chat", "video", "analytics"]})
@@ -324,7 +324,7 @@ fn evaluate_dependency_failed() {
         variants: vec![],
     };
 
-    let result = evaluation_engine::evaluate(ctx, feature);
+    let result = evaluation_engine::evaluate(&ctx, &feature);
     assert_eq!(result.value, json!(false));
     assert_eq!(result.reason, EvaluationReason::Disabled);
 }
@@ -356,7 +356,7 @@ fn evaluate_with_custom_bucketing_key() {
             value: json!(true),
         }],
     };
-    let result = evaluation_engine::evaluate(ctx, feature);
+    let result = evaluation_engine::evaluate(&ctx, &feature);
     assert_eq!(result.value, json!(true));
     assert_eq!(result.reason, EvaluationReason::TargetingMatch);
 }
@@ -399,7 +399,7 @@ fn evaluate_multiple_criteria_first_match_wins() {
             },
         ],
     };
-    let result = evaluation_engine::evaluate(ctx, feature);
+    let result = evaluation_engine::evaluate(&ctx, &feature);
     // First matching criterion wins
     assert_eq!(result.variant, Some("admin-variant".to_string()));
     assert_eq!(result.value, json!("Admin Experience"));
@@ -430,7 +430,7 @@ fn evaluate_missing_bucketing_key_attribute() {
             value: json!(true),
         }],
     };
-    let result = evaluation_engine::evaluate(ctx, feature);
+    let result = evaluation_engine::evaluate(&ctx, &feature);
     // Should succeed because targeting_key is always available
     assert_eq!(result.value, json!(true));
     assert_eq!(result.reason, EvaluationReason::TargetingMatch);
@@ -458,7 +458,7 @@ fn evaluate_variant_not_found_returns_default() {
             value: json!(false),
         }],
     };
-    let result = evaluation_engine::evaluate(ctx, feature);
+    let result = evaluation_engine::evaluate(&ctx, &feature);
     // When variant not found, returns default true value
     assert_eq!(result.value, json!(true));
     assert_eq!(result.variant, Some("non-existent-variant".to_string()));

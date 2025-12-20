@@ -417,7 +417,7 @@ fn passes_stage_criteria(
         });
     let user_bucket = if needs_bucket {
         // Always use targeting_key from evaluation context (OpenFeature standard)
-        let sticky_val = ec.context.targeting_key.clone();
+        let sticky_val = &ec.context.targeting_key;
 
         if sticky_val.is_empty() {
             return CriteriaEvaluationResult {
@@ -493,8 +493,8 @@ fn get_variant_value(feature: &Feature, variant_control: Option<String>) -> Json
 }
 
 pub fn evaluate(
-    evaluation_context: FeatureEvaluationContext,
-    feature: Feature,
+    evaluation_context: &FeatureEvaluationContext,
+    feature: &Feature,
 ) -> EvaluationResult {
     // Evaluation walkthrough:
     // 1) Kill switch: if the feature is disabled, short-circuit to false.
@@ -518,8 +518,8 @@ pub fn evaluate(
     }
 
     // All dependencies must evaluate to true
-    for dependency in feature.dependencies.clone() {
-        let dep_result = evaluate(evaluation_context.clone(), dependency);
+    for dependency in &feature.dependencies {
+        let dep_result = evaluate(evaluation_context, dependency);
         if !dep_result.value.as_bool().unwrap_or(false) {
             return EvaluationResult {
                 flag_key,
@@ -650,7 +650,7 @@ mod tests {
             ],
         };
 
-        let result = evaluate(context, feature);
+        let result = evaluate(&context, &feature);
         assert_eq!(result.variant, Some("treatment".to_string()));
         assert_eq!(result.value, json!("Enhanced UI"));
         assert_eq!(result.reason, EvaluationReason::TargetingMatch);
@@ -679,7 +679,7 @@ mod tests {
             variants: vec![],
         };
 
-        let result = evaluate(context, feature);
+        let result = evaluate(&context, &feature);
         assert_eq!(result.value, json!(false));
         assert_eq!(result.reason, EvaluationReason::Static);
     }
@@ -1022,7 +1022,7 @@ mod tests {
             ],
         };
 
-        let result = evaluate(context, feature);
+        let result = evaluate(&context, &feature);
         assert_eq!(result.variant, Some("adult-content".to_string()));
         assert_eq!(result.value, json!("Access granted"));
         assert_eq!(result.reason, EvaluationReason::TargetingMatch);
@@ -1082,7 +1082,7 @@ mod tests {
             ],
         };
 
-        let result = evaluate(context, feature);
+        let result = evaluate(&context, &feature);
         assert_eq!(result.variant, Some("corporate-variant".to_string()));
         assert_eq!(result.value, json!("Corporate feature enabled"));
         assert_eq!(result.reason, EvaluationReason::TargetingMatch);
@@ -1455,7 +1455,7 @@ mod tests {
             }],
         };
 
-        let result = evaluate(context, feature);
+        let result = evaluate(&context, &feature);
         assert_eq!(result.variant, Some("premium-variant".to_string()));
         assert_eq!(result.value, json!("Premium features unlocked"));
         assert_eq!(result.reason, EvaluationReason::TargetingMatch);
@@ -1725,7 +1725,7 @@ mod tests {
             ],
         };
 
-        let result = evaluate(context, feature);
+        let result = evaluate(&context, &feature);
 
         // The result should be one of the three variants (deterministic based on bucketing_key)
         assert!(result.variant.is_some());
@@ -1792,7 +1792,7 @@ mod tests {
             ],
         };
 
-        let result = evaluate(context, feature);
+        let result = evaluate(&context, &feature);
 
         // Should get a variant (deterministic)
         assert!(result.variant.is_some());

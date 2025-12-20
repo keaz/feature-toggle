@@ -263,15 +263,15 @@ pub fn map_http_context_to_engine(
 }
 
 /// Resolve client credentials from request or app defaults
-fn resolve_credentials(app: &AppState, req: &EvaluateHttpRequest) -> (String, String) {
+fn resolve_credentials<'a>(app: &'a AppState, req: &'a EvaluateHttpRequest) -> (&'a str, &'a str) {
     let client_id = req
         .client_id
-        .clone()
-        .unwrap_or_else(|| app.client_id.clone());
+        .as_deref()
+        .unwrap_or(&app.client_id);
     let client_secret = req
         .client_secret
-        .clone()
-        .unwrap_or_else(|| app.client_secret.clone());
+        .as_deref()
+        .unwrap_or(&app.client_secret);
     (client_id, client_secret)
 }
 
@@ -462,12 +462,12 @@ pub async fn evaluate_handler(
             )
         } else {
             let ec = map_http_context_to_engine(feature_key.clone(), req.context.clone());
-            let result = engine::evaluate(ec, (*feature).clone());
+            let result = engine::evaluate(&ec, &feature);
             (result, false)
         }
     } else {
         let ec = map_http_context_to_engine(feature_key.clone(), req.context.clone());
-        let result = engine::evaluate(ec, (*feature).clone());
+        let result = engine::evaluate(&ec, &feature);
         (result, false)
     };
 
@@ -531,11 +531,17 @@ pub async fn evaluate_handler(
         }
     }
 
-    // Convert evaluation reason to string
-    let reason = format!("{:?}", result.reason).to_uppercase();
-    let error_code = result
-        .error_code
-        .map(|ec| format!("{:?}", ec).to_uppercase());
+    // Convert evaluation reason to string (using serde serialization which is more efficient)
+    let reason = serde_json::to_string(&result.reason)
+        .unwrap_or_else(|_| "UNKNOWN".to_string())
+        .trim_matches('"')
+        .to_string();
+    let error_code = result.error_code.map(|ec| {
+        serde_json::to_string(&ec)
+            .unwrap_or_else(|_| "GENERAL".to_string())
+            .trim_matches('"')
+            .to_string()
+    });
 
     // Convert metadata HashMap to JSON Value
     let metadata = result
@@ -695,7 +701,8 @@ pub async fn ofrep_evaluate_flag(
     let environment_id = req.context.attributes
         .get("environment_id")
         .and_then(|v| v.as_str())
-        .unwrap_or("default");
+        .unwrap_or("default")
+        .to_string();
 
     let stage_enabled = feature
         .stages
@@ -718,8 +725,8 @@ pub async fn ofrep_evaluate_flag(
     let user_id = req.context.targeting_key.clone();
 
     // Check cache for sticky assignment
-    let (mut result, _prior_assignment) = {
-        let cache_key = assignment_key(&user_id, &feature.id, environment_id);
+    let (mut result, prior_assignment) = {
+        let cache_key = assignment_key(&user_id, &feature.id, &environment_id);
         let cached = app
             .assigned_cache
             .get(&cache_key)
@@ -741,7 +748,7 @@ pub async fn ofrep_evaluate_flag(
         } else {
             // Perform fresh evaluation
             let ec = map_ofrep_context_to_engine(feature_key.clone(), req.context.clone());
-            let result = engine::evaluate(ec, (*feature).clone());
+            let result = engine::evaluate(&ec, &feature);
             (result, false)
         }
     };
@@ -753,10 +760,34 @@ pub async fn ofrep_evaluate_flag(
         result.variant = None;
     }
 
+    // Record evaluation event for analytics/observability
+    let evaluation_result = result.variant.is_some() || result.value.as_bool().unwrap_or(false);
+    let evaluation_context = EvaluateContext {
+        bucketing_key: user_id.clone(),
+        environment_id: environment_id.clone(),
+        attributes: req.context.attributes.clone(),
+    };
+    let evaluation_event = EvaluationEvent {
+        feature_key: feature.key.clone(),
+        environment_id: environment_id.clone(),
+        evaluation_result,
+        evaluation_context,
+        user_context: Some(user_id.clone()),
+        evaluated_at: std::time::SystemTime::now(),
+        prior_assignment,
+        variant: result.variant.clone(),
+        variant_value: if result.variant.is_some() {
+            Some(result.value.clone())
+        } else {
+            None
+        },
+    };
+    let _ = app.evaluation_event_tx.send(evaluation_event);
+
     // Cache successful assignments
     let should_cache = result.variant.is_some() || result.value.as_bool().unwrap_or(false);
     if should_cache {
-        let cache_key = assignment_key(&user_id, &feature.id, environment_id);
+        let cache_key = assignment_key(&user_id, &feature.id, &environment_id);
         app.assigned_cache.insert(
             cache_key,
             crate::CachedAssignment {
@@ -776,8 +807,11 @@ pub async fn ofrep_evaluate_flag(
         });
     }
 
-    // Convert reason to SCREAMING_SNAKE_CASE string
-    let reason = format!("{:?}", result.reason).to_uppercase();
+    // Convert reason to SCREAMING_SNAKE_CASE string (using serde serialization)
+    let reason = serde_json::to_string(&result.reason)
+        .unwrap_or_else(|_| "UNKNOWN".to_string())
+        .trim_matches('"')
+        .to_string();
 
     // OFREP response: no "key" field for single evaluation success
     Ok(HttpResponse::Ok().json(OFREPSuccessResponse {

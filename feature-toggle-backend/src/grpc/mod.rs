@@ -659,7 +659,7 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
             },
         };
 
-        let result = engine::evaluate(ec, eng_feature);
+        let result = engine::evaluate(&ec, &eng_feature);
 
         // For backward compatibility, return just the boolean value
         let enabled = result.value.as_bool().unwrap_or(false);

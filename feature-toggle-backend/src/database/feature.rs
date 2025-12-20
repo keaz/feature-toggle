@@ -1,5 +1,5 @@
 use crate::database::entity::{Feature, FeatureDependency, FeaturePipelineStage, FeatureType};
-use crate::database::{Error, handle_error};
+use crate::database::{handle_error, Error};
 use chrono::{DateTime, Utc};
 use mockall::automock;
 use serde::{Deserialize, Serialize};
@@ -2449,7 +2449,7 @@ mod tests {
 
         let features = result.unwrap();
         // Note: might not be empty if other tests left data, but should not error
-        assert!(features.len() >= 0, "Should return a valid list");
+        assert!(!features.is_empty(), "Should return a valid list");
     }
 
     #[tokio::test]
