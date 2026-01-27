@@ -26,17 +26,22 @@ impl ActorContext {
 pub mod approval;
 pub mod authorization;
 pub mod client;
+pub mod client_tx;
 pub mod context;
 pub mod environment;
+pub mod environment_tx;
 pub mod feature;
 pub mod feature_evaluation;
+pub mod feature_tx;
 pub mod jwt_secret;
 pub mod jwt_token;
 pub mod metrics;
 pub mod pipeline;
+pub mod pipeline_tx;
 pub mod role;
 pub mod stage_builder;
 pub mod team;
+pub mod team_tx;
 pub mod user;
 pub mod user_flag;
 

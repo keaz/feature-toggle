@@ -1,5 +1,5 @@
 use crate::database::entity::{Feature, FeatureDependency, FeaturePipelineStage, FeatureType};
-use crate::database::{handle_error, Error};
+use crate::database::{Error, handle_error};
 use chrono::{DateTime, Utc};
 use mockall::automock;
 use serde::{Deserialize, Serialize};
@@ -318,8 +318,30 @@ impl Clone for Box<dyn FeatureRepository> {
     }
 }
 
+/// Extension trait for transaction-aware repository operations.
+/// These methods accept a mutable connection reference for use within transactions.
+#[async_trait::async_trait]
+pub trait FeatureRepositoryTx: FeatureRepository {
+    async fn create_feature_tx(
+        &self,
+        conn: &mut PgConnection,
+        input: CreateFeature,
+    ) -> Result<Uuid, Error>;
+    async fn update_feature_tx(
+        &self,
+        conn: &mut PgConnection,
+        input: UpdateFeature,
+    ) -> Result<Feature, Error>;
+    async fn delete_feature_tx(&self, conn: &mut PgConnection, id: Uuid) -> Result<(), Error>;
+}
+
 pub fn feature_repository(pool: PgPool) -> Box<dyn FeatureRepository> {
     Box::new(FeatureRepositoryImpl::new(pool))
+}
+
+/// Returns a repository that also implements FeatureRepositoryTx for transaction support.
+pub fn feature_repository_tx(pool: PgPool) -> FeatureRepositoryImpl {
+    FeatureRepositoryImpl::new(pool)
 }
 
 #[derive(Clone)]
@@ -969,7 +991,9 @@ impl FeatureRepository for FeatureRepositoryImpl {
                 .collect();
 
             let variant_selection_mode = match r.variant_selection_mode.to_uppercase().as_str() {
-                "SPECIFIC_VARIANT" => crate::database::entity::VariantSelectionMode::SpecificVariant,
+                "SPECIFIC_VARIANT" => {
+                    crate::database::entity::VariantSelectionMode::SpecificVariant
+                }
                 _ => crate::database::entity::VariantSelectionMode::WeightedSplit,
             };
 
@@ -1021,8 +1045,12 @@ impl FeatureRepository for FeatureRepositoryImpl {
             let modes: Vec<String> = criteria
                 .iter()
                 .map(|c| match c.variant_selection_mode {
-                    crate::database::entity::VariantSelectionMode::WeightedSplit => "WEIGHTED_SPLIT".to_string(),
-                    crate::database::entity::VariantSelectionMode::SpecificVariant => "SPECIFIC_VARIANT".to_string(),
+                    crate::database::entity::VariantSelectionMode::WeightedSplit => {
+                        "WEIGHTED_SPLIT".to_string()
+                    }
+                    crate::database::entity::VariantSelectionMode::SpecificVariant => {
+                        "SPECIFIC_VARIANT".to_string()
+                    }
                 })
                 .collect();
             let selected_variants: Vec<Option<String>> = criteria
@@ -2183,6 +2211,150 @@ impl FeatureRepository for FeatureRepositoryImpl {
 
     fn clone_box(&self) -> Box<dyn FeatureRepository> {
         Box::new(self.clone())
+    }
+}
+
+#[async_trait::async_trait]
+impl FeatureRepositoryTx for FeatureRepositoryImpl {
+    async fn create_feature_tx(
+        &self,
+        conn: &mut PgConnection,
+        input: CreateFeature,
+    ) -> Result<Uuid, Error> {
+        // Check if feature with same key exists in team
+        let existing = sqlx::query_scalar!(
+            r#"SELECT EXISTS(SELECT 1 FROM features WHERE key = $1 AND team_id = $2) AS exists"#,
+            input.key,
+            input.team_id
+        )
+        .fetch_one(&mut *conn)
+        .await;
+        let exists: Option<bool> = handle_error(None, existing)?;
+        if exists.unwrap_or_default() {
+            return Err(Error::RecordAlreadyExists(
+                "Feature with same key in team".into(),
+            ));
+        }
+
+        let id = Uuid::new_v4();
+        let feature_type_str = match input.feature_type {
+            FeatureType::Simple => "Simple",
+            FeatureType::Contextual => "Contextual",
+        };
+
+        // Insert feature
+        let result = sqlx::query!(
+            r#"INSERT INTO features (id, key, description, feature_type, team_id)
+               VALUES ($1, $2, $3, $4, $5)"#,
+            id,
+            input.key,
+            input.description,
+            feature_type_str,
+            input.team_id
+        )
+        .execute(&mut *conn)
+        .await;
+        handle_error(None, result)?;
+
+        // Create stages - inline the logic for transaction context
+        for stage in input.stages {
+            let stage_id = stage.id;
+            let parent_id = stage.parent_stage.as_ref().map(|p| p.id);
+            sqlx::query!(
+                r#"INSERT INTO features_pipeline_stages (id, feature_id, environment_id, parent_stage_id, order_index, position, status)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+                stage_id,
+                id,
+                stage.environment_id,
+                parent_id,
+                stage.order_index,
+                stage.position,
+                "NOT_DEPLOYED"
+            )
+            .execute(&mut *conn)
+            .await
+            .map_err(Error::DatabaseError)?;
+        }
+
+        // Create dependencies
+        for dep_id in input.dependencies {
+            sqlx::query!(
+                r#"INSERT INTO feature_dependencies (feature_id, depends_on_id) VALUES ($1, $2)"#,
+                id,
+                dep_id
+            )
+            .execute(&mut *conn)
+            .await
+            .map_err(Error::DatabaseError)?;
+        }
+
+        // Create variants if provided
+        if let Some(variants) = input.variants {
+            for (control, value, value_type, description) in variants {
+                sqlx::query!(
+                    r#"INSERT INTO feature_variants (feature_id, control, value, value_type, description)
+                       VALUES ($1, $2, $3, $4, $5)"#,
+                    id,
+                    control,
+                    value,
+                    value_type as crate::database::entity::VariantValueType,
+                    description
+                )
+                .execute(&mut *conn)
+                .await
+                .map_err(Error::DatabaseError)?;
+            }
+        }
+
+        Ok(id)
+    }
+
+    async fn update_feature_tx(
+        &self,
+        conn: &mut PgConnection,
+        input: UpdateFeature,
+    ) -> Result<Feature, Error> {
+        let existing_feature = self.get_feature_by_id(input.id).await?;
+
+        let feature_type_str = match input
+            .feature_type
+            .clone()
+            .unwrap_or(existing_feature.feature_type.clone())
+        {
+            FeatureType::Simple => "Simple",
+            FeatureType::Contextual => "Contextual",
+        };
+
+        let key = input.key.clone().unwrap_or(existing_feature.key.clone());
+        let description = input
+            .description
+            .clone()
+            .or(existing_feature.description.clone());
+
+        sqlx::query!(
+            r#"UPDATE features SET key = $1, description = $2, feature_type = $3 WHERE id = $4"#,
+            key,
+            description,
+            feature_type_str,
+            input.id
+        )
+        .execute(&mut *conn)
+        .await
+        .map_err(Error::DatabaseError)?;
+
+        // Return updated feature
+        self.get_feature_by_id(input.id).await
+    }
+
+    async fn delete_feature_tx(&self, conn: &mut PgConnection, id: Uuid) -> Result<(), Error> {
+        // Ensure feature exists
+        self.get_feature_by_id(id).await?;
+
+        let result = sqlx::query!("DELETE FROM features WHERE id = $1", id)
+            .execute(&mut *conn)
+            .await;
+        let _ = handle_error(Some(id), result)?;
+        Ok(())
     }
 }
 

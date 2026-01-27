@@ -1,7 +1,7 @@
 use crate::database::entity::Environment;
 use crate::database::{Error, handle_error};
 use mockall::automock;
-use sqlx::{PgPool, Postgres, QueryBuilder};
+use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
 pub struct CreateEnvironment {
@@ -55,12 +55,36 @@ impl Clone for Box<dyn EnvironmentRepository> {
     }
 }
 
+/// Extension trait for transaction-aware repository operations.
+/// These methods accept a mutable connection reference for use within transactions.
+#[async_trait::async_trait]
+pub trait EnvironmentRepositoryTx: EnvironmentRepository {
+    async fn create_environment_tx(
+        &self,
+        conn: &mut PgConnection,
+        team_id: Uuid,
+        input: CreateEnvironment,
+    ) -> Result<Environment, Error>;
+    async fn update_environment_tx(
+        &self,
+        conn: &mut PgConnection,
+        id: Uuid,
+        input: UpdateEnvironment,
+    ) -> Result<Environment, Error>;
+    async fn delete_environment_tx(&self, conn: &mut PgConnection, id: Uuid) -> Result<(), Error>;
+}
+
 pub fn environment_repository(pool: PgPool) -> Box<dyn EnvironmentRepository> {
     Box::new(EnvironmentRepositoryImpl::new(pool))
 }
 
+/// Returns a repository that also implements EnvironmentRepositoryTx for transaction support.
+pub fn environment_repository_tx(pool: PgPool) -> EnvironmentRepositoryImpl {
+    EnvironmentRepositoryImpl::new(pool)
+}
+
 #[derive(Clone)]
-struct EnvironmentRepositoryImpl {
+pub struct EnvironmentRepositoryImpl {
     pool: PgPool,
 }
 
@@ -243,6 +267,89 @@ impl EnvironmentRepository for EnvironmentRepositoryImpl {
 
     fn clone_box(&self) -> Box<dyn EnvironmentRepository> {
         Box::new(self.clone())
+    }
+}
+
+#[async_trait::async_trait]
+impl EnvironmentRepositoryTx for EnvironmentRepositoryImpl {
+    async fn create_environment_tx(
+        &self,
+        conn: &mut PgConnection,
+        team_id: Uuid,
+        input: CreateEnvironment,
+    ) -> Result<Environment, Error> {
+        // Check for existing environment (uses pool for read)
+        let existing_result = self
+            .get_environments(team_id, Some(input.name.clone()), None)
+            .await;
+        if let Ok(existing_environments) = existing_result {
+            if !existing_environments.is_empty() {
+                return Err(Error::RecordAlreadyExists(format!(
+                    "Environment with name '{}' already exists for team {}",
+                    input.name, team_id
+                )));
+            }
+        }
+
+        let id = Uuid::new_v4();
+        let environment_type = input
+            .environment_type
+            .unwrap_or_else(|| "Development".to_string());
+        let result = sqlx::query!(
+            r#"INSERT INTO environments (id, name, active, team_id, environment_type) VALUES ($1, $2, $3, $4, $5) RETURNING id,name,active, team_id, environment_type"#,
+            id,
+            input.name,
+            input.active,
+            team_id,
+            environment_type
+        )
+        .fetch_one(&mut *conn)
+        .await;
+
+        let handled_error = handle_error(None, result)?;
+        Ok(Environment {
+            id: handled_error.id,
+            name: handled_error.name,
+            active: handled_error.active,
+            team_id: handled_error.team_id,
+            environment_type: handled_error.environment_type,
+        })
+    }
+
+    async fn update_environment_tx(
+        &self,
+        conn: &mut PgConnection,
+        id: Uuid,
+        input: UpdateEnvironment,
+    ) -> Result<Environment, Error> {
+        let existing_env = self.get_environment_by_id(id).await?;
+        let result = sqlx::query!(
+            r#"UPDATE environments SET name = $1, active = $2, environment_type = $3 WHERE id = $4 RETURNING id, name, active, team_id, environment_type"#,
+            input.name.unwrap_or(existing_env.name),
+            input.active.unwrap_or(existing_env.active),
+            input.environment_type.unwrap_or(existing_env.environment_type),
+            id
+        )
+        .fetch_one(&mut *conn)
+        .await;
+
+        let environment = handle_error(Some(id), result)?;
+        Ok(Environment {
+            id: environment.id,
+            name: environment.name,
+            active: environment.active,
+            team_id: environment.team_id,
+            environment_type: environment.environment_type,
+        })
+    }
+
+    async fn delete_environment_tx(&self, conn: &mut PgConnection, id: Uuid) -> Result<(), Error> {
+        self.get_environment_by_id(id).await?;
+        let result = sqlx::query!("DELETE FROM environments WHERE id = $1", id)
+            .execute(&mut *conn)
+            .await;
+        let _ = handle_error(Some(id), result)?;
+        Ok(())
     }
 }
 

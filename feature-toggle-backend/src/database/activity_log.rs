@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use sqlx::PgConnection;
 use sqlx::types::chrono::{DateTime, Utc};
 use uuid::Uuid;
 
@@ -67,6 +68,13 @@ pub trait ActivityLogRepository: Send + Sync {
     /// Get count of activities matching the filter
     async fn get_activity_count(&self, filter: ActivityLogFilter) -> Result<i64, sqlx::Error>;
 
+    /// Create a new activity log entry within an existing transaction
+    async fn create_activity_tx(
+        &self,
+        conn: &mut PgConnection,
+        activity: CreateActivityLog,
+    ) -> Result<ActivityLogRow, sqlx::Error>;
+
     fn clone_box(&self) -> Box<dyn ActivityLogRepository>;
 }
 
@@ -79,12 +87,9 @@ impl PgActivityLogRepository {
     pub fn new(pool: sqlx::PgPool) -> Self {
         Self { pool }
     }
-}
 
-#[async_trait::async_trait]
-impl ActivityLogRepository for PgActivityLogRepository {
-    async fn create_activity(
-        &self,
+    async fn create_activity_internal(
+        conn: &mut PgConnection,
         activity: CreateActivityLog,
     ) -> Result<ActivityLogRow, sqlx::Error> {
         let row = sqlx::query_as::<_, ActivityLogRow>(
@@ -97,17 +102,36 @@ impl ActivityLogRepository for PgActivityLogRepository {
             RETURNING *
             "#,
         )
-        .bind(activity.activity_type)
-        .bind(activity.entity_type)
-        .bind(activity.entity_id)
+        .bind(&activity.activity_type)
+        .bind(&activity.entity_type)
+        .bind(&activity.entity_id)
         .bind(activity.actor_id)
-        .bind(activity.actor_name)
-        .bind(activity.description)
-        .bind(activity.metadata)
-        .fetch_one(&self.pool)
+        .bind(&activity.actor_name)
+        .bind(&activity.description)
+        .bind(&activity.metadata)
+        .fetch_one(&mut *conn)
         .await?;
 
         Ok(row)
+    }
+}
+
+#[async_trait::async_trait]
+impl ActivityLogRepository for PgActivityLogRepository {
+    async fn create_activity(
+        &self,
+        activity: CreateActivityLog,
+    ) -> Result<ActivityLogRow, sqlx::Error> {
+        let mut conn = self.pool.acquire().await?;
+        Self::create_activity_internal(&mut conn, activity).await
+    }
+
+    async fn create_activity_tx(
+        &self,
+        conn: &mut PgConnection,
+        activity: CreateActivityLog,
+    ) -> Result<ActivityLogRow, sqlx::Error> {
+        Self::create_activity_internal(conn, activity).await
     }
 
     async fn get_activities(

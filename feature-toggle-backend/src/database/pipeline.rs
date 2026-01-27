@@ -103,12 +103,34 @@ impl Clone for Box<dyn PipelineRepository> {
     }
 }
 
+/// Extension trait for transaction-aware repository operations.
+/// These methods accept a mutable connection reference for use within transactions.
+#[async_trait::async_trait]
+pub trait PipelineRepositoryTx: PipelineRepository {
+    async fn create_pipeline_tx(
+        &self,
+        conn: &mut PgConnection,
+        input: CreatePipeline,
+    ) -> Result<Uuid, Error>;
+    async fn update_pipeline_tx(
+        &self,
+        conn: &mut PgConnection,
+        input: UpdatePipeline,
+    ) -> Result<Pipeline, Error>;
+    async fn delete_pipeline_tx(&self, conn: &mut PgConnection, id: Uuid) -> Result<(), Error>;
+}
+
 pub fn pipeline_repository(pool: PgPool) -> Box<dyn PipelineRepository> {
     Box::new(PipelineRepositoryImpl::new(pool))
 }
 
+/// Returns a repository that also implements PipelineRepositoryTx for transaction support.
+pub fn pipeline_repository_tx(pool: PgPool) -> PipelineRepositoryImpl {
+    PipelineRepositoryImpl::new(pool)
+}
+
 #[derive(Clone)]
-struct PipelineRepositoryImpl {
+pub struct PipelineRepositoryImpl {
     pool: PgPool,
 }
 
@@ -498,5 +520,77 @@ impl PipelineRepository for PipelineRepositoryImpl {
 
     fn clone_box(&self) -> Box<dyn PipelineRepository> {
         Box::new(self.clone())
+    }
+}
+
+#[async_trait::async_trait]
+impl PipelineRepositoryTx for PipelineRepositoryImpl {
+    async fn create_pipeline_tx(
+        &self,
+        conn: &mut PgConnection,
+        input: CreatePipeline,
+    ) -> Result<Uuid, Error> {
+        // Check for existing pipeline
+        let existing_pipeline = self
+            .get_pipelines(input.team_id, Some(input.name.clone()), None)
+            .await;
+
+        if let Ok(existing_pipeline) = existing_pipeline {
+            if !existing_pipeline.is_empty() {
+                return Err(Error::RecordAlreadyExists(format!(
+                    "Pipeline with name '{}' already exists",
+                    input.name
+                )));
+            }
+        }
+
+        let id = Uuid::new_v4();
+        let result = sqlx::query!(
+            r#"INSERT INTO pipelines (id, name, active, team_id) VALUES ($1, $2, true, $3) RETURNING id"#,
+            id, input.name, input.team_id
+        )
+        .fetch_one(&mut *conn)
+        .await;
+
+        let saved_pipeline = handle_error(None, result)?;
+        self.create_stage(&id, input.stages, conn).await?;
+        Ok(saved_pipeline.id)
+    }
+
+    async fn update_pipeline_tx(
+        &self,
+        conn: &mut PgConnection,
+        input: UpdatePipeline,
+    ) -> Result<Pipeline, Error> {
+        let existing_env = self.get_pipeline_by_id(input.id).await?;
+        let result = sqlx::query!(
+            r#"UPDATE pipelines SET name = $1, active = $2 WHERE id = $3"#,
+            input.name.clone().unwrap_or(existing_env.name),
+            input.active.unwrap_or(existing_env.active),
+            input.id
+        )
+        .execute(&mut *conn)
+        .await;
+
+        handle_error(Some(input.id), result)?;
+
+        if !input.stages.is_empty() {
+            self.update_pipeline_stage(&input.id, input.stages, conn)
+                .await?;
+        }
+
+        self.get_pipeline_by_id(input.id).await
+    }
+
+    async fn delete_pipeline_tx(&self, conn: &mut PgConnection, id: Uuid) -> Result<(), Error> {
+        if self.is_pipeline_exists_id(id).await?.is_none() {
+            return Err(Error::NotFound(id));
+        }
+
+        let result = sqlx::query!("DELETE FROM pipelines WHERE id = $1", id)
+            .execute(&mut *conn)
+            .await;
+        let _ = handle_error(Some(id), result)?;
+        Ok(())
     }
 }

@@ -13,6 +13,7 @@ pub mod metrics;
 pub mod pipeline;
 pub mod role;
 pub mod team;
+pub mod transaction;
 pub mod user;
 pub mod user_flag_assignment;
 pub mod variant_allocations;

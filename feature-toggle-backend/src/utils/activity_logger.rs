@@ -3,6 +3,7 @@
 /// This module provides convenient functions to log activities throughout the application.
 /// It defines common activity types and provides a simple API for creating activity log entries.
 use crate::database::activity_log::{ActivityLogRepository, CreateActivityLog};
+use sqlx::PgConnection;
 use uuid::Uuid;
 
 /// Common activity types in the system
@@ -96,6 +97,31 @@ pub async fn log_feature_activity(
     Ok(())
 }
 
+/// Log a feature activity within an existing transaction
+pub async fn log_feature_activity_tx(
+    repo: &Box<dyn ActivityLogRepository>,
+    conn: &mut PgConnection,
+    activity_type: &str,
+    feature_id: &str,
+    actor_id: Option<Uuid>,
+    actor_name: Option<String>,
+    description: String,
+    metadata: Option<serde_json::Value>,
+) -> Result<(), sqlx::Error> {
+    let activity = CreateActivityLog {
+        activity_type: activity_type.to_string(),
+        entity_type: entity_types::FEATURE.to_string(),
+        entity_id: feature_id.to_string(),
+        actor_id,
+        actor_name,
+        description,
+        metadata,
+    };
+
+    repo.create_activity_tx(conn, activity).await?;
+    Ok(())
+}
+
 /// Log a user activity
 pub async fn log_user_activity(
     repo: &Box<dyn ActivityLogRepository>,
@@ -141,6 +167,31 @@ pub async fn log_team_activity(
     };
 
     repo.create_activity(activity).await?;
+    Ok(())
+}
+
+/// Log a team activity within an existing transaction
+pub async fn log_team_activity_tx(
+    repo: &Box<dyn ActivityLogRepository>,
+    conn: &mut PgConnection,
+    activity_type: &str,
+    team_id: &str,
+    actor_id: Option<Uuid>,
+    actor_name: Option<String>,
+    description: String,
+    metadata: Option<serde_json::Value>,
+) -> Result<(), sqlx::Error> {
+    let activity = CreateActivityLog {
+        activity_type: activity_type.to_string(),
+        entity_type: entity_types::TEAM.to_string(),
+        entity_id: team_id.to_string(),
+        actor_id,
+        actor_name,
+        description,
+        metadata,
+    };
+
+    repo.create_activity_tx(conn, activity).await?;
     Ok(())
 }
 
