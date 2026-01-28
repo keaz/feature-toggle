@@ -59,6 +59,11 @@ pub mod activity_types {
     pub const ROLE_DELETED: &str = "role_deleted";
     pub const ROLE_ASSIGNED: &str = "role_assigned";
     pub const ROLE_REVOKED: &str = "role_revoked";
+
+    // Approval policy activities
+    pub const APPROVAL_POLICY_CREATED: &str = "approval_policy_created";
+    pub const APPROVAL_POLICY_UPDATED: &str = "approval_policy_updated";
+    pub const APPROVAL_POLICY_DELETED: &str = "approval_policy_deleted";
 }
 
 /// Common entity types in the system

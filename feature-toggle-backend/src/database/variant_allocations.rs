@@ -74,7 +74,7 @@ pub fn variant_allocations_repository(pool: PgPool) -> Box<dyn VariantAllocation
 }
 
 #[derive(Clone)]
-struct VariantAllocationsRepositoryImpl {
+pub struct VariantAllocationsRepositoryImpl {
     pool: PgPool,
 }
 
@@ -169,7 +169,7 @@ impl VariantAllocationsRepository for VariantAllocationsRepositoryImpl {
             VariantAllocation,
             r#"UPDATE variant_allocations
                SET weight = $1,
-                   updated_at = CURRENT_TIMESTAMP
+               updated_at = CURRENT_TIMESTAMP
                WHERE id = $2
                RETURNING id, criteria_id, variant_control, weight,
                          created_at as "created_at!", updated_at as "updated_at!""#,
@@ -266,6 +266,63 @@ impl VariantAllocationsRepository for VariantAllocationsRepositoryImpl {
 
     fn clone_box(&self) -> Box<dyn VariantAllocationsRepository> {
         Box::new(self.clone())
+    }
+}
+
+pub fn variant_allocations_repository_tx(pool: PgPool) -> VariantAllocationsRepositoryImpl {
+    VariantAllocationsRepositoryImpl::new(pool)
+}
+
+#[async_trait::async_trait]
+pub trait VariantAllocationsRepositoryTx: VariantAllocationsRepository {
+    async fn set_allocations_tx(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        criteria_id: Uuid,
+        allocations: Vec<CreateVariantAllocationInput>,
+    ) -> Result<Vec<VariantAllocation>, Error>;
+}
+
+#[async_trait::async_trait]
+impl VariantAllocationsRepositoryTx for VariantAllocationsRepositoryImpl {
+    async fn set_allocations_tx(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        criteria_id: Uuid,
+        allocations: Vec<CreateVariantAllocationInput>,
+    ) -> Result<Vec<VariantAllocation>, Error> {
+        // Delete all existing allocations for this criterion
+        let _ = sqlx::query!(
+            r#"DELETE FROM variant_allocations WHERE criteria_id = $1"#,
+            criteria_id
+        )
+        .execute(&mut *conn)
+        .await
+        .map_err(Error::DatabaseError)?;
+
+        // Insert new allocations
+        let mut result_allocations = Vec::new();
+        for alloc in allocations {
+            let allocation_id = Uuid::new_v4();
+            let allocation = sqlx::query_as!(
+                VariantAllocation,
+                r#"INSERT INTO variant_allocations (id, criteria_id, variant_control, weight)
+                   VALUES ($1, $2, $3, $4)
+                   RETURNING id, criteria_id, variant_control, weight,
+                             created_at as "created_at!", updated_at as "updated_at!""#,
+                allocation_id,
+                criteria_id,
+                alloc.variant_control,
+                alloc.weight
+            )
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(Error::DatabaseError)?;
+
+            result_allocations.push(allocation);
+        }
+
+        Ok(result_allocations)
     }
 }
 

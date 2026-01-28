@@ -51,8 +51,12 @@ pub fn context_repository(pool: PgPool) -> Box<dyn ContextRepository> {
     Box::new(ContextRepositoryImpl::new(pool))
 }
 
+pub fn context_repository_tx(pool: PgPool) -> ContextRepositoryImpl {
+    ContextRepositoryImpl::new(pool)
+}
+
 #[derive(Clone)]
-struct ContextRepositoryImpl {
+pub struct ContextRepositoryImpl {
     pool: PgPool,
 }
 
@@ -336,6 +340,192 @@ impl ContextRepository for ContextRepositoryImpl {
 
     fn clone_box(&self) -> Box<dyn ContextRepository> {
         Box::new(self.clone())
+    }
+}
+
+#[async_trait::async_trait]
+pub trait ContextRepositoryTx: Send + Sync {
+    async fn create_context_tx(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        team_id: Uuid,
+        input: CreateContextInput,
+    ) -> Result<Context, Error>;
+    async fn update_context_tx(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        id: Uuid,
+        input: UpdateContextInput,
+    ) -> Result<Context, Error>;
+    async fn delete_context_tx(&self, conn: &mut sqlx::PgConnection, id: Uuid)
+    -> Result<(), Error>;
+    async fn get_context_by_id_tx(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        id: Uuid,
+    ) -> Result<Context, Error>;
+}
+
+#[async_trait::async_trait]
+impl ContextRepositoryTx for ContextRepositoryImpl {
+    async fn create_context_tx(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        team_id: Uuid,
+        input: CreateContextInput,
+    ) -> Result<Context, Error> {
+        // Check duplicate key for team
+        let exists = sqlx::query_scalar!(
+            r#"SELECT 1 FROM contexts WHERE team_id = $1 AND key = $2"#,
+            team_id,
+            input.key
+        )
+        .fetch_optional(&mut *conn)
+        .await;
+        let exists = handle_error(None, exists)?;
+        if exists.is_some() {
+            return Err(Error::RecordAlreadyExists(
+                "Context key already exists for team".to_string(),
+            ));
+        }
+
+        let id = Uuid::new_v4();
+        let ctx_row = sqlx::query!(
+            r#"INSERT INTO contexts (id, team_id, key) VALUES ($1, $2, $3) RETURNING id, team_id, key"#,
+            id,
+            team_id,
+            input.key
+        )
+        .fetch_one(&mut *conn)
+        .await;
+        let ctx_row = handle_error(None, ctx_row)?;
+
+        // insert entries unique per context
+        for value in input.entries {
+            let eid = Uuid::new_v4();
+            let _ = handle_error(
+                None,
+                sqlx::query!(
+                    r#"INSERT INTO context_entries (id, context_id, value) VALUES ($1, $2, $3)"#,
+                    eid,
+                    ctx_row.id,
+                    value
+                )
+                .execute(&mut *conn)
+                .await,
+            )?;
+        }
+
+        self.get_context_by_id_tx(conn, ctx_row.id).await
+    }
+
+    async fn update_context_tx(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        id: Uuid,
+        input: UpdateContextInput,
+    ) -> Result<Context, Error> {
+        // Ensure exists
+        let existing = self.get_context_by_id_tx(conn, id).await?;
+        let new_key = input.key.unwrap_or(existing.key.clone());
+        if new_key != existing.key {
+            // check unique within team
+            let exists = sqlx::query_scalar!(
+                r#"SELECT 1 FROM contexts WHERE team_id = $1 AND key = $2 AND id <> $3"#,
+                existing.team_id,
+                new_key,
+                id
+            )
+            .fetch_optional(&mut *conn)
+            .await;
+            let exists = handle_error(None, exists)?;
+            if exists.is_some() {
+                return Err(Error::RecordAlreadyExists(
+                    "Context key already exists for team".to_string(),
+                ));
+            }
+        }
+        let _ = handle_error(
+            Some(id),
+            sqlx::query!(r#"UPDATE contexts SET key = $1 WHERE id = $2"#, new_key, id)
+                .execute(&mut *conn)
+                .await,
+        )?;
+
+        if let Some(entries) = input.entries {
+            // Replace entries
+            let _ = handle_error(
+                Some(id),
+                sqlx::query!(r#"DELETE FROM context_entries WHERE context_id = $1"#, id)
+                    .execute(&mut *conn)
+                    .await,
+            )?;
+            for v in entries {
+                let eid = Uuid::new_v4();
+                let _ = handle_error(None, sqlx::query!(
+                    r#"INSERT INTO context_entries (id, context_id, value) VALUES ($1, $2, $3)"#,
+                    eid,
+                    id,
+                    v
+                )
+                .execute(&mut *conn)
+                .await)?;
+            }
+        }
+
+        self.get_context_by_id_tx(conn, id).await
+    }
+
+    async fn delete_context_tx(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        id: Uuid,
+    ) -> Result<(), Error> {
+        // ensure exists
+        let _ = self.get_context_by_id_tx(conn, id).await?;
+        let _ = handle_error(
+            Some(id),
+            sqlx::query!("DELETE FROM context_entries WHERE context_id = $1", id)
+                .execute(&mut *conn)
+                .await,
+        )?;
+        let result = sqlx::query!("DELETE FROM contexts WHERE id = $1", id)
+            .execute(&mut *conn)
+            .await;
+        let _ = handle_error(Some(id), result)?;
+        Ok(())
+    }
+
+    async fn get_context_by_id_tx(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        id: Uuid,
+    ) -> Result<Context, Error> {
+        let ctx_row = sqlx::query!(r#"SELECT id, team_id, key FROM contexts WHERE id = $1"#, id)
+            .fetch_one(&mut *conn)
+            .await;
+        let ctx_row = handle_error(Some(id), ctx_row)?;
+
+        let entries = sqlx::query!(
+            r#"SELECT id, value FROM context_entries WHERE context_id = $1 ORDER BY value"#,
+            id
+        )
+        .fetch_all(&mut *conn)
+        .await;
+        let entries = handle_error(Some(id), entries)?;
+
+        Ok(Context {
+            id: ctx_row.id,
+            team_id: ctx_row.team_id,
+            key: ctx_row.key,
+            entries: entries
+                .into_iter()
+                .map(|e| ContextEntry {
+                    id: e.id,
+                    value: e.value,
+                })
+                .collect(),
+        })
     }
 }
 

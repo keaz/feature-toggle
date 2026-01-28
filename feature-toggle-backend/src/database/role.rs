@@ -1,7 +1,7 @@
 use crate::Error;
 use crate::database::entity::Role;
 use mockall::automock;
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -44,6 +44,37 @@ impl Clone for Box<dyn RoleRepository> {
     fn clone(&self) -> Self {
         self.clone_box()
     }
+}
+
+/// Extension trait for transaction-aware repository operations.
+/// These methods accept a mutable connection reference for use within transactions.
+#[async_trait::async_trait]
+pub trait RoleRepositoryTx: RoleRepository {
+    async fn create_role_tx(
+        &self,
+        conn: &mut PgConnection,
+        name: &str,
+        description: &str,
+    ) -> Result<Role, Error>;
+    async fn delete_role_tx(&self, conn: &mut PgConnection, id: Uuid) -> Result<(), Error>;
+    async fn assign_user_roles_tx(
+        &self,
+        conn: &mut PgConnection,
+        user_id: Uuid,
+        role_ids: Vec<Uuid>,
+        assigned_by: Option<Uuid>,
+    ) -> Result<(), Error>;
+    async fn remove_user_role_tx(
+        &self,
+        conn: &mut PgConnection,
+        user_id: Uuid,
+        role_id: Uuid,
+    ) -> Result<(), Error>;
+}
+
+/// Returns a repository that also implements RoleRepositoryTx for transaction support.
+pub fn role_repository_tx(pool: PgPool) -> RoleRepositoryImpl {
+    RoleRepositoryImpl { pool }
 }
 
 fn handle_error<T>(id: Option<Uuid>, result: Result<T, sqlx::Error>) -> Result<T, Error> {
@@ -235,6 +266,131 @@ impl RoleRepository for RoleRepositoryImpl {
 
     fn clone_box(&self) -> Box<dyn RoleRepository> {
         Box::new(self.clone())
+    }
+}
+
+impl RoleRepositoryImpl {
+    async fn create_role_internal(
+        conn: &mut PgConnection,
+        name: &str,
+        description: &str,
+    ) -> Result<Role, Error> {
+        let result = sqlx::query_as!(
+            Role,
+            r#"INSERT INTO roles (name, description) 
+               VALUES ($1, $2) 
+               RETURNING id, name, description, created_at, updated_at"#,
+            name,
+            description
+        )
+        .fetch_one(&mut *conn)
+        .await;
+
+        handle_error(None, result)
+    }
+
+    async fn delete_role_internal(conn: &mut PgConnection, id: Uuid) -> Result<(), Error> {
+        let result = sqlx::query("DELETE FROM roles WHERE id = $1")
+            .bind(id)
+            .execute(&mut *conn)
+            .await;
+
+        let res = handle_error(Some(id), result)?;
+        if res.rows_affected() == 0 {
+            return Err(Error::NotFound(id));
+        }
+
+        Ok(())
+    }
+
+    async fn assign_user_roles_internal(
+        conn: &mut PgConnection,
+        user_id: Uuid,
+        role_ids: Vec<Uuid>,
+        assigned_by: Option<Uuid>,
+    ) -> Result<(), Error> {
+        if role_ids.is_empty() {
+            return Ok(());
+        }
+
+        // Remove existing role assignments
+        handle_error(
+            Some(user_id),
+            sqlx::query("DELETE FROM user_roles WHERE user_id = $1")
+                .bind(user_id)
+                .execute(&mut *conn)
+                .await,
+        )?;
+
+        // Insert new role assignments
+        for role_id in role_ids {
+            handle_error(
+                Some(user_id),
+                sqlx::query(
+                    r#"INSERT INTO user_roles (user_id, role_id, assigned_by) 
+                       VALUES ($1, $2, $3)"#,
+                )
+                .bind(user_id)
+                .bind(role_id)
+                .bind(assigned_by)
+                .execute(&mut *conn)
+                .await,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    async fn remove_user_role_internal(
+        conn: &mut PgConnection,
+        user_id: Uuid,
+        role_id: Uuid,
+    ) -> Result<(), Error> {
+        handle_error(
+            Some(user_id),
+            sqlx::query("DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2")
+                .bind(user_id)
+                .bind(role_id)
+                .execute(&mut *conn)
+                .await,
+        )?;
+
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl RoleRepositoryTx for RoleRepositoryImpl {
+    async fn create_role_tx(
+        &self,
+        conn: &mut PgConnection,
+        name: &str,
+        description: &str,
+    ) -> Result<Role, Error> {
+        Self::create_role_internal(conn, name, description).await
+    }
+
+    async fn delete_role_tx(&self, conn: &mut PgConnection, id: Uuid) -> Result<(), Error> {
+        Self::delete_role_internal(conn, id).await
+    }
+
+    async fn assign_user_roles_tx(
+        &self,
+        conn: &mut PgConnection,
+        user_id: Uuid,
+        role_ids: Vec<Uuid>,
+        assigned_by: Option<Uuid>,
+    ) -> Result<(), Error> {
+        Self::assign_user_roles_internal(conn, user_id, role_ids, assigned_by).await
+    }
+
+    async fn remove_user_role_tx(
+        &self,
+        conn: &mut PgConnection,
+        user_id: Uuid,
+        role_id: Uuid,
+    ) -> Result<(), Error> {
+        Self::remove_user_role_internal(conn, user_id, role_id).await
     }
 }
 

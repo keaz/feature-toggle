@@ -3,7 +3,7 @@ use crate::database::entity::Team;
 use crate::database::handle_error;
 use chrono::{DateTime, Utc};
 use mockall::automock;
-use sqlx::{PgPool, Postgres, QueryBuilder, Row};
+use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder, Row};
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -81,12 +81,40 @@ impl Clone for Box<dyn UserRepository> {
     }
 }
 
+/// Extension trait for transaction-aware repository operations.
+/// These methods accept a mutable connection reference for use within transactions.
+#[async_trait::async_trait]
+pub trait UserRepositoryTx: UserRepository {
+    async fn get_user_by_id_tx(&self, conn: &mut PgConnection, id: Uuid) -> Result<User, Error>;
+    async fn create_user_tx(
+        &self,
+        conn: &mut PgConnection,
+        input: CreateUser,
+    ) -> Result<User, Error>;
+    async fn update_user_tx(
+        &self,
+        conn: &mut PgConnection,
+        input: UpdateUser,
+    ) -> Result<User, Error>;
+    async fn set_user_teams_tx(
+        &self,
+        conn: &mut PgConnection,
+        id: Uuid,
+        team_ids: Vec<Uuid>,
+    ) -> Result<(), Error>;
+}
+
 pub fn user_repository(pool: PgPool) -> Box<dyn UserRepository> {
     Box::new(UserRepositoryImpl::new(pool))
 }
 
+/// Returns a repository that also implements UserRepositoryTx for transaction support.
+pub fn user_repository_tx(pool: PgPool) -> UserRepositoryImpl {
+    UserRepositoryImpl::new(pool)
+}
+
 #[derive(Clone)]
-struct UserRepositoryImpl {
+pub struct UserRepositoryImpl {
     pool: PgPool,
 }
 
@@ -459,6 +487,174 @@ impl UserRepository for UserRepositoryImpl {
 
     fn clone_box(&self) -> Box<dyn UserRepository> {
         Box::new(self.clone())
+    }
+}
+
+impl UserRepositoryImpl {
+    async fn get_user_by_id_internal(conn: &mut PgConnection, id: Uuid) -> Result<User, Error> {
+        let result = sqlx::query!(
+            r#"SELECT id, username, password_hash, first_name, last_name, email, is_admin, enabled,
+                       created_at, updated_at, last_login, is_temporary_password
+                FROM users WHERE id = $1"#,
+            id
+        )
+        .fetch_one(&mut *conn)
+        .await;
+
+        let row = handle_error(Some(id), result)?;
+        Ok(User {
+            id: row.id,
+            username: row.username,
+            password_hash: row.password_hash,
+            first_name: row.first_name,
+            last_name: row.last_name,
+            email: row.email,
+            is_admin: row.is_admin,
+            enabled: row.enabled,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+            last_login: row.last_login,
+            is_temporary_password: row.is_temporary_password,
+        })
+    }
+
+    async fn create_user_internal(
+        conn: &mut PgConnection,
+        input: CreateUser,
+    ) -> Result<User, Error> {
+        let id = Uuid::new_v4();
+        let result = sqlx::query!(
+            r#"INSERT INTO users (id, username, password_hash, first_name, last_name, email, is_admin, is_temporary_password)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+               RETURNING id, username, password_hash, first_name, last_name, email, is_admin, enabled, created_at, updated_at, last_login, is_temporary_password"#,
+            id,
+            input.username,
+            input.password_hash,
+            input.first_name,
+            input.last_name,
+            input.email,
+            input.is_admin,
+            input.is_temporary_password
+        )
+        .fetch_one(&mut *conn)
+        .await;
+
+        let row = handle_error(None, result)?;
+        Ok(User {
+            id: row.id,
+            username: row.username,
+            password_hash: row.password_hash,
+            first_name: row.first_name,
+            last_name: row.last_name,
+            email: row.email,
+            is_admin: row.is_admin,
+            enabled: row.enabled,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+            last_login: row.last_login,
+            is_temporary_password: row.is_temporary_password,
+        })
+    }
+
+    async fn update_user_internal(
+        conn: &mut PgConnection,
+        input: UpdateUser,
+        existing: User,
+    ) -> Result<User, Error> {
+        let result = sqlx::query!(
+            r#"UPDATE users
+               SET first_name = $1, last_name = $2, email = $3, is_admin = $4, enabled = $5, updated_at = now()
+               WHERE id = $6
+               RETURNING id, username, password_hash, first_name, last_name, email, is_admin, enabled, created_at, updated_at, last_login, is_temporary_password"#,
+            input.first_name.unwrap_or(existing.first_name),
+            input.last_name.unwrap_or(existing.last_name),
+            input.email.unwrap_or(existing.email),
+            input.is_admin.unwrap_or(existing.is_admin),
+            input.enabled.unwrap_or(existing.enabled),
+            input.id
+        )
+        .fetch_one(&mut *conn)
+        .await;
+
+        let row = handle_error(Some(input.id), result)?;
+        Ok(User {
+            id: row.id,
+            username: row.username,
+            password_hash: row.password_hash,
+            first_name: row.first_name,
+            last_name: row.last_name,
+            email: row.email,
+            is_admin: row.is_admin,
+            enabled: row.enabled,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+            last_login: row.last_login,
+            is_temporary_password: row.is_temporary_password,
+        })
+    }
+
+    async fn set_user_teams_internal(
+        conn: &mut PgConnection,
+        id: Uuid,
+        team_ids: Vec<Uuid>,
+    ) -> Result<(), Error> {
+        // delete existing assignments
+        handle_error(
+            Some(id),
+            sqlx::query("DELETE FROM user_teams WHERE user_id = $1")
+                .bind(id)
+                .execute(&mut *conn)
+                .await,
+        )?;
+        // insert new ones, if any
+        if !team_ids.is_empty() {
+            let user_ids: Vec<Uuid> = team_ids.iter().map(|_| id).collect();
+            handle_error(
+                Some(id),
+                sqlx::query(
+                    r#"INSERT INTO user_teams (user_id, team_id)
+                       SELECT * FROM UNNEST($1::uuid[], $2::uuid[])"#,
+                )
+                .bind(&user_ids)
+                .bind(&team_ids)
+                .execute(&mut *conn)
+                .await,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl UserRepositoryTx for UserRepositoryImpl {
+    async fn get_user_by_id_tx(&self, conn: &mut PgConnection, id: Uuid) -> Result<User, Error> {
+        Self::get_user_by_id_internal(conn, id).await
+    }
+
+    async fn create_user_tx(
+        &self,
+        conn: &mut PgConnection,
+        input: CreateUser,
+    ) -> Result<User, Error> {
+        Self::create_user_internal(conn, input).await
+    }
+
+    async fn update_user_tx(
+        &self,
+        conn: &mut PgConnection,
+        input: UpdateUser,
+    ) -> Result<User, Error> {
+        let existing = Self::get_user_by_id_internal(conn, input.id).await?;
+        Self::update_user_internal(conn, input, existing).await
+    }
+
+    async fn set_user_teams_tx(
+        &self,
+        conn: &mut PgConnection,
+        id: Uuid,
+        team_ids: Vec<Uuid>,
+    ) -> Result<(), Error> {
+        Self::set_user_teams_internal(conn, id, team_ids).await
     }
 }
 

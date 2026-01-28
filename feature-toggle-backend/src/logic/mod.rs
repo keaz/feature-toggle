@@ -24,10 +24,12 @@ impl ActorContext {
 }
 
 pub mod approval;
+pub mod approval_tx;
 pub mod authorization;
 pub mod client;
 pub mod client_tx;
 pub mod context;
+pub mod context_tx;
 pub mod environment;
 pub mod environment_tx;
 pub mod feature;
@@ -39,11 +41,13 @@ pub mod metrics;
 pub mod pipeline;
 pub mod pipeline_tx;
 pub mod role;
+pub mod role_tx;
 pub mod stage_builder;
 pub mod team;
 pub mod team_tx;
 pub mod user;
 pub mod user_flag;
+pub mod user_tx;
 
 pub fn create_relationships<R: Relationship + 'static>(
     has_stage: bool,

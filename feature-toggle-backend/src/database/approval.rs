@@ -3,7 +3,7 @@ use crate::database::{Error, handle_error};
 use chrono::{DateTime, Utc};
 use mockall::automock;
 use sqlx::query_builder::QueryBuilder;
-use sqlx::{PgPool, Row};
+use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 
 pub const DEFAULT_APPROVAL_PAGE_SIZE: i32 = 20;
@@ -107,12 +107,51 @@ impl Clone for Box<dyn ApprovalRepository> {
     }
 }
 
+/// Extension trait for transaction-aware repository operations.
+/// These methods accept a mutable connection reference for use within transactions.
+#[async_trait::async_trait]
+pub trait ApprovalRepositoryTx: ApprovalRepository {
+    async fn create_policy_tx(
+        &self,
+        conn: &mut PgConnection,
+        input: CreateApprovalPolicyInput,
+    ) -> Result<ApprovalPolicy, Error>;
+    async fn update_policy_tx(
+        &self,
+        conn: &mut PgConnection,
+        policy_id: Uuid,
+        input: UpdateApprovalPolicyInput,
+    ) -> Result<ApprovalPolicy, Error>;
+    async fn delete_policy_tx(
+        &self,
+        conn: &mut PgConnection,
+        policy_id: Uuid,
+    ) -> Result<bool, Error>;
+    async fn create_request_tx(
+        &self,
+        conn: &mut PgConnection,
+        input: CreateApprovalRequestInput,
+    ) -> Result<ApprovalRequest, Error>;
+    async fn update_request_status_tx(
+        &self,
+        conn: &mut PgConnection,
+        request_id: Uuid,
+        status: ApprovalStatus,
+        executed_at: Option<DateTime<Utc>>,
+    ) -> Result<ApprovalRequest, Error>;
+}
+
 pub fn approval_repository(pool: PgPool) -> Box<dyn ApprovalRepository> {
     Box::new(ApprovalRepositoryImpl::new(pool))
 }
 
+/// Returns a repository that also implements ApprovalRepositoryTx for transaction support.
+pub fn approval_repository_tx(pool: PgPool) -> ApprovalRepositoryImpl {
+    ApprovalRepositoryImpl::new(pool)
+}
+
 #[derive(Clone)]
-struct ApprovalRepositoryImpl {
+pub struct ApprovalRepositoryImpl {
     pool: PgPool,
 }
 
@@ -569,5 +608,217 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
 
     fn clone_box(&self) -> Box<dyn ApprovalRepository> {
         Box::new(self.clone())
+    }
+}
+
+impl ApprovalRepositoryImpl {
+    async fn create_policy_internal(
+        conn: &mut PgConnection,
+        input: CreateApprovalPolicyInput,
+    ) -> Result<ApprovalPolicy, Error> {
+        let result = sqlx::query_as::<_, ApprovalPolicy>(
+            r#"
+            INSERT INTO approval_policies (
+                team_id,
+                name,
+                description,
+                applies_to,
+                environment_ids,
+                required_approvers,
+                approver_role_ids,
+                auto_approve_after_hours,
+                enabled
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+            RETURNING id, team_id, name, description, applies_to, environment_ids, required_approvers, approver_role_ids, auto_approve_after_hours, enabled, created_at
+            "#,
+        )
+        .bind(input.team_id)
+        .bind(input.name)
+        .bind(input.description)
+        .bind(input.applies_to)
+        .bind(input.environment_ids.as_deref())
+        .bind(input.required_approvers)
+        .bind(&input.approver_role_ids)
+        .bind(input.auto_approve_after_hours)
+        .bind(input.enabled)
+        .fetch_one(&mut *conn)
+        .await;
+
+        handle_error(None, result)
+    }
+
+    async fn create_request_internal(
+        conn: &mut PgConnection,
+        input: CreateApprovalRequestInput,
+    ) -> Result<ApprovalRequest, Error> {
+        let result = sqlx::query(
+            r#"
+            INSERT INTO approval_requests (
+                policy_id, feature_id, environment_id, change_type, change_payload,
+                change_description, requested_by
+            )
+            VALUES ($1,$2,$3,$4,$5,$6,$7)
+            RETURNING id, policy_id, feature_id, environment_id, change_type, change_payload,
+                      change_description, requested_by, status, approved_count, rejected_count,
+                      executed_at, created_at, updated_at
+            "#,
+        )
+        .bind(input.policy_id)
+        .bind(input.feature_id)
+        .bind(input.environment_id)
+        .bind(input.change_type)
+        .bind(input.change_payload)
+        .bind(input.change_description)
+        .bind(input.requested_by)
+        .map(Self::map_request_row)
+        .fetch_one(&mut *conn)
+        .await;
+
+        handle_error(None, result)
+    }
+
+    async fn update_request_status_internal(
+        conn: &mut PgConnection,
+        request_id: Uuid,
+        status: ApprovalStatus,
+        executed_at: Option<DateTime<Utc>>,
+    ) -> Result<ApprovalRequest, Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE approval_requests
+            SET status = $2,
+                executed_at = COALESCE($3, executed_at),
+                updated_at = NOW()
+            WHERE id = $1
+            RETURNING id, policy_id, feature_id, environment_id, change_type, change_payload,
+                      change_description, requested_by, status, approved_count, rejected_count,
+                      executed_at, created_at, updated_at
+            "#,
+        )
+        .bind(request_id)
+        .bind(status.as_str())
+        .bind(executed_at)
+        .map(Self::map_request_row)
+        .fetch_one(&mut *conn)
+        .await;
+
+        handle_error(Some(request_id), result)
+    }
+}
+
+#[async_trait::async_trait]
+impl ApprovalRepositoryTx for ApprovalRepositoryImpl {
+    async fn create_policy_tx(
+        &self,
+        conn: &mut PgConnection,
+        input: CreateApprovalPolicyInput,
+    ) -> Result<ApprovalPolicy, Error> {
+        Self::create_policy_internal(conn, input).await
+    }
+
+    async fn update_policy_tx(
+        &self,
+        conn: &mut PgConnection,
+        policy_id: Uuid,
+        input: UpdateApprovalPolicyInput,
+    ) -> Result<ApprovalPolicy, Error> {
+        // First fetch the existing policy within the transaction
+        let existing = sqlx::query_as::<_, ApprovalPolicy>(
+            r#"
+            SELECT id, team_id, name, description, applies_to, environment_ids, required_approvers,
+                   approver_role_ids, auto_approve_after_hours, enabled, created_at
+            FROM approval_policies
+            WHERE id = $1
+            "#,
+        )
+        .bind(policy_id)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(Error::DatabaseError)?
+        .ok_or(Error::NotFound(policy_id))?;
+
+        // Build update with optional fields
+        let name = input.name.unwrap_or(existing.name);
+        let description = input.description.or(existing.description);
+        let applies_to = input.applies_to.unwrap_or(existing.applies_to);
+        let environment_ids = input.environment_ids.or(existing.environment_ids);
+        let required_approvers = input
+            .required_approvers
+            .unwrap_or(existing.required_approvers);
+        let approver_role_ids = input
+            .approver_role_ids
+            .unwrap_or(existing.approver_role_ids);
+        let auto_approve_after_hours = input
+            .auto_approve_after_hours
+            .or(existing.auto_approve_after_hours);
+        let enabled = input.enabled.unwrap_or(existing.enabled);
+
+        let result = sqlx::query_as::<_, ApprovalPolicy>(
+            r#"
+            UPDATE approval_policies
+            SET name = $2,
+                description = $3,
+                applies_to = $4,
+                environment_ids = $5,
+                required_approvers = $6,
+                approver_role_ids = $7,
+                auto_approve_after_hours = $8,
+                enabled = $9
+            WHERE id = $1
+            RETURNING id, team_id, name, description, applies_to, environment_ids, required_approvers,
+                      approver_role_ids, auto_approve_after_hours, enabled, created_at
+            "#,
+        )
+        .bind(policy_id)
+        .bind(name)
+        .bind(description)
+        .bind(applies_to)
+        .bind(environment_ids.as_deref())
+        .bind(required_approvers)
+        .bind(&approver_role_ids)
+        .bind(auto_approve_after_hours)
+        .bind(enabled)
+        .fetch_one(&mut *conn)
+        .await;
+
+        handle_error(Some(policy_id), result)
+    }
+
+    async fn delete_policy_tx(
+        &self,
+        conn: &mut PgConnection,
+        policy_id: Uuid,
+    ) -> Result<bool, Error> {
+        let result = sqlx::query(
+            r#"
+            DELETE FROM approval_policies WHERE id = $1
+            "#,
+        )
+        .bind(policy_id)
+        .execute(&mut *conn)
+        .await;
+
+        match result {
+            Ok(r) => Ok(r.rows_affected() > 0),
+            Err(e) => Err(Error::DatabaseError(e)),
+        }
+    }
+
+    async fn create_request_tx(
+        &self,
+        conn: &mut PgConnection,
+        input: CreateApprovalRequestInput,
+    ) -> Result<ApprovalRequest, Error> {
+        Self::create_request_internal(conn, input).await
+    }
+
+    async fn update_request_status_tx(
+        &self,
+        conn: &mut PgConnection,
+        request_id: Uuid,
+        status: ApprovalStatus,
+        executed_at: Option<DateTime<Utc>>,
+    ) -> Result<ApprovalRequest, Error> {
+        Self::update_request_status_internal(conn, request_id, status, executed_at).await
     }
 }

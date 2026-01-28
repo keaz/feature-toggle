@@ -70,7 +70,7 @@ pub fn compound_rules_repository(pool: PgPool) -> Box<dyn CompoundRulesRepositor
 }
 
 #[derive(Clone)]
-struct CompoundRulesRepositoryImpl {
+pub struct CompoundRulesRepositoryImpl {
     pool: PgPool,
 }
 
@@ -341,6 +341,112 @@ impl CompoundRulesRepository for CompoundRulesRepositoryImpl {
 
     fn clone_box(&self) -> Box<dyn CompoundRulesRepository> {
         Box::new(self.clone())
+    }
+}
+
+pub fn compound_rules_repository_tx(pool: PgPool) -> CompoundRulesRepositoryImpl {
+    CompoundRulesRepositoryImpl::new(pool)
+}
+
+#[async_trait::async_trait]
+pub trait CompoundRulesRepositoryTx: CompoundRulesRepository {
+    async fn set_rule_groups_tx(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        criteria_id: Uuid,
+        rule_groups: Vec<CreateRuleGroupInput>,
+    ) -> Result<Vec<RuleGroup>, Error>;
+}
+
+#[async_trait::async_trait]
+impl CompoundRulesRepositoryTx for CompoundRulesRepositoryImpl {
+    async fn set_rule_groups_tx(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        criteria_id: Uuid,
+        rule_groups: Vec<CreateRuleGroupInput>,
+    ) -> Result<Vec<RuleGroup>, Error> {
+        // Delete existing groups for this criterion
+        // Note: we can't call self.delete_rule_groups_by_criteria because it uses self.pool
+        // We must implement deletion using conn.
+
+        // Get all groups for this criterion (using conn)
+        let groups = sqlx::query!(
+            "SELECT id FROM rule_groups WHERE criteria_id = $1",
+            criteria_id
+        )
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(Error::DatabaseError)?;
+
+        // Delete conditions for all groups
+        for group in &groups {
+            sqlx::query!(
+                r#"DELETE FROM rule_conditions WHERE group_id = $1"#,
+                group.id
+            )
+            .execute(&mut *conn)
+            .await
+            .map_err(Error::DatabaseError)?;
+        }
+
+        // Delete all groups
+        sqlx::query!(
+            r#"DELETE FROM rule_groups WHERE criteria_id = $1"#,
+            criteria_id
+        )
+        .execute(&mut *conn)
+        .await
+        .map_err(Error::DatabaseError)?;
+
+        // Now create new rule groups
+        let mut result_groups = Vec::new();
+        for input in rule_groups {
+            let group_id = Uuid::new_v4();
+
+            // Insert rule group
+            let row = sqlx::query!(
+                r#"INSERT INTO rule_groups (id, criteria_id, logic_operator)
+                   VALUES ($1, $2, $3)
+                   RETURNING id, criteria_id, logic_operator as "logic_operator: LogicOperator",
+                             created_at, updated_at"#,
+                group_id,
+                input.criteria_id,
+                input.logic_operator as LogicOperator
+            )
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(Error::DatabaseError)?;
+
+            // Insert conditions
+            for condition in input.conditions {
+                let condition_id = Uuid::new_v4();
+                sqlx::query!(
+                    r#"INSERT INTO rule_conditions
+                       (id, group_id, context_key, operator, value, order_index)
+                       VALUES ($1, $2, $3, $4, $5, $6)"#,
+                    condition_id,
+                    group_id,
+                    condition.context_key,
+                    condition.operator,
+                    condition.value,
+                    condition.order_index
+                )
+                .execute(&mut *conn)
+                .await
+                .map_err(Error::DatabaseError)?;
+            }
+
+            result_groups.push(RuleGroup {
+                id: row.id,
+                criteria_id: row.criteria_id,
+                logic_operator: row.logic_operator,
+                created_at: row.created_at.unwrap_or_else(chrono::Utc::now),
+                updated_at: row.updated_at.unwrap_or_else(chrono::Utc::now),
+            });
+        }
+
+        Ok(result_groups)
     }
 }
 
