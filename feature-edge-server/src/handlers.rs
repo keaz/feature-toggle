@@ -191,10 +191,11 @@ pub fn map_proto_to_engine(f: &pb::FeatureFull) -> engine::Feature {
                         .collect();
 
                     // Parse variant selection mode
-                    let variant_selection_mode = match c.variant_selection_mode.to_uppercase().as_str() {
-                        "SPECIFIC_VARIANT" => engine::VariantSelectionMode::SpecificVariant,
-                        _ => engine::VariantSelectionMode::WeightedSplit,
-                    };
+                    let variant_selection_mode =
+                        match c.variant_selection_mode.to_uppercase().as_str() {
+                            "SPECIFIC_VARIANT" => engine::VariantSelectionMode::SpecificVariant,
+                            _ => engine::VariantSelectionMode::WeightedSplit,
+                        };
 
                     engine::StageCriterion {
                         priority: c.priority,
@@ -264,14 +265,8 @@ pub fn map_http_context_to_engine(
 
 /// Resolve client credentials from request or app defaults
 fn resolve_credentials<'a>(app: &'a AppState, req: &'a EvaluateHttpRequest) -> (&'a str, &'a str) {
-    let client_id = req
-        .client_id
-        .as_deref()
-        .unwrap_or(&app.client_id);
-    let client_secret = req
-        .client_secret
-        .as_deref()
-        .unwrap_or(&app.client_secret);
+    let client_id = req.client_id.as_deref().unwrap_or(&app.client_id);
+    let client_secret = req.client_secret.as_deref().unwrap_or(&app.client_secret);
     (client_id, client_secret)
 }
 
@@ -531,17 +526,9 @@ pub async fn evaluate_handler(
         }
     }
 
-    // Convert evaluation reason to string (using serde serialization which is more efficient)
-    let reason = serde_json::to_string(&result.reason)
-        .unwrap_or_else(|_| "UNKNOWN".to_string())
-        .trim_matches('"')
-        .to_string();
-    let error_code = result.error_code.map(|ec| {
-        serde_json::to_string(&ec)
-            .unwrap_or_else(|_| "GENERAL".to_string())
-            .trim_matches('"')
-            .to_string()
-    });
+    // Convert evaluation reason to string using zero-allocation as_str()
+    let reason = result.reason.as_str().to_string();
+    let error_code = result.error_code.map(|ec| ec.as_str().to_string());
 
     // Convert metadata HashMap to JSON Value
     let metadata = result
@@ -577,7 +564,10 @@ pub async fn health_handler(app: web::Data<AppState>) -> impl Responder {
 // ===== OFREP (OpenFeature Remote Evaluation Protocol) Handlers =====
 
 /// Extract credentials from Authorization header or X-API-Key header
-fn extract_auth_from_headers(http_req: &actix_web::HttpRequest, app: &AppState) -> (String, String) {
+fn extract_auth_from_headers(
+    http_req: &actix_web::HttpRequest,
+    app: &AppState,
+) -> (String, String) {
     // Try Bearer token first
     if let Some(auth_header) = http_req.headers().get("authorization") {
         if let Ok(auth_str) = auth_header.to_str() {
@@ -602,7 +592,10 @@ fn extract_auth_from_headers(http_req: &actix_web::HttpRequest, app: &AppState) 
 }
 
 /// Map OFREP context to engine context
-fn map_ofrep_context_to_engine(flag_key: String, ofrep_ctx: OFREPContext) -> engine::FeatureEvaluationContext {
+fn map_ofrep_context_to_engine(
+    flag_key: String,
+    ofrep_ctx: OFREPContext,
+) -> engine::FeatureEvaluationContext {
     // Extract environment_id from attributes or use a default
     let environment_id = ofrep_ctx
         .attributes
@@ -698,7 +691,9 @@ pub async fn ofrep_evaluate_flag(
     }
 
     // Check environment stage enabled
-    let environment_id = req.context.attributes
+    let environment_id = req
+        .context
+        .attributes
         .get("environment_id")
         .and_then(|v| v.as_str())
         .unwrap_or("default")
@@ -798,13 +793,14 @@ pub async fn ofrep_evaluate_flag(
         );
 
         // Queue for backend persistence
-        app.pending_assignments.push(crate::grpc_client::UserAssignment {
-            user_id,
-            feature_id: feature.id.clone(),
-            environment_id: environment_id.to_string(),
-            assigned: true,
-            variant: result.variant.clone(),
-        });
+        app.pending_assignments
+            .push(crate::grpc_client::UserAssignment {
+                user_id,
+                feature_id: feature.id.clone(),
+                environment_id: environment_id.to_string(),
+                assigned: true,
+                variant: result.variant.clone(),
+            });
     }
 
     // Convert reason to SCREAMING_SNAKE_CASE string (using serde serialization)

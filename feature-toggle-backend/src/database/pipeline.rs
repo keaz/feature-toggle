@@ -211,7 +211,13 @@ impl PipelineRepositoryImpl {
         input: Vec<CreateStage>,
         tx: &mut PgConnection,
     ) -> Result<PgQueryResult, Error> {
-        self.delete_pipeline_stage(pipeline_id.to_owned()).await?;
+        let result = sqlx::query!(
+            r#"DELETE FROM pipeline_stages WHERE pipeline_id = $1"#,
+            *pipeline_id
+        )
+        .execute(&mut *tx)
+        .await;
+        handle_error(Some(*pipeline_id), result)?;
 
         self.create_stage(pipeline_id, input, tx).await?;
 

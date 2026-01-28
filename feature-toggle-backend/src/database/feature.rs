@@ -3396,10 +3396,7 @@ mod tests {
         // Should return empty when no features pending rollback
         let result = repo.get_features_pending_rollback().await;
         assert!(result.is_ok(), "Get pending rollback should succeed");
-
-        let features = result.unwrap();
-        // Note: might not be empty if other tests left data, but should not error
-        assert!(!features.is_empty(), "Should return a valid list");
+        result.unwrap();
     }
 
     #[tokio::test]

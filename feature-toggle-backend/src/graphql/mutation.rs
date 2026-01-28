@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
+use crate::database::approval::ApprovalRepository;
 use crate::database::client::ClientRepository;
-use crate::database::context::ContextRepository;
 use crate::database::environment::EnvironmentRepository;
 use crate::database::feature::FeatureRepository;
 use crate::database::pipeline::PipelineRepository;
@@ -22,11 +22,9 @@ use crate::graphql::schema::{
 };
 use crate::graphql::validator::{CreateInputValidator, UpdateInputValidator};
 use crate::logic::approval::ApprovalLogic;
-use crate::logic::context::ContextLogic;
 use crate::logic::feature::FeatureLogic;
 use crate::logic::metrics::MetricLogic;
 use crate::logic::pipeline::PipelineLogic;
-use crate::logic::role::RoleLogic;
 use crate::logic::user::{RegisterUserInput, UpdateGqlUserInput, UserLogic};
 use crate::middleware::admin_guard::AdminState;
 use async_graphql::{Context, ID, Object, Result as GqlResult};
@@ -1627,6 +1625,9 @@ impl MutationRoot {
         #[graphql(desc = "Team ID")] team_id: ID,
         #[graphql(desc = "Approval policy input")] input: GqlCreateApprovalPolicyInput,
     ) -> GqlResult<ApprovalPolicy> {
+        let actor = ctx.data_opt::<crate::JwtUser>().map(|jwt_user| {
+            crate::logic::ActorContext::new(jwt_user.id, jwt_user.username.clone())
+        });
         let team_uuid = uuid::Uuid::try_from(team_id)
             .map_err(|e| async_graphql::Error::new(format!("Invalid team id: {e}")))?;
 
@@ -1652,10 +1653,20 @@ impl MutationRoot {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let repo = ctx.data::<Box<dyn crate::database::approval::ApprovalRepository>>()?;
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        let repo = crate::database::approval::approval_repository_tx(pool.clone());
+        let activity_repo =
+            ctx.data::<Box<dyn crate::database::activity_log::ActivityLogRepository>>()?;
 
-        let policy = repo
-            .create_policy(crate::database::approval::CreateApprovalPolicyInput {
+        let mut tx = pool.begin().await.map_err(|e| {
+            async_graphql::Error::new(format!("Failed to start transaction: {}", e))
+        })?;
+
+        let result = crate::logic::approval_tx::create_approval_policy_in_tx(
+            &mut tx,
+            &repo,
+            &**activity_repo,
+            crate::database::approval::CreateApprovalPolicyInput {
                 team_id: team_uuid,
                 name: input.name,
                 description: input.description,
@@ -1665,11 +1676,23 @@ impl MutationRoot {
                 approver_role_ids: role_ids,
                 auto_approve_after_hours: input.auto_approve_after_hours,
                 enabled: input.enabled.unwrap_or(true),
-            })
-            .await
-            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+            },
+            actor,
+        )
+        .await;
 
-        Ok(map_approval_policy(policy))
+        match result {
+            Ok(policy) => {
+                tx.commit().await.map_err(|e| {
+                    async_graphql::Error::new(format!("Failed to commit transaction: {}", e))
+                })?;
+                Ok(map_approval_policy(policy))
+            }
+            Err(e) => {
+                let _ = tx.rollback().await;
+                Err(e.into())
+            }
+        }
     }
 
     /// Update an existing approval policy
@@ -1679,6 +1702,9 @@ impl MutationRoot {
         #[graphql(desc = "Policy ID")] policy_id: ID,
         #[graphql(desc = "Update input")] input: GqlUpdateApprovalPolicyInput,
     ) -> GqlResult<ApprovalPolicy> {
+        let actor = ctx.data_opt::<crate::JwtUser>().map(|jwt_user| {
+            crate::logic::ActorContext::new(jwt_user.id, jwt_user.username.clone())
+        });
         let policy_uuid = uuid::Uuid::try_from(policy_id)
             .map_err(|e| async_graphql::Error::new(format!("Invalid policy id: {e}")))?;
 
@@ -1707,26 +1733,46 @@ impl MutationRoot {
             })
             .transpose()?;
 
-        let repo = ctx.data::<Box<dyn crate::database::approval::ApprovalRepository>>()?;
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        let repo = crate::database::approval::approval_repository_tx(pool.clone());
+        let activity_repo =
+            ctx.data::<Box<dyn crate::database::activity_log::ActivityLogRepository>>()?;
 
-        let policy = repo
-            .update_policy(
-                policy_uuid,
-                crate::database::approval::UpdateApprovalPolicyInput {
-                    name: input.name,
-                    description: input.description,
-                    applies_to: input.applies_to,
-                    environment_ids: env_ids,
-                    required_approvers: input.required_approvers,
-                    approver_role_ids: role_ids,
-                    auto_approve_after_hours: input.auto_approve_after_hours,
-                    enabled: input.enabled,
-                },
-            )
-            .await
-            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+        let mut tx = pool.begin().await.map_err(|e| {
+            async_graphql::Error::new(format!("Failed to start transaction: {}", e))
+        })?;
 
-        Ok(map_approval_policy(policy))
+        let result = crate::logic::approval_tx::update_approval_policy_in_tx(
+            &mut tx,
+            &repo,
+            &**activity_repo,
+            policy_uuid,
+            crate::database::approval::UpdateApprovalPolicyInput {
+                name: input.name,
+                description: input.description,
+                applies_to: input.applies_to,
+                environment_ids: env_ids,
+                required_approvers: input.required_approvers,
+                approver_role_ids: role_ids,
+                auto_approve_after_hours: input.auto_approve_after_hours,
+                enabled: input.enabled,
+            },
+            actor,
+        )
+        .await;
+
+        match result {
+            Ok(policy) => {
+                tx.commit().await.map_err(|e| {
+                    async_graphql::Error::new(format!("Failed to commit transaction: {}", e))
+                })?;
+                Ok(map_approval_policy(policy))
+            }
+            Err(e) => {
+                let _ = tx.rollback().await;
+                Err(e.into())
+            }
+        }
     }
 
     /// Delete an approval policy
@@ -1735,14 +1781,50 @@ impl MutationRoot {
         ctx: &Context<'_>,
         #[graphql(desc = "Policy ID")] policy_id: ID,
     ) -> GqlResult<bool> {
+        let actor = ctx.data_opt::<crate::JwtUser>().map(|jwt_user| {
+            crate::logic::ActorContext::new(jwt_user.id, jwt_user.username.clone())
+        });
         let policy_uuid = uuid::Uuid::try_from(policy_id)
             .map_err(|e| async_graphql::Error::new(format!("Invalid policy id: {e}")))?;
 
-        let repo = ctx.data::<Box<dyn crate::database::approval::ApprovalRepository>>()?;
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        let repo = crate::database::approval::approval_repository_tx(pool.clone());
+        let activity_repo =
+            ctx.data::<Box<dyn crate::database::activity_log::ActivityLogRepository>>()?;
 
-        repo.delete_policy(policy_uuid)
+        let policy = repo
+            .get_policy_by_id(policy_uuid)
             .await
-            .map_err(|e| async_graphql::Error::new(e.to_string()))
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?
+            .ok_or_else(|| async_graphql::Error::new("Policy not found"))?;
+        let policy_name = policy.name.clone();
+
+        let mut tx = pool.begin().await.map_err(|e| {
+            async_graphql::Error::new(format!("Failed to start transaction: {}", e))
+        })?;
+
+        let result = crate::logic::approval_tx::delete_approval_policy_in_tx(
+            &mut tx,
+            &repo,
+            &**activity_repo,
+            policy_uuid,
+            policy_name,
+            actor,
+        )
+        .await;
+
+        match result {
+            Ok(deleted) => {
+                tx.commit().await.map_err(|e| {
+                    async_graphql::Error::new(format!("Failed to commit transaction: {}", e))
+                })?;
+                Ok(deleted)
+            }
+            Err(e) => {
+                let _ = tx.rollback().await;
+                Err(e.into())
+            }
+        }
     }
 
     // User mutations
@@ -1754,29 +1836,52 @@ impl MutationRoot {
         let actor = ctx.data_opt::<crate::JwtUser>().map(|jwt_user| {
             crate::logic::ActorContext::new(jwt_user.id, jwt_user.username.clone())
         });
-        let logic = ctx.data::<Box<dyn UserLogic>>()?;
-        let created = logic
-            .register_user(
-                RegisterUserInput {
-                    username: input.username,
-                    password: input.password,
-                    first_name: input.first_name,
-                    last_name: input.last_name,
-                    email: input.email,
-                    is_admin: input.is_admin.unwrap_or(false),
-                    is_temporary_password: input.is_temporary_password.unwrap_or(true), // Default to temporary password
-                },
-                actor,
-            )
-            .await?;
 
-        // If an admin was created, flip the admin-exists cache so middleware stops redirecting.
-        if created.is_admin
-            && let Ok(state) = ctx.data::<AdminState>()
-        {
-            state.set_exists(true);
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        let user_repo = crate::database::user::user_repository_tx(pool.clone());
+        let activity_repo =
+            ctx.data::<Box<dyn crate::database::activity_log::ActivityLogRepository>>()?;
+
+        let mut tx = pool.begin().await.map_err(|e| {
+            async_graphql::Error::new(format!("Failed to start transaction: {}", e))
+        })?;
+
+        let result = crate::logic::user_tx::register_user_in_tx(
+            &mut tx,
+            &user_repo,
+            &**activity_repo,
+            RegisterUserInput {
+                username: input.username,
+                password: input.password,
+                first_name: input.first_name,
+                last_name: input.last_name,
+                email: input.email,
+                is_admin: input.is_admin.unwrap_or(false),
+                is_temporary_password: input.is_temporary_password.unwrap_or(true), // Default to temporary password
+            },
+            actor,
+        )
+        .await;
+
+        match result {
+            Ok(created) => {
+                tx.commit().await.map_err(|e| {
+                    async_graphql::Error::new(format!("Failed to commit transaction: {}", e))
+                })?;
+
+                // If an admin was created, flip the admin-exists cache so middleware stops redirecting.
+                if created.is_admin
+                    && let Ok(state) = ctx.data::<AdminState>()
+                {
+                    state.set_exists(true);
+                }
+                create_user(created)
+            }
+            Err(e) => {
+                let _ = tx.rollback().await;
+                Err(e.into())
+            }
         }
-        create_user(created)
     }
 
     async fn create_admin(
@@ -1787,29 +1892,51 @@ impl MutationRoot {
         let actor = ctx.data_opt::<crate::JwtUser>().map(|jwt_user| {
             crate::logic::ActorContext::new(jwt_user.id, jwt_user.username.clone())
         });
-        let logic = ctx.data::<Box<dyn UserLogic>>()?;
-        let created = logic
-            .register_user(
-                RegisterUserInput {
-                    username: input.username,
-                    password: input.password,
-                    first_name: input.first_name,
-                    last_name: input.last_name,
-                    email: input.email,
-                    is_admin: true,               // Force admin to true
-                    is_temporary_password: false, // Default to temporary password
-                },
-                actor,
-            )
-            .await?;
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        let user_repo = crate::database::user::user_repository_tx(pool.clone());
+        let activity_repo =
+            ctx.data::<Box<dyn crate::database::activity_log::ActivityLogRepository>>()?;
 
-        // If an admin was created, flip the admin-exists cache so middleware stops redirecting.
-        if created.is_admin
-            && let Ok(state) = ctx.data::<AdminState>()
-        {
-            state.set_exists(true);
+        let mut tx = pool.begin().await.map_err(|e| {
+            async_graphql::Error::new(format!("Failed to start transaction: {}", e))
+        })?;
+
+        let result = crate::logic::user_tx::register_user_in_tx(
+            &mut tx,
+            &user_repo,
+            &**activity_repo,
+            RegisterUserInput {
+                username: input.username,
+                password: input.password,
+                first_name: input.first_name,
+                last_name: input.last_name,
+                email: input.email,
+                is_admin: true,               // Force admin to true
+                is_temporary_password: false, // Default to temporary password
+            },
+            actor,
+        )
+        .await;
+
+        match result {
+            Ok(created) => {
+                tx.commit().await.map_err(|e| {
+                    async_graphql::Error::new(format!("Failed to commit transaction: {}", e))
+                })?;
+
+                // If an admin was created, flip the admin-exists cache so middleware stops redirecting.
+                if created.is_admin
+                    && let Ok(state) = ctx.data::<AdminState>()
+                {
+                    state.set_exists(true);
+                }
+                create_user(created)
+            }
+            Err(e) => {
+                let _ = tx.rollback().await;
+                Err(e.into())
+            }
         }
-        create_user(created)
     }
 
     async fn login(&self, ctx: &Context<'_>, input: GqlLoginInput) -> GqlResult<LoginResponse> {
@@ -1882,21 +2009,43 @@ impl MutationRoot {
         let actor = ctx.data_opt::<crate::JwtUser>().map(|jwt_user| {
             crate::logic::ActorContext::new(jwt_user.id, jwt_user.username.clone())
         });
-        let logic = ctx.data::<Box<dyn UserLogic>>()?;
-        let u = logic
-            .update_user(
-                id,
-                UpdateGqlUserInput {
-                    first_name: input.first_name,
-                    last_name: input.last_name,
-                    email: input.email,
-                    is_admin: input.is_admin,
-                    enabled: input.enabled,
-                },
-                actor,
-            )
-            .await?;
-        create_user(u)
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        let user_repo = crate::database::user::user_repository_tx(pool.clone());
+        let activity_repo =
+            ctx.data::<Box<dyn crate::database::activity_log::ActivityLogRepository>>()?;
+
+        let mut tx = pool.begin().await.map_err(|e| {
+            async_graphql::Error::new(format!("Failed to start transaction: {}", e))
+        })?;
+
+        let result = crate::logic::user_tx::update_user_in_tx(
+            &mut tx,
+            &user_repo,
+            &**activity_repo,
+            id,
+            UpdateGqlUserInput {
+                first_name: input.first_name,
+                last_name: input.last_name,
+                email: input.email,
+                is_admin: input.is_admin,
+                enabled: input.enabled,
+            },
+            actor,
+        )
+        .await;
+
+        match result {
+            Ok(updated) => {
+                tx.commit().await.map_err(|e| {
+                    async_graphql::Error::new(format!("Failed to commit transaction: {}", e))
+                })?;
+                create_user(updated)
+            }
+            Err(e) => {
+                let _ = tx.rollback().await;
+                Err(e.into())
+            }
+        }
     }
 
     async fn reset_password(
@@ -1982,18 +2131,43 @@ impl MutationRoot {
             jwt_user.id,
             jwt_user.username.clone(),
         ));
-        let logic = ctx.data::<Box<dyn RoleLogic>>()?;
-        let role = logic
-            .create_role(input.name, input.description, actor)
-            .await?;
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        let role_repo = crate::database::role::role_repository_tx(pool.clone());
+        let activity_repo =
+            ctx.data::<Box<dyn crate::database::activity_log::ActivityLogRepository>>()?;
 
-        Ok(Role {
-            id: role.id,
-            name: role.name,
-            description: role.description,
-            created_at: role.created_at,
-            updated_at: role.updated_at,
-        })
+        let mut tx = pool.begin().await.map_err(|e| {
+            async_graphql::Error::new(format!("Failed to start transaction: {}", e))
+        })?;
+
+        let result = crate::logic::role_tx::create_role_in_tx(
+            &mut tx,
+            &role_repo,
+            &**activity_repo,
+            input.name,
+            input.description,
+            actor,
+        )
+        .await;
+
+        match result {
+            Ok(role) => {
+                tx.commit().await.map_err(|e| {
+                    async_graphql::Error::new(format!("Failed to commit transaction: {}", e))
+                })?;
+                Ok(Role {
+                    id: role.id,
+                    name: role.name,
+                    description: role.description,
+                    created_at: role.created_at,
+                    updated_at: role.updated_at,
+                })
+            }
+            Err(e) => {
+                let _ = tx.rollback().await;
+                Err(e.into())
+            }
+        }
     }
 
     async fn delete_role(&self, ctx: &Context<'_>, id: ID) -> GqlResult<bool> {
@@ -2009,10 +2183,31 @@ impl MutationRoot {
             jwt_user.id,
             jwt_user.username.clone(),
         ));
-        let logic = ctx.data::<Box<dyn RoleLogic>>()?;
-        logic.delete_role(id, actor).await?;
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        let role_repo = crate::database::role::role_repository_tx(pool.clone());
+        let activity_repo =
+            ctx.data::<Box<dyn crate::database::activity_log::ActivityLogRepository>>()?;
 
-        Ok(true)
+        let mut tx = pool.begin().await.map_err(|e| {
+            async_graphql::Error::new(format!("Failed to start transaction: {}", e))
+        })?;
+
+        let result =
+            crate::logic::role_tx::delete_role_in_tx(&mut tx, &role_repo, &**activity_repo, id, actor)
+                .await;
+
+        match result {
+            Ok(()) => {
+                tx.commit().await.map_err(|e| {
+                    async_graphql::Error::new(format!("Failed to commit transaction: {}", e))
+                })?;
+                Ok(true)
+            }
+            Err(e) => {
+                let _ = tx.rollback().await;
+                Err(e.into())
+            }
+        }
     }
 
     async fn assign_user_roles(
@@ -2028,21 +2223,46 @@ impl MutationRoot {
             crate::logic::ActorContext::new(jwt_user.id, jwt_user.username.clone())
         });
 
-        let logic = ctx.data::<Box<dyn RoleLogic>>()?;
-        let roles = logic
-            .assign_user_roles(user_id, input.role_ids, actor)
-            .await?;
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        let role_repo = crate::database::role::role_repository_tx(pool.clone());
+        let activity_repo =
+            ctx.data::<Box<dyn crate::database::activity_log::ActivityLogRepository>>()?;
 
-        Ok(roles
-            .into_iter()
-            .map(|r| Role {
-                id: r.id,
-                name: r.name,
-                description: r.description,
-                created_at: r.created_at,
-                updated_at: r.updated_at,
-            })
-            .collect())
+        let mut tx = pool.begin().await.map_err(|e| {
+            async_graphql::Error::new(format!("Failed to start transaction: {}", e))
+        })?;
+
+        let result = crate::logic::role_tx::assign_user_roles_in_tx(
+            &mut tx,
+            &role_repo,
+            &**activity_repo,
+            user_id,
+            input.role_ids,
+            actor,
+        )
+        .await;
+
+        match result {
+            Ok(roles) => {
+                tx.commit().await.map_err(|e| {
+                    async_graphql::Error::new(format!("Failed to commit transaction: {}", e))
+                })?;
+                Ok(roles
+                    .into_iter()
+                    .map(|r| Role {
+                        id: r.id,
+                        name: r.name,
+                        description: r.description,
+                        created_at: r.created_at,
+                        updated_at: r.updated_at,
+                    })
+                    .collect())
+            }
+            Err(e) => {
+                let _ = tx.rollback().await;
+                Err(e.into())
+            }
+        }
     }
 
     /// Generate a new JWT signing secret (admin only)
@@ -2296,22 +2516,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_context_mutation() {
-        let mut mock = MockContextLogic::new();
+        let mock = MockContextLogic::new();
         let team_id = ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27");
         let unique_key = format!("test_ctx_{}", Uuid::new_v4());
-        let input = crate::graphql::schema::CreateContextInput {
-            key: unique_key.clone(),
-            entries: vec!["US".into()],
-        };
-        let expected = crate::graphql::schema::Context {
-            id: ID::from(Uuid::new_v4()),
-            team_id: team_id.clone(),
-            key: unique_key.clone(),
-            entries: vec![crate::graphql::schema::ContextEntry {
-                id: ID::from(Uuid::new_v4()),
-                value: "US".into(),
-            }],
-        };
 
         let pool = crate::database::init_pg_pool().await;
         let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
@@ -2354,28 +2561,62 @@ mod tests {
     async fn test_set_stage_contexts_mutation() {
         use crate::graphql::query::Query as GqlQuery;
         use crate::logic::feature::MockFeatureLogic;
-        let mut mock = MockFeatureLogic::new();
-        let stage_id = ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27");
-        let ctx1 = ID::from("cb461425-373b-49d9-9634-9a248612d7b7");
-        let ctx2 = ID::from("fcc0dfca-07b0-44ad-8d9a-21f2cd450d10");
-        let expected = vec![
-            crate::graphql::schema::Context {
-                id: ctx1.clone(),
-                team_id: ID::from(Uuid::new_v4()),
-                key: "k1".into(),
-                entries: vec![],
-            },
-            crate::graphql::schema::Context {
-                id: ctx2.clone(),
-                team_id: ID::from(Uuid::new_v4()),
-                key: "k2".into(),
-                entries: vec![],
-            },
-        ];
+        let mock = MockFeatureLogic::new();
+        let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+        let env_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+        let stage_uuid = Uuid::new_v4();
 
         let feature_repo = MockFeatureRepository::new();
 
         let pool = crate::database::init_pg_pool().await;
+        let feature_repo_db = crate::database::feature::feature_repository(pool.clone());
+        let context_repo = crate::database::context::context_repository(pool.clone());
+
+        let feature_id = feature_repo_db
+            .create_feature(crate::database::feature::CreateFeature {
+                team_id,
+                key: format!("stage-contexts-{}", Uuid::new_v4()),
+                description: None,
+                feature_type: crate::database::entity::FeatureType::Simple,
+                stages: vec![crate::database::feature::CreateFeatureStage {
+                    id: stage_uuid,
+                    environment_id: env_id,
+                    order_index: 0,
+                    parent_stage: None,
+                    position: "{ x: 0, y: 0 }".to_string(),
+                    enabled: true,
+                }],
+                dependencies: vec![],
+                variants: None,
+            })
+            .await
+            .expect("feature to be created for setStageContexts test");
+
+        let ctx1 = context_repo
+            .create_context(
+                team_id,
+                crate::database::context::CreateContextInput {
+                    key: format!("ctx-{}-a", Uuid::new_v4()),
+                    entries: vec![],
+                },
+            )
+            .await
+            .expect("context 1");
+        let ctx2 = context_repo
+            .create_context(
+                team_id,
+                crate::database::context::CreateContextInput {
+                    key: format!("ctx-{}-b", Uuid::new_v4()),
+                    entries: vec![],
+                },
+            )
+            .await
+            .expect("context 2");
+
+        let stage_id = ID::from(stage_uuid);
+        let ctx1_id = ID::from(ctx1.id);
+        let ctx2_id = ID::from(ctx2.id);
+
         let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
             .data::<Box<dyn crate::logic::feature::FeatureLogic>>(Box::new(mock))
             .data::<Box<dyn crate::database::feature::FeatureRepository>>(Box::new(feature_repo))
@@ -2393,7 +2634,7 @@ mod tests {
         let mut req = Request::new(gql);
         req = req.variables(async_graphql::Variables::from_json(serde_json::json!({
             "sid": stage_id.to_string(),
-            "ids": [ctx1.to_string(), ctx2.to_string()]
+            "ids": [ctx1_id.to_string(), ctx2_id.to_string()]
         })));
         let resp = schema.execute(req).await;
         assert!(
@@ -2403,24 +2644,43 @@ mod tests {
         );
         let data = resp.data.into_json().unwrap();
         assert_eq!(data["setStageContexts"].as_array().unwrap().len(), 2);
+
+        let _ = feature_repo_db.delete_feature(feature_id).await;
+        let _ = context_repo.delete_context(ctx1.id).await;
+        let _ = context_repo.delete_context(ctx2.id).await;
     }
 
     #[tokio::test]
     async fn test_set_stage_criteria_mutation_and_validation() {
         use crate::logic::feature::MockFeatureLogic;
-        let mut mock = MockFeatureLogic::new();
-        let stage_id = ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27");
-        // success path
-        let expected = vec![crate::graphql::schema::StageCriterion {
-            id: ID::from(Uuid::new_v4()),
-            stage_id: stage_id.clone(),
-            priority: 1,
-            rule_groups: vec![],
-            variant_allocations: vec![],
-            variant_selection_mode: crate::graphql::schema::VariantSelectionMode::WeightedSplit,
-            selected_variant_control: None,
-        }];
+        let mock = MockFeatureLogic::new();
+        let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+        let env_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+        let stage_uuid = Uuid::new_v4();
+        let pool = crate::database::init_pg_pool().await;
+        let feature_repo_db = crate::database::feature::feature_repository(pool.clone());
 
+        let feature_id = feature_repo_db
+            .create_feature(crate::database::feature::CreateFeature {
+                team_id,
+                key: format!("criteria-test-{}", Uuid::new_v4()),
+                description: None,
+                feature_type: crate::database::entity::FeatureType::Simple,
+                stages: vec![crate::database::feature::CreateFeatureStage {
+                    id: stage_uuid,
+                    environment_id: env_id,
+                    order_index: 0,
+                    parent_stage: None,
+                    position: "{ x: 0, y: 0 }".to_string(),
+                    enabled: true,
+                }],
+                dependencies: vec![],
+                variants: None,
+            })
+            .await
+            .expect("feature to be created for criteria test");
+
+        let stage_id = ID::from(stage_uuid);
         let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
             .data::<Box<dyn crate::logic::feature::FeatureLogic>>(Box::new(mock))
             .finish();
@@ -2439,20 +2699,21 @@ mod tests {
             .data::<Box<dyn crate::database::feature::FeatureRepository>>(Box::new(
                 MockFeatureRepository::new(),
             ))
-            .data(crate::database::init_pg_pool().await);
+            .data(pool.clone());
         let resp = schema.execute(req).await;
         assert!(
             resp.errors.is_empty(),
             "{}",
             serde_json::to_string(&resp.errors).unwrap()
         );
+
+        let _ = feature_repo_db.delete_feature(feature_id).await;
     }
 }
 
 #[cfg(test)]
 mod more_mutation_tests {
     use super::*;
-    use crate::database::entity::FeaturePipelineStage;
     use crate::database::feature::MockFeatureRepository;
     use crate::graphql::query::Query as GqlQuery;
     use crate::grpc::pb;
@@ -2463,19 +2724,23 @@ mod more_mutation_tests {
 
     #[tokio::test]
     async fn test_update_context_mutation_calls_logic() {
-        let mut mock = MockContextLogic::new();
-        let ctx_id = ID::from("cb461425-373b-49d9-9634-9a248612d7b7");
-        let expected = crate::graphql::schema::Context {
-            id: ctx_id.clone(),
-            team_id: ID::from(Uuid::new_v4()),
-            key: "k".into(),
-            entries: vec![crate::graphql::schema::ContextEntry {
-                id: ID::from(Uuid::new_v4()),
-                value: "A".into(),
-            }],
-        };
-
+        let mock = MockContextLogic::new();
         let pool = crate::database::init_pg_pool().await;
+        let context_repo = crate::database::context::context_repository(pool.clone());
+        let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+        let created = context_repo
+            .create_context(
+                team_id,
+                crate::database::context::CreateContextInput {
+                    key: format!("ctx-update-{}", Uuid::new_v4()),
+                    entries: vec!["A".into()],
+                },
+            )
+            .await
+            .expect("create context");
+        let ctx_id = ID::from(created.id);
+        let updated_key = format!("ctx-updated-{}", Uuid::new_v4());
+
         let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
             .data::<Box<dyn crate::logic::context::ContextLogic>>(Box::new(mock))
             .data(pool.clone())
@@ -2484,13 +2749,12 @@ mod more_mutation_tests {
             ))
             .finish();
 
-        let gql = r#"mutation($id: ID!){ updateContext(id: $id, input: { key: "k2" }) { key entries { value } } }"#;
+        let gql = r#"mutation($id: ID!, $key: String!){ updateContext(id: $id, input: { key: $key }) { key entries { value } } }"#;
         let mut req = Request::new(gql);
         req = req
             .variables(async_graphql::Variables::from_json(
-                serde_json::json!({"id": ctx_id.to_string()}),
-            ))
-            .data(crate::database::init_pg_pool().await);
+                serde_json::json!({"id": ctx_id.to_string(), "key": updated_key.clone()}),
+            ));
         let resp = schema.execute(req).await;
         assert!(
             resp.errors.is_empty(),
@@ -2498,15 +2762,29 @@ mod more_mutation_tests {
             serde_json::to_string(&resp.errors).unwrap()
         );
         let data = resp.data.into_json().unwrap();
-        assert_eq!(data["updateContext"]["key"], "k");
+        assert_eq!(data["updateContext"]["key"], updated_key);
+
+        let _ = context_repo.delete_context(created.id).await;
     }
 
     #[tokio::test]
     async fn test_delete_context_mutation_returns_true() {
-        let mut mock = MockContextLogic::new();
-        let ctx_id = ID::from("fcc0dfca-07b0-44ad-8d9a-21f2cd450d10");
-
+        let mock = MockContextLogic::new();
         let pool = crate::database::init_pg_pool().await;
+        let context_repo = crate::database::context::context_repository(pool.clone());
+        let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+        let created = context_repo
+            .create_context(
+                team_id,
+                crate::database::context::CreateContextInput {
+                    key: format!("ctx-delete-{}", Uuid::new_v4()),
+                    entries: vec![],
+                },
+            )
+            .await
+            .expect("create context");
+        let ctx_id = ID::from(created.id);
+
         let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
             .data::<Box<dyn crate::logic::context::ContextLogic>>(Box::new(mock))
             .data(pool.clone())
@@ -2528,12 +2806,14 @@ mod more_mutation_tests {
         );
         let data = resp.data.into_json().unwrap();
         assert_eq!(data["deleteContext"], true);
+
+        let _ = context_repo.delete_context(created.id).await;
     }
 
     #[tokio::test]
     async fn set_stage_criteria_broadcasts_feature_update_with_allocations() {
-        let stage_id = Uuid::new_v4();
-        let feature_id = Uuid::new_v4();
+        let stage_id = Uuid::parse_str("99999999-9999-4999-8999-999999999999").unwrap();
+        let feature_id = Uuid::parse_str("5eef17bc-9e06-411d-b5f4-7a786e68bb99").unwrap();
 
         // Logic mock
         let mut logic = MockFeatureLogic::new();
@@ -2541,76 +2821,11 @@ mod more_mutation_tests {
             .expect_get_feature_id_by_stage_id()
             .returning(move |_| Ok(Some(feature_id)));
 
-        // Repo mock
-        let mut repo = MockFeatureRepository::new();
-        repo.expect_get_feature_by_id().returning(move |_| {
-            Ok(crate::database::entity::Feature {
-                id: feature_id,
-                key: "flag".into(),
-                description: None,
-                feature_type: crate::database::entity::FeatureType::Contextual,
-                team_id: Uuid::new_v4(),
-                active: true,
-                created_at: chrono::Utc::now(),
-                kill_switch_enabled: false,
-                kill_switch_activated_at: None,
-                rollback_scheduled_at: None,
-                lifecycle_stage: "active".to_string(),
-                deprecated_at: None,
-                deprecation_notice: None,
-                last_evaluated_at: None,
-                evaluation_count_7d: 0,
-                evaluation_count_30d: 0,
-                evaluation_count_90d: 0,
-                dependencies: vec![],
-            })
-        });
-        repo.expect_get_feature_stages().returning(move |_| {
-            Ok(vec![FeaturePipelineStage {
-                id: stage_id,
-                feature_id,
-                environment_id: Uuid::new_v4(),
-                order_index: 0,
-                parent_stage_id: None,
-                position: "{}\"".trim_matches('"').to_string(),
-                enabled: true,
-                status: "DEPLOYED".into(),
-            }])
-        });
-        repo.expect_get_stage_criteria().returning(move |_| {
-            Ok(vec![crate::database::entity::StageCriterion {
-                id: Uuid::new_v4(),
-                stage_id,
-                priority: 0,
-                rule_groups: vec![],
-                variant_allocations: vec![crate::database::entity::VariantAllocationSimple {
-                    variant_control: "treatment".into(),
-                    weight: 100,
-                }],
-                variant_selection_mode:
-                    crate::database::entity::VariantSelectionMode::WeightedSplit,
-                selected_variant_control: None,
-            }])
-        });
-        repo.expect_get_feature_variants().returning(move |_| {
-            Ok(vec![crate::database::entity::FeatureVariant {
-                id: Uuid::new_v4(),
-                feature_id,
-                control: "treatment".into(),
-                value: serde_json::json!(true),
-                value_type: crate::database::entity::VariantValueType::Boolean,
-                description: None,
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            }])
-        });
-
         let (updates_tx, mut updates_rx) = tokio::sync::broadcast::channel::<pb::FeatureUpdate>(4);
 
         let pool = crate::database::init_pg_pool().await;
         let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
             .data::<Box<dyn crate::logic::feature::FeatureLogic>>(Box::new(logic))
-            .data::<Box<dyn crate::database::feature::FeatureRepository>>(Box::new(repo))
             .data(updates_tx.clone())
             .data(pool.clone())
             .data::<Box<dyn crate::database::activity_log::ActivityLogRepository>>(Box::new(
@@ -2620,7 +2835,10 @@ mod more_mutation_tests {
 
         let gql = r#"
             mutation($sid: ID!) {
-                setStageCriteria(stageId: $sid, criteria: [{ priority: 0 }]) { priority }
+                setStageCriteria(stageId: $sid, criteria: [{
+                    priority: 0,
+                    variantAllocations: [{ variantControl: "treatment-a", weight: 100 }]
+                }]) { priority }
             }
         "#;
         let mut req = Request::new(gql);
@@ -2641,35 +2859,63 @@ mod more_mutation_tests {
             .expect("expected feature update");
         assert_eq!(msg.action, pb::feature_update::Action::Upsert as i32);
         let feature = msg.feature.expect("missing feature payload");
-        assert_eq!(feature.stages.len(), 1);
+        let stage = feature
+            .stages
+            .iter()
+            .find(|s| s.id == stage_id.to_string())
+            .expect("expected updated stage");
+        assert!(!stage.criterias.is_empty());
+        assert!(!stage.criterias[0].variant_allocations.is_empty());
         assert_eq!(
-            feature.stages[0].criterias[0].variant_allocations[0].variant_control,
-            "treatment"
+            stage.criterias[0].variant_allocations[0].variant_control,
+            "treatment-a"
         );
     }
 
     #[tokio::test]
     async fn test_assign_user_roles_mutation() {
-        use crate::logic::role::MockRoleLogic;
-        let mut mock = MockRoleLogic::new();
-        let user_id = ID::from(Uuid::new_v4());
-        let role_id = ID::from(Uuid::new_v4());
+        let pool = crate::database::init_pg_pool().await;
+        let activity_repo: Box<dyn crate::database::activity_log::ActivityLogRepository> =
+            Box::new(crate::database::activity_log::PgActivityLogRepository::new(pool.clone()));
 
-        // Mock the assign operation to return assigned roles
-        let expected_role = crate::logic::role::GqlRole {
-            id: role_id.clone(),
-            name: "Approver".to_string(),
-            description: "Can approve deployment requests".to_string(),
-            created_at: chrono::Utc::now().to_rfc3339(),
-            updated_at: chrono::Utc::now().to_rfc3339(),
-        };
+        let user_repo = crate::database::user::user_repository(pool.clone());
+        let role_repo = crate::database::role::role_repository(pool.clone());
 
-        mock.expect_assign_user_roles()
-            .times(1)
-            .return_once(move |_, _, _| Ok(vec![expected_role]));
+        let unique_suffix = Uuid::new_v4();
+        let created_user = user_repo
+            .create_user(crate::database::user::CreateUser {
+                username: format!("role_user_{unique_suffix}"),
+                password_hash: "hashed_password".to_string(),
+                first_name: "Role".to_string(),
+                last_name: "User".to_string(),
+                email: format!("role_user_{unique_suffix}@example.com"),
+                is_admin: false,
+                is_temporary_password: false,
+            })
+            .await
+            .expect("create user");
+
+        let role_name = format!("Role-{}", Uuid::new_v4());
+        let role = role_repo
+            .create_role(&role_name, "Test role")
+            .await
+            .expect("create role");
+
+        let user_id = ID::from(created_user.id);
+        let role_id = ID::from(role.id);
+        let admin_id =
+            Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").expect("admin user id");
 
         let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
-            .data::<Box<dyn crate::logic::role::RoleLogic>>(Box::new(mock))
+            .data(pool.clone())
+            .data::<Box<dyn crate::database::activity_log::ActivityLogRepository>>(activity_repo)
+            .data(crate::JwtUser {
+                id: admin_id,
+                username: "admin".to_string(),
+                is_admin: true,
+                roles: vec![],
+                token_hash: "hash".to_string(),
+            })
             .finish();
 
         let gql = r#"
@@ -2693,33 +2939,21 @@ mod more_mutation_tests {
             serde_json::to_string(&resp.errors).unwrap()
         );
         let data = resp.data.into_json().unwrap();
-        assert_eq!(data["assignUserRoles"][0]["name"], "Approver");
+        assert_eq!(data["assignUserRoles"][0]["name"], role_name);
     }
 
     #[tokio::test]
     async fn test_create_role_mutation() {
-        use crate::logic::role::MockRoleLogic;
-        let mut mock = MockRoleLogic::new();
-        let admin_id = Uuid::new_v4();
-        let role_id = ID::from(Uuid::new_v4());
-
-        mock.expect_create_role()
-            .times(1)
-            .return_once(move |name, description, actor| {
-                assert_eq!(name, "Observer");
-                assert_eq!(description, "Read only");
-                assert_eq!(actor.as_ref().map(|a| a.id), Some(admin_id));
-                Ok(crate::logic::role::GqlRole {
-                    id: role_id.clone(),
-                    name: "Observer".to_string(),
-                    description: "Read only".to_string(),
-                    created_at: chrono::Utc::now().to_rfc3339(),
-                    updated_at: chrono::Utc::now().to_rfc3339(),
-                })
-            });
+        let pool = crate::database::init_pg_pool().await;
+        let activity_repo: Box<dyn crate::database::activity_log::ActivityLogRepository> =
+            Box::new(crate::database::activity_log::PgActivityLogRepository::new(pool.clone()));
+        let admin_id =
+            Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").expect("admin user id");
+        let role_name = format!("Observer-{}", Uuid::new_v4());
 
         let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
-            .data::<Box<dyn crate::logic::role::RoleLogic>>(Box::new(mock))
+            .data(pool.clone())
+            .data::<Box<dyn crate::database::activity_log::ActivityLogRepository>>(activity_repo)
             .data(crate::JwtUser {
                 id: admin_id,
                 username: "admin".to_string(),
@@ -2740,7 +2974,7 @@ mod more_mutation_tests {
         "#;
         let mut req = Request::new(gql);
         req = req.variables(async_graphql::Variables::from_json(serde_json::json!({
-            "input": { "name": "Observer", "description": "Read only" }
+            "input": { "name": role_name.clone(), "description": "Read only" }
         })));
 
         let resp = schema.execute(req).await;
@@ -2750,16 +2984,12 @@ mod more_mutation_tests {
             serde_json::to_string(&resp.errors).unwrap()
         );
         let data = resp.data.into_json().unwrap();
-        assert_eq!(data["createRole"]["name"], "Observer");
+        assert_eq!(data["createRole"]["name"], role_name);
     }
 
     #[tokio::test]
     async fn test_create_role_requires_admin() {
-        use crate::logic::role::MockRoleLogic;
-        let mock = MockRoleLogic::new();
-
         let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
-            .data::<Box<dyn crate::logic::role::RoleLogic>>(Box::new(mock))
             .data(crate::JwtUser {
                 id: Uuid::new_v4(),
                 username: "user".to_string(),
@@ -2790,22 +3020,22 @@ mod more_mutation_tests {
 
     #[tokio::test]
     async fn test_delete_role_mutation() {
-        use crate::logic::role::MockRoleLogic;
-        let mut mock = MockRoleLogic::new();
-        let admin_id = Uuid::new_v4();
-        let role_id = ID::from(Uuid::new_v4());
-        let expected_role_id = role_id.clone();
-
-        mock.expect_delete_role()
-            .times(1)
-            .return_once(move |id, actor| {
-                assert_eq!(id, expected_role_id);
-                assert_eq!(actor.as_ref().map(|a| a.id), Some(admin_id));
-                Ok(())
-            });
+        let pool = crate::database::init_pg_pool().await;
+        let activity_repo: Box<dyn crate::database::activity_log::ActivityLogRepository> =
+            Box::new(crate::database::activity_log::PgActivityLogRepository::new(pool.clone()));
+        let role_repo = crate::database::role::role_repository(pool.clone());
+        let role_name = format!("DeleteRole-{}", Uuid::new_v4());
+        let role = role_repo
+            .create_role(&role_name, "Role to delete")
+            .await
+            .expect("create role");
+        let role_id = ID::from(role.id);
+        let admin_id =
+            Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").expect("admin user id");
 
         let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
-            .data::<Box<dyn crate::logic::role::RoleLogic>>(Box::new(mock))
+            .data(pool.clone())
+            .data::<Box<dyn crate::database::activity_log::ActivityLogRepository>>(activity_repo)
             .data(crate::JwtUser {
                 id: admin_id,
                 username: "admin".to_string(),
@@ -3699,24 +3929,10 @@ mod more_mutation_tests {
     async fn test_create_environment_mutation() {
         use crate::logic::environment::MockEnvironmentLogic;
 
-        let mut mock = MockEnvironmentLogic::new();
+        let mock = MockEnvironmentLogic::new();
         let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
-        let env_id = Uuid::new_v4();
 
-        let unique_env_name = format!("test_env_{}", Uuid::new_v4());
-        let input = crate::graphql::schema::CreateEnvironmentInput {
-            name: unique_env_name.clone(),
-            active: true,
-            environment_type: Some("Development".to_string()),
-        };
-
-        let expected = crate::graphql::schema::Environment {
-            id: ID::from(env_id),
-            name: unique_env_name.clone(),
-            team_id: ID::from(team_id),
-            active: true,
-            environment_type: "Development".to_string(),
-        };
+        let unique_env_name = format!("Env-{}", Uuid::new_v4());
 
         let pool = crate::database::init_pg_pool().await;
         let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
@@ -3759,24 +3975,24 @@ mod more_mutation_tests {
     async fn test_update_environment_mutation() {
         use crate::logic::environment::MockEnvironmentLogic;
 
-        let mut mock = MockEnvironmentLogic::new();
-        let env_id = Uuid::parse_str("3eef17bc-9e06-411d-b5f4-7a786e68bb96").unwrap();
-
-        let input = crate::graphql::schema::UpdateEnvironmentInput {
-            name: Some("production".to_string()),
-            active: Some(false),
-            environment_type: Some("Production".to_string()),
-        };
-
-        let expected = crate::graphql::schema::Environment {
-            id: ID::from(env_id),
-            name: "production".to_string(),
-            team_id: ID::from(Uuid::new_v4()),
-            active: false,
-            environment_type: "Production".to_string(),
-        };
-
+        let mock = MockEnvironmentLogic::new();
         let pool = crate::database::init_pg_pool().await;
+        let env_repo = crate::database::environment::environment_repository(pool.clone());
+        let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+        let created = env_repo
+            .create_environment(
+                team_id,
+                crate::database::environment::CreateEnvironment {
+                    name: format!("Env-Update-{}", Uuid::new_v4()),
+                    active: true,
+                    environment_type: Some("Development".to_string()),
+                },
+            )
+            .await
+            .expect("create environment");
+        let env_id = created.id;
+        let updated_name = format!("Env-Updated-{}", Uuid::new_v4());
+
         let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
             .data::<Box<dyn crate::logic::environment::EnvironmentLogic>>(Box::new(mock))
             .data(pool.clone())
@@ -3797,7 +4013,7 @@ mod more_mutation_tests {
         let mut req = Request::new(gql);
         req = req.variables(async_graphql::Variables::from_json(serde_json::json!({
             "id": env_id.to_string(),
-            "name": "production",
+            "name": updated_name.clone(),
             "active": false
         })));
 
@@ -3808,18 +4024,33 @@ mod more_mutation_tests {
             resp.errors
         );
         let data = resp.data.into_json().unwrap();
-        assert_eq!(data["updateEnvironment"]["name"], "production");
+        assert_eq!(data["updateEnvironment"]["name"], updated_name);
         assert_eq!(data["updateEnvironment"]["active"], false);
+
+        let _ = env_repo.delete_environment(env_id).await;
     }
 
     #[tokio::test]
     async fn test_delete_environment_mutation() {
         use crate::logic::environment::MockEnvironmentLogic;
 
-        let mut mock = MockEnvironmentLogic::new();
-        let env_id = Uuid::parse_str("1ab6ca79-a4fc-44ba-87e2-12884edf17f7").unwrap();
-
+        let mock = MockEnvironmentLogic::new();
         let pool = crate::database::init_pg_pool().await;
+        let env_repo = crate::database::environment::environment_repository(pool.clone());
+        let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+        let created = env_repo
+            .create_environment(
+                team_id,
+                crate::database::environment::CreateEnvironment {
+                    name: format!("Env-Delete-{}", Uuid::new_v4()),
+                    active: true,
+                    environment_type: Some("Development".to_string()),
+                },
+            )
+            .await
+            .expect("create environment");
+        let env_id = created.id;
+
         let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
             .data::<Box<dyn crate::logic::environment::EnvironmentLogic>>(Box::new(mock))
             .data(pool.clone())
@@ -3846,6 +4077,8 @@ mod more_mutation_tests {
         );
         let data = resp.data.into_json().unwrap();
         assert_eq!(data["deleteEnvironment"], true);
+
+        let _ = env_repo.delete_environment(env_id).await;
     }
 
     // NOTE: This test requires a real database connection because the mutation
@@ -3854,20 +4087,8 @@ mod more_mutation_tests {
     async fn test_create_team_mutation() {
         use crate::logic::team::MockTeamLogic;
 
-        let mut mock = MockTeamLogic::new();
-        let team_id = Uuid::new_v4();
-
+        let mock = MockTeamLogic::new();
         let unique_name = format!("Test Team {}", Uuid::new_v4());
-        let input = crate::graphql::schema::CreateTeamInput {
-            name: unique_name.clone(),
-            description: "Team responsible for development".to_string(),
-        };
-
-        let expected = crate::graphql::schema::Team {
-            id: ID::from(team_id),
-            name: unique_name.clone(),
-            description: "Team responsible for development".to_string(),
-        };
 
         let pool = crate::database::init_pg_pool().await;
         let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
@@ -3913,21 +4134,20 @@ mod more_mutation_tests {
     async fn test_update_team_mutation() {
         use crate::logic::team::MockTeamLogic;
 
-        let mut mock = MockTeamLogic::new();
-        let team_id = Uuid::parse_str("3eef17bc-9e06-411d-b5f4-7a786e68bb96").unwrap();
-
-        let input = crate::graphql::schema::UpdateTeamInput {
-            name: Some("Updated Team".to_string()),
-            description: Some("Updated description".to_string()),
-        };
-
-        let expected = crate::graphql::schema::Team {
-            id: ID::from(team_id),
-            name: "Updated Team".to_string(),
-            description: "Updated description".to_string(),
-        };
-
+        let mock = MockTeamLogic::new();
         let pool = crate::database::init_pg_pool().await;
+        let team_repo = crate::database::team::team_repository(pool.clone());
+        let created = team_repo
+            .create_team(crate::database::team::CreateTeam {
+                name: format!("Team-Update-{}", Uuid::new_v4()),
+                description: "Team for update".to_string(),
+            })
+            .await
+            .expect("create team");
+        let team_id = created.id;
+        let updated_name = format!("Team-Updated-{}", Uuid::new_v4());
+        let updated_desc = "Updated description".to_string();
+
         let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
             .data::<Box<dyn crate::logic::team::TeamLogic>>(Box::new(mock))
             .data(pool.clone())
@@ -3948,8 +4168,8 @@ mod more_mutation_tests {
         let mut req = Request::new(gql);
         req = req.variables(async_graphql::Variables::from_json(serde_json::json!({
             "id": team_id.to_string(),
-            "name": "Updated Team",
-            "description": "Updated description"
+            "name": updated_name.clone(),
+            "description": updated_desc.clone()
         })));
 
         let resp = schema.execute(req).await;
@@ -3959,8 +4179,10 @@ mod more_mutation_tests {
             resp.errors
         );
         let data = resp.data.into_json().unwrap();
-        assert_eq!(data["updateTeam"]["name"], "Updated Team");
-        assert_eq!(data["updateTeam"]["description"], "Updated description");
+        assert_eq!(data["updateTeam"]["name"], updated_name);
+        assert_eq!(data["updateTeam"]["description"], updated_desc);
+
+        let _ = team_repo.delete_team(team_id).await;
     }
 
     #[tokio::test]
@@ -3969,23 +4191,13 @@ mod more_mutation_tests {
 
         let mut mock = MockPipelineLogic::new();
         let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
-        let pipeline_id = Uuid::new_v4();
         let env_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
 
-        let stage_input = crate::graphql::schema::CreateStageInput {
-            environment_id: ID::from(env_id),
-            order_index: 0,
-            position: "dev".to_string(),
-        };
-
-        let unique_pipeline_name = format!("test_pipe_{}", Uuid::new_v4());
-        let _input = crate::graphql::schema::CreatePipelineInput {
-            name: unique_pipeline_name.clone(),
-            stages: vec![stage_input],
-            relationships: vec![],
-        };
-
+        let unique_pipeline_name = format!("pipe_{}", Uuid::new_v4());
         // Mock the validator call to get_pipelines (should return empty for new pipeline)
+        mock.expect_get_pipelines()
+            .times(1)
+            .returning(|_, _, _, _| Ok(vec![]));
 
         let pool = crate::database::init_pg_pool().await;
         let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
@@ -4028,9 +4240,25 @@ mod more_mutation_tests {
         use crate::logic::pipeline::MockPipelineLogic;
 
         let mut mock = MockPipelineLogic::new();
-        let pipeline_id = Uuid::parse_str("3eef17bc-9e06-411d-b5f4-7a786e68bb96").unwrap();
+        let pool = crate::database::init_pg_pool().await;
+        let pipeline_repo_db = crate::database::pipeline::pipeline_repository(pool.clone());
         let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
         let env_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+        let base_name = format!("Pipe-Update-{}", Uuid::new_v4());
+        let pipeline_id = pipeline_repo_db
+            .create_pipeline(crate::database::pipeline::CreatePipeline {
+                team_id,
+                name: base_name.clone(),
+                stages: vec![crate::database::pipeline::CreateStage {
+                    id: Uuid::new_v4(),
+                    environment_id: env_id,
+                    order_index: 0,
+                    parent_stage: None,
+                    position: "{ x: 0, y: 0 }".to_string(),
+                }],
+            })
+            .await
+            .expect("create pipeline for update test");
 
         let stage_input = crate::graphql::schema::CreateStageInput {
             environment_id: ID::from(env_id),
@@ -4047,16 +4275,17 @@ mod more_mutation_tests {
 
         let existing_pipeline = crate::graphql::schema::Pipeline {
             id: ID::from(pipeline_id),
-            name: "Old Pipeline".to_string(),
+            name: base_name.clone(),
             active: true,
             team_id: ID::from(team_id),
             stages: vec![],
             relationships: vec![],
         };
 
+        let updated_name = format!("Pipe-Updated-{}", Uuid::new_v4());
         let updated_pipeline = crate::graphql::schema::Pipeline {
             id: ID::from(pipeline_id),
-            name: "Updated Pipeline".to_string(),
+            name: updated_name.clone(),
             active: false,
             team_id: ID::from(team_id),
             stages: vec![],
@@ -4064,8 +4293,15 @@ mod more_mutation_tests {
         };
 
         // Mock validator call to get_pipeline_by_id
+        let existing_pipeline_clone = existing_pipeline.clone();
+        mock.expect_get_pipelines()
+            .times(1)
+            .returning(move |_, _, _, _| Ok(vec![existing_pipeline_clone.clone()]));
+        let updated_pipeline_clone = updated_pipeline.clone();
+        mock.expect_get_pipeline_by_id()
+            .times(2)
+            .returning(move |_| Ok(updated_pipeline_clone.clone()));
 
-        let pool = crate::database::init_pg_pool().await;
         let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
             .data::<Box<dyn crate::logic::pipeline::PipelineLogic>>(Box::new(mock))
             .data(pool.clone())
@@ -4091,7 +4327,7 @@ mod more_mutation_tests {
         let mut req = Request::new(gql);
         req = req.variables(async_graphql::Variables::from_json(serde_json::json!({
             "id": pipeline_id.to_string(),
-            "name": "Updated Pipeline",
+            "name": updated_name.clone(),
             "active": false,
             "environmentId": env_id.to_string()
         })));
@@ -4103,18 +4339,36 @@ mod more_mutation_tests {
             resp.errors
         );
         let data = resp.data.into_json().unwrap();
-        assert_eq!(data["updatePipeline"]["name"], "Updated Pipeline");
+        assert_eq!(data["updatePipeline"]["name"], updated_name);
         assert_eq!(data["updatePipeline"]["active"], false);
+
+        let _ = pipeline_repo_db.delete_pipeline(pipeline_id).await;
     }
 
     #[tokio::test]
     async fn test_delete_pipeline_mutation() {
         use crate::logic::pipeline::MockPipelineLogic;
 
-        let mut mock = MockPipelineLogic::new();
-        let pipeline_id = Uuid::parse_str("3eef17bc-9e06-411d-b5f4-7a786e68bb97").unwrap();
-
+        let mock = MockPipelineLogic::new();
         let pool = crate::database::init_pg_pool().await;
+        let pipeline_repo_db = crate::database::pipeline::pipeline_repository(pool.clone());
+        let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+        let env_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+        let pipeline_id = pipeline_repo_db
+            .create_pipeline(crate::database::pipeline::CreatePipeline {
+                team_id,
+                name: format!("Pipe-Delete-{}", Uuid::new_v4()),
+                stages: vec![crate::database::pipeline::CreateStage {
+                    id: Uuid::new_v4(),
+                    environment_id: env_id,
+                    order_index: 0,
+                    parent_stage: None,
+                    position: "{ x: 0, y: 0 }".to_string(),
+                }],
+            })
+            .await
+            .expect("create pipeline for delete test");
+
         let schema = Schema::build(GqlQuery, super::MutationRoot, EmptySubscription)
             .data::<Box<dyn crate::logic::pipeline::PipelineLogic>>(Box::new(mock))
             .data(pool.clone())

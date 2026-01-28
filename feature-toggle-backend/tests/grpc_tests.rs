@@ -555,7 +555,7 @@ async fn get_feature_by_key_and_stream_branches() {
     let mut raw = FeatureEvaluationClient::connect(endpoint.clone())
         .await
         .unwrap();
-    let (mut tx_in, rx_out) = tokio::sync::mpsc::channel::<pb::StreamRequest>(4);
+    let (tx_in, rx_out) = tokio::sync::mpsc::channel::<pb::StreamRequest>(4);
     let _ = tx_in
         .send(StreamRequest {
             payload: Some(pb::stream_request::Payload::Heartbeat(pb::Heartbeat {
@@ -571,7 +571,7 @@ async fn get_feature_by_key_and_stream_branches() {
     let mut raw = FeatureEvaluationClient::connect(endpoint.clone())
         .await
         .unwrap();
-    let (mut tx_in, rx_out) = tokio::sync::mpsc::channel::<pb::StreamRequest>(16);
+    let (tx_in, rx_out) = tokio::sync::mpsc::channel::<pb::StreamRequest>(16);
     let _ = tx_in
         .send(StreamRequest {
             payload: Some(pb::stream_request::Payload::Subscribe(
@@ -592,7 +592,7 @@ async fn get_feature_by_key_and_stream_branches() {
     let mut raw = FeatureEvaluationClient::connect(endpoint.clone())
         .await
         .unwrap();
-    let (mut tx_in, rx_out) = tokio::sync::mpsc::channel::<pb::StreamRequest>(16);
+    let (tx_in, rx_out) = tokio::sync::mpsc::channel::<pb::StreamRequest>(16);
     let _ = tx_in
         .send(StreamRequest {
             payload: Some(pb::stream_request::Payload::Subscribe(
@@ -613,7 +613,7 @@ async fn get_feature_by_key_and_stream_branches() {
     let mut raw = FeatureEvaluationClient::connect(endpoint.clone())
         .await
         .unwrap();
-    let (mut tx_in, rx_out) = tokio::sync::mpsc::channel::<pb::StreamRequest>(16);
+    let (tx_in, rx_out) = tokio::sync::mpsc::channel::<pb::StreamRequest>(16);
     let _ = tx_in
         .send(StreamRequest {
             payload: Some(pb::stream_request::Payload::Subscribe(
@@ -634,7 +634,7 @@ async fn get_feature_by_key_and_stream_branches() {
     let mut raw = FeatureEvaluationClient::connect(endpoint.clone())
         .await
         .unwrap();
-    let (mut tx_in, rx_out) = tokio::sync::mpsc::channel::<pb::StreamRequest>(16);
+    let (tx_in, rx_out) = tokio::sync::mpsc::channel::<pb::StreamRequest>(16);
     let _ = tx_in
         .send(StreamRequest {
             payload: Some(pb::stream_request::Payload::Subscribe(
@@ -655,7 +655,7 @@ async fn get_feature_by_key_and_stream_branches() {
     let mut raw = FeatureEvaluationClient::connect(endpoint.clone())
         .await
         .unwrap();
-    let (mut tx_in, rx_out) = tokio::sync::mpsc::channel::<pb::StreamRequest>(32);
+    let (tx_in, rx_out) = tokio::sync::mpsc::channel::<pb::StreamRequest>(32);
     let _ = tx_in
         .send(StreamRequest {
             payload: Some(pb::stream_request::Payload::Subscribe(

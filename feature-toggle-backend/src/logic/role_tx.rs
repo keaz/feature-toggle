@@ -193,7 +193,7 @@ where
         }
     }
 
-    // Get updated roles for the user
-    let roles = repo.get_user_roles(user_uuid).await?;
+    // Get updated roles for the user within the transaction
+    let roles = repo.get_user_roles_tx(conn, user_uuid).await?;
     Ok(roles.into_iter().map(GqlRole::from).collect())
 }

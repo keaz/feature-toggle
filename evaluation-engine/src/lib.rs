@@ -48,6 +48,19 @@ pub enum EvaluationReason {
     Unknown,        // Unknown reason (catch-all)
 }
 
+impl EvaluationReason {
+    /// Returns the reason as a static string (zero-allocation)
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Static => "STATIC",
+            Self::TargetingMatch => "TARGETING_MATCH",
+            Self::Split => "SPLIT",
+            Self::Disabled => "DISABLED",
+            Self::Unknown => "UNKNOWN",
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ErrorCode {
@@ -56,6 +69,19 @@ pub enum ErrorCode {
     InvalidContext,      // Invalid context structure
     General,             // General evaluation error
     FlagNotFound,        // Flag doesn't exist
+}
+
+impl ErrorCode {
+    /// Returns the error code as a static string (zero-allocation)
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::ParseError => "PARSE_ERROR",
+            Self::TargetingKeyMissing => "TARGETING_KEY_MISSING",
+            Self::InvalidContext => "INVALID_CONTEXT",
+            Self::General => "GENERAL",
+            Self::FlagNotFound => "FLAG_NOT_FOUND",
+        }
+    }
 }
 
 // Feature data structures
@@ -408,13 +434,10 @@ fn passes_stage_criteria(
     }
 
     // Only compute a sticky bucket if any criterion uses weighted split mode
-    let needs_bucket = stage
-        .criterias
-        .iter()
-        .any(|crit| {
-            crit.variant_selection_mode == VariantSelectionMode::WeightedSplit
-                && !crit.variant_allocations.is_empty()
-        });
+    let needs_bucket = stage.criterias.iter().any(|crit| {
+        crit.variant_selection_mode == VariantSelectionMode::WeightedSplit
+            && !crit.variant_allocations.is_empty()
+    });
     let user_bucket = if needs_bucket {
         // Always use targeting_key from evaluation context (OpenFeature standard)
         let sticky_val = &ec.context.targeting_key;
@@ -458,8 +481,9 @@ fn passes_stage_criteria(
                 VariantSelectionMode::WeightedSplit => {
                     // Use weighted distribution based on user bucket
                     if !crit.variant_allocations.is_empty() {
-                        user_bucket
-                            .and_then(|bucket| select_variant_by_weight(&crit.variant_allocations, bucket))
+                        user_bucket.and_then(|bucket| {
+                            select_variant_by_weight(&crit.variant_allocations, bucket)
+                        })
                     } else {
                         None
                     }

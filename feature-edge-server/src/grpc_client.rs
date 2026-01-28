@@ -355,8 +355,16 @@ pub async fn run_flush_task(app: AppState) {
                         environment_id: a.environment_id,
                         assigned: a.assigned,
                         // Only send credentials on first message
-                        client_id: if idx == 0 { client_id.clone() } else { String::new() },
-                        client_secret: if idx == 0 { client_secret.clone() } else { String::new() },
+                        client_id: if idx == 0 {
+                            client_id.clone()
+                        } else {
+                            String::new()
+                        },
+                        client_secret: if idx == 0 {
+                            client_secret.clone()
+                        } else {
+                            String::new()
+                        },
                         variant: a.variant.unwrap_or_default(),
                     };
                     if tx.send(assignment).await.is_err() {
@@ -426,7 +434,8 @@ pub async fn run_evaluation_flush_task(
 
             // Convert EvaluateContext to proto Context entries
             // Pre-allocate: 1 for bucketingKey + number of attributes
-            let mut proto_context = Vec::with_capacity(1 + event.evaluation_context.attributes.len());
+            let mut proto_context =
+                Vec::with_capacity(1 + event.evaluation_context.attributes.len());
 
             // Add bucketing_key as a context entry
             proto_context.push(pb::Context {
@@ -440,7 +449,7 @@ pub async fn run_evaluation_flush_task(
                 let value_str = match value {
                     serde_json::Value::String(s) => s.clone(),
                     serde_json::Value::Number(n) => n.to_string(),
-                    serde_json::Value::Bool(b) => b.to_string(),
+                    serde_json::Value::Bool(b) => if *b { "true" } else { "false" }.to_string(),
                     _ => value.to_string(),
                 };
                 proto_context.push(pb::Context {
@@ -460,7 +469,8 @@ pub async fn run_evaluation_flush_task(
                 evaluated_at_unix_ms,
                 prior_assignment: event.prior_assignment,
                 variant: event.variant.clone().unwrap_or_default(),
-                variant_value: event.variant_value
+                variant_value: event
+                    .variant_value
                     .as_ref()
                     .map(|v| serde_json::to_string(v).unwrap_or_default())
                     .unwrap_or_default(),

@@ -136,7 +136,11 @@ async fn test_get_evaluation_rates_and_summary() {
         )
         .await
         .unwrap();
-    assert!(rates.len() >= 0); // May be empty if no data
+    assert!(rates.iter().all(|point| {
+        point.evaluation_count >= 0
+            && point.success_count >= 0
+            && point.prior_assignment_count >= 0
+    }));
 
     let summary = repo
         .get_evaluation_summary(

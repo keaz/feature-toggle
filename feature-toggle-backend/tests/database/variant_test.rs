@@ -3,8 +3,6 @@ use feature_toggle_backend::database::feature::{CreateFeature, CreateFeatureStag
 use feature_toggle_backend::database::{entity::FeatureType, feature, init_pg_pool};
 use serde_json::json;
 use uuid::Uuid;
-
-type DbResult<T> = Result<T, feature_toggle_backend::Error>;
 #[tokio::test]
 async fn test_variant_value_types() {
     let pool = init_pg_pool().await;

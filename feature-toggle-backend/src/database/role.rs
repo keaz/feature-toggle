@@ -64,6 +64,11 @@ pub trait RoleRepositoryTx: RoleRepository {
         role_ids: Vec<Uuid>,
         assigned_by: Option<Uuid>,
     ) -> Result<(), Error>;
+    async fn get_user_roles_tx(
+        &self,
+        conn: &mut PgConnection,
+        user_id: Uuid,
+    ) -> Result<Vec<Role>, Error>;
     async fn remove_user_role_tx(
         &self,
         conn: &mut PgConnection,
@@ -341,6 +346,25 @@ impl RoleRepositoryImpl {
         Ok(())
     }
 
+    async fn get_user_roles_internal(
+        conn: &mut PgConnection,
+        user_id: Uuid,
+    ) -> Result<Vec<Role>, Error> {
+        let result = sqlx::query_as!(
+            Role,
+            r#"SELECT r.id, r.name, r.description, r.created_at, r.updated_at 
+               FROM roles r 
+               JOIN user_roles ur ON r.id = ur.role_id 
+               WHERE ur.user_id = $1 
+               ORDER BY r.name"#,
+            user_id
+        )
+        .fetch_all(&mut *conn)
+        .await;
+
+        handle_error(Some(user_id), result)
+    }
+
     async fn remove_user_role_internal(
         conn: &mut PgConnection,
         user_id: Uuid,
@@ -382,6 +406,14 @@ impl RoleRepositoryTx for RoleRepositoryImpl {
         assigned_by: Option<Uuid>,
     ) -> Result<(), Error> {
         Self::assign_user_roles_internal(conn, user_id, role_ids, assigned_by).await
+    }
+
+    async fn get_user_roles_tx(
+        &self,
+        conn: &mut PgConnection,
+        user_id: Uuid,
+    ) -> Result<Vec<Role>, Error> {
+        Self::get_user_roles_internal(conn, user_id).await
     }
 
     async fn remove_user_role_tx(

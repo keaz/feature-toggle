@@ -6,25 +6,53 @@ use uuid::Uuid;
 
 #[tokio::test]
 async fn test_assign_user_roles_mutation() {
-    let mut mock = MockRoleLogic::new();
-    let user_id = ID::from(Uuid::new_v4());
-    let role_id = ID::from(Uuid::new_v4());
+    let pool = feature_toggle_backend::database::init_pg_pool().await;
+    let activity_repo: Box<
+        dyn feature_toggle_backend::database::activity_log::ActivityLogRepository,
+    > = Box::new(feature_toggle_backend::database::activity_log::PgActivityLogRepository::new(
+        pool.clone(),
+    ));
 
-    // Mock the assign operation to return assigned roles
-    let expected_role = feature_toggle_backend::logic::role::GqlRole {
-        id: role_id.clone(),
-        name: "Approver".to_string(),
-        description: "Can approve deployment requests".to_string(),
-        created_at: chrono::Utc::now().to_rfc3339(),
-        updated_at: chrono::Utc::now().to_rfc3339(),
-    };
+    let user_repo = feature_toggle_backend::database::user::user_repository(pool.clone());
+    let role_repo = feature_toggle_backend::database::role::role_repository(pool.clone());
 
-    mock.expect_assign_user_roles()
-        .times(1)
-        .return_once(move |_, _, _| Ok(vec![expected_role]));
+    let unique_suffix = Uuid::new_v4();
+    let created_user = user_repo
+        .create_user(feature_toggle_backend::database::user::CreateUser {
+            username: format!("role_user_{unique_suffix}"),
+            password_hash: "hashed_password".to_string(),
+            first_name: "Role".to_string(),
+            last_name: "User".to_string(),
+            email: format!("role_user_{unique_suffix}@example.com"),
+            is_admin: false,
+            is_temporary_password: false,
+        })
+        .await
+        .expect("create user");
+
+    let role_name = format!("Approver-{}", Uuid::new_v4());
+    let role = role_repo
+        .create_role(&role_name, "Can approve deployment requests")
+        .await
+        .expect("create role");
+
+    let user_id = ID::from(created_user.id);
+    let role_id = ID::from(role.id);
+    let admin_id =
+        Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").expect("admin user id");
 
     let schema = Schema::build(GqlQuery, MutationRoot, EmptySubscription)
-        .data::<Box<dyn feature_toggle_backend::logic::role::RoleLogic>>(Box::new(mock))
+        .data(pool.clone())
+        .data::<Box<dyn feature_toggle_backend::database::activity_log::ActivityLogRepository>>(
+            activity_repo,
+        )
+        .data(feature_toggle_backend::JwtUser {
+            id: admin_id,
+            username: "admin".to_string(),
+            is_admin: true,
+            roles: vec![],
+            token_hash: "hash".to_string(),
+        })
         .finish();
 
     let gql = r#"
@@ -48,7 +76,7 @@ async fn test_assign_user_roles_mutation() {
         serde_json::to_string(&resp.errors).unwrap()
     );
     let data = resp.data.into_json().unwrap();
-    assert_eq!(data["assignUserRoles"][0]["name"], "Approver");
+    assert_eq!(data["assignUserRoles"][0]["name"], role_name);
 }
 
 #[tokio::test]
