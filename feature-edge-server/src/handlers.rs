@@ -1,7 +1,7 @@
 use crate::grpc_client::{assignment_key, fetch_feature_via_grpc, get_or_fetch_client_info};
 use crate::pb;
 use crate::{AppState, EvaluationEvent};
-use actix_web::{HttpResponse, Responder, web};
+use actix_web::{web, HttpResponse, Responder};
 use evaluation_engine as engine;
 use serde::{Deserialize, Serialize};
 use tracing::error;
@@ -308,36 +308,78 @@ fn validate_web_origin(
 }
 
 /// Get feature from cache or fetch from backend (returns mapped engine::Feature)
+/// Uses request coalescing to prevent concurrent fetches for the same key
 async fn get_or_fetch_feature(
     app: &AppState,
     feature_key: &str,
     client_id: &str,
     client_secret: &str,
 ) -> Option<std::sync::Arc<engine::Feature>> {
-    // Check mapped cache first
-    if let Some(mapped) = app.mapped_cache.get(feature_key).await {
-        info_log!("Feature '{}' found in mapped cache", feature_key);
-        return Some(mapped);
+    // Check negative cache first - avoid repeated gRPC calls for non-existent features
+    if app.mapped_cache.is_negative_cached(feature_key).await {
+        return None;
     }
 
-    // Cache miss - fetch protobuf from backend and map it
-    info_log!(
-        "Feature '{}' NOT in cache, fetching from backend via gRPC",
-        feature_key
-    );
-    let pb_feature = fetch_feature_via_grpc(app, feature_key, client_id, client_secret).await?;
+    // Use optionally_get_with for automatic request coalescing
+    // If multiple concurrent requests ask for the same uncached key,
+    // only one will execute the fetch function while others wait
+    let client_id_owned = client_id.to_string();
+    let client_secret_owned = client_secret.to_string();
+    let app_clone = app.clone();
+    let feature_key_owned = feature_key.to_string();
 
-    // Map to engine format
-    let engine_feature = std::sync::Arc::new(map_proto_to_engine(&pb_feature));
+    let result = app
+        .mapped_cache
+        .optionally_get_with(feature_key.to_string(), || async move {
+            info_log!(
+                "Feature '{}' NOT in cache, fetching from backend via gRPC",
+                feature_key_owned
+            );
 
-    // Cache the mapped version
-    app.mapped_cache.insert(engine_feature.clone()).await;
-    info_log!(
-        "Feature '{}' successfully cached in mapped cache",
-        feature_key
-    );
+            // Fetch protobuf from backend
+            let pb_feature = fetch_feature_via_grpc(
+                &app_clone,
+                &feature_key_owned,
+                &client_id_owned,
+                &client_secret_owned,
+            )
+                .await;
 
-    Some(engine_feature)
+            match pb_feature {
+                Some(pf) => {
+                    // Map to engine format
+                    let engine_feature = std::sync::Arc::new(map_proto_to_engine(&pf));
+
+                    // Also update the by_id index
+                    app_clone
+                        .mapped_cache
+                        .update_id_index(&engine_feature.id, &engine_feature.key)
+                        .await;
+
+                    info_log!(
+                        "Feature '{}' successfully fetched and cached",
+                        feature_key_owned
+                    );
+
+                    Some(engine_feature)
+                }
+                None => {
+                    // Feature not found - add to negative cache
+                    info_log!(
+                        "Feature '{}' not found in backend, adding to negative cache",
+                        feature_key_owned
+                    );
+                    app_clone
+                        .mapped_cache
+                        .add_negative(&feature_key_owned)
+                        .await;
+                    None
+                }
+            }
+        })
+        .await;
+
+    result
 }
 
 /// HTTP handler for feature evaluation

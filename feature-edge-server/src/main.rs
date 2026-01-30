@@ -99,6 +99,9 @@ pub struct MappedFeatureCache {
     by_key: moka::future::Cache<String, Arc<evaluation_engine::Feature>>,
     // Secondary index: feature_id -> feature_key
     by_id: moka::future::Cache<String, String>,
+    // Negative cache: feature_key -> () for features that don't exist
+    // TTL of 60 seconds so we periodically recheck if feature was created
+    negative_cache: moka::future::Cache<String, ()>,
 }
 
 impl MappedFeatureCache {
@@ -110,12 +113,58 @@ impl MappedFeatureCache {
         Self {
             by_key: moka::future::Cache::new(max_capacity),
             by_id: moka::future::Cache::new(max_capacity),
+            negative_cache: moka::future::Cache::builder()
+                .time_to_live(std::time::Duration::from_secs(60))
+                .max_capacity(10000)
+                .build(),
         }
     }
 
     /// Get feature by key
     pub async fn get(&self, key: &str) -> Option<Arc<evaluation_engine::Feature>> {
         self.by_key.get(key).await
+    }
+
+    /// Get feature by key, or compute and insert it if not present.
+    /// This uses moka's built-in request coalescing - if multiple concurrent
+    /// requests ask for the same uncached key, only one will execute the
+    /// init function while others wait for the result.
+    pub async fn optionally_get_with<F, Fut>(
+        &self,
+        key: String,
+        init: F,
+    ) -> Option<Arc<evaluation_engine::Feature>>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Option<Arc<evaluation_engine::Feature>>>,
+    {
+        self.by_key
+            .optionally_get_with(key, async move {
+                let feature = init().await?;
+                Some(feature)
+            })
+            .await
+    }
+
+    /// Update the by_id index (feature_id -> feature_key mapping)
+    /// Used when inserting via optionally_get_with which only updates by_key
+    pub async fn update_id_index(&self, id: &str, key: &str) {
+        self.by_id.insert(id.to_string(), key.to_string()).await;
+    }
+
+    /// Check if a feature key is in the negative cache (doesn't exist in backend)
+    pub async fn is_negative_cached(&self, key: &str) -> bool {
+        self.negative_cache.get(key).await.is_some()
+    }
+
+    /// Add a feature key to the negative cache (mark as non-existent)
+    pub async fn add_negative(&self, key: &str) {
+        self.negative_cache.insert(key.to_string(), ()).await;
+    }
+
+    /// Remove a feature key from negative cache (called when feature is created)
+    pub async fn remove_negative(&self, key: &str) {
+        self.negative_cache.invalidate(key).await;
     }
 
     /// Get feature by ID (using secondary index)
@@ -299,7 +348,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .route("/health", web::get().to(handlers::health_handler))
             .route("/evaluate", web::post().to(handlers::evaluate_handler))
             // OFREP (OpenFeature Remote Evaluation Protocol) endpoint
-            .route("/ofrep/v1/evaluate/flags/{key}", web::post().to(handlers::ofrep_evaluate_flag))
+            .route(
+                "/ofrep/v1/evaluate/flags/{key}",
+                web::post().to(handlers::ofrep_evaluate_flag),
+            )
     })
     .bind(http_addr)?
     .run()
@@ -453,7 +505,10 @@ mod tests {
         let context: OFREPContext = serde_json::from_str(json_str).unwrap();
 
         assert_eq!(context.targeting_key, "user-123");
-        assert_eq!(context.attributes.get("environment_id").unwrap(), "env-prod");
+        assert_eq!(
+            context.attributes.get("environment_id").unwrap(),
+            "env-prod"
+        );
         assert_eq!(context.attributes.get("country").unwrap(), "US");
 
         // Test that it works with minimal attributes
@@ -465,7 +520,7 @@ mod tests {
 
     #[test]
     fn test_ofrep_response_serialization() {
-        use handlers::{OFREPSuccessResponse, OFREPErrorResponse};
+        use handlers::{OFREPErrorResponse, OFREPSuccessResponse};
 
         // Test success response
         let success = OFREPSuccessResponse {
@@ -477,7 +532,7 @@ mod tests {
         };
 
         let json = serde_json::to_string(&success).unwrap();
-        assert!(!json.contains("\"key\":"));  // key should be omitted when None
+        assert!(!json.contains("\"key\":")); // key should be omitted when None
         assert!(json.contains("\"value\":true"));
         assert!(json.contains("\"reason\":\"TARGETING_MATCH\""));
 
@@ -501,49 +556,125 @@ mod tests {
 
         // Test that our engine reasons serialize correctly to JSON (SCREAMING_SNAKE_CASE)
         let reason1 = evaluation_engine::EvaluationReason::Static;
-        let json1 = serde_json::to_string(&reason1).unwrap().trim_matches('"').to_string();
-        assert!(valid_reasons.contains(&json1.as_str()), "Reason '{}' not in OFREP spec", json1);
+        let json1 = serde_json::to_string(&reason1)
+            .unwrap()
+            .trim_matches('"')
+            .to_string();
+        assert!(
+            valid_reasons.contains(&json1.as_str()),
+            "Reason '{}' not in OFREP spec",
+            json1
+        );
 
         let reason2 = evaluation_engine::EvaluationReason::TargetingMatch;
-        let json2 = serde_json::to_string(&reason2).unwrap().trim_matches('"').to_string();
-        assert!(valid_reasons.contains(&json2.as_str()), "Reason '{}' not in OFREP spec", json2);
+        let json2 = serde_json::to_string(&reason2)
+            .unwrap()
+            .trim_matches('"')
+            .to_string();
+        assert!(
+            valid_reasons.contains(&json2.as_str()),
+            "Reason '{}' not in OFREP spec",
+            json2
+        );
 
         let reason3 = evaluation_engine::EvaluationReason::Split;
-        let json3 = serde_json::to_string(&reason3).unwrap().trim_matches('"').to_string();
-        assert!(valid_reasons.contains(&json3.as_str()), "Reason '{}' not in OFREP spec", json3);
+        let json3 = serde_json::to_string(&reason3)
+            .unwrap()
+            .trim_matches('"')
+            .to_string();
+        assert!(
+            valid_reasons.contains(&json3.as_str()),
+            "Reason '{}' not in OFREP spec",
+            json3
+        );
 
         let reason4 = evaluation_engine::EvaluationReason::Disabled;
-        let json4 = serde_json::to_string(&reason4).unwrap().trim_matches('"').to_string();
-        assert!(valid_reasons.contains(&json4.as_str()), "Reason '{}' not in OFREP spec", json4);
+        let json4 = serde_json::to_string(&reason4)
+            .unwrap()
+            .trim_matches('"')
+            .to_string();
+        assert!(
+            valid_reasons.contains(&json4.as_str()),
+            "Reason '{}' not in OFREP spec",
+            json4
+        );
 
         let reason5 = evaluation_engine::EvaluationReason::Unknown;
-        let json5 = serde_json::to_string(&reason5).unwrap().trim_matches('"').to_string();
-        assert!(valid_reasons.contains(&json5.as_str()), "Reason '{}' not in OFREP spec", json5);
+        let json5 = serde_json::to_string(&reason5)
+            .unwrap()
+            .trim_matches('"')
+            .to_string();
+        assert!(
+            valid_reasons.contains(&json5.as_str()),
+            "Reason '{}' not in OFREP spec",
+            json5
+        );
     }
 
     #[test]
     fn test_ofrep_error_codes_are_valid() {
         // Verify all error codes match OFREP spec (using JSON serialization)
-        let valid_codes = vec!["PARSE_ERROR", "TARGETING_KEY_MISSING", "INVALID_CONTEXT", "GENERAL", "FLAG_NOT_FOUND"];
+        let valid_codes = vec![
+            "PARSE_ERROR",
+            "TARGETING_KEY_MISSING",
+            "INVALID_CONTEXT",
+            "GENERAL",
+            "FLAG_NOT_FOUND",
+        ];
 
         let code1 = evaluation_engine::ErrorCode::ParseError;
-        let json1 = serde_json::to_string(&code1).unwrap().trim_matches('"').to_string();
-        assert!(valid_codes.contains(&json1.as_str()), "Error code '{}' not in OFREP spec", json1);
+        let json1 = serde_json::to_string(&code1)
+            .unwrap()
+            .trim_matches('"')
+            .to_string();
+        assert!(
+            valid_codes.contains(&json1.as_str()),
+            "Error code '{}' not in OFREP spec",
+            json1
+        );
 
         let code2 = evaluation_engine::ErrorCode::TargetingKeyMissing;
-        let json2 = serde_json::to_string(&code2).unwrap().trim_matches('"').to_string();
-        assert!(valid_codes.contains(&json2.as_str()), "Error code '{}' not in OFREP spec", json2);
+        let json2 = serde_json::to_string(&code2)
+            .unwrap()
+            .trim_matches('"')
+            .to_string();
+        assert!(
+            valid_codes.contains(&json2.as_str()),
+            "Error code '{}' not in OFREP spec",
+            json2
+        );
 
         let code3 = evaluation_engine::ErrorCode::InvalidContext;
-        let json3 = serde_json::to_string(&code3).unwrap().trim_matches('"').to_string();
-        assert!(valid_codes.contains(&json3.as_str()), "Error code '{}' not in OFREP spec", json3);
+        let json3 = serde_json::to_string(&code3)
+            .unwrap()
+            .trim_matches('"')
+            .to_string();
+        assert!(
+            valid_codes.contains(&json3.as_str()),
+            "Error code '{}' not in OFREP spec",
+            json3
+        );
 
         let code4 = evaluation_engine::ErrorCode::General;
-        let json4 = serde_json::to_string(&code4).unwrap().trim_matches('"').to_string();
-        assert!(valid_codes.contains(&json4.as_str()), "Error code '{}' not in OFREP spec", json4);
+        let json4 = serde_json::to_string(&code4)
+            .unwrap()
+            .trim_matches('"')
+            .to_string();
+        assert!(
+            valid_codes.contains(&json4.as_str()),
+            "Error code '{}' not in OFREP spec",
+            json4
+        );
 
         let code5 = evaluation_engine::ErrorCode::FlagNotFound;
-        let json5 = serde_json::to_string(&code5).unwrap().trim_matches('"').to_string();
-        assert!(valid_codes.contains(&json5.as_str()), "Error code '{}' not in OFREP spec", json5);
+        let json5 = serde_json::to_string(&code5)
+            .unwrap()
+            .trim_matches('"')
+            .to_string();
+        assert!(
+            valid_codes.contains(&json5.as_str()),
+            "Error code '{}' not in OFREP spec",
+            json5
+        );
     }
 }
