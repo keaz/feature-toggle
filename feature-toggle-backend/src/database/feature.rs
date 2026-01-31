@@ -2346,36 +2346,31 @@ impl FeatureRepositoryTx for FeatureRepositoryImpl {
         conn: &mut PgConnection,
         input: UpdateFeature,
     ) -> Result<Feature, Error> {
-        let existing_feature = self.get_feature_by_id(input.id).await?;
+        let feature_id = input.id;
 
-        let feature_type_str = match input
-            .feature_type
-            .clone()
-            .unwrap_or(existing_feature.feature_type.clone())
-        {
-            FeatureType::Simple => "Simple",
-            FeatureType::Contextual => "Contextual",
-        };
+        // Update feature metadata
+        self.update_feature(&input, conn).await?;
 
-        let key = input.key.clone().unwrap_or(existing_feature.key.clone());
-        let description = input
-            .description
-            .clone()
-            .or(existing_feature.description.clone());
+        // Update stages
+        self.update_feature_stage(&feature_id, input.stages, conn)
+            .await?;
 
-        sqlx::query!(
-            r#"UPDATE features SET key = $1, description = $2, feature_type = $3 WHERE id = $4"#,
-            key,
-            description,
-            feature_type_str,
-            input.id
-        )
-        .execute(&mut *conn)
-        .await
-        .map_err(Error::DatabaseError)?;
+        // Update dependencies
+        self.update_feature_dependencies(&feature_id, input.dependencies, conn)
+            .await?;
+
+        // Update variants if provided (replace all)
+        if let Some(variants) = input.variants {
+            self.delete_feature_variants_conn(conn, feature_id).await?;
+
+            if !variants.is_empty() {
+                self.create_feature_variants_conn(conn, feature_id, variants)
+                    .await?;
+            }
+        }
 
         // Return updated feature
-        self.get_feature_by_id(input.id).await
+        self.get_feature_by_id(feature_id).await
     }
 
     async fn delete_feature_tx(&self, conn: &mut PgConnection, id: Uuid) -> Result<(), Error> {
@@ -2819,6 +2814,53 @@ impl FeatureRepositoryImpl {
             feature_id
         )
         .execute(&mut **tx)
+        .await
+        .map_err(Error::DatabaseError)?;
+
+        Ok(())
+    }
+
+    async fn create_feature_variants_conn(
+        &self,
+        conn: &mut PgConnection,
+        feature_id: Uuid,
+        variants: Vec<(
+            String,
+            serde_json::Value,
+            crate::database::entity::VariantValueType,
+            Option<String>,
+        )>,
+    ) -> Result<(), Error> {
+        for (control, value, value_type, description) in variants {
+            sqlx::query!(
+                r#"
+                INSERT INTO feature_variants (feature_id, control, value, value_type, description)
+                VALUES ($1, $2, $3, $4, $5)
+                "#,
+                feature_id,
+                control,
+                value,
+                value_type as crate::database::entity::VariantValueType,
+                description
+            )
+            .execute(&mut *conn)
+            .await
+            .map_err(Error::DatabaseError)?;
+        }
+
+        Ok(())
+    }
+
+    async fn delete_feature_variants_conn(
+        &self,
+        conn: &mut PgConnection,
+        feature_id: Uuid,
+    ) -> Result<(), Error> {
+        sqlx::query!(
+            "DELETE FROM feature_variants WHERE feature_id = $1",
+            feature_id
+        )
+        .execute(&mut *conn)
         .await
         .map_err(Error::DatabaseError)?;
 
