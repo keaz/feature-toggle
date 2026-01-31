@@ -11,6 +11,7 @@ use pb::feature_evaluation_server::{FeatureEvaluation, FeatureEvaluationServer};
 use pb::{EvaluateRequest, EvaluateResponse};
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
+use tonic::codec::CompressionEncoding;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
@@ -1371,8 +1372,9 @@ pub async fn serve(
     >,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let svc = FeatureEvaluationSvc::new(pool, updates_tx.clone(), evaluation_events_tx.clone());
+    let svc = FeatureEvaluationServer::new(svc).accept_compressed(CompressionEncoding::Gzip);
     tonic::transport::Server::builder()
-        .add_service(FeatureEvaluationServer::new(svc))
+        .add_service(svc)
         .serve(addr)
         .await?;
     Ok(())

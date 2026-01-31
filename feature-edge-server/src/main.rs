@@ -1,5 +1,6 @@
 use actix_web::{App, HttpServer, web};
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{net::SocketAddr, sync::{Arc, atomic::AtomicU64}, time::Duration};
+use tonic::codec::CompressionEncoding;
 use tonic::transport::Endpoint;
 use tracing::{error, info};
 use utoipa::OpenApi;
@@ -73,9 +74,13 @@ pub struct AppState {
     assigned_cache: Arc<dashmap::DashMap<String, CachedAssignment>>,
     pending_assignments: Arc<crossbeam::queue::SegQueue<grpc_client::UserAssignment>>,
     flush_interval: Duration,
+    assignment_flush_batch_size: usize,
     // Evaluation events tracking (using channel for lock-free writes)
-    evaluation_event_tx: tokio::sync::mpsc::UnboundedSender<EvaluationEvent>,
+    evaluation_event_tx: tokio::sync::mpsc::Sender<EvaluationEvent>,
     evaluation_flush_interval: Duration,
+    evaluation_flush_batch_size: usize,
+    evaluation_event_queue_capacity: usize,
+    evaluation_event_dropped: Arc<AtomicU64>,
     // Retry configuration
     retry_config: config::RetryConfig,
 }
@@ -293,10 +298,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .concurrency_limit(cfg.grpc.concurrency_limit)
         .tcp_nodelay(cfg.grpc.tcp_nodelay);
     let channel = endpoint.connect().await?;
-    let grpc_client = pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
+    let mut grpc_client = pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
+    if matches!(cfg.grpc.compression, config::GrpcCompression::Gzip) {
+        grpc_client = grpc_client
+            .send_compressed(CompressionEncoding::Gzip)
+            .accept_compressed(CompressionEncoding::Gzip);
+    }
 
-    // Create unbounded channel for evaluation events
-    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+    // Create bounded channel for evaluation events
+    let evaluation_event_queue_capacity = cfg.flush.evaluation_event_queue_capacity.max(1);
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel(evaluation_event_queue_capacity);
 
     let state = AppState {
         mapped_cache: Arc::new(MappedFeatureCache::new(cfg.cache.max_capacity)),
@@ -308,8 +319,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         assigned_cache: Arc::new(dashmap::DashMap::new()),
         pending_assignments: Arc::new(crossbeam::queue::SegQueue::new()),
         flush_interval: cfg.flush.assignment_flush_interval(),
+        assignment_flush_batch_size: cfg.flush.assignment_flush_batch_size(),
         evaluation_event_tx: event_tx,
         evaluation_flush_interval: cfg.flush.evaluation_flush_interval(),
+        evaluation_flush_batch_size: cfg.flush.evaluation_flush_batch_size(),
+        evaluation_event_queue_capacity,
+        evaluation_event_dropped: Arc::new(AtomicU64::new(0)),
         retry_config: cfg.retry.clone(),
     };
 
@@ -371,7 +386,7 @@ mod tests {
         let client_info_cache = Arc::new(ClientInfoCache::new(Duration::from_secs(300)));
         let channel = Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
         let grpc_client = pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
-        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(10);
         let state = AppState {
             mapped_cache,
             client_info_cache,
@@ -382,8 +397,12 @@ mod tests {
             assigned_cache: Arc::new(dashmap::DashMap::new()),
             pending_assignments: Arc::new(crossbeam::queue::SegQueue::new()),
             flush_interval: Duration::from_secs(60),
+            assignment_flush_batch_size: 1000,
             evaluation_event_tx: event_tx,
             evaluation_flush_interval: Duration::from_secs(60),
+            evaluation_flush_batch_size: 500,
+            evaluation_event_queue_capacity: 10,
+            evaluation_event_dropped: Arc::new(AtomicU64::new(0)),
             retry_config: config::RetryConfig::default(),
         };
 

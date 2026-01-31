@@ -4,6 +4,7 @@ use crate::{AppState, EvaluationEvent};
 use actix_web::{web, HttpResponse, Responder};
 use evaluation_engine as engine;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::Ordering;
 use tracing::error;
 use tracing::info as info_log;
 use utoipa::ToSchema;
@@ -537,8 +538,17 @@ pub async fn evaluate_handler(
         },
     };
 
-    // Non-blocking send - if channel is full, this will fail silently (unbounded so shouldn't happen)
-    let _ = app.evaluation_event_tx.send(evaluation_event);
+    // Non-blocking send; drop if the queue is full
+    if let Err(err) = app.evaluation_event_tx.try_send(evaluation_event) {
+        match err {
+            tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                app.evaluation_event_dropped.fetch_add(1, Ordering::Relaxed);
+            }
+            tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                tracing::warn!("Evaluation event channel closed; dropping event");
+            }
+        }
+    }
 
     // Determine if we should cache this assignment:
     // - For features with variants: cache if a variant was resolved
@@ -819,7 +829,16 @@ pub async fn ofrep_evaluate_flag(
             None
         },
     };
-    let _ = app.evaluation_event_tx.send(evaluation_event);
+    if let Err(err) = app.evaluation_event_tx.try_send(evaluation_event) {
+        match err {
+            tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                app.evaluation_event_dropped.fetch_add(1, Ordering::Relaxed);
+            }
+            tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                tracing::warn!("Evaluation event channel closed; dropping event");
+            }
+        }
+    }
 
     // Cache successful assignments
     let should_cache = result.variant.is_some() || result.value.as_bool().unwrap_or(false);

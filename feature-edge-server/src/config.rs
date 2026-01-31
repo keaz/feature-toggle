@@ -61,6 +61,23 @@ pub struct GrpcConfig {
     /// Enable TCP_NODELAY
     #[serde(default = "default_true")]
     pub tcp_nodelay: bool,
+
+    /// gRPC request compression (none or gzip)
+    #[serde(default)]
+    pub compression: GrpcCompression,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GrpcCompression {
+    None,
+    Gzip,
+}
+
+impl Default for GrpcCompression {
+    fn default() -> Self {
+        GrpcCompression::None
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +89,18 @@ pub struct FlushConfig {
     /// Evaluation events flush interval in seconds
     #[serde(default = "default_evaluation_flush")]
     pub evaluation_flush_secs: u64,
+
+    /// Evaluation event queue capacity (bounded channel)
+    #[serde(default = "default_evaluation_event_queue_capacity")]
+    pub evaluation_event_queue_capacity: usize,
+
+    /// Max user assignment messages per gRPC stream flush
+    #[serde(default = "default_assignment_flush_batch_size")]
+    pub assignment_flush_batch_size: usize,
+
+    /// Max evaluation events per gRPC request
+    #[serde(default = "default_evaluation_flush_batch_size")]
+    pub evaluation_flush_batch_size: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -137,6 +166,15 @@ fn default_assignment_flush() -> u64 {
 fn default_evaluation_flush() -> u64 {
     30
 }
+fn default_evaluation_event_queue_capacity() -> usize {
+    10_000
+}
+fn default_assignment_flush_batch_size() -> usize {
+    1000
+}
+fn default_evaluation_flush_batch_size() -> usize {
+    500
+}
 fn default_base_delay() -> u64 {
     500
 }
@@ -160,6 +198,7 @@ impl Default for GrpcConfig {
             keep_alive_while_idle: default_true(),
             concurrency_limit: default_concurrency_limit(),
             tcp_nodelay: default_true(),
+            compression: GrpcCompression::default(),
         }
     }
 }
@@ -169,6 +208,9 @@ impl Default for FlushConfig {
         Self {
             assignment_flush_secs: default_assignment_flush(),
             evaluation_flush_secs: default_evaluation_flush(),
+            evaluation_event_queue_capacity: default_evaluation_event_queue_capacity(),
+            assignment_flush_batch_size: default_assignment_flush_batch_size(),
+            evaluation_flush_batch_size: default_evaluation_flush_batch_size(),
         }
     }
 }
@@ -224,6 +266,14 @@ impl FlushConfig {
 
     pub fn evaluation_flush_interval(&self) -> Duration {
         Duration::from_secs(self.evaluation_flush_secs)
+    }
+
+    pub fn assignment_flush_batch_size(&self) -> usize {
+        self.assignment_flush_batch_size.max(1)
+    }
+
+    pub fn evaluation_flush_batch_size(&self) -> usize {
+        self.evaluation_flush_batch_size.max(1)
     }
 }
 
@@ -294,6 +344,7 @@ mod tests {
         assert!(config.keep_alive_while_idle);
         assert_eq!(config.concurrency_limit, 256);
         assert!(config.tcp_nodelay);
+        assert!(matches!(config.compression, GrpcCompression::None));
     }
 
     #[test]
@@ -301,6 +352,9 @@ mod tests {
         let config = FlushConfig::default();
         assert_eq!(config.assignment_flush_secs, 10);
         assert_eq!(config.evaluation_flush_secs, 30);
+        assert_eq!(config.evaluation_event_queue_capacity, 10_000);
+        assert_eq!(config.assignment_flush_batch_size, 1000);
+        assert_eq!(config.evaluation_flush_batch_size, 500);
     }
 
     #[test]
@@ -333,5 +387,7 @@ mod tests {
         let config = FlushConfig::default();
         assert_eq!(config.assignment_flush_interval(), Duration::from_secs(10));
         assert_eq!(config.evaluation_flush_interval(), Duration::from_secs(30));
+        assert_eq!(config.assignment_flush_batch_size(), 1000);
+        assert_eq!(config.evaluation_flush_batch_size(), 500);
     }
 }

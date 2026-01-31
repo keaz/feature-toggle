@@ -35,7 +35,7 @@ rand = { version = "0.9.1" }
 argon2 = { version = "0.5", features = ["password-hash"] }
 password-hash = "0.5"
 # gRPC
-tonic = { version = "0.12" }
+tonic = { version = "0.12", features = ["gzip"] }
 prost = { version = "0.13" }
 # stream wrappers
 tokio-stream = "0.1"

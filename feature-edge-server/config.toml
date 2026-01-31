@@ -1,38 +1,46 @@
 # Edge Server Configuration
 
 # Backend gRPC server address
-backend_grpc = "http://127.0.0.1:50051"
+backend_grpc = "http://feature_toggle_backend:50051"
 
 # HTTP server bind address
 http_addr = "0.0.0.0:8081"
 
 # Client credentials for backend authentication
-client_id = "721d2cd3-cb81-4a03-a1fa-94a77ed9303e"
-client_secret = "CfVPv210XQDUnwXUjTmyZhDHhh3Ejy0IzH2xDNIkjCvqZtdN"
+client_id = "a0ee083f-47fc-46bd-9e10-e2f76c8d5e5e"
+client_secret = "XqPvbq8cSPkZhq3H8Dxf5LyuNSDQiyrFrjXsE8SQLdCTUizf"
 
 # gRPC connection settings
 [grpc]
 # Connection timeout in seconds
-connect_timeout_secs = 5
+connect_timeout_secs = 20
 # Request timeout in seconds
-timeout_secs = 10
+timeout_secs = 20
 # TCP keepalive interval in seconds
 tcp_keepalive_secs = 30
 # HTTP/2 keepalive interval in seconds
-http2_keepalive_secs = 20
+http2_keepalive_secs = 30
 # Keep connection alive even when idle
 keep_alive_while_idle = true
 # Maximum concurrent requests
 concurrency_limit = 256
 # Enable TCP_NODELAY
 tcp_nodelay = true
+# Request compression: "none" or "gzip"
+compression = "none"
 
 # Flush settings
 [flush]
 # User assignment flush interval in seconds
 assignment_flush_secs = 10
 # Evaluation events flush interval in seconds
-evaluation_flush_secs = 30
+evaluation_flush_secs = 10
+# Evaluation event queue capacity (bounded)
+evaluation_event_queue_capacity = 1000000
+# Max user assignment messages per gRPC stream flush
+assignment_flush_batch_size = 1000
+# Max evaluation events per gRPC request
+evaluation_flush_batch_size = 1000
 
 # Retry settings
 [retry]
@@ -50,4 +58,4 @@ stream_max_delay_secs = 30
 # Maximum number of features to cache (LRU eviction when exceeded)
 # Default: 10000
 # Set based on your memory constraints and feature count
-max_capacity = 10000
+max_capacity = 50

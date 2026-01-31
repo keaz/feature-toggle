@@ -1,23 +1,25 @@
 services:
-  postgres_server:
-    hostname: postgres_server
-    image: postgres:latest
-    environment:
-      - POSTGRES_PASSWORD=local123
-      - POSTGRES_DB=feature_toggle
-    ports:
-      - "5433:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
+  # postgres_server:
+  #   hostname: postgres_server
+  #   image: postgres:16
+  #   environment:
+  #     - POSTGRES_PASSWORD=local123
+  #     - POSTGRES_DB=feature_toggle
+  #   ports:
+  #     - "5433:5432"
+  #   volumes:
+  #     - postgres_data_v2:/var/lib/postgresql/data
 
   feature_toggle_backend:
     build:
       context: .
       dockerfile: feature-toggle-backend/Dockerfile
     environment:
-      - DATABASE_URL=postgres://postgres:local123@postgres_server:5432/feature_toggle
-    depends_on:
-      - postgres_server
+      # Connect to PostgreSQL running on host machine (default port 5432)
+      # Update the credentials below to match your host PostgreSQL setup
+      - DATABASE_URL=postgres://postgres:root123@host.docker.internal:5432/feature_toggle_k8s
+    # depends_on:
+    #   - postgres_server
     ports:
       - "8080:8080"
     restart: unless-stopped
@@ -39,6 +41,13 @@ services:
     ports:
       - "8081:8081"
     restart: unless-stopped
-
-volumes:
-  postgres_data:
+    volumes:
+      - ./feature-edge-server/config.toml:/app/config.toml:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+# Volumes section can be removed if not using containerized PostgreSQL
+# volumes:
+#   postgres_data_v2:

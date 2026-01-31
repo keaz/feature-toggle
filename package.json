@@ -1,0 +1,19 @@
+{
+  "name": "fluxgate-test-data-populator",
+  "version": "1.0.0",
+  "description": "Test data population script for FluxGate using GraphQL API",
+  "type": "module",
+  "scripts": {
+    "populate": "node populate_test_data.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "fluxgate",
+    "test-data",
+    "graphql"
+  ],
+  "author": "FluxGate Team",
+  "license": "MIT"
+}
