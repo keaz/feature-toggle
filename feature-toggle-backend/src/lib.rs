@@ -215,6 +215,7 @@ pub async fn run() -> std::io::Result<()> {
             .data(updates_tx.clone())
             // Channel for evaluation events consumed by subscriptions
             .data(evaluation_events_tx.clone())
+            .data(activity_log_repository_arc.clone())
             .data(activity_log_repository_arc.clone_box())
             .data(feature_repository_arc.clone())
             .data(feature_repository.clone())
