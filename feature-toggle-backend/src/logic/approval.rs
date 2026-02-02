@@ -1,4 +1,3 @@
-use crate::Error;
 use crate::database::approval::{
     ApprovalRepository, CreateApprovalRequestInput, CreateApprovalVoteInput,
 };
@@ -9,6 +8,7 @@ use crate::database::entity::{
 use crate::database::feature::FeatureRepository;
 use crate::database::role::RoleRepository;
 use crate::logic::environment::EnvironmentLogic;
+use crate::Error;
 use async_graphql::ID;
 use chrono::Utc;
 use feature_toggle_shared::constants::StageStatus;
@@ -137,13 +137,15 @@ impl ApprovalLogicImpl {
             )
             .await
             {
-                let _ = self.feature_updates_tx.send(crate::grpc::pb::FeatureUpdate {
-                    message_id: uuid::Uuid::new_v4().to_string(),
-                    action: crate::grpc::pb::feature_update::Action::Upsert as i32,
-                    feature: Some(full),
-                    feature_key: String::new(),
-                    error: String::new(),
-                });
+                let _ = self
+                    .feature_updates_tx
+                    .send(crate::grpc::pb::FeatureUpdate {
+                        message_id: uuid::Uuid::new_v4().to_string(),
+                        action: crate::grpc::pb::feature_update::Action::Upsert as i32,
+                        feature: Some(full),
+                        feature_key: String::new(),
+                        error: String::new(),
+                    });
             }
         }
     }

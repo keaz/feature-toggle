@@ -1,5 +1,5 @@
 use async_graphql::{
-    Context, Enum, ID, InputObject, Result as GqlResult, SimpleObject, Subscription,
+    Context, Enum, InputObject, Result as GqlResult, SimpleObject, Subscription, ID,
 };
 use async_stream::stream;
 use chrono::{DateTime, Utc};
@@ -12,7 +12,7 @@ use crate::database::activity_log::{ActivityLogFilter, ActivityLogRepository, Ac
 use crate::database::feature_evaluation::{
     EvaluationByFeature, EvaluationRatePoint, EvaluationSummary,
 };
-use crate::graphql::schema::{ApprovalRequest, map_approval_request};
+use crate::graphql::schema::{map_approval_request, ApprovalRequest};
 use crate::logic::approval::{ApprovalLogic, ApprovalRequestEvent};
 use crate::logic::client::ClientLogic;
 use crate::logic::feature::FeatureLogic;
@@ -293,7 +293,14 @@ async fn load_system_metrics(
         feature_logic_clone.count_features(team_id_arg.clone()),
         client_logic_active.count_clients(team_id_arg.clone(), Some(true)),
         client_logic_total.count_clients(team_id_arg.clone(), None),
-        evaluation_logic_today.count_evaluations(today_start, today_end, None, None, None, team_id.clone()),
+        evaluation_logic_today.count_evaluations(
+            today_start,
+            today_end,
+            None,
+            None,
+            None,
+            team_id.clone()
+        ),
         evaluation_logic_yesterday.count_evaluations(
             yesterday_start,
             yesterday_end,
@@ -302,7 +309,14 @@ async fn load_system_metrics(
             None,
             team_id.clone()
         ),
-        evaluation_logic_summary.get_evaluation_summary(None, None, None, team_id.clone(), from_7d, to_7d)
+        evaluation_logic_summary.get_evaluation_summary(
+            None,
+            None,
+            None,
+            team_id.clone(),
+            from_7d,
+            to_7d
+        )
     );
 
     match (
@@ -1004,16 +1018,18 @@ impl FeatureEvaluationSubscription {
         activity_types: Option<Vec<String>>,
         #[graphql(desc = "Filter by team ID (best effort via entity lookups)")] team_id: Option<ID>,
     ) -> GqlStream<GqlActivityLogPage> {
-        let activity_repo = match ctx.data::<Arc<Box<dyn ActivityLogRepository>>>() {
-            Ok(repo) => repo.clone(),
-            Err(_) => {
-                return stream_error("Activity log repository not found in context");
-            }
+        let activity_repo = if let Ok(repo) = ctx.data::<Arc<Box<dyn ActivityLogRepository>>>() {
+            repo.clone()
+        } else if let Ok(repo) = ctx.data::<Box<dyn ActivityLogRepository>>() {
+            Arc::new(repo.clone_box())
+        } else {
+            return stream_error("Activity log repository not found in context");
         };
-        let feature_repo = match ctx.data::<Arc<Box<dyn crate::database::feature::FeatureRepository>>>() {
-            Ok(repo) => repo.clone(),
-            Err(_) => return stream_error("Feature repository not found in context"),
-        };
+        let feature_repo =
+            match ctx.data::<Arc<Box<dyn crate::database::feature::FeatureRepository>>>() {
+                Ok(repo) => repo.clone(),
+                Err(_) => return stream_error("Feature repository not found in context"),
+            };
         let client_logic = match ctx.data::<Box<dyn ClientLogic>>() {
             Ok(l) => l.clone(),
             Err(_) => return stream_error("Client logic not found in context"),
@@ -1022,10 +1038,11 @@ impl FeatureEvaluationSubscription {
             Ok(l) => l.clone(),
             Err(_) => return stream_error("Pipeline logic not found in context"),
         };
-        let environment_logic = match ctx.data::<Box<dyn crate::logic::environment::EnvironmentLogic>>() {
-            Ok(l) => l.clone(),
-            Err(_) => return stream_error("Environment logic not found in context"),
-        };
+        let environment_logic =
+            match ctx.data::<Box<dyn crate::logic::environment::EnvironmentLogic>>() {
+                Ok(l) => l.clone(),
+                Err(_) => return stream_error("Environment logic not found in context"),
+            };
 
         // Set default pagination
         let page_sz = page_size.unwrap_or(10);
@@ -1078,7 +1095,8 @@ impl FeatureEvaluationSubscription {
                                         &client_logic,
                                         &pipeline_logic,
                                     )
-                                    .await {
+                                        .await
+                                    {
                                         keep.push(a);
                                     }
                                 }
@@ -1289,10 +1307,11 @@ impl FeatureEvaluationSubscription {
             .await
         {
             Ok((requests, _)) => {
-                let repo = match ctx.data::<Box<dyn crate::database::approval::ApprovalRepository>>() {
-                    Ok(r) => r.clone_box(),
-                    Err(err) => return stream_failure(err),
-                };
+                let repo =
+                    match ctx.data::<Box<dyn crate::database::approval::ApprovalRepository>>() {
+                        Ok(r) => r.clone_box(),
+                        Err(err) => return stream_failure(err),
+                    };
                 let mut votes_map = std::collections::HashMap::new();
                 for req in requests.iter() {
                     if let Ok(votes) = repo.list_votes_for_request(req.id).await {
@@ -1673,7 +1692,10 @@ pub async fn activity_matches_team(
 
             // Finally, fall back to environment metadata if present
             if let Some(env_id) = metadata_environment_id {
-                if let Ok(env) = environment_logic.get_environment_by_id(ID::from(env_id)).await {
+                if let Ok(env) = environment_logic
+                    .get_environment_by_id(ID::from(env_id))
+                    .await
+                {
                     if env.team_id == ID::from(team_id) {
                         return true;
                     }

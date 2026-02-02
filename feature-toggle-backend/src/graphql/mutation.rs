@@ -8,17 +8,17 @@ use crate::database::pipeline::PipelineRepository;
 use crate::graphql::create_user;
 use crate::graphql::schema::map_approval_request;
 use crate::graphql::schema::{
-    ApprovalPolicy, ApprovalRequest, AssignUserRolesInput,
-    CreateApprovalPolicyInput as GqlCreateApprovalPolicyInput, CreateClientInput,
-    CreateEnvironmentInput, CreateFeatureInput, CreateMetricInput, CreatePipelineInput,
-    CreateRoleInput, CreateTeamInput, CreateVariantAllocationInput, Environment, Feature,
-    LoginInput as GqlLoginInput, LoginResponse, Metric, Pipeline,
-    RegisterUserInput as GqlRegisterUserInput, ResetPasswordInput as GqlResetPasswordInput, Role,
-    SetTemporaryPasswordInput as GqlSetTemporaryPasswordInput, Team,
-    UpdateApprovalPolicyInput as GqlUpdateApprovalPolicyInput, UpdateClientInput,
-    UpdateEnvironmentInput, UpdateFeatureInput, UpdatePipelineInput, UpdateTeamInput,
-    UpdateUserInput as GqlUpdateUserInput, UpdateVariantAllocationInput, User, VariantAllocation,
-    map_approval_policy,
+    map_approval_policy, ApprovalPolicy, ApprovalRequest,
+    AssignUserRolesInput, CreateApprovalPolicyInput as GqlCreateApprovalPolicyInput,
+    CreateClientInput, CreateEnvironmentInput, CreateFeatureInput, CreateMetricInput,
+    CreatePipelineInput, CreateRoleInput, CreateTeamInput, CreateVariantAllocationInput, Environment,
+    Feature, LoginInput as GqlLoginInput, LoginResponse, Metric,
+    Pipeline, RegisterUserInput as GqlRegisterUserInput, ResetPasswordInput as GqlResetPasswordInput,
+    Role, SetTemporaryPasswordInput as GqlSetTemporaryPasswordInput,
+    Team, UpdateApprovalPolicyInput as GqlUpdateApprovalPolicyInput,
+    UpdateClientInput, UpdateEnvironmentInput, UpdateFeatureInput, UpdatePipelineInput,
+    UpdateTeamInput, UpdateUserInput as GqlUpdateUserInput, UpdateVariantAllocationInput, User,
+    VariantAllocation,
 };
 use crate::graphql::validator::{CreateInputValidator, UpdateInputValidator};
 use crate::logic::approval::ApprovalLogic;
@@ -27,7 +27,7 @@ use crate::logic::metrics::MetricLogic;
 use crate::logic::pipeline::PipelineLogic;
 use crate::logic::user::{RegisterUserInput, UpdateGqlUserInput, UserLogic};
 use crate::middleware::admin_guard::AdminState;
-use async_graphql::{Context, ID, Object, Result as GqlResult};
+use async_graphql::{Context, Object, Result as GqlResult, ID};
 use log::info;
 
 #[cfg(test)]
@@ -2192,9 +2192,14 @@ impl MutationRoot {
             async_graphql::Error::new(format!("Failed to start transaction: {}", e))
         })?;
 
-        let result =
-            crate::logic::role_tx::delete_role_in_tx(&mut tx, &role_repo, &**activity_repo, id, actor)
-                .await;
+        let result = crate::logic::role_tx::delete_role_in_tx(
+            &mut tx,
+            &role_repo,
+            &**activity_repo,
+            id,
+            actor,
+        )
+            .await;
 
         match result {
             Ok(()) => {
@@ -2751,10 +2756,9 @@ mod more_mutation_tests {
 
         let gql = r#"mutation($id: ID!, $key: String!){ updateContext(id: $id, input: { key: $key }) { key entries { value } } }"#;
         let mut req = Request::new(gql);
-        req = req
-            .variables(async_graphql::Variables::from_json(
-                serde_json::json!({"id": ctx_id.to_string(), "key": updated_key.clone()}),
-            ));
+        req = req.variables(async_graphql::Variables::from_json(
+            serde_json::json!({"id": ctx_id.to_string(), "key": updated_key.clone()}),
+        ));
         let resp = schema.execute(req).await;
         assert!(
             resp.errors.is_empty(),
@@ -2875,8 +2879,9 @@ mod more_mutation_tests {
     #[tokio::test]
     async fn test_assign_user_roles_mutation() {
         let pool = crate::database::init_pg_pool().await;
-        let activity_repo: Box<dyn crate::database::activity_log::ActivityLogRepository> =
-            Box::new(crate::database::activity_log::PgActivityLogRepository::new(pool.clone()));
+        let activity_repo: Box<dyn crate::database::activity_log::ActivityLogRepository> = Box::new(
+            crate::database::activity_log::PgActivityLogRepository::new(pool.clone()),
+        );
 
         let user_repo = crate::database::user::user_repository(pool.clone());
         let role_repo = crate::database::role::role_repository(pool.clone());
@@ -2945,8 +2950,9 @@ mod more_mutation_tests {
     #[tokio::test]
     async fn test_create_role_mutation() {
         let pool = crate::database::init_pg_pool().await;
-        let activity_repo: Box<dyn crate::database::activity_log::ActivityLogRepository> =
-            Box::new(crate::database::activity_log::PgActivityLogRepository::new(pool.clone()));
+        let activity_repo: Box<dyn crate::database::activity_log::ActivityLogRepository> = Box::new(
+            crate::database::activity_log::PgActivityLogRepository::new(pool.clone()),
+        );
         let admin_id =
             Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").expect("admin user id");
         let role_name = format!("Observer-{}", Uuid::new_v4());
@@ -3021,8 +3027,9 @@ mod more_mutation_tests {
     #[tokio::test]
     async fn test_delete_role_mutation() {
         let pool = crate::database::init_pg_pool().await;
-        let activity_repo: Box<dyn crate::database::activity_log::ActivityLogRepository> =
-            Box::new(crate::database::activity_log::PgActivityLogRepository::new(pool.clone()));
+        let activity_repo: Box<dyn crate::database::activity_log::ActivityLogRepository> = Box::new(
+            crate::database::activity_log::PgActivityLogRepository::new(pool.clone()),
+        );
         let role_repo = crate::database::role::role_repository(pool.clone());
         let role_name = format!("DeleteRole-{}", Uuid::new_v4());
         let role = role_repo

@@ -1,5 +1,6 @@
 # Ignore build output and dependencies
-target/
+# Ignore build output and dependencies
+**/target/
 !target/.gitkeep
 
 # Don't ignore .sqlx directory (needed for offline sqlx compilation)

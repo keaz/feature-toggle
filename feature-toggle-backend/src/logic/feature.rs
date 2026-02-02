@@ -1,4 +1,3 @@
-use crate::Error;
 use crate::database::entity::FeatureType as EntityFeatureType;
 use crate::database::feature::{
     CreateFeature, CreateFeatureStage, FeatureRepository, UpdateFeature,
@@ -10,6 +9,7 @@ use crate::graphql::schema::{
 use crate::logic::approval::ApprovalLogic;
 use crate::logic::environment::EnvironmentLogic;
 use crate::logic::stage_builder::{build_stage_relationships, id_to_uuid};
+use crate::Error;
 use async_graphql::ID;
 use feature_toggle_shared::constants::StageStatus;
 use uuid::Uuid;
@@ -1005,7 +1005,9 @@ impl DeploymentLogic for FeatureLogicImpl {
                     .maybe_create_stage_change_request(&db_feature, &stage, next_status, user_id)
                     .await?
                 {
-                    if pending_status == "DEPLOYMENT_REQUESTED" || pending_status == "ROLLBACK_REQUESTED" {
+                    if pending_status == "DEPLOYMENT_REQUESTED"
+                        || pending_status == "ROLLBACK_REQUESTED"
+                    {
                         let now = chrono::Utc::now();
                         let updated = self
                             .repository
@@ -1015,7 +1017,8 @@ impl DeploymentLogic for FeatureLogicImpl {
                             return Err(Error::NotFound(stage_uuid));
                         }
                     }
-                    let mut gql_feature = FeatureLogicImpl::map_entity_to_graphql_feature(db_feature);
+                    let mut gql_feature =
+                        FeatureLogicImpl::map_entity_to_graphql_feature(db_feature);
                     gql_feature.pending_approval_request_id = Some(ID::from(request.id));
                     return Ok(gql_feature);
                 }

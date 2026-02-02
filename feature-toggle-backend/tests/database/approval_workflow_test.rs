@@ -1,11 +1,11 @@
 use async_graphql::ID;
 use feature_toggle_backend::database::{approval, feature, init_pg_pool, role};
+use feature_toggle_backend::grpc::pb::FeatureUpdate;
 use feature_toggle_backend::logic::approval::ApprovalRequestEvent;
 use feature_toggle_backend::logic::feature::StageChangeRequestType;
 use feature_toggle_backend::logic::{
     approval as approval_logic, environment, feature as feature_logic,
 };
-use feature_toggle_backend::grpc::pb::FeatureUpdate;
 use uuid::Uuid;
 
 #[tokio::test]
@@ -44,7 +44,10 @@ async fn test_stage_change_creates_approval_request_when_policy_exists() {
     let requester = Uuid::parse_str("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb").unwrap();
 
     // Reset stage status to a pending state for deterministic transition
-    sqlx::query!("UPDATE features_pipeline_stages SET status = 'NOT_DEPLOYED' WHERE id = $1", stage_id)
+    sqlx::query!(
+        "UPDATE features_pipeline_stages SET status = 'NOT_DEPLOYED' WHERE id = $1",
+        stage_id
+    )
         .execute(&pool)
         .await
         .unwrap();
@@ -121,7 +124,10 @@ async fn test_quorum_approvals_execute_stage_change() {
     let approver_one = Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").unwrap();
     let approver_two = Uuid::parse_str("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb").unwrap();
 
-    sqlx::query!("UPDATE features_pipeline_stages SET status = 'NOT_DEPLOYED' WHERE id = $1", stage_id)
+    sqlx::query!(
+        "UPDATE features_pipeline_stages SET status = 'NOT_DEPLOYED' WHERE id = $1",
+        stage_id
+    )
         .execute(&pool)
         .await
         .unwrap();

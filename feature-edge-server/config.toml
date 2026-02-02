@@ -1,14 +1,14 @@
 # Edge Server Configuration
 
 # Backend gRPC server address
-backend_grpc = "http://feature_toggle_backend:50051"
+backend_grpc = "http://localhost:50051"
 
 # HTTP server bind address
-http_addr = "0.0.0.0:8081"
+http_addr = "0.0.0.0:8082"
 
 # Client credentials for backend authentication
-client_id = "a0ee083f-47fc-46bd-9e10-e2f76c8d5e5e"
-client_secret = "XqPvbq8cSPkZhq3H8Dxf5LyuNSDQiyrFrjXsE8SQLdCTUizf"
+client_id = "ae4e1a61-9af7-4c4c-a0b4-3ffded4f797f"
+client_secret = "ichD3fa1bbHQ9tEAhtD2tGvIdvKJRwLOdxvMs4FcMk6N0MYS"
 
 # gRPC connection settings
 [grpc]

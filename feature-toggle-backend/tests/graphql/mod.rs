@@ -1,4 +1,4 @@
-use async_graphql::{EmptySubscription, ID, Request, Schema};
+use async_graphql::{EmptySubscription, Request, Schema, ID};
 use feature_toggle_backend::graphql::mutation::MutationRoot;
 use feature_toggle_backend::graphql::query::Query as GqlQuery;
 use feature_toggle_backend::logic::role::MockRoleLogic;
@@ -9,9 +9,9 @@ async fn test_assign_user_roles_mutation() {
     let pool = feature_toggle_backend::database::init_pg_pool().await;
     let activity_repo: Box<
         dyn feature_toggle_backend::database::activity_log::ActivityLogRepository,
-    > = Box::new(feature_toggle_backend::database::activity_log::PgActivityLogRepository::new(
-        pool.clone(),
-    ));
+    > = Box::new(
+        feature_toggle_backend::database::activity_log::PgActivityLogRepository::new(pool.clone()),
+    );
 
     let user_repo = feature_toggle_backend::database::user::user_repository(pool.clone());
     let role_repo = feature_toggle_backend::database::role::role_repository(pool.clone());
@@ -38,8 +38,7 @@ async fn test_assign_user_roles_mutation() {
 
     let user_id = ID::from(created_user.id);
     let role_id = ID::from(role.id);
-    let admin_id =
-        Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").expect("admin user id");
+    let admin_id = Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").expect("admin user id");
 
     let schema = Schema::build(GqlQuery, MutationRoot, EmptySubscription)
         .data(pool.clone())

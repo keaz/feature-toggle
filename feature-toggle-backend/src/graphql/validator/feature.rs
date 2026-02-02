@@ -1,11 +1,11 @@
 use crate::graphql::schema::{CreateFeatureInput, FeatureType, UpdateFeatureInput};
 use crate::graphql::validator::{
-    CreateInputValidator, UpdateInputValidator, validate_duplicate_environment_and_index,
-    validate_relationships_and_stages,
+    validate_duplicate_environment_and_index, validate_relationships_and_stages, CreateInputValidator,
+    UpdateInputValidator,
 };
 use crate::logic::feature::FeatureLogic;
 use crate::logic::pipeline::PipelineLogic;
-use async_graphql::{Context, Error, ID, Result};
+use async_graphql::{Context, Error, Result, ID};
 
 impl CreateInputValidator for CreateFeatureInput {
     async fn validate(&self, team_id: Option<ID>, ctx: &Context<'_>) -> Result<(), Error> {
@@ -78,10 +78,7 @@ pub fn validate_stage_transition(current: &str, next: &str) -> Result<(), Error>
         "DEPLOYMENT_REQUESTED",
         HashSet::from(["DEPLOYMENT_REJECTED", "DEPLOYMENT_APPROVED"]),
     );
-    allowed.insert(
-        "DEPLOYMENT_APPROVED",
-        HashSet::from(["DEPLOYED"]),
-    );
+    allowed.insert("DEPLOYMENT_APPROVED", HashSet::from(["DEPLOYED"]));
     allowed.insert(
         "DEPLOYMENT_REJECTED",
         HashSet::from(["DEPLOYMENT_REQUESTED"]),
@@ -91,10 +88,7 @@ pub fn validate_stage_transition(current: &str, next: &str) -> Result<(), Error>
         "ROLLBACK_REQUESTED",
         HashSet::from(["ROLLBACK_REJECTED", "ROLLBACK_APPROVED"]),
     );
-    allowed.insert(
-        "ROLLBACK_APPROVED",
-        HashSet::from(["ROLLBACKED"]),
-    );
+    allowed.insert("ROLLBACK_APPROVED", HashSet::from(["ROLLBACKED"]));
     allowed.insert("ROLLBACK_REJECTED", HashSet::from(["ROLLBACK_REQUESTED"]));
     allowed.insert("ROLLBACKED", HashSet::from(["DEPLOYMENT_REQUESTED"]));
 

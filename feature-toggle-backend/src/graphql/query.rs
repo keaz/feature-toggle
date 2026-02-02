@@ -2,12 +2,12 @@ use crate::database::approval::DEFAULT_APPROVAL_PAGE_SIZE;
 use crate::database::entity::ApprovalStatus;
 use crate::graphql::create_user;
 use crate::graphql::schema::{
-    ActivityLog, ActivityLogPage, ApplicationStatus, ApprovalPolicy, ApprovalRequestPage,
-    ApprovalRequestStatus, Client, ClientType, ClientsPage, ContextsPage, Environment,
-    EnvironmentsPage, EvaluationByFeature, EvaluationCountFilter, EvaluationSummaryOutput,
-    EvaluationSummaryQueryInput, ExperimentAnalysis, Feature, FeatureGrowthPoint, FeatureType,
-    FeaturesPage, JwtSecretResponse, Metric, MetricAnalysis, MetricResult, Pipeline, PipelinesPage,
-    Role, RolloutMetrics, Team, User, UsersPage, map_approval_policy, map_approval_request,
+    map_approval_policy, map_approval_request, ActivityLog, ActivityLogPage, ApplicationStatus,
+    ApprovalPolicy, ApprovalRequestPage, ApprovalRequestStatus, Client, ClientType, ClientsPage,
+    ContextsPage, Environment, EnvironmentsPage, EvaluationByFeature,
+    EvaluationCountFilter, EvaluationSummaryOutput, EvaluationSummaryQueryInput, ExperimentAnalysis, Feature,
+    FeatureGrowthPoint, FeatureType, FeaturesPage, JwtSecretResponse, Metric, MetricAnalysis, MetricResult,
+    Pipeline, PipelinesPage, Role, RolloutMetrics, Team, User, UsersPage,
 };
 use crate::graphql::subscription::calculate_time_range;
 use crate::logic::approval::ApprovalLogic;
@@ -20,7 +20,7 @@ use crate::logic::pipeline::PipelineLogic;
 use crate::logic::role::RoleLogic;
 use crate::logic::team::TeamLogic;
 use crate::logic::user::UserLogic;
-use async_graphql::{Context, ID, Object, Result as GqlResult};
+use async_graphql::{Context, Object, Result as GqlResult, ID};
 use chrono::{DateTime, Utc};
 use log::debug;
 use std::collections::{HashMap, HashSet};
@@ -589,13 +589,14 @@ impl Query {
             None
         };
 
-        let team_uuid = if let Some(id) = team_id {
-            Some(uuid::Uuid::parse_str(&id.to_string()).map_err(|e| {
-                async_graphql::Error::new(format!("Invalid team ID format: {}", e))
-            })?)
-        } else {
-            None
-        };
+        let team_uuid =
+            if let Some(id) = team_id {
+                Some(uuid::Uuid::parse_str(&id.to_string()).map_err(|e| {
+                    async_graphql::Error::new(format!("Invalid team ID format: {}", e))
+                })?)
+            } else {
+                None
+            };
 
         // Use logic to fetch evaluations grouped by feature; delegate to repository internally
         let results = logic
@@ -674,13 +675,14 @@ impl Query {
         // Calculate offset
         let offset = (page_num - 1) * page_sz;
 
-        let team_uuid = if let Some(id) = team_id {
-            Some(uuid::Uuid::parse_str(&id.to_string()).map_err(|e| {
-                async_graphql::Error::new(format!("Invalid team ID format: {}", e))
-            })?)
-        } else {
-            None
-        };
+        let team_uuid =
+            if let Some(id) = team_id {
+                Some(uuid::Uuid::parse_str(&id.to_string()).map_err(|e| {
+                    async_graphql::Error::new(format!("Invalid team ID format: {}", e))
+                })?)
+            } else {
+                None
+            };
 
         // Build filter
         let filter = crate::database::activity_log::ActivityLogFilter {
@@ -849,13 +851,14 @@ impl Query {
             None
         };
 
-        let team_uuid = if let Some(id) = filter.team_id {
-            Some(uuid::Uuid::parse_str(&id.to_string()).map_err(|e| {
-                async_graphql::Error::new(format!("Invalid team ID format: {}", e))
-            })?)
-        } else {
-            None
-        };
+        let team_uuid =
+            if let Some(id) = filter.team_id {
+                Some(uuid::Uuid::parse_str(&id.to_string()).map_err(|e| {
+                    async_graphql::Error::new(format!("Invalid team ID format: {}", e))
+                })?)
+            } else {
+                None
+            };
 
         let count = logic
             .count_evaluations(
@@ -898,13 +901,14 @@ impl Query {
             None
         };
 
-        let team_uuid = if let Some(id) = input.team_id {
-            Some(uuid::Uuid::parse_str(&id.to_string()).map_err(|e| {
-                async_graphql::Error::new(format!("Invalid team ID format: {}", e))
-            })?)
-        } else {
-            None
-        };
+        let team_uuid =
+            if let Some(id) = input.team_id {
+                Some(uuid::Uuid::parse_str(&id.to_string()).map_err(|e| {
+                    async_graphql::Error::new(format!("Invalid team ID format: {}", e))
+                })?)
+            } else {
+                None
+            };
 
         // Calculate time range based on period
         let now = chrono::Utc::now();

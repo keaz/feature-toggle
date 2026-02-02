@@ -652,7 +652,8 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
         );
 
         if team_id.is_some() {
-            top_feature_query.push_str(" JOIN environments env ON env.id::text = fe.environment_id");
+            top_feature_query
+                .push_str(" JOIN environments env ON env.id::text = fe.environment_id");
         }
 
         top_feature_query.push_str(

@@ -92,7 +92,10 @@ pub enum VariantValueType {
 
 // Enum for variant selection mode (maps to Postgres ENUM)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
-#[sqlx(type_name = "variant_selection_mode", rename_all = "SCREAMING_SNAKE_CASE")]
+#[sqlx(
+    type_name = "variant_selection_mode",
+    rename_all = "SCREAMING_SNAKE_CASE"
+)]
 pub enum VariantSelectionMode {
     WeightedSplit,
     SpecificVariant,

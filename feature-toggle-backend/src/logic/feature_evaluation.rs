@@ -706,15 +706,7 @@ mod tests {
 
         let logic = feature_evaluation_logic(Box::new(mock_repo));
         let result = logic
-            .get_evaluation_rates(
-                None,
-                None,
-                None,
-                Some(team_id),
-                from_time,
-                to_time,
-                5,
-            )
+            .get_evaluation_rates(None, None, None, Some(team_id), from_time, to_time, 5)
             .await;
 
         assert!(result.is_ok());

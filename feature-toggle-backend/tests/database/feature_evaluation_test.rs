@@ -1,6 +1,6 @@
 use chrono::Utc;
 use feature_toggle_backend::database::feature_evaluation::{
-    CreateFeatureEvaluation, FeatureEvaluationFilter, feature_evaluation_repository,
+    feature_evaluation_repository, CreateFeatureEvaluation, FeatureEvaluationFilter,
 };
 use feature_toggle_backend::database::init_pg_pool;
 use serde_json::json;
@@ -137,9 +137,7 @@ async fn test_get_evaluation_rates_and_summary() {
         .await
         .unwrap();
     assert!(rates.iter().all(|point| {
-        point.evaluation_count >= 0
-            && point.success_count >= 0
-            && point.prior_assignment_count >= 0
+        point.evaluation_count >= 0 && point.success_count >= 0 && point.prior_assignment_count >= 0
     }));
 
     let summary = repo
