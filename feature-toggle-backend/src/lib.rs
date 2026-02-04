@@ -281,6 +281,8 @@ pub async fn run() -> std::io::Result<()> {
             .app_data(web::Data::new(user_logic.clone()))
             .app_data(web::Data::new(jwt_token_logic_for_server.clone()))
             .app_data(web::Data::new(jwt_secret_logic_for_server.clone()))
+            .app_data(web::Data::new(evaluation_events_tx.clone()))
+            .app_data(web::Data::new(approval_events_tx.clone()))
             .app_data(web::Data::new(admin_state.clone()))
             .app_data(web::Data::new(feature_repository.clone_box()))
             .app_data(web::Data::new(variant_allocations_repository.clone()))

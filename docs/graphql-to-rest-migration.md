@@ -227,7 +227,7 @@ Checkpoint
 
 ## 11) Phase J - Real-time updates (streaming)
 Backend
-- [ ] Implement SSE or WebSocket endpoints for live updates:
+- [x] Implement SSE or WebSocket endpoints for live updates:
   - evaluationSummary
   - evaluationRatesWithPeriod
   - evaluationsByFeatureLive
@@ -236,13 +236,13 @@ Backend
   - featureGrowth
   - evaluationDashboard
   - approvalRequestsForTeam
-- [ ] Define auth for stream endpoints (JWT header or query token)
-- [ ] Reuse existing broadcast channels (evaluation_events_tx, approval_events_tx)
-- [ ] Verify transaction pattern coverage for any new write endpoints (if introduced)
+- [x] Define auth for stream endpoints (JWT header or query token)
+- [x] Reuse existing broadcast channels (evaluation_events_tx, approval_events_tx)
+- [x] Verify transaction pattern coverage for any new write endpoints (if introduced)
 
 Frontend
-- [ ] Replace GraphQL subscriptions with SSE/WS hooks
-- [ ] Update UI components to use stream hooks + REST initial loads
+- [x] Replace GraphQL subscriptions with SSE/WS hooks
+- [x] Update UI components to use stream hooks + REST initial loads
 
 Checkpoint
 - [ ] Commit: streaming REST migration working

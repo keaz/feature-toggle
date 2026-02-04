@@ -11,6 +11,7 @@ pub mod team;
 pub mod user;
 pub mod auth;
 pub mod jwt_secret;
+pub mod stream;
 pub mod pagination;
 pub mod types;
 pub mod metrics;
@@ -331,7 +332,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .configure(team::configure)
             .configure(user::configure)
             .configure(auth::configure)
-            .configure(jwt_secret::configure),
+            .configure(jwt_secret::configure)
+            .configure(stream::configure),
     );
 }
 

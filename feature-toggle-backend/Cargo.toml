@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 actix-web = "4.11.0"
+actix-ws = "0.2"
 async-graphql = { version = "7.0.17", features = [
     "uuid",
     "apollo_tracing",
@@ -46,6 +47,7 @@ jsonwebtoken = "9.3"
 sha2 = "0.10"
 base64 = "0.22.1"
 async-stream = "0.3.6"
+serde_urlencoded = "0.7"
 utoipa = { version = "4.2", features = ["actix_extras", "chrono", "uuid"] }
 utoipa-swagger-ui = { version = "6.0", features = ["actix-web"] }
 

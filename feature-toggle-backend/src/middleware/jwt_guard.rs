@@ -138,126 +138,136 @@ where
                 }
             }
 
-            // Check JWT token in Authorization header
+            // Check JWT token in Authorization header (or query param for WebSocket)
             let auth_header = req.headers().get("Authorization");
-            if let Some(auth_value) = auth_header {
-                if let Ok(auth_str) = auth_value.to_str() {
-                    if let Some(token) = auth_str.strip_prefix("Bearer ") {
-                        // Get current JWT secret from database
-                        let jwt_secret = match jwt_secret_logic.get_current_secret().await {
-                            Ok(secret) => secret,
-                            Err(e) => {
-                                // Log detailed error for debugging multi-instance issues
-                                let hostname = std::env::var("HOSTNAME")
-                                    .unwrap_or_else(|_| "unknown".to_string());
-                                let pod_ip = std::env::var("POD_IP")
-                                    .unwrap_or_else(|_| "unknown".to_string());
-                                log::error!(
-                                    "Failed to get JWT secret from database - Pod: {}, IP: {}, Error: {:?}, Path: {}",
-                                    hostname,
-                                    pod_ip,
-                                    e,
-                                    req.path()
-                                );
-                                // If we can't get the secret, reject the token
-                                let response =
-                                    HttpResponse::Unauthorized().json(serde_json::json!({
-                                        "error": "JWT secret unavailable",
-                                        "details": "Database error retrieving secret"
-                                    }));
-                                return Ok(req.into_response(response).map_into_right_body());
-                            }
-                        };
+            let mut token_opt = auth_header
+                .and_then(|auth_value| auth_value.to_str().ok())
+                .and_then(|auth_str| auth_str.strip_prefix("Bearer "))
+                .map(|value| value.to_string());
 
-                        // Verify JWT token
-                        let decoding_key = DecodingKey::from_secret(jwt_secret.as_ref());
-                        let validation = Validation::new(Algorithm::HS256);
+            if token_opt.is_none() && path.starts_with("/api/v1/ws") {
+                let query = req.query_string();
+                for pair in query.split('&') {
+                    let mut parts = pair.splitn(2, '=');
+                    let key = parts.next().unwrap_or_default();
+                    if key == "token" {
+                        let value = parts.next().unwrap_or_default();
+                        if !value.is_empty() {
+                            token_opt = Some(value.to_string());
+                        }
+                        break;
+                    }
+                }
+            }
 
-                        match decode::<Claims>(token, &decoding_key, &validation) {
-                            Ok(token_data) => {
-                                // Check if token is still valid in database
-                                let token_hash = hash_token(token);
-                                let token_repo =
-                                    crate::database::jwt_token::jwt_token_repository(pool.clone());
+            if let Some(token) = token_opt {
+                // Get current JWT secret from database
+                let jwt_secret = match jwt_secret_logic.get_current_secret().await {
+                    Ok(secret) => secret,
+                    Err(e) => {
+                        // Log detailed error for debugging multi-instance issues
+                        let hostname = std::env::var("HOSTNAME")
+                            .unwrap_or_else(|_| "unknown".to_string());
+                        let pod_ip = std::env::var("POD_IP")
+                            .unwrap_or_else(|_| "unknown".to_string());
+                        log::error!(
+                            "Failed to get JWT secret from database - Pod: {}, IP: {}, Error: {:?}, Path: {}",
+                            hostname,
+                            pod_ip,
+                            e,
+                            req.path()
+                        );
+                        // If we can't get the secret, reject the token
+                        let response = HttpResponse::Unauthorized().json(serde_json::json!({
+                            "error": "JWT secret unavailable",
+                            "details": "Database error retrieving secret"
+                        }));
+                        return Ok(req.into_response(response).map_into_right_body());
+                    }
+                };
 
-                                match token_repo.is_token_valid(&token_hash).await {
-                                    Ok(is_valid) => {
-                                        if is_valid {
-                                            let user_id_uuid =
-                                                Uuid::parse_str(&token_data.claims.sub)
-                                                    .unwrap_or_default();
+                // Verify JWT token
+                let decoding_key = DecodingKey::from_secret(jwt_secret.as_ref());
+                let validation = Validation::new(Algorithm::HS256);
 
-                                            // Check if user has temporary password (unless this is resetPassword mutation)
-                                            // Users with temporary passwords must reset their password before accessing other endpoints
-                                            // However, the resetPassword mutation itself is allowed with valid JWT
-                                            if !is_reset_password_request {
-                                                let user_repo =
-                                                    crate::database::user::user_repository(
-                                                        pool.clone(),
-                                                    );
-                                                if let Ok(user) =
-                                                    user_repo.get_user_by_id(user_id_uuid).await
-                                                {
-                                                    if user.is_temporary_password {
-                                                        // User has temporary password, redirect to password reset
-                                                        let target = format!(
-                                                            "{}/reset-password",
-                                                            ui_origin.trim_end_matches('/')
-                                                        );
-                                                        let res = HttpResponse::Unauthorized()
-                                                            .json(serde_json::json!({
-                                                                "error": "temporary_password_reset_required",
-                                                                "message": "You must reset your temporary password before continuing",
-                                                                "redirect": target
-                                                            }))
-                                                            .map_into_right_body();
-                                                        return Ok(req.into_response(res));
-                                                    }
-                                                }
+                match decode::<Claims>(&token, &decoding_key, &validation) {
+                    Ok(token_data) => {
+                        // Check if token is still valid in database
+                        let token_hash = hash_token(&token);
+                        let token_repo =
+                            crate::database::jwt_token::jwt_token_repository(pool.clone());
+
+                        match token_repo.is_token_valid(&token_hash).await {
+                            Ok(is_valid) => {
+                                if is_valid {
+                                    let user_id_uuid =
+                                        Uuid::parse_str(&token_data.claims.sub).unwrap_or_default();
+
+                                    // Check if user has temporary password (unless this is resetPassword mutation)
+                                    // Users with temporary passwords must reset their password before accessing other endpoints
+                                    // However, the resetPassword mutation itself is allowed with valid JWT
+                                    if !is_reset_password_request {
+                                        let user_repo =
+                                            crate::database::user::user_repository(pool.clone());
+                                        if let Ok(user) = user_repo.get_user_by_id(user_id_uuid).await {
+                                            if user.is_temporary_password {
+                                                // User has temporary password, redirect to password reset
+                                                let target = format!(
+                                                    "{}/reset-password",
+                                                    ui_origin.trim_end_matches('/')
+                                                );
+                                                let res = HttpResponse::Unauthorized()
+                                                    .json(serde_json::json!({
+                                                        "error": "temporary_password_reset_required",
+                                                        "message": "You must reset your temporary password before continuing",
+                                                        "redirect": target
+                                                    }))
+                                                    .map_into_right_body();
+                                                return Ok(req.into_response(res));
                                             }
-
-                                            // Token is valid and user doesn't have temporary password (or this is resetPassword), inject user data
-                                            req.extensions_mut().insert(crate::JwtUser {
-                                                id: user_id_uuid,
-                                                username: token_data.claims.username.clone(),
-                                                is_admin: token_data.claims.is_admin,
-                                                roles: token_data.claims.roles.clone(),
-                                                token_hash: token_hash.clone(),
-                                            });
-
-                                            let res = service.call(req).await?;
-                                            return Ok(res.map_into_left_body());
-                                        } else {
-                                            // Token not found or revoked in database
-                                            let hostname = std::env::var("HOSTNAME")
-                                                .unwrap_or_else(|_| "unknown".to_string());
-                                            log::warn!(
-                                                "JWT token invalid in database - Pod: {}, User: {}, Token hash: {}",
-                                                hostname,
-                                                token_data.claims.username,
-                                                &token_hash[..8]
-                                            );
                                         }
                                     }
-                                    Err(e) => {
-                                        // Database error checking token validity
-                                        let hostname = std::env::var("HOSTNAME")
-                                            .unwrap_or_else(|_| "unknown".to_string());
-                                        log::error!(
-                                            "Database error validating token - Pod: {}, Error: {:?}",
-                                            hostname,
-                                            e
-                                        );
-                                    }
+
+                                    // Token is valid and user doesn't have temporary password (or this is resetPassword), inject user data
+                                    req.extensions_mut().insert(crate::JwtUser {
+                                        id: user_id_uuid,
+                                        username: token_data.claims.username.clone(),
+                                        is_admin: token_data.claims.is_admin,
+                                        roles: token_data.claims.roles.clone(),
+                                        token_hash: token_hash.clone(),
+                                    });
+
+                                    let res = service.call(req).await?;
+                                    return Ok(res.map_into_left_body());
+                                } else {
+                                    // Token not found or revoked in database
+                                    let hostname = std::env::var("HOSTNAME")
+                                        .unwrap_or_else(|_| "unknown".to_string());
+                                    log::warn!(
+                                        "JWT token invalid in database - Pod: {}, User: {}, Token hash: {}",
+                                        hostname,
+                                        token_data.claims.username,
+                                        &token_hash[..8]
+                                    );
                                 }
                             }
                             Err(e) => {
-                                // JWT decode failed (wrong secret, expired, or malformed)
+                                // Database error checking token validity
                                 let hostname = std::env::var("HOSTNAME")
                                     .unwrap_or_else(|_| "unknown".to_string());
-                                log::debug!("JWT decode failed - Pod: {}, Error: {}", hostname, e);
+                                log::error!(
+                                    "Database error validating token - Pod: {}, Error: {:?}",
+                                    hostname,
+                                    e
+                                );
                             }
                         }
+                    }
+                    Err(e) => {
+                        // JWT decode failed (wrong secret, expired, or malformed)
+                        let hostname = std::env::var("HOSTNAME")
+                            .unwrap_or_else(|_| "unknown".to_string());
+                        log::debug!("JWT decode failed - Pod: {}, Error: {}", hostname, e);
                     }
                 }
             }

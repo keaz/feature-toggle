@@ -1,6 +1,6 @@
-use actix_web::{get, post, web, HttpResponse, Responder};
+use actix_web::{get, post, web, HttpRequest, HttpResponse, Responder};
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -28,8 +28,6 @@ pub struct MetricsByFeatureQuery {
 #[serde(rename_all = "camelCase")]
 pub struct ExperimentResultsQuery {
     pub feature_key: String,
-    #[serde(default, deserialize_with = "deserialize_string_or_vec")]
-    pub metric_keys: Vec<String>,
     pub environment_id: Option<String>,
     pub time_period: Option<String>,
 }
@@ -372,26 +370,27 @@ fn resolve_time_range_with_period(
     crate::graphql::subscription::calculate_time_range(period, Utc::now())
 }
 
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum StringOrVec {
-    String(String),
-    Vec(Vec<String>),
-}
-
-fn deserialize_string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let value = StringOrVec::deserialize(deserializer)?;
-    Ok(match value {
-        StringOrVec::String(value) => value
-            .split(',')
-            .map(|item| item.trim().to_string())
-            .filter(|item| !item.is_empty())
-            .collect(),
-        StringOrVec::Vec(values) => values,
-    })
+fn parse_metric_keys_from_query(query: &str) -> Result<Vec<String>, RestError> {
+    let pairs: Vec<(String, String)> = serde_urlencoded::from_str(query).map_err(|_| {
+        RestError::invalid_input("invalid query parameters")
+    })?;
+    let mut metric_keys = Vec::new();
+    for (key, value) in pairs {
+        if key == "metricKeys" || key == "metricKeys[]" || key == "metric_keys" {
+            for entry in value.split(',') {
+                let trimmed = entry.trim();
+                if !trimmed.is_empty() {
+                    metric_keys.push(trimmed.to_string());
+                }
+            }
+        }
+    }
+    if metric_keys.is_empty() {
+        return Err(RestError::invalid_input(
+            "metricKeys must include at least one entry",
+        ));
+    }
+    Ok(metric_keys)
 }
 
 async fn resolve_activity_entity_details(
@@ -784,9 +783,11 @@ pub(crate) async fn metrics_by_feature(
 #[get("/metrics/experiment-results")]
 pub(crate) async fn experiment_results(
     logic: web::Data<Box<dyn MetricLogic>>,
+    req: HttpRequest,
     query: web::Query<ExperimentResultsQuery>,
 ) -> Result<impl Responder, RestError> {
-    validate_metric_keys(&query.metric_keys)?;
+    let metric_keys = parse_metric_keys_from_query(req.query_string())?;
+    validate_metric_keys(&metric_keys)?;
 
     let env_uuid = match &query.environment_id {
         Some(value) if !value.trim().is_empty() => Some(parse_uuid(value, "environment_id")?),
@@ -806,7 +807,7 @@ pub(crate) async fn experiment_results(
         .map_err(RestError::from)?;
 
     let requested: std::collections::HashSet<String> =
-        query.metric_keys.iter().cloned().collect();
+        metric_keys.iter().cloned().collect();
 
     let mut aggregated: std::collections::HashMap<
         String,
@@ -837,7 +838,7 @@ pub(crate) async fn experiment_results(
     }
 
     let mut analyses = Vec::new();
-    for key in &query.metric_keys {
+    for key in &metric_keys {
         let mut results = Vec::new();
         if let Some(variants) = aggregated.get(key) {
             for (variant, (sample_size, conversion_count, sum_value, p95_value, time_bucket)) in
