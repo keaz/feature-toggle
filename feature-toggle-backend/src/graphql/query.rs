@@ -1650,6 +1650,17 @@ mod more_query_tests {
         ) -> Result<(Vec<Pipeline>, i64), crate::Error> {
             Ok((Vec::new(), 0))
         }
+        async fn get_pipelines_with_offset(
+            &self,
+            _team_id: ID,
+            _name: Option<String>,
+            _active: Option<bool>,
+            _fields: Vec<String>,
+            _offset: i64,
+            _limit: i64,
+        ) -> Result<(Vec<Pipeline>, i64), crate::Error> {
+            Ok((Vec::new(), 0))
+        }
         async fn get_pipeline_by_id(&self, _id: ID) -> Result<Pipeline, crate::Error> {
             unreachable!()
         }

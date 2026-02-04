@@ -559,3 +559,108 @@ where
 
     Ok(())
 }
+
+pub async fn emergency_disable_feature_in_tx<R, A>(
+    conn: &mut PgConnection,
+    feature_repo: &R,
+    activity_repo: &A,
+    id: ID,
+    rollback_in_minutes: Option<i32>,
+    actor: Option<ActorContext>,
+) -> Result<GqlFeature, Error>
+where
+    R: FeatureRepositoryTx + ?Sized,
+    A: ActivityLogRepository + ?Sized,
+{
+    let feature_uuid = id_to_uuid(id)?;
+    let feature = feature_repo
+        .emergency_disable_feature_tx(conn, feature_uuid, rollback_in_minutes)
+        .await?;
+
+    let (actor_id, actor_name) = actor
+        .as_ref()
+        .map(|a| a.as_option())
+        .unwrap_or((None, None));
+
+    let log_message = match rollback_in_minutes {
+        Some(minutes) if minutes > 0 => {
+            let scheduled = feature
+                .rollback_scheduled_at
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_else(|| "unknown".to_string());
+            format!(
+                "Kill switch scheduled for feature '{}' at {} (in {} minutes)",
+                feature.key, scheduled, minutes
+            )
+        }
+        _ => format!("Kill switch activated for feature '{}'", feature.key),
+    };
+
+    let activity = CreateActivityLog {
+        activity_type: crate::utils::activity_logger::activity_types::KILL_SWITCH_ACTIVATED
+            .to_string(),
+        entity_type: "feature".to_string(),
+        entity_id: feature.id.to_string(),
+        actor_id,
+        actor_name,
+        description: log_message,
+        metadata: Some(serde_json::json!({
+            "feature_id": feature.id.to_string(),
+            "feature_key": feature.key.clone(),
+            "rollback_in_minutes": rollback_in_minutes,
+        })),
+    };
+
+    activity_repo
+        .create_activity_tx(conn, activity)
+        .await
+        .map_err(Error::DatabaseError)?;
+
+    Ok(map_entity_to_graphql_feature(feature))
+}
+
+pub async fn emergency_enable_feature_in_tx<R, A>(
+    conn: &mut PgConnection,
+    feature_repo: &R,
+    activity_repo: &A,
+    id: ID,
+    actor: Option<ActorContext>,
+) -> Result<GqlFeature, Error>
+where
+    R: FeatureRepositoryTx + ?Sized,
+    A: ActivityLogRepository + ?Sized,
+{
+    let feature_uuid = id_to_uuid(id)?;
+    let feature = feature_repo
+        .emergency_enable_feature_tx(conn, feature_uuid)
+        .await?;
+
+    let (actor_id, actor_name) = actor
+        .as_ref()
+        .map(|a| a.as_option())
+        .unwrap_or((None, None));
+
+    let activity = CreateActivityLog {
+        activity_type: crate::utils::activity_logger::activity_types::KILL_SWITCH_DEACTIVATED
+            .to_string(),
+        entity_type: "feature".to_string(),
+        entity_id: feature.id.to_string(),
+        actor_id,
+        actor_name,
+        description: format!(
+            "Feature is enabled and kill switch deactivated for '{}'",
+            feature.key
+        ),
+        metadata: Some(serde_json::json!({
+            "feature_id": feature.id.to_string(),
+            "feature_key": feature.key.clone(),
+        })),
+    };
+
+    activity_repo
+        .create_activity_tx(conn, activity)
+        .await
+        .map_err(Error::DatabaseError)?;
+
+    Ok(map_entity_to_graphql_feature(feature))
+}

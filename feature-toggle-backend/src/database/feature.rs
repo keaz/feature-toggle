@@ -198,6 +198,14 @@ pub trait FeatureRepository: Send + Sync {
         page_number: i32,
         page_size: i32,
     ) -> Result<(Vec<Feature>, i64), Error>;
+    async fn get_features_with_offset(
+        &self,
+        team_id: Uuid,
+        key: Option<String>,
+        feature_type: Option<FeatureType>,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<Feature>, i64), Error>;
     async fn create_feature(&self, input: CreateFeature) -> Result<Uuid, Error>;
     async fn update_feature(&self, input: UpdateFeature) -> Result<Feature, Error>;
     async fn delete_feature(&self, id: Uuid) -> Result<(), Error>;
@@ -300,6 +308,12 @@ pub trait FeatureRepository: Send + Sync {
         page_number: Option<i32>,
         page_size: Option<i32>,
     ) -> Result<(Vec<Feature>, i64), Error>;
+    async fn get_features_with_pending_approvals_with_offset(
+        &self,
+        team_id: Option<Uuid>,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<Feature>, i64), Error>;
 
     // Get features with active kill switches
     async fn get_features_with_kill_switches(
@@ -307,6 +321,12 @@ pub trait FeatureRepository: Send + Sync {
         team_id: Option<Uuid>,
         page_number: Option<i32>,
         page_size: Option<i32>,
+    ) -> Result<(Vec<Feature>, i64), Error>;
+    async fn get_features_with_kill_switches_with_offset(
+        &self,
+        team_id: Option<Uuid>,
+        offset: i64,
+        limit: i64,
     ) -> Result<(Vec<Feature>, i64), Error>;
 
     fn clone_box(&self) -> Box<dyn FeatureRepository>;
@@ -365,6 +385,38 @@ pub trait FeatureRepositoryTx: FeatureRepository {
         conn: &mut PgConnection,
         stage_id: Uuid,
     ) -> Result<Vec<crate::database::entity::StageCriterion>, Error>;
+    async fn request_stage_change_tx(
+        &self,
+        conn: &mut PgConnection,
+        stage_id: Uuid,
+        status: &str,
+        requested_user: Uuid,
+        when: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, Error>;
+    async fn approve_or_reject_stage_change_tx(
+        &self,
+        conn: &mut PgConnection,
+        stage_id: Uuid,
+        status: &str,
+        user_id: Uuid,
+    ) -> Result<bool, Error>;
+    async fn reset_stage_status_tx(
+        &self,
+        conn: &mut PgConnection,
+        stage_id: Uuid,
+        status: &str,
+    ) -> Result<bool, Error>;
+    async fn emergency_disable_feature_tx(
+        &self,
+        conn: &mut PgConnection,
+        feature_id: Uuid,
+        rollback_in_minutes: Option<i32>,
+    ) -> Result<Feature, Error>;
+    async fn emergency_enable_feature_tx(
+        &self,
+        conn: &mut PgConnection,
+        feature_id: Uuid,
+    ) -> Result<Feature, Error>;
 }
 
 pub fn feature_repository(pool: PgPool) -> Box<dyn FeatureRepository> {
@@ -1274,6 +1326,89 @@ impl FeatureRepository for FeatureRepositoryImpl {
         Ok((features, total_count))
     }
 
+    async fn get_features_with_offset(
+        &self,
+        team_id: Uuid,
+        key: Option<String>,
+        feature_type: Option<FeatureType>,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<Feature>, i64), Error> {
+        // First, get the total count
+        let mut count_query =
+            sqlx::QueryBuilder::new("SELECT COUNT(DISTINCT f.id) FROM features f");
+        count_query.push(" WHERE f.team_id = ").push_bind(team_id);
+
+        if let Some(key) = &key {
+            count_query.push(" AND f.key ILIKE ");
+            count_query.push_bind(format!("%{key}%"));
+        }
+        if let Some(feature_type_value) = &feature_type {
+            let feature_type_str = match feature_type_value {
+                FeatureType::Simple => "Simple",
+                FeatureType::Contextual => "Contextual",
+            };
+            count_query
+                .push(" AND f.feature_type = ")
+                .push_bind(feature_type_str);
+        }
+
+        let total_count: i64 = count_query
+            .build_query_scalar()
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| Error::DatabaseError(e))?;
+
+        let mut query_builder = sqlx::QueryBuilder::new(FEATURE_SELECT);
+        query_builder.push(" WHERE f.team_id = ").push_bind(team_id);
+
+        if let Some(key) = key {
+            query_builder.push(" AND f.key ILIKE ");
+            query_builder.push_bind(format!("%{key}%"));
+        }
+        if let Some(feature_type_value) = feature_type {
+            let feature_type_str = match feature_type_value {
+                FeatureType::Simple => "Simple",
+                FeatureType::Contextual => "Contextual",
+            };
+            query_builder
+                .push(" AND f.feature_type = ")
+                .push_bind(feature_type_str);
+        }
+        query_builder.push(" ORDER BY f.key");
+        query_builder.push(" LIMIT ").push_bind(limit);
+        query_builder.push(" OFFSET ").push_bind(offset);
+
+        let result = query_builder
+            .build_query_as::<FeatureWithStageRow>()
+            .fetch_all(&self.pool)
+            .await;
+
+        let features_rows = handle_error(None, result)?;
+        let mut map: HashMap<Uuid, Vec<FeatureWithStageRow>> = HashMap::new();
+        let mut order: Vec<Uuid> = Vec::new();
+
+        for row in features_rows {
+            if !map.contains_key(&row.feature_id) {
+                order.push(row.feature_id);
+            }
+            map.entry(row.feature_id).or_default().push(row);
+        }
+
+        let mut features: Vec<Feature> = Vec::with_capacity(order.len());
+        for id in order {
+            if let Some(rows) = map.remove(&id) {
+                features.push(Self::map_row_to_feature(rows));
+            }
+        }
+        for feature in &mut features {
+            let dependencies = self.get_feature_dependencies(&feature.id).await?;
+            feature.dependencies = dependencies;
+        }
+
+        Ok((features, total_count))
+    }
+
     async fn create_feature(&self, input: CreateFeature) -> Result<Uuid, Error> {
         self.check_feature_exists(&input).await?;
 
@@ -2158,6 +2293,78 @@ impl FeatureRepository for FeatureRepositoryImpl {
         Ok((features, total))
     }
 
+    async fn get_features_with_pending_approvals_with_offset(
+        &self,
+        team_id: Option<Uuid>,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<Feature>, i64), Error> {
+        let mut count_query = sqlx::QueryBuilder::new(
+            "SELECT COUNT(DISTINCT f.id) FROM features f \
+             INNER JOIN features_pipeline_stages s ON f.id = s.feature_id \
+             WHERE s.status IN ('DEPLOYMENT_REQUESTED', 'ROLLBACK_REQUESTED')",
+        );
+
+        if let Some(tid) = team_id {
+            count_query.push(" AND f.team_id = ").push_bind(tid);
+        }
+
+        let total: i64 = count_query
+            .build_query_scalar()
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| Error::DatabaseError(e))?;
+
+        let mut query_builder = sqlx::QueryBuilder::new(
+            r#"SELECT DISTINCT ON (f.id) f.id as feature_id, f.key as feature_key, f.description,
+               f.feature_type, f.team_id, f.created_at, f.kill_switch_enabled,
+               f.kill_switch_activated_at, f.rollback_scheduled_at, f.active as feature_enabled,
+               f.lifecycle_stage, f.deprecated_at, f.deprecation_notice, f.last_evaluated_at,
+               f.evaluation_count_7d, f.evaluation_count_30d, f.evaluation_count_90d,
+               s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
+               s.parent_stage_id, s.position, s.status, s.enabled
+               FROM features f
+               INNER JOIN features_pipeline_stages s ON f.id = s.feature_id
+               WHERE s.status IN ('DEPLOYMENT_REQUESTED', 'ROLLBACK_REQUESTED')"#,
+        );
+
+        if let Some(tid) = team_id {
+            query_builder.push(" AND f.team_id = ").push_bind(tid);
+        }
+
+        query_builder.push(" ORDER BY f.id, f.created_at DESC");
+        query_builder.push(" LIMIT ").push_bind(limit);
+        query_builder.push(" OFFSET ").push_bind(offset);
+
+        let result = query_builder
+            .build_query_as::<FeatureWithStageRow>()
+            .fetch_all(&self.pool)
+            .await;
+
+        let features_rows = handle_error(None, result)?;
+        let mut map: HashMap<Uuid, Vec<FeatureWithStageRow>> = HashMap::new();
+        let mut order: Vec<Uuid> = Vec::new();
+
+        for row in features_rows {
+            if !map.contains_key(&row.feature_id) {
+                order.push(row.feature_id);
+            }
+            map.entry(row.feature_id).or_default().push(row);
+        }
+
+        let mut features: Vec<Feature> = Vec::with_capacity(order.len());
+        for id in order {
+            if let Some(rows) = map.remove(&id) {
+                let mut feature = Self::map_row_to_feature(rows);
+                let dependencies = self.get_feature_dependencies(&id).await?;
+                feature.dependencies = dependencies;
+                features.push(feature);
+            }
+        }
+
+        Ok((features, total))
+    }
+
     async fn get_features_with_kill_switches(
         &self,
         team_id: Option<Uuid>,
@@ -2232,6 +2439,77 @@ impl FeatureRepository for FeatureRepositoryImpl {
             if let Some(rows) = map.remove(&id) {
                 let mut feature = Self::map_row_to_feature(rows);
                 // Load dependencies
+                let dependencies = self.get_feature_dependencies(&id).await?;
+                feature.dependencies = dependencies;
+                features.push(feature);
+            }
+        }
+
+        Ok((features, total))
+    }
+
+    async fn get_features_with_kill_switches_with_offset(
+        &self,
+        team_id: Option<Uuid>,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<Feature>, i64), Error> {
+        let mut count_query = sqlx::QueryBuilder::new(
+            "SELECT COUNT(DISTINCT f.id) FROM features f \
+             WHERE f.kill_switch_enabled = false",
+        );
+
+        if let Some(tid) = team_id {
+            count_query.push(" AND f.team_id = ").push_bind(tid);
+        }
+
+        let total: i64 = count_query
+            .build_query_scalar()
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| Error::DatabaseError(e))?;
+
+        let mut query_builder = sqlx::QueryBuilder::new(
+            r#"SELECT DISTINCT ON (f.id) f.id as feature_id, f.key as feature_key, f.description,
+               f.feature_type, f.team_id, f.created_at, f.kill_switch_enabled,
+               f.kill_switch_activated_at, f.rollback_scheduled_at, f.active as feature_enabled,
+               f.lifecycle_stage, f.deprecated_at, f.deprecation_notice, f.last_evaluated_at,
+               f.evaluation_count_7d, f.evaluation_count_30d, f.evaluation_count_90d,
+               s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
+               s.parent_stage_id, s.position, s.status, s.enabled
+               FROM features f
+               LEFT JOIN features_pipeline_stages s ON f.id = s.feature_id
+               WHERE f.kill_switch_enabled = false"#,
+        );
+
+        if let Some(tid) = team_id {
+            query_builder.push(" AND f.team_id = ").push_bind(tid);
+        }
+
+        query_builder.push(" ORDER BY f.id, f.kill_switch_activated_at DESC NULLS LAST");
+        query_builder.push(" LIMIT ").push_bind(limit);
+        query_builder.push(" OFFSET ").push_bind(offset);
+
+        let result = query_builder
+            .build_query_as::<FeatureWithStageRow>()
+            .fetch_all(&self.pool)
+            .await;
+
+        let features_rows = handle_error(None, result)?;
+        let mut map: HashMap<Uuid, Vec<FeatureWithStageRow>> = HashMap::new();
+        let mut order: Vec<Uuid> = Vec::new();
+
+        for row in features_rows {
+            if !map.contains_key(&row.feature_id) {
+                order.push(row.feature_id);
+            }
+            map.entry(row.feature_id).or_default().push(row);
+        }
+
+        let mut features: Vec<Feature> = Vec::with_capacity(order.len());
+        for id in order {
+            if let Some(rows) = map.remove(&id) {
+                let mut feature = Self::map_row_to_feature(rows);
                 let dependencies = self.get_feature_dependencies(&id).await?;
                 feature.dependencies = dependencies;
                 features.push(feature);
@@ -2755,6 +3033,171 @@ impl FeatureRepositoryTx for FeatureRepositoryImpl {
             )?;
         }
         self.get_stage_criteria_tx(conn, stage_id).await
+    }
+
+    async fn request_stage_change_tx(
+        &self,
+        conn: &mut PgConnection,
+        stage_id: Uuid,
+        status: &str,
+        requested_user: Uuid,
+        when: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, Error> {
+        let enabled = match status {
+            "DEPLOYED" => true,
+            "ROLLBACKED" => false,
+            _ => {
+                let current_enabled = sqlx::query_scalar!(
+                    "SELECT enabled FROM features_pipeline_stages WHERE id = $1",
+                    stage_id
+                )
+                .fetch_optional(&mut *conn)
+                .await;
+
+                match handle_error(Some(stage_id), current_enabled)? {
+                    Some(current) => current,
+                    None => return Err(Error::NotFound(stage_id)),
+                }
+            }
+        };
+
+        let result = sqlx::query(
+            r#"UPDATE features_pipeline_stages
+               SET status = $1, enabled = $2, requested_user = $3, requested_time = $4, approved_user = NULL, approved_time = NULL
+               WHERE id = $5"#,
+        )
+        .bind(status)
+        .bind(enabled)
+        .bind(requested_user)
+        .bind(when)
+        .bind(stage_id)
+        .execute(&mut *conn)
+        .await;
+        let res = handle_error(Some(stage_id), result)?;
+        Ok(res.rows_affected() == 1)
+    }
+
+    async fn approve_or_reject_stage_change_tx(
+        &self,
+        conn: &mut PgConnection,
+        stage_id: Uuid,
+        status: &str,
+        user_id: Uuid,
+    ) -> Result<bool, Error> {
+        let now = chrono::Utc::now();
+
+        let enabled = match status {
+            "DEPLOYED" => true,
+            "ROLLBACKED" => false,
+            _ => {
+                let current_enabled = sqlx::query_scalar!(
+                    "SELECT enabled FROM features_pipeline_stages WHERE id = $1",
+                    stage_id
+                )
+                .fetch_optional(&mut *conn)
+                .await;
+
+                match handle_error(Some(stage_id), current_enabled)? {
+                    Some(current) => current,
+                    None => return Err(Error::NotFound(stage_id)),
+                }
+            }
+        };
+
+        let result = sqlx::query(
+            r#"UPDATE features_pipeline_stages
+               SET status = $1, enabled = $2, approved_user = $3, approved_time = $4
+               WHERE id = $5"#,
+        )
+        .bind(status)
+        .bind(enabled)
+        .bind(user_id)
+        .bind(now)
+        .bind(stage_id)
+        .execute(&mut *conn)
+        .await;
+        let res = handle_error(Some(stage_id), result)?;
+        Ok(res.rows_affected() == 1)
+    }
+
+    async fn reset_stage_status_tx(
+        &self,
+        conn: &mut PgConnection,
+        stage_id: Uuid,
+        status: &str,
+    ) -> Result<bool, Error> {
+        let result = sqlx::query(
+            r#"UPDATE features_pipeline_stages
+               SET status = $1,
+                   requested_user = NULL,
+                   requested_time = NULL,
+                   approved_user = NULL,
+                   approved_time = NULL
+               WHERE id = $2"#,
+        )
+        .bind(status)
+        .bind(stage_id)
+        .execute(&mut *conn)
+        .await;
+        let res = handle_error(Some(stage_id), result)?;
+        Ok(res.rows_affected() == 1)
+    }
+
+    async fn emergency_disable_feature_tx(
+        &self,
+        conn: &mut PgConnection,
+        feature_id: Uuid,
+        rollback_in_minutes: Option<i32>,
+    ) -> Result<Feature, Error> {
+        let now = chrono::Utc::now();
+
+        let (kill_switch_enabled, activated_at, rollback_at, active) = match rollback_in_minutes {
+            Some(minutes) if minutes > 0 => {
+                let schedule = now + chrono::Duration::minutes(minutes as i64);
+                (true, None, Some(schedule), true)
+            }
+            _ => (false, Some(now), None, false),
+        };
+
+        let result = sqlx::query!(
+            r#"UPDATE features
+                SET kill_switch_enabled = $1,
+                kill_switch_activated_at = $2,
+                rollback_scheduled_at = $3,
+                active = $4
+               WHERE id = $5"#,
+            kill_switch_enabled,
+            activated_at,
+            rollback_at,
+            active,
+            feature_id
+        )
+        .execute(&mut *conn)
+        .await;
+
+        handle_error(Some(feature_id), result)?;
+        self.get_feature_by_id(feature_id).await
+    }
+
+    async fn emergency_enable_feature_tx(
+        &self,
+        conn: &mut PgConnection,
+        feature_id: Uuid,
+    ) -> Result<Feature, Error> {
+        let result = sqlx::query!(
+            r#"UPDATE features
+                SET kill_switch_enabled = false,
+                active = true,
+                kill_switch_activated_at = NULL,
+                rollback_scheduled_at = NULL
+                WHERE id = $1"#,
+            feature_id
+        )
+        .execute(&mut *conn)
+        .await;
+
+        handle_error(Some(feature_id), result)?;
+        self.get_feature_by_id(feature_id).await
     }
 }
 

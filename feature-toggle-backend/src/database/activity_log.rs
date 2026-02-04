@@ -78,6 +78,12 @@ pub trait ActivityLogRepository: Send + Sync {
     fn clone_box(&self) -> Box<dyn ActivityLogRepository>;
 }
 
+impl Clone for Box<dyn ActivityLogRepository> {
+    fn clone(&self) -> Box<dyn ActivityLogRepository> {
+        self.clone_box()
+    }
+}
+
 #[derive(Clone)]
 pub struct PgActivityLogRepository {
     pool: sqlx::PgPool,

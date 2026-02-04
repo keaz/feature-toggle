@@ -1,11 +1,12 @@
 use crate::database::approval::{
-    ApprovalRepository, CreateApprovalRequestInput, CreateApprovalVoteInput,
+    approval_repository_tx, ApprovalRepository, ApprovalRepositoryTx, CreateApprovalRequestInput,
+    CreateApprovalVoteInput,
 };
 use crate::database::entity::{
     ApprovalPolicy, ApprovalRequest, ApprovalStatus, ApprovalVote, ApprovalVoteValue,
     Feature as DbFeature, FeaturePipelineStage, SENTINEL_UUID,
 };
-use crate::database::feature::FeatureRepository;
+use crate::database::feature::{feature_repository_tx, FeatureRepository, FeatureRepositoryTx};
 use crate::database::role::RoleRepository;
 use crate::logic::environment::EnvironmentLogic;
 use crate::Error;
@@ -13,6 +14,7 @@ use async_graphql::ID;
 use chrono::Utc;
 use feature_toggle_shared::constants::StageStatus;
 use mockall::automock;
+use sqlx::PgPool;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
@@ -20,7 +22,7 @@ pub(crate) fn status_requires_interception(status: &str) -> bool {
     matches!(status, "DEPLOYMENT_REQUESTED" | "ROLLBACK_REQUESTED")
 }
 
-fn policy_applies(policy: &ApprovalPolicy, env_id: Uuid, env_type: &str) -> bool {
+pub(crate) fn policy_applies(policy: &ApprovalPolicy, env_id: Uuid, env_type: &str) -> bool {
     if !policy.enabled {
         return false;
     }
@@ -109,6 +111,27 @@ pub fn approval_logic(
     feature_updates_tx: broadcast::Sender<crate::grpc::pb::FeatureUpdate>,
 ) -> Box<dyn ApprovalLogic> {
     Box::new(ApprovalLogicImpl {
+        db_pool: None,
+        approval_repository,
+        feature_repository,
+        environment_logic,
+        role_repository,
+        approval_events_tx,
+        feature_updates_tx,
+    })
+}
+
+pub fn approval_logic_with_pool(
+    db_pool: PgPool,
+    approval_repository: Box<dyn ApprovalRepository>,
+    feature_repository: Box<dyn FeatureRepository>,
+    environment_logic: Box<dyn EnvironmentLogic>,
+    role_repository: Box<dyn RoleRepository>,
+    approval_events_tx: broadcast::Sender<ApprovalRequestEvent>,
+    feature_updates_tx: broadcast::Sender<crate::grpc::pb::FeatureUpdate>,
+) -> Box<dyn ApprovalLogic> {
+    Box::new(ApprovalLogicImpl {
+        db_pool: Some(db_pool),
         approval_repository,
         feature_repository,
         environment_logic,
@@ -120,6 +143,7 @@ pub fn approval_logic(
 
 #[derive(Clone)]
 struct ApprovalLogicImpl {
+    db_pool: Option<PgPool>,
     approval_repository: Box<dyn ApprovalRepository>,
     feature_repository: Box<dyn FeatureRepository>,
     environment_logic: Box<dyn EnvironmentLogic>,
@@ -326,6 +350,131 @@ impl ApprovalLogicImpl {
         Ok(updated)
     }
 
+    async fn apply_vote_tx(
+        &self,
+        request_id: Uuid,
+        approver_id: Uuid,
+        vote: ApprovalVoteValue,
+        comment: Option<String>,
+    ) -> Result<ApprovalRequest, Error> {
+        let request = self
+            .approval_repository
+            .get_request_by_id(request_id)
+            .await?
+            .ok_or(Error::NotFound(request_id))?;
+        if !matches!(request.status, ApprovalStatus::Pending) {
+            return Err(Error::InvalidInput("Request is already resolved".into()));
+        }
+
+        let policy = self
+            .approval_repository
+            .get_policy_by_id(request.policy_id)
+            .await?
+            .ok_or(Error::NotFound(request.policy_id))?;
+        let team_id = policy.team_id;
+
+        let has_approver_role = self
+            .role_repository
+            .user_has_role(approver_id, "Approver")
+            .await?;
+
+        if !has_approver_role {
+            return Err(Error::InvalidInput(
+                "User does not have 'Approver' role required to vote on approval requests".into(),
+            ));
+        }
+
+        let user_roles = self.role_repository.get_user_roles(approver_id).await?;
+        let user_role_ids: Vec<Uuid> = user_roles.iter().map(|r| r.id).collect();
+
+        let has_policy_role = policy
+            .approver_role_ids
+            .iter()
+            .any(|policy_role_id| user_role_ids.contains(policy_role_id));
+
+        if !has_policy_role {
+            return Err(Error::InvalidInput(
+                "User does not have any of the required roles specified in this approval policy"
+                    .into(),
+            ));
+        }
+
+        let pool = self
+            .db_pool
+            .as_ref()
+            .ok_or_else(|| Error::InvalidInput("Transaction pool not configured".into()))?;
+        let mut tx = pool.begin().await.map_err(Error::DatabaseError)?;
+        let approval_repo_tx = approval_repository_tx(pool.clone());
+        let feature_repo_tx = feature_repository_tx(pool.clone());
+
+        let updated = approval_repo_tx
+            .add_vote_tx(
+                &mut tx,
+                CreateApprovalVoteInput {
+                    request_id,
+                    approver_id,
+                    vote,
+                    comment,
+                },
+                policy.required_approvers,
+            )
+            .await?;
+
+        if matches!(updated.status, ApprovalStatus::Approved) {
+            if let Err(exec_err) = self
+                .execute_change_tx(&feature_repo_tx, &mut tx, &updated, approver_id)
+                .await
+            {
+                let pending = approval_repo_tx
+                    .update_request_status_tx(&mut tx, request_id, ApprovalStatus::Pending, None)
+                    .await?;
+                tx.commit().await.map_err(Error::DatabaseError)?;
+                self.publish_event(&pending, team_id).await?;
+                return Err(exec_err);
+            }
+
+            let final_request = approval_repo_tx
+                .update_request_status_tx(&mut tx, request_id, ApprovalStatus::Approved, Some(Utc::now()))
+                .await?;
+            tx.commit().await.map_err(Error::DatabaseError)?;
+
+            self.publish_event(&updated, team_id).await?;
+            self.publish_event(&final_request, team_id).await?;
+            self.notify_edge_servers(updated.feature_id).await;
+
+            return Ok(final_request);
+        }
+
+        if matches!(updated.status, ApprovalStatus::Rejected) {
+            if let Err(exec_err) = self
+                .execute_change_tx(&feature_repo_tx, &mut tx, &updated, approver_id)
+                .await
+            {
+                let pending = approval_repo_tx
+                    .update_request_status_tx(&mut tx, request_id, ApprovalStatus::Pending, None)
+                    .await?;
+                tx.commit().await.map_err(Error::DatabaseError)?;
+                self.publish_event(&pending, team_id).await?;
+                return Err(exec_err);
+            }
+
+            let final_request = approval_repo_tx
+                .update_request_status_tx(&mut tx, request_id, ApprovalStatus::Rejected, None)
+                .await?;
+            tx.commit().await.map_err(Error::DatabaseError)?;
+
+            self.publish_event(&updated, team_id).await?;
+            self.publish_event(&final_request, team_id).await?;
+            self.notify_edge_servers(updated.feature_id).await;
+
+            return Ok(final_request);
+        }
+
+        tx.commit().await.map_err(Error::DatabaseError)?;
+        self.publish_event(&updated, team_id).await?;
+        Ok(updated)
+    }
+
     async fn execute_change(&self, request: &ApprovalRequest, actor_id: Uuid) -> Result<(), Error> {
         if request.change_type != "stage_change" {
             return Ok(());
@@ -361,6 +510,55 @@ impl ApprovalLogicImpl {
 
         self.feature_repository
             .approve_or_reject_stage_change(stage_id, final_status, actor_id)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn execute_change_tx<R>(
+        &self,
+        feature_repo: &R,
+        conn: &mut sqlx::PgConnection,
+        request: &ApprovalRequest,
+        actor_id: Uuid,
+    ) -> Result<(), Error>
+    where
+        R: FeatureRepositoryTx,
+    {
+        if request.change_type != "stage_change" {
+            return Ok(());
+        }
+
+        let stage_id = request
+            .change_payload
+            .get("stage_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::InvalidInput("Missing stage_id in change_payload".into()))
+            .and_then(|s| Uuid::parse_str(s).map_err(|e| Error::InvalidInput(e.to_string())))?;
+
+        let next_status = request
+            .change_payload
+            .get("next_status")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::InvalidInput("Missing next_status in change_payload".into()))?;
+
+        let approval_target_status = request
+            .change_payload
+            .get("approval_target_status")
+            .and_then(|v| v.as_str());
+        let rejection_target_status = request
+            .change_payload
+            .get("rejection_target_status")
+            .and_then(|v| v.as_str());
+
+        let final_status = match request.status {
+            ApprovalStatus::Approved => approval_target_status.unwrap_or(next_status),
+            ApprovalStatus::Rejected => rejection_target_status.unwrap_or(next_status),
+            _ => return Ok(()),
+        };
+
+        feature_repo
+            .approve_or_reject_stage_change_tx(conn, stage_id, final_status, actor_id)
             .await?;
 
         Ok(())
@@ -439,8 +637,13 @@ impl ApprovalLogic for ApprovalLogicImpl {
         approver_id: Uuid,
         comment: Option<String>,
     ) -> Result<ApprovalRequest, Error> {
-        self.apply_vote(request_id, approver_id, ApprovalVoteValue::Approve, comment)
-            .await
+        if self.db_pool.is_some() {
+            self.apply_vote_tx(request_id, approver_id, ApprovalVoteValue::Approve, comment)
+                .await
+        } else {
+            self.apply_vote(request_id, approver_id, ApprovalVoteValue::Approve, comment)
+                .await
+        }
     }
 
     async fn reject_request(
@@ -449,8 +652,13 @@ impl ApprovalLogic for ApprovalLogicImpl {
         approver_id: Uuid,
         comment: Option<String>,
     ) -> Result<ApprovalRequest, Error> {
-        self.apply_vote(request_id, approver_id, ApprovalVoteValue::Reject, comment)
-            .await
+        if self.db_pool.is_some() {
+            self.apply_vote_tx(request_id, approver_id, ApprovalVoteValue::Reject, comment)
+                .await
+        } else {
+            self.apply_vote(request_id, approver_id, ApprovalVoteValue::Reject, comment)
+                .await
+        }
     }
 
     async fn cancel_request(
@@ -458,6 +666,52 @@ impl ApprovalLogic for ApprovalLogicImpl {
         request_id: Uuid,
         _cancelled_by: Uuid,
     ) -> Result<ApprovalRequest, Error> {
+        if let Some(pool) = &self.db_pool {
+            let existing = self
+                .approval_repository
+                .get_request_by_id(request_id)
+                .await?
+                .ok_or(Error::NotFound(request_id))?;
+            let team_id = self.policy_team_id(existing.policy_id).await?;
+
+            let stage_reset: Option<(Uuid, String)> = if existing.change_type == "stage_change" {
+                let stage_id = existing
+                    .change_payload
+                    .get("stage_id")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| Uuid::parse_str(s).ok());
+                let previous_status = existing
+                    .change_payload
+                    .get("previous_status")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                match (stage_id, previous_status) {
+                    (Some(id), Some(status)) => Some((id, status)),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+            let mut tx = pool.begin().await.map_err(Error::DatabaseError)?;
+            let approval_repo_tx = approval_repository_tx(pool.clone());
+            let feature_repo_tx = feature_repository_tx(pool.clone());
+
+            let updated = approval_repo_tx
+                .update_request_status_tx(&mut tx, request_id, ApprovalStatus::Cancelled, None)
+                .await?;
+
+            if let Some((stage_id, status)) = stage_reset {
+                let _ = feature_repo_tx
+                    .reset_stage_status_tx(&mut tx, stage_id, status.as_str())
+                    .await;
+            }
+
+            tx.commit().await.map_err(Error::DatabaseError)?;
+            self.publish_event(&updated, team_id).await?;
+            return Ok(updated);
+        }
+
         let existing = self
             .approval_repository
             .get_request_by_id(request_id)
@@ -523,6 +777,30 @@ impl ApprovalLogic for ApprovalLogicImpl {
         &self,
         request: ApprovalRequest,
     ) -> Result<ApprovalRequest, Error> {
+        if let Some(pool) = &self.db_pool {
+            let team_id = self.policy_team_id(request.policy_id).await?;
+            let mut tx = pool.begin().await.map_err(Error::DatabaseError)?;
+            let approval_repo_tx = approval_repository_tx(pool.clone());
+            let feature_repo_tx = feature_repository_tx(pool.clone());
+
+            self.execute_change_tx(&feature_repo_tx, &mut tx, &request, SENTINEL_UUID)
+                .await?;
+
+            let updated = approval_repo_tx
+                .update_request_status_tx(
+                    &mut tx,
+                    request.id,
+                    ApprovalStatus::AutoApproved,
+                    Some(Utc::now()),
+                )
+                .await?;
+            tx.commit().await.map_err(Error::DatabaseError)?;
+            self.publish_event(&updated, team_id).await?;
+            self.notify_edge_servers(request.feature_id).await;
+
+            return Ok(updated);
+        }
+
         let team_id = self.policy_team_id(request.policy_id).await?;
         if let Err(exec_err) = self.execute_change(&request, SENTINEL_UUID).await {
             return Err(exec_err);

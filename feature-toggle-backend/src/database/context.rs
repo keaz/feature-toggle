@@ -30,6 +30,13 @@ pub trait ContextRepository: Send + Sync {
         page_number: i32,
         page_size: i32,
     ) -> Result<(Vec<Context>, i64), Error>;
+    async fn get_contexts_with_offset(
+        &self,
+        team_id: Uuid,
+        key: Option<String>,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<Context>, i64), Error>;
     async fn create_context(
         &self,
         team_id: Uuid,
@@ -214,6 +221,76 @@ impl ContextRepository for ContextRepositoryImpl {
                     .collect(),
             });
         }
+        Ok((result, total_count))
+    }
+
+    async fn get_contexts_with_offset(
+        &self,
+        team_id: Uuid,
+        key: Option<String>,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<Context>, i64), Error> {
+        debug!("DB: get_contexts_with_offset team={team_id} key={key:?} offset={offset} limit={limit}");
+
+        let offset = offset.max(0);
+        let limit = limit.max(1);
+
+        let mut count_qb =
+            QueryBuilder::<Postgres>::new("SELECT COUNT(*) FROM contexts c WHERE c.team_id = ");
+        count_qb.push_bind(team_id);
+        if let Some(k) = &key {
+            let pattern = format!("%{}%", k);
+            count_qb.push(" AND c.key ILIKE ").push_bind(pattern);
+        }
+
+        let total_count: i64 = count_qb
+            .build_query_scalar()
+            .fetch_one(&self.pool)
+            .await
+            .map_err(Error::DatabaseError)?;
+
+        let mut qb = QueryBuilder::<Postgres>::new(
+            "SELECT c.id, c.team_id, c.key FROM contexts c WHERE c.team_id = ",
+        );
+        qb.push_bind(team_id);
+        if let Some(k) = key {
+            let pattern = format!("%{}%", k);
+            qb.push(" AND c.key ILIKE ").push_bind(pattern);
+        }
+        qb.push(" ORDER BY c.key");
+        qb.push(" LIMIT ").push_bind(limit);
+        qb.push(" OFFSET ").push_bind(offset);
+
+        let rows = qb.build().fetch_all(&self.pool).await;
+        let rows = handle_error(None, rows)?;
+
+        let mut result = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id: Uuid = row.get::<Uuid, _>(0);
+            let team_id: Uuid = row.get::<Uuid, _>(1);
+            let key: String = row.get::<String, _>(2);
+            let entries = sqlx::query!(
+                r#"SELECT id, value FROM context_entries WHERE context_id = $1 ORDER BY value"#,
+                id
+            )
+            .fetch_all(&self.pool)
+            .await;
+            let entries = handle_error(Some(id), entries)?;
+            result.push(Context {
+                id,
+                team_id,
+                key,
+                entries: entries
+                    .into_iter()
+                    .map(|e| ContextEntry {
+                        id: e.id,
+                        value: e.value,
+                    })
+                    .collect(),
+            });
+        }
+
         Ok((result, total_count))
     }
 

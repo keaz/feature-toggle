@@ -94,35 +94,48 @@ where
                 return Ok(res.map_into_left_body());
             }
 
-            // Only guard GraphQL POST
-            let is_graphql_post =
-                method == actix_web::http::Method::POST && req.path() == "/graphql";
-            if !is_graphql_post {
+            let path = req.path().to_string();
+            let is_graphql_post = method == actix_web::http::Method::POST && path == "/graphql";
+
+            let is_public_path = path == "/api/v1/health"
+                || path == "/api/v1/openapi.json"
+                || path.starts_with("/docs")
+                || (path == "/metrics/track" && method == actix_web::http::Method::POST)
+                || (path == "/api/v1/metrics/track" && method == actix_web::http::Method::POST)
+                || (path == "/api/v1/auth/login" && method == actix_web::http::Method::POST)
+                || (path == "/api/v1/auth/status" && method == actix_web::http::Method::GET)
+                || (path == "/api/v1/admins" && method == actix_web::http::Method::POST);
+
+            if is_public_path {
                 let res = service.call(req).await?;
                 return Ok(res.map_into_left_body());
             }
 
-            // Read body to inspect the operation name (login/createAdmin mutations and applicationStatus query skip JWT validation)
-            let mut body = Vec::new();
-            while let Some(chunk) = req.take_payload().next().await {
-                body.extend_from_slice(&chunk?);
-            }
+            let mut is_reset_password_request =
+                path == "/api/v1/auth/reset-password" && method == actix_web::http::Method::POST;
+            if is_graphql_post {
+                // Read body to inspect the operation name (login/createAdmin mutations and applicationStatus query skip JWT validation)
+                let mut body = Vec::new();
+                while let Some(chunk) = req.take_payload().next().await {
+                    body.extend_from_slice(&chunk?);
+                }
 
-            let body_str = String::from_utf8_lossy(&body);
-            let skip_jwt = (body_str.contains("mutation")
-                && (body_str.contains("login") || body_str.contains("createAdmin")))
-                || (body_str.contains("query") && body_str.contains("applicationStatus"));
+                let body_str = String::from_utf8_lossy(&body);
+                let skip_jwt = (body_str.contains("mutation")
+                    && (body_str.contains("login") || body_str.contains("createAdmin")))
+                    || (body_str.contains("query") && body_str.contains("applicationStatus"));
 
-            // Check if this is a resetPassword mutation (needs special handling)
-            let is_reset_password_mutation = body_str.contains("mutation")
-                && (body_str.contains("resetPassword") || body_str.contains("reset_password"));
+                // Check if this is a resetPassword mutation (needs special handling)
+                is_reset_password_request = body_str.contains("mutation")
+                    && (body_str.contains("resetPassword") || body_str.contains("reset_password"));
 
-            // Restore payload for downstream
-            req.set_payload(actix_web::web::Bytes::from(body.clone()).into());
+                // Restore payload for downstream
+                req.set_payload(actix_web::web::Bytes::from(body.clone()).into());
 
-            if skip_jwt {
-                let res = service.call(req).await?;
-                return Ok(res.map_into_left_body());
+                if skip_jwt {
+                    let res = service.call(req).await?;
+                    return Ok(res.map_into_left_body());
+                }
             }
 
             // Check JWT token in Authorization header
@@ -177,7 +190,7 @@ where
                                             // Check if user has temporary password (unless this is resetPassword mutation)
                                             // Users with temporary passwords must reset their password before accessing other endpoints
                                             // However, the resetPassword mutation itself is allowed with valid JWT
-                                            if !is_reset_password_mutation {
+                                            if !is_reset_password_request {
                                                 let user_repo =
                                                     crate::database::user::user_repository(
                                                         pool.clone(),

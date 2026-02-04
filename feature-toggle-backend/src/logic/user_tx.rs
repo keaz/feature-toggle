@@ -12,7 +12,7 @@ use crate::logic::user::{GqlUser, RegisterUserInput, UpdateGqlUserInput};
 use crate::utils::activity_logger::activity_types;
 use argon2::{
     Argon2,
-    password_hash::{PasswordHasher, SaltString, rand_core::OsRng},
+    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
 };
 use async_graphql::ID;
 use sqlx::PgConnection;
@@ -188,4 +188,185 @@ where
         last_login: updated.last_login,
         is_temporary_password: updated.is_temporary_password,
     })
+}
+
+/// Assign user to teams within a transaction.
+///
+/// This function updates the user-team assignments and logs activity entries
+/// within the same transaction, ensuring atomicity.
+pub async fn assign_user_teams_in_tx<R>(
+    conn: &mut PgConnection,
+    repo: &R,
+    activity_repo: &dyn ActivityLogRepository,
+    id: ID,
+    team_ids: Vec<ID>,
+    actor: Option<ActorContext>,
+) -> Result<bool, Error>
+where
+    R: UserRepositoryTx,
+{
+    let user_id =
+        Uuid::try_from(id).map_err(|e| Error::InvalidInput(format!("Invalid user id: {e}")))?;
+    let team_ids_uuid: Result<Vec<Uuid>, _> = team_ids
+        .iter()
+        .map(|id| Uuid::try_from(id.clone()))
+        .collect();
+    let team_ids_uuid =
+        team_ids_uuid.map_err(|e| Error::InvalidInput(format!("Invalid team id: {e}")))?;
+
+    repo.set_user_teams_tx(conn, user_id, team_ids_uuid.clone())
+        .await?;
+
+    let (actor_id, actor_name) = actor
+        .as_ref()
+        .map(|a| a.as_option())
+        .unwrap_or((None, None));
+
+    for team_id in &team_ids_uuid {
+        let activity = CreateActivityLog {
+            activity_type: activity_types::USER_ADDED_TO_TEAM.to_string(),
+            entity_type: "team".to_string(),
+            entity_id: team_id.to_string(),
+            actor_id,
+            actor_name: actor_name.clone(),
+            description: format!("User '{}' added to team", user_id),
+            metadata: Some(serde_json::json!({
+                "user_id": user_id.to_string(),
+                "team_id": team_id.to_string(),
+            })),
+        };
+
+        activity_repo
+            .create_activity_tx(conn, activity)
+            .await
+            .map_err(Error::DatabaseError)?;
+    }
+
+    Ok(true)
+}
+
+/// Reset a user's password within a transaction.
+///
+/// This function verifies the current password, updates to a new one,
+/// and logs the activity within the provided transaction.
+pub async fn reset_password_in_tx<R>(
+    conn: &mut PgConnection,
+    repo: &R,
+    activity_repo: &dyn ActivityLogRepository,
+    id: ID,
+    current_password: String,
+    new_password: String,
+    actor: Option<ActorContext>,
+) -> Result<(), Error>
+where
+    R: UserRepositoryTx,
+{
+    let user_id = Uuid::try_from(id).map_err(|e| Error::InvalidInput(e.to_string()))?;
+    let user = repo.get_user_by_id_tx(conn, user_id).await?;
+
+    let parsed_hash = PasswordHash::new(&user.password_hash)
+        .map_err(|_| Error::InvalidInput("Stored password hash is invalid".to_string()))?;
+    Argon2::default()
+        .verify_password(current_password.as_bytes(), &parsed_hash)
+        .map_err(|_| Error::InvalidInput("Current password is incorrect".to_string()))?;
+
+    if Argon2::default()
+        .verify_password(new_password.as_bytes(), &parsed_hash)
+        .is_ok()
+    {
+        return Err(Error::InvalidInput(
+            "New password must be different from current password".to_string(),
+        ));
+    }
+
+    let salt = SaltString::generate(&mut OsRng);
+    let argon2 = Argon2::default();
+    let new_password_hash = argon2
+        .hash_password(new_password.as_bytes(), &salt)
+        .map_err(|_| Error::InvalidInput("Failed to hash new password".to_string()))?
+        .to_string();
+
+    repo.update_password_tx(conn, user_id, new_password_hash, false)
+        .await?;
+
+    // For reset_password, the actor is the user themselves (self-service password change).
+    let (actor_id, actor_name) = actor
+        .as_ref()
+        .map(|a| a.as_option())
+        .unwrap_or((Some(user_id), Some(user.username.clone())));
+
+    let activity = CreateActivityLog {
+        activity_type: activity_types::USER_PASSWORD_CHANGED.to_string(),
+        entity_type: "user".to_string(),
+        entity_id: user_id.to_string(),
+        actor_id,
+        actor_name,
+        description: format!("User '{}' changed their password", user.username),
+        metadata: Some(serde_json::json!({
+            "user_id": user_id.to_string(),
+            "username": user.username,
+        })),
+    };
+
+    activity_repo
+        .create_activity_tx(conn, activity)
+        .await
+        .map_err(Error::DatabaseError)?;
+
+    Ok(())
+}
+
+/// Set a temporary password within a transaction.
+///
+/// This function updates the user's password to a temporary one and
+/// logs the activity within the provided transaction.
+pub async fn set_temporary_password_in_tx<R>(
+    conn: &mut PgConnection,
+    repo: &R,
+    activity_repo: &dyn ActivityLogRepository,
+    user_id: ID,
+    temporary_password: String,
+    actor: Option<ActorContext>,
+) -> Result<(), Error>
+where
+    R: UserRepositoryTx,
+{
+    let user_uuid = Uuid::try_from(user_id).map_err(|e| Error::InvalidInput(e.to_string()))?;
+    let user = repo.get_user_by_id_tx(conn, user_uuid).await?;
+
+    let salt = SaltString::generate(&mut OsRng);
+    let argon2 = Argon2::default();
+    let password_hash = argon2
+        .hash_password(temporary_password.as_bytes(), &salt)
+        .map_err(|_| Error::InvalidInput("Failed to hash temporary password".to_string()))?
+        .to_string();
+
+    repo.update_password_tx(conn, user_uuid, password_hash, true)
+        .await?;
+
+    let (actor_id, actor_name) = actor
+        .as_ref()
+        .map(|a| a.as_option())
+        .unwrap_or((None, None));
+
+    let activity = CreateActivityLog {
+        activity_type: activity_types::USER_PASSWORD_CHANGED.to_string(),
+        entity_type: "user".to_string(),
+        entity_id: user_uuid.to_string(),
+        actor_id,
+        actor_name,
+        description: format!("Temporary password set for user '{}'", user.username),
+        metadata: Some(serde_json::json!({
+            "user_id": user_uuid.to_string(),
+            "username": user.username,
+            "temporary": true,
+        })),
+    };
+
+    activity_repo
+        .create_activity_tx(conn, activity)
+        .await
+        .map_err(Error::DatabaseError)?;
+
+    Ok(())
 }

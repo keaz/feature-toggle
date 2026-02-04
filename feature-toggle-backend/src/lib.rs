@@ -5,6 +5,7 @@ pub mod graphql;
 pub mod grpc;
 pub mod logic;
 mod middleware;
+pub mod rest;
 pub mod scheduler;
 pub mod utils;
 
@@ -25,7 +26,6 @@ use async_graphql::http::GraphiQLSource;
 use async_graphql_actix_web::{GraphQLRequest, GraphQLResponse, GraphQLSubscription};
 use chrono::{DateTime, Utc};
 use log::error;
-use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
@@ -60,6 +60,10 @@ pub async fn run() -> std::io::Result<()> {
     let feature_repository_arc = Arc::new(feature_repository.clone_box());
 
     let environment_repository = database::environment::environment_repository(db_pool.clone());
+    let variant_allocations_repository =
+        database::variant_allocations::variant_allocations_repository(db_pool.clone());
+    let compound_rules_repository =
+        database::compound_rules::compound_rules_repository(db_pool.clone());
     let environment_logic = logic::environment::environment_logic(
         environment_repository.clone(),
         activity_log_repository.clone_box(),
@@ -73,7 +77,8 @@ pub async fn run() -> std::io::Result<()> {
     let (updates_tx, _updates_rx) =
         tokio::sync::broadcast::channel::<crate::grpc::pb::FeatureUpdate>(128);
 
-    let approval_logic = logic::approval::approval_logic(
+    let approval_logic = logic::approval::approval_logic_with_pool(
+        db_pool.clone(),
         approval_repository.clone(),
         feature_repository.clone_box(),
         environment_logic.clone(),
@@ -240,7 +245,7 @@ pub async fn run() -> std::io::Result<()> {
 
         let cors = Cors::default()
             .allowed_origin(&cfg.allowed_origin) // configured frontend origin
-            .allowed_methods(vec!["GET", "POST", "PUT", "DELETE", "OPTIONS"]) // Or your allowed methods
+            .allowed_methods(vec!["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]) // Or your allowed methods
             .allowed_headers(vec!["content-type", "authorization"]) // Or your allowed headers
             .supports_credentials()
             .max_age(3600);
@@ -259,8 +264,28 @@ pub async fn run() -> std::io::Result<()> {
             ))
             .wrap(AccessLogger)
             .wrap(cors)
+            .app_data(web::Data::new(db_pool.clone()))
             .app_data(web::Data::new(schema.clone()))
             .app_data(web::Data::new(metric_logic.clone()))
+            .app_data(web::Data::new(feature_evaluation_logic.clone()))
+            .app_data(web::Data::new(environment_logic.clone()))
+            .app_data(web::Data::new(pipeline_logic.clone()))
+            .app_data(web::Data::new(team_logic.clone()))
+            .app_data(web::Data::new(context_logic.clone()))
+            .app_data(web::Data::new(client_logic.clone()))
+            .app_data(web::Data::new(feature_logic.clone()))
+            .app_data(web::Data::new(approval_logic.clone()))
+            .app_data(web::Data::new(approval_repository.clone_box()))
+            .app_data(web::Data::new(activity_log_repository.clone_box()))
+            .app_data(web::Data::new(role_logic.clone()))
+            .app_data(web::Data::new(user_logic.clone()))
+            .app_data(web::Data::new(jwt_token_logic_for_server.clone()))
+            .app_data(web::Data::new(jwt_secret_logic_for_server.clone()))
+            .app_data(web::Data::new(admin_state.clone()))
+            .app_data(web::Data::new(feature_repository.clone_box()))
+            .app_data(web::Data::new(variant_allocations_repository.clone()))
+            .app_data(web::Data::new(compound_rules_repository.clone()))
+            .app_data(web::Data::new(updates_tx.clone()))
             .service(
                 web::resource("/graphql")
                     .guard(guard::Post())
@@ -283,6 +308,8 @@ pub async fn run() -> std::io::Result<()> {
                     .guard(guard::Post())
                     .to(track_metrics_http),
             )
+            .configure(rest::configure)
+            .service(rest::swagger_ui())
     })
     .bind(&cfg.http_addr)?
     .run()
@@ -343,28 +370,9 @@ async fn index_ws(
     GraphQLSubscription::new(Schema::clone(&*schema)).start(&req, payload)
 }
 
-#[derive(Deserialize)]
-struct MetricEventPayload {
-    metric_key: String,
-    feature_key: Option<String>,
-    environment_id: Option<String>,
-    user_context: String,
-    variant: Option<String>,
-    value: f64,
-    metadata: Option<serde_json::Value>,
-    timestamp_unix_ms: Option<i64>,
-}
-
-#[derive(Deserialize)]
-struct TrackMetricsPayload {
-    client_id: String,
-    client_secret: String,
-    events: Vec<MetricEventPayload>,
-}
-
 async fn track_metrics_http(
     metric_logic: web::Data<Box<dyn crate::logic::metrics::MetricLogic>>,
-    payload: web::Json<TrackMetricsPayload>,
+    payload: web::Json<crate::rest::metrics::TrackMetricsRequest>,
 ) -> Result<HttpResponse, actix_web::Error> {
     let body = payload.into_inner();
     let mut events = Vec::with_capacity(body.events.len());

@@ -59,6 +59,14 @@ pub trait FeatureCrudLogic: Send + Sync {
         page_number: i32,
         page_size: i32,
     ) -> Result<(Vec<Feature>, i64), Error>;
+    async fn get_features_with_offset(
+        &self,
+        team_id: ID,
+        name: Option<String>,
+        feature_type: Option<GraphQLFeatureType>,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<Feature>, i64), Error>;
     async fn create_feature(
         &self,
         team_id: ID,
@@ -90,6 +98,12 @@ pub trait FeatureCrudLogic: Send + Sync {
         page_number: Option<i32>,
         page_size: Option<i32>,
     ) -> Result<(Vec<Feature>, i64), Error>;
+    async fn get_features_with_pending_approvals_with_offset(
+        &self,
+        team_id: Option<ID>,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<Feature>, i64), Error>;
 
     // Get features with active kill switches
     async fn get_features_with_kill_switches(
@@ -97,6 +111,12 @@ pub trait FeatureCrudLogic: Send + Sync {
         team_id: Option<ID>,
         page_number: Option<i32>,
         page_size: Option<i32>,
+    ) -> Result<(Vec<Feature>, i64), Error>;
+    async fn get_features_with_kill_switches_with_offset(
+        &self,
+        team_id: Option<ID>,
+        offset: i64,
+        limit: i64,
     ) -> Result<(Vec<Feature>, i64), Error>;
 
     // Kill switch functionality
@@ -187,6 +207,14 @@ mockall::mock! {
             page_number: i32,
             page_size: i32,
         ) -> Result<(Vec<Feature>, i64), Error>;
+        async fn get_features_with_offset(
+            &self,
+            team_id: ID,
+            name: Option<String>,
+            feature_type: Option<GraphQLFeatureType>,
+            offset: i64,
+            limit: i64,
+        ) -> Result<(Vec<Feature>, i64), Error>;
         async fn create_feature(&self, team_id: ID, input: CreateFeatureInput, actor: Option<crate::logic::ActorContext>) -> Result<ID, Error>;
         async fn update_feature(&self, id: ID, input: UpdateFeatureInput, actor: Option<crate::logic::ActorContext>) -> Result<Feature, Error>;
         async fn delete_feature(&self, id: ID, actor: Option<crate::logic::ActorContext>) -> Result<(), Error>;
@@ -198,11 +226,23 @@ mockall::mock! {
             page_number: Option<i32>,
             page_size: Option<i32>,
         ) -> Result<(Vec<Feature>, i64), Error>;
+        async fn get_features_with_pending_approvals_with_offset(
+            &self,
+            team_id: Option<ID>,
+            offset: i64,
+            limit: i64,
+        ) -> Result<(Vec<Feature>, i64), Error>;
         async fn get_features_with_kill_switches(
             &self,
             team_id: Option<ID>,
             page_number: Option<i32>,
             page_size: Option<i32>,
+        ) -> Result<(Vec<Feature>, i64), Error>;
+        async fn get_features_with_kill_switches_with_offset(
+            &self,
+            team_id: Option<ID>,
+            offset: i64,
+            limit: i64,
         ) -> Result<(Vec<Feature>, i64), Error>;
         async fn emergency_disable_feature(
             &self,
@@ -540,6 +580,29 @@ impl FeatureCrudLogic for FeatureLogicImpl {
         Ok((mapped_features, total))
     }
 
+    async fn get_features_with_offset(
+        &self,
+        team_id: ID,
+        name: Option<String>,
+        feature_type: Option<GraphQLFeatureType>,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<Feature>, i64), Error> {
+        let team_id = Uuid::try_from(team_id).map_err(|e| Error::InvalidInput(e.to_string()))?;
+        let entity_feature_type = feature_type.map(Self::map_graphql_to_entity_feature_type);
+        let (features, total) = self
+            .repository
+            .get_features_with_offset(team_id, name, entity_feature_type, offset, limit)
+            .await?;
+
+        let mapped_features = features
+            .into_iter()
+            .map(Self::map_entity_to_graphql_feature)
+            .collect();
+
+        Ok((mapped_features, total))
+    }
+
     async fn create_feature(
         &self,
         team_id: ID,
@@ -706,6 +769,27 @@ impl FeatureCrudLogic for FeatureLogicImpl {
         Ok((mapped_features, total))
     }
 
+    async fn get_features_with_pending_approvals_with_offset(
+        &self,
+        team_id: Option<ID>,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<Feature>, i64), Error> {
+        let team_uuid = team_id.map(|id| id_to_uuid(id)).transpose()?;
+        let (features, total) = self
+            .repository
+            .get_features_with_pending_approvals_with_offset(team_uuid, offset, limit)
+            .await?;
+
+        let mut mapped_features = Vec::new();
+        for feature in features {
+            let mapped_feature = Self::map_entity_to_graphql_feature(feature);
+            mapped_features.push(mapped_feature);
+        }
+
+        Ok((mapped_features, total))
+    }
+
     async fn get_features_with_kill_switches(
         &self,
         team_id: Option<ID>,
@@ -722,6 +806,27 @@ impl FeatureCrudLogic for FeatureLogicImpl {
         let mut mapped_features = Vec::new();
         for feature in features {
             // Create feature with properly mapped stages
+            let mapped_feature = Self::map_entity_to_graphql_feature(feature);
+            mapped_features.push(mapped_feature);
+        }
+
+        Ok((mapped_features, total))
+    }
+
+    async fn get_features_with_kill_switches_with_offset(
+        &self,
+        team_id: Option<ID>,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<Feature>, i64), Error> {
+        let team_uuid = team_id.map(|id| id_to_uuid(id)).transpose()?;
+        let (features, total) = self
+            .repository
+            .get_features_with_kill_switches_with_offset(team_uuid, offset, limit)
+            .await?;
+
+        let mut mapped_features = Vec::new();
+        for feature in features {
             let mapped_feature = Self::map_entity_to_graphql_feature(feature);
             mapped_features.push(mapped_feature);
         }

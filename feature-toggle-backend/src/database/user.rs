@@ -102,6 +102,13 @@ pub trait UserRepositoryTx: UserRepository {
         id: Uuid,
         team_ids: Vec<Uuid>,
     ) -> Result<(), Error>;
+    async fn update_password_tx(
+        &self,
+        conn: &mut PgConnection,
+        id: Uuid,
+        password_hash: String,
+        is_temporary: bool,
+    ) -> Result<(), Error>;
 }
 
 pub fn user_repository(pool: PgPool) -> Box<dyn UserRepository> {
@@ -655,6 +662,32 @@ impl UserRepositoryTx for UserRepositoryImpl {
         team_ids: Vec<Uuid>,
     ) -> Result<(), Error> {
         Self::set_user_teams_internal(conn, id, team_ids).await
+    }
+
+    async fn update_password_tx(
+        &self,
+        conn: &mut PgConnection,
+        id: Uuid,
+        password_hash: String,
+        is_temporary: bool,
+    ) -> Result<(), Error> {
+        let result = sqlx::query!(
+            r#"
+            UPDATE users
+            SET password_hash = $2,
+                is_temporary_password = $3,
+                updated_at = NOW()
+            WHERE id = $1
+            "#,
+            id,
+            password_hash,
+            is_temporary
+        )
+        .execute(&mut *conn)
+        .await;
+
+        handle_error(Some(id), result)?;
+        Ok(())
     }
 }
 

@@ -35,6 +35,15 @@ pub trait PipelineLogic: Send + Sync {
         page_number: i32,
         page_size: i32,
     ) -> Result<(Vec<Pipeline>, i64), Error>;
+    async fn get_pipelines_with_offset(
+        &self,
+        team_id: ID,
+        name: Option<String>,
+        active: Option<bool>,
+        fields: Vec<String>,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<Pipeline>, i64), Error>;
 
     async fn create_pipeline(
         &self,
@@ -193,6 +202,55 @@ impl PipelineLogic for PipelineLogicImpl {
         let (pipelines, total) = self
             .repository
             .get_pipelines_paginated(team_id, name, active, page_number, page_size)
+            .await?;
+        let has_stage = fields.contains(&"stages".to_string());
+
+        let stages = pipelines
+            .iter()
+            .flat_map(|feature| &feature.stages)
+            .map(|stage| Box::new(stage.clone()) as Box<dyn DBStage>)
+            .collect::<Vec<Box<dyn DBStage>>>();
+
+        let environment_map = get_environment_map(&*self.environment_logic, &stages, true).await?;
+
+        let mapped_pipelines = pipelines
+            .into_iter()
+            .map(|pipeline| {
+                let db_stages = pipeline
+                    .stages
+                    .iter()
+                    .map(|stage| Box::new(stage.clone()) as Box<dyn DBStage>)
+                    .collect();
+                let stages = map_stages(has_stage, &environment_map, &db_stages, stage_factory);
+                let relationships =
+                    create_relationships(has_stage, db_stages, relationship_factory);
+                Pipeline {
+                    id: pipeline.id.into(),
+                    name: pipeline.name,
+                    active: pipeline.active,
+                    stages,
+                    relationships,
+                    team_id: pipeline.team_id.into(),
+                }
+            })
+            .collect();
+
+        Ok((mapped_pipelines, total))
+    }
+
+    async fn get_pipelines_with_offset(
+        &self,
+        team_id: ID,
+        name: Option<String>,
+        active: Option<bool>,
+        fields: Vec<String>,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<Pipeline>, i64), Error> {
+        let team_id = Uuid::try_from(team_id).map_err(|e| Error::InvalidInput(e.to_string()))?;
+        let (pipelines, total) = self
+            .repository
+            .get_pipelines_with_offset(team_id, name, active, offset, limit)
             .await?;
         let has_stage = fields.contains(&"stages".to_string());
 

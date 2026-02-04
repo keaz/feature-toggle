@@ -1,10 +1,20 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
+use utoipa::ToSchema;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 #[derive(
-    Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, sqlx::Type, async_graphql::Enum,
+    Debug,
+    Clone,
+    Copy,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    sqlx::Type,
+    async_graphql::Enum,
+    ToSchema,
 )]
 #[sqlx(type_name = "varchar", rename_all = "lowercase")]
 pub enum MetricType {
@@ -130,6 +140,15 @@ impl Clone for Box<dyn MetricRepository> {
     }
 }
 
+#[async_trait::async_trait]
+pub trait MetricRepositoryTx: MetricRepository {
+    async fn create_metric_tx(
+        &self,
+        conn: &mut PgConnection,
+        metric: CreateMetric,
+    ) -> Result<MetricRow, sqlx::Error>;
+}
+
 #[derive(Clone)]
 pub struct PgMetricRepository {
     pool: PgPool,
@@ -137,6 +156,10 @@ pub struct PgMetricRepository {
 
 pub fn metric_repository(pool: PgPool) -> Box<dyn MetricRepository> {
     Box::new(PgMetricRepository { pool })
+}
+
+pub fn metric_repository_tx(pool: PgPool) -> PgMetricRepository {
+    PgMetricRepository { pool }
 }
 
 #[async_trait::async_trait]
@@ -457,5 +480,41 @@ impl MetricRepository for PgMetricRepository {
 
     fn clone_box(&self) -> Box<dyn MetricRepository> {
         Box::new(self.clone())
+    }
+}
+
+#[async_trait::async_trait]
+impl MetricRepositoryTx for PgMetricRepository {
+    async fn create_metric_tx(
+        &self,
+        conn: &mut PgConnection,
+        metric: CreateMetric,
+    ) -> Result<MetricRow, sqlx::Error> {
+        sqlx::query_as!(
+            MetricRow,
+            r#"
+            INSERT INTO metrics (team_id, key, name, description, metric_type, unit, success_criteria)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            RETURNING
+                id,
+                team_id,
+                key,
+                name,
+                description,
+                metric_type as "metric_type: MetricType",
+                unit,
+                success_criteria,
+                created_at
+            "#,
+            metric.team_id,
+            metric.key,
+            metric.name,
+            metric.description,
+            metric.metric_type as MetricType,
+            metric.unit,
+            metric.success_criteria
+        )
+        .fetch_one(&mut *conn)
+        .await
     }
 }

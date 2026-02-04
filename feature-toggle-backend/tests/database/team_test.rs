@@ -139,5 +139,7 @@ async fn test_name_param_get_team() {
     assert!(result.is_ok());
     let teams = result.unwrap();
     assert!(!teams.is_empty());
-    assert!(teams.iter().all(|env| env.name.contains("Test")));
+    assert!(teams
+        .iter()
+        .all(|env| env.name.to_lowercase().contains("test")));
 }

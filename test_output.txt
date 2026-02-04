@@ -1,0 +1,335 @@
+   Compiling feature-toggle-backend v0.1.0 (/Users/kasunranasinghe/Projects/FeatureToggle/feature-toggle/feature-toggle-backend)
+warning: unused variable: `bucketing`
+  --> evaluation-engine/tests/evaluation_tests.rs:33:5
+   |
+33 |     bucketing: Option<&str>,
+   |     ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_bucketing`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `evaluation-engine` (test "evaluation_tests") generated 1 warning (run `cargo fix --test "evaluation_tests" -p evaluation-engine` to apply 1 suggestion)
+warning: unused import: `OFREPEvaluationRequest`
+   --> feature-edge-server/src/main.rs:448:38
+    |
+448 | ...REPContext, OFREPEvaluationRequest};
+    |                ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `std::collections::HashMap`
+   --> feature-edge-server/src/main.rs:449:13
+    |
+449 |         use std::collections::HashMap;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `feature-edge-server` (bin "feature-edge-server" test) generated 2 warnings (run `cargo fix --bin "feature-edge-server" -p feature-edge-server --tests` to apply 2 suggestions)
+warning: unused import: `crate::database::context::ContextRepository`
+ --> feature-toggle-backend/src/graphql/mutation.rs:4:5
+  |
+4 | use crate::database::context::ContextRepository;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `crate::logic::context::ContextLogic`
+  --> feature-toggle-backend/src/graphql/mutation.rs:25:5
+   |
+25 | use crate::logic::context::ContextLogic;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `get_stage_by_id_tx`, `set_stage_contexts_tx`, and `set_stage_criteria_tx` are never used
+    --> feature-toggle-backend/src/database/feature.rs:2828:14
+     |
+2767 | impl FeatureRepositoryImpl {
+     | -------------------------- methods in this implementation
+...
+2828 |     async fn get_stage_by_id_tx(
+     |              ^^^^^^^^^^^^^^^^^^
+...
+2899 |     async fn set_stage_contexts_tx(
+     |              ^^^^^^^^^^^^^^^^^^^^^
+...
+3135 |     async fn set_stage_criteria_tx(
+     |              ^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: use of deprecated field `database::feature_evaluation::CreateFeatureEvaluation::evaluation_result`: Use evaluation_success for success tracking and evaluation_value for the actual value
+   --> feature-toggle-backend/src/logic/feature_evaluation.rs:514:17
+    |
+514 |                 evaluation.evaluation_result,
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: variable does not need to be mutable
+    --> feature-toggle-backend/src/graphql/mutation.rs:2299:13
+     |
+2299 |         let mut mock = MockContextLogic::new();
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `input`
+    --> feature-toggle-backend/src/graphql/mutation.rs:2301:13
+     |
+2301 |         let input = crate::graphql::schema::Crea...
+     |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_input`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `expected`
+    --> feature-toggle-backend/src/graphql/mutation.rs:2305:13
+     |
+2305 |         let expected = crate::graphql::schema::C...
+     |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_expected`
+
+warning: variable does not need to be mutable
+    --> feature-toggle-backend/src/graphql/mutation.rs:2351:13
+     |
+2351 |         let mut mock = MockFeatureLogic::new();
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `expected`
+    --> feature-toggle-backend/src/graphql/mutation.rs:2355:13
+     |
+2355 |         let expected = vec![
+     |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_expected`
+
+warning: variable does not need to be mutable
+    --> feature-toggle-backend/src/graphql/mutation.rs:2400:13
+     |
+2400 |         let mut mock = MockFeatureLogic::new();
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `expected`
+    --> feature-toggle-backend/src/graphql/mutation.rs:2403:13
+     |
+2403 |         let expected = vec![crate::graphql::sche...
+     |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_expected`
+
+warning: variable does not need to be mutable
+    --> feature-toggle-backend/src/graphql/mutation.rs:2455:13
+     |
+2455 |         let mut mock = MockContextLogic::new();
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `expected`
+    --> feature-toggle-backend/src/graphql/mutation.rs:2457:13
+     |
+2457 |         let expected = crate::graphql::schema::C...
+     |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_expected`
+
+warning: variable does not need to be mutable
+    --> feature-toggle-backend/src/graphql/mutation.rs:2490:13
+     |
+2490 |         let mut mock = MockContextLogic::new();
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> feature-toggle-backend/src/graphql/mutation.rs:3678:13
+     |
+3678 |         let mut mock = MockEnvironmentLogic::new();
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `input`
+    --> feature-toggle-backend/src/graphql/mutation.rs:3682:13
+     |
+3682 |         let input = crate::graphql::schema::Crea...
+     |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_input`
+
+warning: unused variable: `expected`
+    --> feature-toggle-backend/src/graphql/mutation.rs:3688:13
+     |
+3688 |         let expected = crate::graphql::schema::E...
+     |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_expected`
+
+warning: variable does not need to be mutable
+    --> feature-toggle-backend/src/graphql/mutation.rs:3733:13
+     |
+3733 |         let mut mock = MockEnvironmentLogic::new();
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `input`
+    --> feature-toggle-backend/src/graphql/mutation.rs:3736:13
+     |
+3736 |         let input = crate::graphql::schema::Upda...
+     |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_input`
+
+warning: unused variable: `expected`
+    --> feature-toggle-backend/src/graphql/mutation.rs:3742:13
+     |
+3742 |         let expected = crate::graphql::schema::E...
+     |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_expected`
+
+warning: variable does not need to be mutable
+    --> feature-toggle-backend/src/graphql/mutation.rs:3786:13
+     |
+3786 |         let mut mock = MockEnvironmentLogic::new();
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> feature-toggle-backend/src/graphql/mutation.rs:3820:13
+     |
+3820 |         let mut mock = MockTeamLogic::new();
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `input`
+    --> feature-toggle-backend/src/graphql/mutation.rs:3823:13
+     |
+3823 |         let input = crate::graphql::schema::Crea...
+     |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_input`
+
+warning: unused variable: `expected`
+    --> feature-toggle-backend/src/graphql/mutation.rs:3828:13
+     |
+3828 |         let expected = crate::graphql::schema::T...
+     |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_expected`
+
+warning: variable does not need to be mutable
+    --> feature-toggle-backend/src/graphql/mutation.rs:3874:13
+     |
+3874 |         let mut mock = MockTeamLogic::new();
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `input`
+    --> feature-toggle-backend/src/graphql/mutation.rs:3877:13
+     |
+3877 |         let input = crate::graphql::schema::Upda...
+     |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_input`
+
+warning: unused variable: `expected`
+    --> feature-toggle-backend/src/graphql/mutation.rs:3882:13
+     |
+3882 |         let expected = crate::graphql::schema::T...
+     |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_expected`
+
+warning: variable does not need to be mutable
+    --> feature-toggle-backend/src/graphql/mutation.rs:3924:13
+     |
+3924 |         let mut mock = MockPipelineLogic::new();
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `pipeline_id`
+    --> feature-toggle-backend/src/graphql/mutation.rs:3926:13
+     |
+3926 |         let pipeline_id = Uuid::new_v4();
+     |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_pipeline_id`
+
+warning: variable does not need to be mutable
+    --> feature-toggle-backend/src/graphql/mutation.rs:3979:13
+     |
+3979 |         let mut mock = MockPipelineLogic::new();
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `existing_pipeline`
+    --> feature-toggle-backend/src/graphql/mutation.rs:3997:13
+     |
+3997 |         let existing_pipeline = crate::graphql::...
+     |             ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_existing_pipeline`
+
+warning: unused variable: `updated_pipeline`
+    --> feature-toggle-backend/src/graphql/mutation.rs:4006:13
+     |
+4006 |         let updated_pipeline = crate::graphql::s...
+     |             ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_updated_pipeline`
+
+warning: variable does not need to be mutable
+    --> feature-toggle-backend/src/graphql/mutation.rs:4059:13
+     |
+4059 |         let mut mock = MockPipelineLogic::new();
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `status`
+    --> feature-toggle-backend/src/logic/feature.rs:2397:9
+     |
+2397 |         status: &str,
+     |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_status`
+
+warning: variable does not need to be mutable
+    --> feature-toggle-backend/src/logic/feature.rs:2562:13
+     |
+2562 | ...   let mut env_logic = MockEnvironmentLogic::...
+     |           ----^^^^^^^^^
+     |           |
+     |           help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> feature-toggle-backend/src/logic/feature.rs:2640:13
+     |
+2640 | ...   let mut env_logic = MockEnvironmentLogic::...
+     |           ----^^^^^^^^^
+     |           |
+     |           help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> feature-toggle-backend/src/logic/feature.rs:2679:13
+     |
+2679 | ...   let mut env_logic = MockEnvironmentLogic::...
+     |           ----^^^^^^^^^
+     |           |
+     |           help: remove this `mut`
+
+warning: unused variable: `user_uuid`
+   --> feature-toggle-backend/src/logic/jwt_token.rs:181:13
+    |
+181 |         let user_uuid = Uuid::try_from(user.id.cl...
+    |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_user_uuid`
+
+warning: variable does not need to be mutable
+   --> feature-toggle-backend/src/scheduler/kill_switch_rollback.rs:340:13
+    |
+340 |         let mut repo = MockFeatureRepository::new();
+    |             ----^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> feature-toggle-backend/src/scheduler/kill_switch_rollback.rs:369:13
+    |
+369 |         let mut repo = MockFeatureRepository::new();
+    |             ----^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: function `sample_token` is never used
+   --> feature-toggle-backend/src/database/jwt_token.rs:188:8
+    |
+188 |     fn sample_token() -> JwtToken {
+    |        ^^^^^^^^^^^^
+
+error: couldn't create a temp dir: Operation not permitted (os error 1) at path "/var/folders/s7/gws5wlxs43vbvpnxgr5d_q4r0000gn/T/rustci3PVkx"
+
+warning: `feature-toggle-backend` (lib) generated 3 warnings
+error: could not compile `feature-toggle-backend` (lib) due to 1 previous error; 3 warnings emitted
+warning: build failed, waiting for other jobs to finish...
+error: couldn't create a temp dir: Operation not permitted (os error 1) at path "/var/folders/s7/gws5wlxs43vbvpnxgr5d_q4r0000gn/T/rustcKdsadL"
+
+warning: `feature-toggle-backend` (lib test) generated 41 warnings (3 duplicates)
+error: could not compile `feature-toggle-backend` (lib test) due to 1 previous error; 41 warnings emitted

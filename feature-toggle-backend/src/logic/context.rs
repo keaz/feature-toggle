@@ -28,6 +28,13 @@ pub trait ContextLogic: Send + Sync {
         page_number: i32,
         page_size: i32,
     ) -> Result<(Vec<GqlContext>, i64), Error>;
+    async fn get_contexts_with_offset(
+        &self,
+        team_id: ID,
+        key: Option<String>,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<GqlContext>, i64), Error>;
     async fn create_context(
         &self,
         team_id: ID,
@@ -218,6 +225,22 @@ impl ContextLogic for ContextLogicImpl {
         let (list, total) = self
             .repository
             .get_contexts_paginated(team_id, key, page_number, page_size)
+            .await?;
+        let contexts = list.into_iter().map(map_db_to_gql).collect();
+        Ok((contexts, total))
+    }
+
+    async fn get_contexts_with_offset(
+        &self,
+        team_id: ID,
+        key: Option<String>,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<GqlContext>, i64), Error> {
+        let team_id = id_to_uuid(team_id)?;
+        let (list, total) = self
+            .repository
+            .get_contexts_with_offset(team_id, key, offset, limit)
             .await?;
         let contexts = list.into_iter().map(map_db_to_gql).collect();
         Ok((contexts, total))

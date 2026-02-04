@@ -3,7 +3,7 @@ use crate::database::{Error, handle_error};
 use log::{debug, info};
 use mockall::automock;
 use serde_json::Value as JsonValue;
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -350,6 +350,19 @@ pub fn compound_rules_repository_tx(pool: PgPool) -> CompoundRulesRepositoryImpl
 
 #[async_trait::async_trait]
 pub trait CompoundRulesRepositoryTx: CompoundRulesRepository {
+    async fn create_rule_group_tx(
+        &self,
+        conn: &mut PgConnection,
+        input: CreateRuleGroupInput,
+    ) -> Result<RuleGroup, Error>;
+    async fn update_rule_group_tx(
+        &self,
+        conn: &mut PgConnection,
+        group_id: Uuid,
+        input: UpdateRuleGroupInput,
+    ) -> Result<RuleGroup, Error>;
+    async fn delete_rule_group_tx(&self, conn: &mut PgConnection, group_id: Uuid)
+    -> Result<(), Error>;
     async fn set_rule_groups_tx(
         &self,
         conn: &mut sqlx::PgConnection,
@@ -360,6 +373,160 @@ pub trait CompoundRulesRepositoryTx: CompoundRulesRepository {
 
 #[async_trait::async_trait]
 impl CompoundRulesRepositoryTx for CompoundRulesRepositoryImpl {
+    async fn create_rule_group_tx(
+        &self,
+        conn: &mut PgConnection,
+        input: CreateRuleGroupInput,
+    ) -> Result<RuleGroup, Error> {
+        let group_id = Uuid::new_v4();
+
+        let row = sqlx::query!(
+            r#"INSERT INTO rule_groups (id, criteria_id, logic_operator)
+               VALUES ($1, $2, $3)
+               RETURNING id, criteria_id, logic_operator as "logic_operator: LogicOperator",
+                         created_at, updated_at"#,
+            group_id,
+            input.criteria_id,
+            input.logic_operator as LogicOperator
+        )
+        .fetch_one(&mut *conn)
+        .await;
+
+        let row = handle_error(None, row)?;
+
+        for condition in input.conditions {
+            let condition_id = Uuid::new_v4();
+            let _ = handle_error(
+                None,
+                sqlx::query!(
+                    r#"INSERT INTO rule_conditions
+                       (id, group_id, context_key, operator, value, order_index)
+                       VALUES ($1, $2, $3, $4, $5, $6)"#,
+                    condition_id,
+                    group_id,
+                    condition.context_key,
+                    condition.operator,
+                    condition.value,
+                    condition.order_index
+                )
+                .execute(&mut *conn)
+                .await,
+            )?;
+        }
+
+        Ok(RuleGroup {
+            id: row.id,
+            criteria_id: row.criteria_id,
+            logic_operator: row.logic_operator,
+            created_at: row.created_at.unwrap_or_else(chrono::Utc::now),
+            updated_at: row.updated_at.unwrap_or_else(chrono::Utc::now),
+        })
+    }
+
+    async fn update_rule_group_tx(
+        &self,
+        conn: &mut PgConnection,
+        group_id: Uuid,
+        input: UpdateRuleGroupInput,
+    ) -> Result<RuleGroup, Error> {
+        // Ensure group exists
+        let _existing = sqlx::query!(
+            r#"SELECT id FROM rule_groups WHERE id = $1"#,
+            group_id
+        )
+        .fetch_one(&mut *conn)
+        .await;
+        let _ = handle_error(Some(group_id), _existing)?;
+
+        if let Some(logic_operator) = input.logic_operator {
+            let _ = handle_error(
+                Some(group_id),
+                sqlx::query!(
+                    r#"UPDATE rule_groups SET logic_operator = $1, updated_at = CURRENT_TIMESTAMP
+                       WHERE id = $2"#,
+                    logic_operator as LogicOperator,
+                    group_id
+                )
+                .execute(&mut *conn)
+                .await,
+            )?;
+        }
+
+        if let Some(conditions) = input.conditions {
+            let _ = handle_error(
+                Some(group_id),
+                sqlx::query!(
+                    r#"DELETE FROM rule_conditions WHERE group_id = $1"#,
+                    group_id
+                )
+                .execute(&mut *conn)
+                .await,
+            )?;
+
+            for condition in conditions {
+                let condition_id = Uuid::new_v4();
+                let _ = handle_error(
+                    Some(group_id),
+                    sqlx::query!(
+                        r#"INSERT INTO rule_conditions
+                           (id, group_id, context_key, operator, value, order_index)
+                           VALUES ($1, $2, $3, $4, $5, $6)"#,
+                        condition_id,
+                        group_id,
+                        condition.context_key,
+                        condition.operator,
+                        condition.value,
+                        condition.order_index
+                    )
+                    .execute(&mut *conn)
+                    .await,
+                )?;
+            }
+        }
+
+        let row = sqlx::query!(
+            r#"SELECT id, criteria_id, logic_operator as "logic_operator: LogicOperator",
+                      created_at, updated_at
+               FROM rule_groups
+               WHERE id = $1"#,
+            group_id
+        )
+        .fetch_one(&mut *conn)
+        .await;
+
+        let row = handle_error(Some(group_id), row)?;
+
+        Ok(RuleGroup {
+            id: row.id,
+            criteria_id: row.criteria_id,
+            logic_operator: row.logic_operator,
+            created_at: row.created_at.unwrap_or_else(chrono::Utc::now),
+            updated_at: row.updated_at.unwrap_or_else(chrono::Utc::now),
+        })
+    }
+
+    async fn delete_rule_group_tx(
+        &self,
+        conn: &mut PgConnection,
+        group_id: Uuid,
+    ) -> Result<(), Error> {
+        let _ = handle_error(
+            Some(group_id),
+            sqlx::query!(r#"DELETE FROM rule_conditions WHERE group_id = $1"#, group_id)
+                .execute(&mut *conn)
+                .await,
+        )?;
+
+        let _ = handle_error(
+            Some(group_id),
+            sqlx::query!(r#"DELETE FROM rule_groups WHERE id = $1"#, group_id)
+                .execute(&mut *conn)
+                .await,
+        )?;
+
+        Ok(())
+    }
+
     async fn set_rule_groups_tx(
         &self,
         conn: &mut sqlx::PgConnection,

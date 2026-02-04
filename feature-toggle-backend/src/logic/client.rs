@@ -33,6 +33,15 @@ pub trait ClientLogic: Send + Sync {
         page_number: i32,
         page_size: i32,
     ) -> Result<(Vec<GqlClient>, i64), Error>;
+    async fn get_clients_with_offset(
+        &self,
+        team_id: ID,
+        name: Option<String>,
+        enabled: Option<bool>,
+        client_type: Option<GqlClientType>,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<GqlClient>, i64), Error>;
     async fn create_client(
         &self,
         team_id: ID,
@@ -166,6 +175,38 @@ impl ClientLogic for ClientLogicImpl {
         let (list, total) = self
             .repository
             .get_clients_paginated(team_id, name, enabled, ct, page_number, page_size)
+            .await?;
+        let clients = list
+            .into_iter()
+            .map(|c| GqlClient {
+                id: ID::from(c.id.to_string()),
+                team_id: ID::from(c.team_id.to_string()),
+                name: c.name,
+                description: c.description,
+                enabled: c.enabled,
+                client_type: self.map_entity_to_graphql_type(c.client_type),
+                api_key: c.api_key,
+                web_origins: c.web_origins.unwrap_or_default(),
+            })
+            .collect();
+        Ok((clients, total))
+    }
+
+    async fn get_clients_with_offset(
+        &self,
+        team_id: ID,
+        name: Option<String>,
+        enabled: Option<bool>,
+        client_type: Option<GqlClientType>,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<GqlClient>, i64), Error> {
+        let team_id = Uuid::parse_str(&team_id.to_string())
+            .map_err(|e| Error::InvalidInput(e.to_string()))?;
+        let ct = client_type.map(|t| self.map_graphql_to_entity_type(t));
+        let (list, total) = self
+            .repository
+            .get_clients_with_offset(team_id, name, enabled, ct, offset, limit)
             .await?;
         let clients = list
             .into_iter()

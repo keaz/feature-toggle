@@ -268,6 +268,7 @@ spec:
 | `keep_alive_while_idle` | bool | true | Keep connection alive while idle |
 | `concurrency_limit` | usize | 256 | Maximum concurrent requests |
 | `tcp_nodelay` | bool | true | Enable TCP_NODELAY |
+| `compression` | String | `none` | gRPC request compression (`none` or `gzip`) |
 
 ### Flush Settings (`[flush]`)
 
@@ -275,6 +276,9 @@ spec:
 |---------|------|---------|-------------|
 | `assignment_flush_secs` | u64 | 10 | Assignment flush interval in seconds |
 | `evaluation_flush_secs` | u64 | 30 | Evaluation events flush interval in seconds |
+| `evaluation_event_queue_capacity` | usize | 10000 | Evaluation event queue capacity (bounded channel) |
+| `assignment_flush_batch_size` | usize | 1000 | Max assignments per gRPC stream flush |
+| `evaluation_flush_batch_size` | usize | 500 | Max evaluation events per gRPC request |
 
 ### Retry Settings (`[retry]`)
 

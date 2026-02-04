@@ -96,6 +96,13 @@ pub trait ApprovalRepository: Send + Sync {
         page_number: Option<i32>,
         page_size: Option<i32>,
     ) -> Result<(Vec<ApprovalRequest>, i64), Error>;
+    async fn list_requests_for_team_with_offset(
+        &self,
+        team_id: Option<Uuid>,
+        statuses: Option<Vec<ApprovalStatus>>,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<ApprovalRequest>, i64), Error>;
     async fn list_requests_due_for_auto_approval(&self) -> Result<Vec<ApprovalRequest>, Error>;
 
     fn clone_box(&self) -> Box<dyn ApprovalRepository>;
@@ -138,6 +145,12 @@ pub trait ApprovalRepositoryTx: ApprovalRepository {
         request_id: Uuid,
         status: ApprovalStatus,
         executed_at: Option<DateTime<Utc>>,
+    ) -> Result<ApprovalRequest, Error>;
+    async fn add_vote_tx(
+        &self,
+        conn: &mut PgConnection,
+        input: CreateApprovalVoteInput,
+        required_approvers: i32,
     ) -> Result<ApprovalRequest, Error>;
 }
 
@@ -576,6 +589,99 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
         Ok((items, total))
     }
 
+    async fn list_requests_for_team_with_offset(
+        &self,
+        team_id: Option<Uuid>,
+        statuses: Option<Vec<ApprovalStatus>>,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<ApprovalRequest>, i64), Error> {
+        let offset = offset.max(0);
+        let limit = limit.max(1);
+
+        let status_values = statuses.and_then(|list| {
+            let converted: Vec<String> = list
+                .into_iter()
+                .map(|status| status.as_str().to_string())
+                .collect();
+            if converted.is_empty() {
+                None
+            } else {
+                Some(converted)
+            }
+        });
+
+        let mut select_builder = QueryBuilder::new(
+            "SELECT r.* FROM approval_requests r
+             JOIN approval_policies p ON p.id = r.policy_id",
+        );
+        let mut count_builder = QueryBuilder::new(
+            "SELECT COUNT(*) FROM approval_requests r
+             JOIN approval_policies p ON p.id = r.policy_id",
+        );
+
+        let mut select_has_where = false;
+        let mut count_has_where = false;
+
+        if let Some(team_id) = team_id {
+            if !select_has_where {
+                select_builder.push(" WHERE ");
+                select_has_where = true;
+            } else {
+                select_builder.push(" AND ");
+            }
+            select_builder.push("p.team_id = ").push_bind(team_id);
+
+            if !count_has_where {
+                count_builder.push(" WHERE ");
+                count_has_where = true;
+            } else {
+                count_builder.push(" AND ");
+            }
+            count_builder.push("p.team_id = ").push_bind(team_id);
+        }
+
+        if let Some(values) = status_values.clone() {
+            if !select_has_where {
+                select_builder.push(" WHERE ");
+            } else {
+                select_builder.push(" AND ");
+            }
+            select_builder
+                .push("r.status = ANY(")
+                .push_bind(values.clone())
+                .push(")");
+
+            if !count_has_where {
+                count_builder.push(" WHERE ");
+            } else {
+                count_builder.push(" AND ");
+            }
+            count_builder
+                .push("r.status = ANY(")
+                .push_bind(values)
+                .push(")");
+        }
+
+        select_builder.push(" ORDER BY r.created_at DESC");
+        select_builder.push(" LIMIT ").push_bind(limit);
+        select_builder.push(" OFFSET ").push_bind(offset);
+
+        let items = handle_error(
+            None,
+            select_builder
+                .build()
+                .map(Self::map_request_row)
+                .fetch_all(&self.pool)
+                .await,
+        )?;
+
+        let count_row = handle_error(None, count_builder.build().fetch_one(&self.pool).await)?;
+        let total: i64 = count_row.get::<i64, _>(0);
+
+        Ok((items, total))
+    }
+
     async fn list_requests_due_for_auto_approval(&self) -> Result<Vec<ApprovalRequest>, Error> {
         handle_error(
             None,
@@ -820,5 +926,60 @@ impl ApprovalRepositoryTx for ApprovalRepositoryImpl {
         executed_at: Option<DateTime<Utc>>,
     ) -> Result<ApprovalRequest, Error> {
         Self::update_request_status_internal(conn, request_id, status, executed_at).await
+    }
+
+    async fn add_vote_tx(
+        &self,
+        conn: &mut PgConnection,
+        input: CreateApprovalVoteInput,
+        required_approvers: i32,
+    ) -> Result<ApprovalRequest, Error> {
+        if let Err(e) = sqlx::query!(
+            r#"
+            INSERT INTO approval_votes (request_id, approver_id, vote, comment)
+            VALUES ($1, $2, $3, $4)
+            "#,
+            input.request_id,
+            input.approver_id,
+            input.vote.as_str(),
+            input.comment
+        )
+        .execute(&mut *conn)
+        .await
+        {
+            if let sqlx::Error::Database(db_err) = &e
+                && db_err.code().map(|c| c == "23505").unwrap_or(false)
+            {
+                return Err(Error::RecordAlreadyExists("vote".into()));
+            }
+            return Err(Error::DatabaseError(e));
+        }
+
+        let result = sqlx::query(
+            r#"
+            UPDATE approval_requests
+            SET approved_count = approved_count + CASE WHEN $2 = 'approve' THEN 1 ELSE 0 END,
+                rejected_count = rejected_count + CASE WHEN $2 = 'reject' THEN 1 ELSE 0 END,
+                status = CASE
+                    WHEN status = 'cancelled' THEN status
+                    WHEN $2 = 'reject' THEN 'rejected'
+                    WHEN approved_count + CASE WHEN $2 = 'approve' THEN 1 ELSE 0 END >= $3 THEN 'approved'
+                    ELSE status
+                END,
+                updated_at = NOW()
+            WHERE id = $1
+            RETURNING id, policy_id, feature_id, environment_id, change_type, change_payload,
+                      change_description, requested_by, status, approved_count, rejected_count,
+                      executed_at, created_at, updated_at
+            "#,
+        )
+        .bind(input.request_id)
+        .bind(input.vote.as_str())
+        .bind(required_approvers)
+        .map(Self::map_request_row)
+        .fetch_one(&mut *conn)
+        .await;
+
+        handle_error(Some(input.request_id), result)
     }
 }

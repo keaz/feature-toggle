@@ -123,17 +123,42 @@ where
                 return Ok(res.map_into_left_body());
             }
 
-            // No admin exists -> allow only GraphQL POST for admin creation and preflight OPTIONS
+            // No admin exists -> allow only admin creation/status checks and preflight OPTIONS
             let path = req.path().to_string();
             let method = req.method().clone();
 
             let is_preflight = method == actix_web::http::Method::OPTIONS;
             let is_graphql_post = method == actix_web::http::Method::POST && path == "/graphql";
 
-            if is_preflight || !is_graphql_post {
-                // Let it pass. If this was an admin creation, mutation handler will flip the flag via AdminState.
+            if is_preflight {
                 let res = service.call(req).await?;
                 return Ok(res.map_into_left_body());
+            }
+
+            if !is_graphql_post {
+                let is_public_path = path == "/api/v1/health"
+                    || path == "/api/v1/openapi.json"
+                    || path.starts_with("/docs")
+                    || (path == "/metrics/track" && method == actix_web::http::Method::POST)
+                    || (path == "/api/v1/metrics/track" && method == actix_web::http::Method::POST);
+
+                let is_allowed_rest = is_public_path
+                    || (path == "/api/v1/admins" && method == actix_web::http::Method::POST)
+                    || (path == "/api/v1/auth/status" && method == actix_web::http::Method::GET);
+
+                if is_allowed_rest {
+                    let res = service.call(req).await?;
+                    return Ok(res.map_into_left_body());
+                }
+
+                let target = format!("{}/create-admin", ui_origin.trim_end_matches('/'));
+                let res = HttpResponse::Unauthorized()
+                    .json(serde_json::json!({
+                        "error": "admin_account_missing",
+                        "redirect": target
+                    }))
+                    .map_into_right_body();
+                return Ok(req.into_response(res));
             }
 
             // Clone and read the body (non-destructive using `take_payload`)
@@ -283,7 +308,7 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn allows_non_graphql_and_options_when_no_admin() {
+    async fn blocks_non_graphql_and_allows_options_when_no_admin() {
         let pool = test_pool();
         let state = AdminState::new();
         state.set_exists(false);
@@ -320,7 +345,10 @@ mod tests {
         // GET non-graphql
         let req_get = test::TestRequest::get().uri("/other").to_request();
         let resp_get = test::call_service(&app, req_get).await;
-        assert!(resp_get.status().is_success());
+        assert_eq!(
+            resp_get.status(),
+            actix_web::http::StatusCode::UNAUTHORIZED
+        );
 
         // POST non-graphql
         let req_post = test::TestRequest::post()
@@ -329,7 +357,10 @@ mod tests {
             .insert_header(("content-type", "application/json"))
             .to_request();
         let resp_post = test::call_service(&app, req_post).await;
-        assert!(resp_post.status().is_success());
+        assert_eq!(
+            resp_post.status(),
+            actix_web::http::StatusCode::UNAUTHORIZED
+        );
     }
 
     #[actix_web::test]

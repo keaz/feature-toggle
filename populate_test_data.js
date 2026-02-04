@@ -60,19 +60,19 @@ const VARIANTS_BY_TEAM = {
     {
       control: 'control',
       value: 'standard',
-      valueType: 'String',
+      valueType: 'STRING',
       description: 'Standard checkout experience'
     },
     {
       control: 'vip',
       value: 'vip',
-      valueType: 'String',
+      valueType: 'STRING',
       description: 'VIP-focused experience'
     },
     {
       control: 'promo',
       value: 'promo',
-      valueType: 'String',
+      valueType: 'STRING',
       description: 'Promotion-heavy experience'
     }
   ],
@@ -80,19 +80,19 @@ const VARIANTS_BY_TEAM = {
     {
       control: 'control',
       value: 'standard',
-      valueType: 'String',
+      valueType: 'STRING',
       description: 'Standard analytics experience'
     },
     {
       control: 'insights',
       value: 'insights',
-      valueType: 'String',
+      valueType: 'STRING',
       description: 'Insights-rich experience'
     },
     {
       control: 'beta',
       value: 'beta',
-      valueType: 'String',
+      valueType: 'STRING',
       description: 'Early-access analytics experience'
     }
   ],
@@ -100,19 +100,19 @@ const VARIANTS_BY_TEAM = {
     {
       control: 'control',
       value: 'core',
-      valueType: 'String',
+      valueType: 'STRING',
       description: 'Core platform experience'
     },
     {
       control: 'advanced',
       value: 'advanced',
-      valueType: 'String',
+      valueType: 'STRING',
       description: 'Advanced admin experience'
     },
     {
       control: 'enterprise',
       value: 'enterprise',
-      valueType: 'String',
+      valueType: 'STRING',
       description: 'Enterprise-grade experience'
     }
   ],
@@ -120,19 +120,19 @@ const VARIANTS_BY_TEAM = {
     {
       control: 'control',
       value: 'standard',
-      valueType: 'String',
+      valueType: 'STRING',
       description: 'Standard mobile experience'
     },
     {
       control: 'optimized',
       value: 'optimized',
-      valueType: 'String',
+      valueType: 'STRING',
       description: 'Performance-optimized mobile experience'
     },
     {
       control: 'lite',
       value: 'lite',
-      valueType: 'String',
+      valueType: 'STRING',
       description: 'Low-bandwidth mobile experience'
     }
   ]

@@ -34,6 +34,14 @@ pub trait EnvironmentRepository: Send + Sync {
         page_number: i32,
         page_size: i32,
     ) -> Result<(Vec<Environment>, i64), Error>;
+    async fn get_environments_with_offset(
+        &self,
+        team_id: Uuid,
+        name: Option<String>,
+        active: Option<bool>,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<Environment>, i64), Error>;
     async fn create_environment(
         &self,
         team_id: Uuid,
@@ -180,6 +188,60 @@ impl EnvironmentRepository for EnvironmentRepositoryImpl {
         }
         qb.push(" ORDER BY name");
         qb.push(" LIMIT ").push_bind(page_size);
+        qb.push(" OFFSET ").push_bind(offset);
+
+        let query = qb.build_query_as::<Environment>();
+        let result = query.fetch_all(&self.pool).await;
+
+        let environments = handle_error(None, result)?;
+        Ok((environments, total_count))
+    }
+
+    async fn get_environments_with_offset(
+        &self,
+        team_id: Uuid,
+        name: Option<String>,
+        active: Option<bool>,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<Environment>, i64), Error> {
+        let offset = offset.max(0);
+        let limit = limit.max(1);
+
+        let mut count_qb =
+            QueryBuilder::<Postgres>::new("SELECT COUNT(*) FROM environments WHERE team_id = ");
+        count_qb.push_bind(team_id);
+
+        if let Some(filter_name) = &name {
+            let pattern = format!("%{filter_name}%");
+            count_qb.push(" AND name ILIKE ").push_bind(pattern);
+        }
+
+        if let Some(active_value) = active {
+            count_qb.push(" AND active = ").push_bind(active_value);
+        }
+
+        let total_count: i64 = count_qb
+            .build_query_scalar()
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| Error::DatabaseError(e))?;
+
+        let mut qb = QueryBuilder::<Postgres>::new(
+            "SELECT id, name, active, team_id, environment_type FROM environments WHERE team_id = ",
+        );
+        qb.push_bind(team_id);
+
+        if let Some(filter_name) = name {
+            let pattern = format!("%{filter_name}%");
+            qb.push(" AND name ILIKE ").push_bind(pattern);
+        }
+
+        if let Some(active_value) = active {
+            qb.push(" AND active = ").push_bind(active_value);
+        }
+        qb.push(" ORDER BY name");
+        qb.push(" LIMIT ").push_bind(limit);
         qb.push(" OFFSET ").push_bind(offset);
 
         let query = qb.build_query_as::<Environment>();

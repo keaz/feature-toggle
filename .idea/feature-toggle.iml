@@ -9,6 +9,9 @@
       <sourceFolder url="file://$MODULE_DIR$/evaluation-engine/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/evaluation-engine/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/feature-edge-server/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/feature-edge-server/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/feature-toggle-backend/examples" isTestSource="false" />
+      <excludeFolder url="file://$MODULE_DIR$/feature-toggle-backend/target" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />

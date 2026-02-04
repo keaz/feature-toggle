@@ -25,6 +25,14 @@ pub trait EnvironmentLogic: Send + Sync {
         page_number: i32,
         page_size: i32,
     ) -> Result<(Vec<Environment>, i64), Error>;
+    async fn get_environments_with_offset(
+        &self,
+        team_id: ID,
+        name: Option<String>,
+        active: Option<bool>,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<Environment>, i64), Error>;
 
     async fn create_environment(
         &self,
@@ -129,6 +137,32 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
         let (environments, total) = self
             .repository
             .get_environments_paginated(team_id, name, active, page_number, page_size)
+            .await?;
+        let mapped_environments = environments
+            .into_iter()
+            .map(|env| Environment {
+                id: ID::from(env.id),
+                name: env.name,
+                active: env.active,
+                team_id: ID::from(env.team_id),
+                environment_type: env.environment_type,
+            })
+            .collect();
+        Ok((mapped_environments, total))
+    }
+
+    async fn get_environments_with_offset(
+        &self,
+        team_id: ID,
+        name: Option<String>,
+        active: Option<bool>,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<Environment>, i64), Error> {
+        let team_id = Uuid::try_from(team_id).map_err(|e| Error::InvalidInput(e.to_string()))?;
+        let (environments, total) = self
+            .repository
+            .get_environments_with_offset(team_id, name, active, offset, limit)
             .await?;
         let mapped_environments = environments
             .into_iter()

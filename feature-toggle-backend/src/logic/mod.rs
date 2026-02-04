@@ -38,6 +38,7 @@ pub mod feature_tx;
 pub mod jwt_secret;
 pub mod jwt_token;
 pub mod metrics;
+pub mod metrics_tx;
 pub mod pipeline;
 pub mod pipeline_tx;
 pub mod role;
