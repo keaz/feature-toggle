@@ -9,7 +9,7 @@ use crate::database::feature::{
 use crate::database::variant_allocations::{
     CreateVariantAllocationInput, VariantAllocationsRepositoryTx,
 };
-use crate::graphql::schema::{
+use crate::model::{
     Context as GqlContext, ContextEntry as GqlContextEntry, CreateFeatureInput,
     CreateStageCriterionInput, Feature as GqlFeature, FeatureType as GqlFeatureType, RuleOperator,
     StageCriterion as GqlStageCriterion, UpdateFeatureInput,
@@ -17,7 +17,7 @@ use crate::graphql::schema::{
 };
 use crate::logic::ActorContext;
 use crate::logic::stage_builder::build_stage_relationships;
-use async_graphql::ID;
+use crate::model::ID;
 use sqlx::PgConnection;
 use uuid::Uuid;
 
@@ -48,10 +48,10 @@ fn map_entity_to_graphql_feature(feature_entity: crate::database::entity::Featur
         kill_switch_activated_at: feature_entity.kill_switch_activated_at,
         rollback_scheduled_at: feature_entity.rollback_scheduled_at,
         lifecycle_stage: match feature_entity.lifecycle_stage.to_lowercase().as_str() {
-            "deprecated" => crate::graphql::schema::LifecycleStage::Deprecated,
-            "archived" => crate::graphql::schema::LifecycleStage::Archived,
-            "permanent" => crate::graphql::schema::LifecycleStage::Permanent,
-            _ => crate::graphql::schema::LifecycleStage::Active,
+            "deprecated" => crate::model::LifecycleStage::Deprecated,
+            "archived" => crate::model::LifecycleStage::Archived,
+            "permanent" => crate::model::LifecycleStage::Permanent,
+            _ => crate::model::LifecycleStage::Active,
         },
         deprecated_at: feature_entity.deprecated_at,
         deprecation_notice: feature_entity.deprecation_notice,
@@ -148,10 +148,10 @@ where
         .iter()
         .map(|c| {
             let mode = match c.variant_selection_mode {
-                Some(crate::graphql::schema::VariantSelectionMode::WeightedSplit) => {
+                Some(crate::model::VariantSelectionMode::WeightedSplit) => {
                     crate::database::entity::VariantSelectionMode::WeightedSplit
                 }
-                Some(crate::graphql::schema::VariantSelectionMode::SpecificVariant) => {
+                Some(crate::model::VariantSelectionMode::SpecificVariant) => {
                     crate::database::entity::VariantSelectionMode::SpecificVariant
                 }
                 None => crate::database::entity::VariantSelectionMode::WeightedSplit, // Default
@@ -203,16 +203,16 @@ where
                         .map(|cond| CreateRuleConditionInput {
                             context_key: cond.context_key.clone(),
                             operator: cond.operator.to_db_string(),
-                            value: cond.value.0.clone(),
+                            value: cond.value.clone(),
                             order_index: cond.order_index,
                         })
                         .collect();
 
                     let logic = match g.logic_operator {
-                        crate::graphql::schema::LogicOperator::And => {
+                        crate::model::LogicOperator::And => {
                             crate::database::entity::LogicOperator::And
                         }
-                        crate::graphql::schema::LogicOperator::Or => {
+                        crate::model::LogicOperator::Or => {
                             crate::database::entity::LogicOperator::Or
                         }
                     };
@@ -238,17 +238,17 @@ where
         .map(|c| {
             let mode = match c.variant_selection_mode {
                 crate::database::entity::VariantSelectionMode::WeightedSplit => {
-                    crate::graphql::schema::VariantSelectionMode::WeightedSplit
+                    crate::model::VariantSelectionMode::WeightedSplit
                 }
                 crate::database::entity::VariantSelectionMode::SpecificVariant => {
-                    crate::graphql::schema::VariantSelectionMode::SpecificVariant
+                    crate::model::VariantSelectionMode::SpecificVariant
                 }
             };
 
             let allocations = c
                 .variant_allocations
                 .into_iter()
-                .map(|a| crate::graphql::schema::VariantAllocation {
+                .map(|a| crate::model::VariantAllocation {
                     id: ID::from(Uuid::nil()), // Placeholder
                     criteria_id: ID::from(c.id),
                     variant_control: a.variant_control,
@@ -263,25 +263,25 @@ where
                     let conditions = g
                         .conditions
                         .into_iter()
-                        .map(|cond| crate::graphql::schema::CompoundRuleCondition {
+                        .map(|cond| crate::model::CompoundRuleCondition {
                             id: ID::from(cond.id),
                             context_key: cond.context_key,
                             operator: parse_rule_operator(&cond.operator),
-                            value: async_graphql::Json(cond.value),
+                            value: cond.value,
                             order_index: cond.order_index,
                         })
                         .collect();
 
                     let logic = match g.logic_operator {
                         crate::database::entity::LogicOperator::And => {
-                            crate::graphql::schema::LogicOperator::And
+                            crate::model::LogicOperator::And
                         }
                         crate::database::entity::LogicOperator::Or => {
-                            crate::graphql::schema::LogicOperator::Or
+                            crate::model::LogicOperator::Or
                         }
                     };
 
-                    crate::graphql::schema::CompoundRuleGroup {
+                    crate::model::CompoundRuleGroup {
                         id: ID::from(g.id),
                         logic_operator: logic,
                         conditions,
@@ -359,7 +359,7 @@ where
                 };
                 (
                     variant.control,
-                    variant.value.0,
+                    variant.value,
                     value_type,
                     variant.description,
                 )
@@ -472,7 +472,7 @@ where
                 };
                 (
                     variant.control,
-                    variant.value.0,
+                    variant.value,
                     value_type,
                     variant.description,
                 )

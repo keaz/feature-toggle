@@ -3,10 +3,10 @@ use crate::database::context::{
     ContextRepositoryTx, CreateContextInput as DbCreate, UpdateContextInput as DbUpdate,
 };
 use crate::database::entity;
-use crate::graphql::schema::{
+use crate::model::{
     Context as GqlContext, ContextEntry as GqlContextEntry, CreateContextInput, UpdateContextInput,
 };
-use async_graphql::ID;
+use crate::model::ID;
 use sqlx::PgConnection;
 use uuid::Uuid;
 

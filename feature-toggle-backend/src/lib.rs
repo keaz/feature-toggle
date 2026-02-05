@@ -1,18 +1,18 @@
 pub mod cluster;
 mod config;
 pub mod database;
-pub mod graphql;
+pub mod broadcast;
 pub mod grpc;
 pub mod logic;
+pub mod model;
 mod middleware;
 pub mod rest;
 pub mod scheduler;
+pub mod streaming;
 pub mod utils;
+pub mod validation;
 
 use crate::database::init_pg_pool;
-use crate::graphql::mutation::MutationRoot;
-use crate::graphql::query::Query;
-use crate::graphql::subscription::FeatureEvaluationSubscription;
 use crate::middleware::access_log::AccessLogger;
 use crate::middleware::admin_guard::{AdminGuard, AdminState};
 use crate::middleware::jwt_guard::JwtGuard;
@@ -20,10 +20,7 @@ use actix_cors::Cors;
 use actix_web::error::{
     ErrorBadRequest, ErrorConflict, ErrorForbidden, ErrorInternalServerError, ErrorUnauthorized,
 };
-use actix_web::{App, HttpMessage, HttpRequest, HttpResponse, HttpServer, Result, guard, web};
-use async_graphql::Schema;
-use async_graphql::http::GraphiQLSource;
-use async_graphql_actix_web::{GraphQLRequest, GraphQLResponse, GraphQLSubscription};
+use actix_web::{guard, App, HttpMessage, HttpRequest, HttpResponse, HttpServer, Result, web};
 use chrono::{DateTime, Utc};
 use log::error;
 use std::sync::Arc;
@@ -73,7 +70,7 @@ pub async fn run() -> std::io::Result<()> {
     let (approval_events_tx, _approval_events_rx) =
         tokio::sync::broadcast::channel::<logic::approval::ApprovalRequestEvent>(128);
 
-    // Create a broadcast channel for feature updates shared between GraphQL mutations and gRPC streaming
+    // Broadcast channel for feature updates shared between REST handlers and gRPC streaming
     let (updates_tx, _updates_rx) =
         tokio::sync::broadcast::channel::<crate::grpc::pb::FeatureUpdate>(128);
 
@@ -131,7 +128,7 @@ pub async fn run() -> std::io::Result<()> {
         role_logic.clone(),
         jwt_secret_logic.clone(),
     );
-    // Broadcast channel for feature evaluation events powering GraphQL subscriptions.
+    // Broadcast channel for feature evaluation events powering REST streams.
     let (evaluation_events_tx, _evaluation_events_rx_unused) =
         tokio::sync::broadcast::channel::<logic::feature_evaluation::FeatureEvaluationEvent>(512);
 
@@ -215,34 +212,6 @@ pub async fn run() -> std::io::Result<()> {
     HttpServer::new(move || {
         let admin_state = AdminState::new();
 
-        let schema = Schema::build(Query, MutationRoot, FeatureEvaluationSubscription)
-            .data(db_pool.clone())
-            .data(updates_tx.clone())
-            // Channel for evaluation events consumed by subscriptions
-            .data(evaluation_events_tx.clone())
-            .data(activity_log_repository_arc.clone())
-            .data(activity_log_repository_arc.clone_box())
-            .data(feature_repository_arc.clone())
-            .data(feature_repository.clone())
-            .data(approval_repository.clone_box())
-            .data(environment_logic.clone())
-            .data(team_logic.clone())
-            .data(pipeline_logic.clone())
-            .data(feature_logic.clone())
-            .data(approval_logic.clone())
-            .data(approval_events_tx.clone())
-            .data(client_logic.clone())
-            .data(context_logic.clone())
-            .data(user_logic.clone())
-            .data(role_logic.clone())
-            .data(jwt_secret_logic_for_server.clone())
-            .data(jwt_token_logic_for_server.clone())
-            .data(feature_evaluation_logic.clone())
-            .data(metric_logic.clone())
-            .data(admin_state.clone())
-            // .extension(ApolloTracing)
-            .finish();
-
         let cors = Cors::default()
             .allowed_origin(&cfg.allowed_origin) // configured frontend origin
             .allowed_methods(vec!["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]) // Or your allowed methods
@@ -265,7 +234,6 @@ pub async fn run() -> std::io::Result<()> {
             .wrap(AccessLogger)
             .wrap(cors)
             .app_data(web::Data::new(db_pool.clone()))
-            .app_data(web::Data::new(schema.clone()))
             .app_data(web::Data::new(metric_logic.clone()))
             .app_data(web::Data::new(feature_evaluation_logic.clone()))
             .app_data(web::Data::new(environment_logic.clone()))
@@ -289,23 +257,6 @@ pub async fn run() -> std::io::Result<()> {
             .app_data(web::Data::new(compound_rules_repository.clone()))
             .app_data(web::Data::new(updates_tx.clone()))
             .service(
-                web::resource("/graphql")
-                    .guard(guard::Post())
-                    .to(graphql_handler),
-            )
-            .service(
-                web::resource("/graphql")
-                    .guard(guard::Get())
-                    .guard(guard::Header("upgrade", "websocket"))
-                    .app_data(web::Data::new(schema))
-                    .to(index_ws),
-            )
-            .service(
-                web::resource("/graphql")
-                    .guard(guard::Get())
-                    .to(index_graphiql),
-            )
-            .service(
                 web::resource("/metrics/track")
                     .guard(guard::Post())
                     .to(track_metrics_http),
@@ -325,51 +276,6 @@ pub struct JwtUser {
     pub is_admin: bool,
     pub roles: Vec<String>,
     pub token_hash: String, // SHA256 hash of the current token for logout
-}
-
-async fn graphql_handler(
-    schema: web::Data<Schema<Query, MutationRoot, FeatureEvaluationSubscription>>,
-    req: HttpRequest,
-    gql_req: GraphQLRequest,
-) -> GraphQLResponse {
-    let mut inner = gql_req.into_inner();
-
-    // Inject JWT user data into the GraphQL request data (if present from middleware)
-    if let Some(jwt_user) = req.extensions().get::<JwtUser>() {
-        inner = inner.data(jwt_user.clone());
-    }
-
-    let is_login = inner.query.contains("mutation") && inner.query.contains("login");
-
-    let resp = schema.execute(inner).await;
-
-    // If this was a login mutation and it succeeded, we don't need to set session anymore
-    // The JWT token will be returned in the response data
-    if is_login && resp.errors.is_empty() {
-        // The login mutation should return the JWT token in its response
-        // No additional session handling needed
-    }
-
-    resp.into()
-}
-
-async fn index_graphiql() -> Result<HttpResponse> {
-    Ok(HttpResponse::Ok()
-        .content_type("text/html; charset=utf-8")
-        .body(
-            GraphiQLSource::build()
-                .endpoint("/graphql")
-                .subscription_endpoint("/graphql")
-                .finish(),
-        ))
-}
-
-async fn index_ws(
-    schema: web::Data<Schema<Query, MutationRoot, FeatureEvaluationSubscription>>,
-    req: HttpRequest,
-    payload: web::Payload,
-) -> Result<HttpResponse> {
-    GraphQLSubscription::new(Schema::clone(&*schema)).start(&req, payload)
 }
 
 async fn track_metrics_http(

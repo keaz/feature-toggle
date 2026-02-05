@@ -1,11 +1,11 @@
 use crate::Error;
 use crate::database::user::{CreateUser, UpdateUser, UserRepository};
-use crate::graphql::schema::Team;
+use crate::model::Team;
 use argon2::{
     Argon2,
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
 };
-use async_graphql::ID;
+use crate::model::ID;
 use chrono::{DateTime, Utc};
 use mockall::automock;
 use uuid::Uuid;

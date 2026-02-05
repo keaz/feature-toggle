@@ -10,7 +10,7 @@ use crate::database::feature::{feature_repository_tx, FeatureRepository, Feature
 use crate::database::role::RoleRepository;
 use crate::logic::environment::EnvironmentLogic;
 use crate::Error;
-use async_graphql::ID;
+use crate::model::ID;
 use chrono::Utc;
 use feature_toggle_shared::constants::StageStatus;
 use mockall::automock;
@@ -155,7 +155,7 @@ struct ApprovalLogicImpl {
 impl ApprovalLogicImpl {
     async fn notify_edge_servers(&self, feature_id: Uuid) {
         if let Ok(db_feature) = self.feature_repository.get_feature_by_id(feature_id).await {
-            if let Ok(full) = crate::graphql::mutation::map_db_feature_to_full_for_broadcast(
+            if let Ok(full) = crate::broadcast::map_db_feature_to_full_for_broadcast(
                 self.feature_repository.as_ref(),
                 db_feature,
             )
@@ -829,7 +829,7 @@ mod tests {
     use crate::database::entity::{FeatureType, Role};
     use crate::database::feature::MockFeatureRepository;
     use crate::database::role::MockRoleRepository;
-    use crate::graphql::schema::Environment;
+    use crate::model::Environment;
     use crate::logic::environment::MockEnvironmentLogic;
     use chrono::Utc;
 

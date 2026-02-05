@@ -1,10 +1,10 @@
 use actix_web::{delete, get, patch, post, web, HttpResponse, Responder};
-use async_graphql::ID;
+use crate::model::ID;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::graphql::schema::{
+use crate::model::{
     Context as GqlContext, ContextEntry as GqlContextEntry, CreateContextInput,
     UpdateContextInput,
 };

@@ -7,10 +7,10 @@
 use crate::Error;
 use crate::database::activity_log::{ActivityLogRepository, CreateActivityLog};
 use crate::database::environment::{CreateEnvironment, EnvironmentRepositoryTx, UpdateEnvironment};
-use crate::graphql::schema::{CreateEnvironmentInput, UpdateEnvironmentInput};
+use crate::model::{CreateEnvironmentInput, UpdateEnvironmentInput};
 use crate::logic::ActorContext;
 use crate::utils::activity_logger::activity_types;
-use async_graphql::ID;
+use crate::model::ID;
 use sqlx::PgConnection;
 use uuid::Uuid;
 
@@ -25,7 +25,7 @@ pub async fn create_environment_in_tx<R>(
     team_id: ID,
     input: CreateEnvironmentInput,
     actor: Option<ActorContext>,
-) -> Result<crate::graphql::schema::Environment, Error>
+) -> Result<crate::model::Environment, Error>
 where
     R: EnvironmentRepositoryTx,
 {
@@ -76,7 +76,7 @@ where
         .await
         .map_err(Error::DatabaseError)?;
 
-    Ok(crate::graphql::schema::Environment {
+    Ok(crate::model::Environment {
         id: ID::from(environment.id),
         name: environment.name,
         active: environment.active,
@@ -96,7 +96,7 @@ pub async fn update_environment_in_tx<R>(
     id: ID,
     input: UpdateEnvironmentInput,
     actor: Option<ActorContext>,
-) -> Result<crate::graphql::schema::Environment, Error>
+) -> Result<crate::model::Environment, Error>
 where
     R: EnvironmentRepositoryTx,
 {
@@ -138,7 +138,7 @@ where
         .await
         .map_err(Error::DatabaseError)?;
 
-    Ok(crate::graphql::schema::Environment {
+    Ok(crate::model::Environment {
         id: ID::from(environment.id),
         name: environment.name,
         active: environment.active,

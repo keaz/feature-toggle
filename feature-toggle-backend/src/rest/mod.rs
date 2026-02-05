@@ -13,6 +13,7 @@ pub mod auth;
 pub mod jwt_secret;
 pub mod stream;
 pub mod pagination;
+pub mod serde;
 pub mod types;
 pub mod metrics;
 

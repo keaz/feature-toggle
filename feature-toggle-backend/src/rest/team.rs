@@ -1,5 +1,5 @@
 use actix_web::{get, patch, post, web, HttpMessage, HttpRequest, HttpResponse, Responder};
-use async_graphql::ID;
+use crate::model::ID;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -34,8 +34,8 @@ pub struct UpdateTeamRequest {
     pub description: Option<String>,
 }
 
-impl From<crate::graphql::schema::Team> for TeamResponse {
-    fn from(team: crate::graphql::schema::Team) -> Self {
+impl From<crate::model::Team> for TeamResponse {
+    fn from(team: crate::model::Team) -> Self {
         let description = if team.description.trim().is_empty() {
             None
         } else {
@@ -179,7 +179,7 @@ pub(crate) async fn create_team(
         .as_ref()
         .map(|value| value.trim().to_string())
         .unwrap_or_default();
-    let input = crate::graphql::schema::CreateTeamInput {
+    let input = crate::model::CreateTeamInput {
         name: payload.name.trim().to_string(),
         description,
     };
@@ -246,7 +246,7 @@ pub(crate) async fn update_team(
     validate_team_description(&payload.description)?;
 
     let actor = actor_from_request(&req);
-    let input = crate::graphql::schema::UpdateTeamInput {
+    let input = crate::model::UpdateTeamInput {
         name: payload.name.as_ref().map(|value| value.trim().to_string()),
         description: payload
             .description
@@ -298,8 +298,8 @@ mod tests {
     use crate::logic::user::MockUserLogic;
     use sqlx::postgres::PgPoolOptions;
 
-    fn sample_team(team_id: Uuid) -> crate::graphql::schema::Team {
-        crate::graphql::schema::Team {
+    fn sample_team(team_id: Uuid) -> crate::model::Team {
+        crate::model::Team {
             id: ID::from(team_id),
             name: "Team A".to_string(),
             description: "Core team".to_string(),

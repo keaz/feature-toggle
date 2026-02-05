@@ -1,14 +1,14 @@
 use actix_web::{get, patch, post, web, HttpMessage, HttpRequest, HttpResponse, Responder};
-use async_graphql::ID;
+use crate::model::ID;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::graphql::schema::{
+use crate::model::{
     CreatePipelineInput, CreateRelationshipInput, CreateStageInput, Pipeline, PipelineRelationship,
     PipelineStage, UpdatePipelineInput,
 };
-use crate::graphql::validator::{
+use crate::validation::{
     validate_duplicate_environment_and_index, validate_relationships_and_stages,
 };
 use crate::database::activity_log::ActivityLogRepository;
@@ -213,9 +213,9 @@ fn validate_pipeline_structure(
     relationships: &[CreateRelationshipInput],
 ) -> Result<(), RestError> {
     validate_relationships_and_stages(stages, relationships)
-        .map_err(|err| RestError::invalid_input(err.message.clone()))?;
+        .map_err(RestError::invalid_input)?;
     validate_duplicate_environment_and_index(stages)
-        .map_err(|err| RestError::invalid_input(err.message.clone()))?;
+        .map_err(RestError::invalid_input)?;
     Ok(())
 }
 
@@ -527,8 +527,8 @@ mod tests {
     use crate::logic::pipeline::MockPipelineLogic;
     use sqlx::postgres::PgPoolOptions;
 
-    fn sample_env(env_id: Uuid, team_id: Uuid) -> crate::graphql::schema::Environment {
-        crate::graphql::schema::Environment {
+    fn sample_env(env_id: Uuid, team_id: Uuid) -> crate::model::Environment {
+        crate::model::Environment {
             id: ID::from(env_id),
             name: "Production".to_string(),
             team_id: ID::from(team_id),

@@ -1,8 +1,8 @@
 use crate::Error;
 use crate::database::entity::DBStage;
-use crate::graphql::schema::{Environment, Relationship, Stage};
+use crate::model::{Environment, Relationship, Stage};
 use crate::logic::environment::EnvironmentLogic;
-use async_graphql::ID;
+use crate::model::ID;
 use std::collections::HashMap;
 use uuid::Uuid;
 

@@ -1385,7 +1385,7 @@ ON CONFLICT (id) DO NOTHING;
 -- This demonstrates multi-variant weighted distribution:
 -- - For Test Contextual Feature: control=25%, treatment-a=25%, treatment-b=50%
 -- - Assumes there's a criteria to allocate these variants
--- Note: In production, these would be created via GraphQL mutations after criteria exist
+-- Note: In production, these would be created via REST API calls after criteria exist
 
 INSERT INTO
     public.variant_allocations (

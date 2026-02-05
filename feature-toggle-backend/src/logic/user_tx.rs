@@ -14,7 +14,7 @@ use argon2::{
     Argon2,
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
 };
-use async_graphql::ID;
+use crate::model::ID;
 use sqlx::PgConnection;
 use uuid::Uuid;
 

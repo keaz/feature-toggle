@@ -5,7 +5,7 @@
 This project is a comprehensive feature toggle system, likely named "Flux Gate". It is a multi-component, service-oriented system written primarily in Rust.
 
 The architecture consists of three main parts:
-1.  **Central Backend (`feature-toggle-backend`):** A Rust application that serves as the control plane. It provides a GraphQL API for managing feature flags, users, environments, etc. It communicates with the database and exposes a gRPC interface for the edge servers.
+1.  **Central Backend (`feature-toggle-backend`):** A Rust application that serves as the control plane. It provides a REST API (plus WebSocket streams) for managing feature flags, users, environments, etc. It communicates with the database and exposes a gRPC interface for the edge servers.
 2.  **Edge Server (`feature-edge-server`):** A lightweight Rust service designed for high-performance evaluation of feature flags. It fetches configuration from the backend via gRPC and evaluates flags based on the context provided by client applications.
 3.  **Database:** A PostgreSQL database for persistent storage of all feature flag configurations, user data, and other related entities.
 
@@ -29,7 +29,7 @@ The project is fully containerized using Docker and managed via a `Makefile` and
     ```bash
     make up-logs
     ```
-    - The backend's GraphQL API will be available at `http://localhost:8080/graphql`.
+    - The backend's REST API will be available at `http://localhost:8080/api/v1`.
     - The edge server's HTTP endpoint will be at `http://localhost:8081`.
     - The PostgreSQL database is exposed on port `5433`.
 
@@ -75,7 +75,7 @@ The `Makefile` provides extensive support for building and pushing Docker images
 ## Development Conventions
 
 *   **Technology Stack:**
-    - **Backend:** Rust, Actix-web (web framework), Async-GraphQL (GraphQL), SQLx (PostgreSQL), Tonic (gRPC).
+    - **Backend:** Rust, Actix-web (web framework), REST + WebSocket (OpenAPI via utoipa), SQLx (PostgreSQL), Tonic (gRPC).
     - **Database:** PostgreSQL.
     - **Tooling:** Docker, Docker Compose, Makefile.
 

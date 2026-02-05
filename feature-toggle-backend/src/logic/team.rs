@@ -1,7 +1,7 @@
 use crate::Error;
 use crate::database::team::TeamRepository;
-use crate::graphql::schema::{CreateTeamInput, Team, UpdateTeamInput};
-use async_graphql::ID;
+use crate::model::{CreateTeamInput, Team, UpdateTeamInput};
+use crate::model::ID;
 use uuid::Uuid;
 
 #[cfg(test)]

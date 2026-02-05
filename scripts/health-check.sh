@@ -68,8 +68,8 @@ db_status=$?
 # Wait a moment for services to be ready
 sleep 2
 
-# Check backend service (GraphQL endpoint)
-check_service "Backend GraphQL" "http://localhost:8080/graphql" 400
+# Check backend service (REST health endpoint)
+check_service "Backend API" "http://localhost:8080/api/v1/health" 200
 backend_status=$?
 
 # Check edge server (should have some endpoint - let's try root)

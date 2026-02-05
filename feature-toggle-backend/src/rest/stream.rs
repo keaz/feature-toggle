@@ -16,6 +16,7 @@ use crate::logic::environment::EnvironmentLogic;
 use crate::logic::feature::FeatureLogic;
 use crate::logic::feature_evaluation::{FeatureEvaluationEvent, FeatureEvaluationLogic};
 use crate::logic::pipeline::PipelineLogic;
+use crate::model::ID;
 use crate::rest::approval::{ApprovalRequestResponse, ApprovalRequestsResponse, ApprovalRequestStatus, ApprovalVoteResponse};
 use crate::rest::error::ErrorResponse;
 use crate::rest::metrics::{
@@ -24,6 +25,7 @@ use crate::rest::metrics::{
     EvaluationSummaryResponse, FeatureGrowthResponse, SystemMetricsResponse,
 };
 use crate::rest::pagination::{normalize_pagination, PageMeta, PaginationQuery};
+use crate::rest::serde::deserialize_optional_string_or_vec;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -42,6 +44,7 @@ struct StreamQuery {
     limit: Option<i64>,
     interval: Option<String>,
     statuses: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_string_or_vec")]
     activity_types: Option<Vec<String>>,
     entity_type: Option<String>,
     entity_id: Option<String>,
@@ -131,11 +134,11 @@ fn parse_datetime(value: &str, field: &str) -> Result<DateTime<Utc>, String> {
         .map_err(|_| format!("invalid {field}"))
 }
 
-fn parse_time_period(value: &str) -> Result<crate::graphql::subscription::TimePeriod, String> {
+fn parse_time_period(value: &str) -> Result<crate::streaming::TimePeriod, String> {
     match value {
-        "PERIOD_24H" | "H24" | "24H" => Ok(crate::graphql::subscription::TimePeriod::H24),
-        "PERIOD_7D" | "D7" | "7D" => Ok(crate::graphql::subscription::TimePeriod::D7),
-        "PERIOD_30D" | "D30" | "30D" => Ok(crate::graphql::subscription::TimePeriod::D30),
+        "PERIOD_24H" | "H24" | "24H" => Ok(crate::streaming::TimePeriod::H24),
+        "PERIOD_7D" | "D7" | "7D" => Ok(crate::streaming::TimePeriod::D7),
+        "PERIOD_30D" | "D30" | "30D" => Ok(crate::streaming::TimePeriod::D30),
         _ => Err("invalid period".to_string()),
     }
 }
@@ -238,7 +241,7 @@ async fn resolve_activity_entity_details(
                         if let Ok(stages) = feature_repo.get_feature_stages(feature_id).await {
                             if let Some(stage) = stages.iter().find(|s| s.id == stage_uuid) {
                                 let environment = environment_logic
-                                    .get_environment_by_id(async_graphql::ID::from(stage.environment_id))
+                                    .get_environment_by_id(ID::from(stage.environment_id))
                                     .await
                                     .ok();
 
@@ -408,7 +411,7 @@ async fn send_evaluation_summary(
             .ok_or_else(|| "period is required".to_string())?,
     )?;
     let (from_time, to_time) =
-        crate::graphql::subscription::calculate_time_range(period, Utc::now());
+        crate::streaming::calculate_time_range(period, Utc::now());
     let client_id = parse_opt_uuid(query.client_id.as_ref(), "clientId")?;
     let team_id = parse_opt_uuid(query.team_id.as_ref(), "teamId")?;
 
@@ -447,7 +450,7 @@ async fn send_evaluation_rates(
             .ok_or_else(|| "period is required".to_string())?,
     )?;
     let (from_time, to_time) =
-        crate::graphql::subscription::calculate_time_range(period, Utc::now());
+        crate::streaming::calculate_time_range(period, Utc::now());
     let client_id = parse_opt_uuid(query.client_id.as_ref(), "clientId")?;
     let team_id = parse_opt_uuid(query.team_id.as_ref(), "teamId")?;
 
@@ -488,7 +491,7 @@ async fn send_evaluations_by_feature(
                     .as_deref()
                     .ok_or_else(|| "fromTime/toTime or period is required".to_string())?,
             )?;
-            crate::graphql::subscription::calculate_time_range(period, Utc::now())
+            crate::streaming::calculate_time_range(period, Utc::now())
         }
     };
     validate_time_range(from_time, to_time)?;
@@ -557,12 +560,12 @@ async fn send_system_metrics(
         .unwrap()
         .and_utc();
     let yesterday_end = today_start;
-    let (from_7d, to_7d) = crate::graphql::subscription::calculate_time_range(
-        crate::graphql::subscription::TimePeriod::D7,
+    let (from_7d, to_7d) = crate::streaming::calculate_time_range(
+        crate::streaming::TimePeriod::D7,
         now,
     );
 
-    let team_id_arg = team_id.map(async_graphql::ID::from);
+    let team_id_arg = team_id.map(ID::from);
 
     let (
         total_features_result,
@@ -683,7 +686,7 @@ async fn send_recent_activities(
             let env_logic_box = environment_logic.clone();
             let client_logic_box = client_logic.clone();
             let pipeline_logic_box = pipeline_logic.clone();
-            if !crate::graphql::subscription::activity_matches_team(
+            if !crate::streaming::activity_matches_team(
                 &activity,
                 team_id,
                 &feature_repo_arc,

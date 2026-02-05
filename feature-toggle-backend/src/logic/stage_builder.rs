@@ -1,4 +1,4 @@
-use crate::graphql::schema::CreateRelationshipInput;
+use crate::model::{CreateRelationshipInput, ID};
 use uuid::Uuid;
 
 /// Trait for stage objects that can be used in relationship building
@@ -38,14 +38,14 @@ pub fn build_stage_relationships<T: StageWithRelationship>(
 }
 
 /// Helper function to safely convert GraphQL ID to Uuid
-pub fn id_to_uuid(id: async_graphql::ID) -> Result<Uuid, crate::Error> {
+pub fn id_to_uuid(id: ID) -> Result<Uuid, crate::Error> {
     Uuid::try_from(id).map_err(|_| crate::Error::InvalidInput("Invalid UUID format".to_string()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graphql::schema::CreateRelationshipInput;
+    use crate::model::CreateRelationshipInput;
 
     #[derive(Debug, Clone, PartialEq)]
     struct MockStage {
@@ -127,14 +127,14 @@ mod tests {
     #[test]
     fn test_id_to_uuid_valid() {
         let uuid = Uuid::new_v4();
-        let id = async_graphql::ID::from(uuid);
+        let id = ID::from(uuid);
         let result = id_to_uuid(id).unwrap();
         assert_eq!(result, uuid);
     }
 
     #[test]
     fn test_id_to_uuid_invalid() {
-        let id = async_graphql::ID::from("invalid-uuid");
+        let id = ID::from("invalid-uuid");
         let result = id_to_uuid(id);
         assert!(result.is_err());
     }

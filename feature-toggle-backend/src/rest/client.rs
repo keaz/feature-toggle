@@ -1,10 +1,10 @@
 use actix_web::{get, patch, post, web, HttpMessage, HttpRequest, HttpResponse, Responder};
-use async_graphql::ID;
+use crate::model::ID;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::graphql::schema::{
+use crate::model::{
     Client as GqlClient, ClientType as GqlClientType, CreateClientInput, UpdateClientInput,
 };
 use crate::database::activity_log::ActivityLogRepository;

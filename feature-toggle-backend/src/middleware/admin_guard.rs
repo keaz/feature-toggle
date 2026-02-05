@@ -128,52 +128,23 @@ where
             let method = req.method().clone();
 
             let is_preflight = method == actix_web::http::Method::OPTIONS;
-            let is_graphql_post = method == actix_web::http::Method::POST && path == "/graphql";
 
             if is_preflight {
                 let res = service.call(req).await?;
                 return Ok(res.map_into_left_body());
             }
 
-            if !is_graphql_post {
-                let is_public_path = path == "/api/v1/health"
-                    || path == "/api/v1/openapi.json"
-                    || path.starts_with("/docs")
-                    || (path == "/metrics/track" && method == actix_web::http::Method::POST)
-                    || (path == "/api/v1/metrics/track" && method == actix_web::http::Method::POST);
+            let is_public_path = path == "/api/v1/health"
+                || path == "/api/v1/openapi.json"
+                || path.starts_with("/docs")
+                || (path == "/metrics/track" && method == actix_web::http::Method::POST)
+                || (path == "/api/v1/metrics/track" && method == actix_web::http::Method::POST);
 
-                let is_allowed_rest = is_public_path
-                    || (path == "/api/v1/admins" && method == actix_web::http::Method::POST)
-                    || (path == "/api/v1/auth/status" && method == actix_web::http::Method::GET);
+            let is_allowed_rest = is_public_path
+                || (path == "/api/v1/admins" && method == actix_web::http::Method::POST)
+                || (path == "/api/v1/auth/status" && method == actix_web::http::Method::GET);
 
-                if is_allowed_rest {
-                    let res = service.call(req).await?;
-                    return Ok(res.map_into_left_body());
-                }
-
-                let target = format!("{}/create-admin", ui_origin.trim_end_matches('/'));
-                let res = HttpResponse::Unauthorized()
-                    .json(serde_json::json!({
-                        "error": "admin_account_missing",
-                        "redirect": target
-                    }))
-                    .map_into_right_body();
-                return Ok(req.into_response(res));
-            }
-
-            // Clone and read the body (non-destructive using `take_payload`)
-            let mut body = Vec::new();
-            while let Some(chunk) = req.take_payload().next().await {
-                body.extend_from_slice(&chunk?);
-            }
-
-            let body_str = String::from_utf8_lossy(&body);
-            if (body_str.contains("mutation") && body_str.contains("createAdmin"))
-                || (body_str.contains("query") && body_str.contains("applicationStatus"))
-            {
-                // Replace the payload so Actix can read it again downstream
-                req.set_payload(actix_web::web::Bytes::from(body.clone()).into());
-
+            if is_allowed_rest {
                 let res = service.call(req).await?;
                 return Ok(res.map_into_left_body());
             }
@@ -214,30 +185,20 @@ mod tests {
             App::new()
                 .wrap(AdminGuard::new(pool, "http://ui".to_string(), state))
                 .route(
-                    "/graphql",
-                    web::post().to(|| async { HttpResponse::Ok().finish() }),
-                )
-                .route(
-                    "/other",
+                    "/api/v1/teams",
                     web::get().to(|| async { HttpResponse::Ok().finish() }),
-                )
-                .route(
-                    "/other",
-                    web::post().to(|| async { HttpResponse::Ok().finish() }),
                 ),
         )
         .await;
-        let req = test::TestRequest::post()
-            .uri("/graphql")
-            .set_payload(r#"{ "query": "query { ping }" }"#)
-            .insert_header(("content-type", "application/json"))
+        let req = test::TestRequest::get()
+            .uri("/api/v1/teams")
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert!(resp.status().is_success());
     }
 
     #[actix_web::test]
-    async fn blocks_graphql_post_without_create_admin_when_no_admin() {
+    async fn blocks_protected_request_when_no_admin() {
         let pool = test_pool();
         let state = AdminState::new();
         state.set_exists(false);
@@ -250,7 +211,7 @@ mod tests {
                     state,
                 ))
                 .route(
-                    "/graphql",
+                    "/api/v1/teams",
                     web::post().to(|| async { HttpResponse::Ok().finish() }),
                 )
                 .route(
@@ -264,9 +225,7 @@ mod tests {
         )
         .await;
         let req = test::TestRequest::post()
-            .uri("/graphql")
-            .set_payload(r#"{ "query": "mutation { somethingElse }" }"#)
-            .insert_header(("content-type", "application/json"))
+            .uri("/api/v1/teams")
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), actix_web::http::StatusCode::UNAUTHORIZED);
@@ -276,7 +235,7 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn allows_graphql_post_create_admin_when_no_admin() {
+    async fn allows_create_admin_when_no_admin() {
         let pool = test_pool();
         let state = AdminState::new();
         state.set_exists(false);
@@ -285,7 +244,7 @@ mod tests {
             App::new()
                 .wrap(AdminGuard::new(pool, "http://ui".to_string(), state))
                 .route(
-                    "/graphql",
+                    "/api/v1/admins",
                     web::post().to(|| async { HttpResponse::Ok().finish() }),
                 )
                 .route(
@@ -299,8 +258,8 @@ mod tests {
         )
         .await;
         let req = test::TestRequest::post()
-            .uri("/graphql")
-            .set_payload(r#"{ "query": "mutation { createAdmin(input:{}) { id } }" }"#)
+            .uri("/api/v1/admins")
+            .set_payload(r#"{"username":"admin","password":"password","firstName":"Admin","lastName":"User","email":"admin@example.com"}"#)
             .insert_header(("content-type", "application/json"))
             .to_request();
         let resp = test::call_service(&app, req).await;
@@ -308,7 +267,7 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn blocks_non_graphql_and_allows_options_when_no_admin() {
+    async fn blocks_non_admin_and_allows_options_when_no_admin() {
         let pool = test_pool();
         let state = AdminState::new();
         state.set_exists(false);
@@ -317,7 +276,7 @@ mod tests {
             App::new()
                 .wrap(AdminGuard::new(pool, "http://ui".to_string(), state))
                 .route(
-                    "/graphql",
+                    "/api/v1/teams",
                     web::post().to(|| async { HttpResponse::Ok().finish() }),
                 )
                 .route(
@@ -334,7 +293,7 @@ mod tests {
         // OPTIONS preflight
         let req_options = test::TestRequest::default()
             .method(actix_web::http::Method::OPTIONS)
-            .uri("/graphql")
+            .uri("/api/v1/teams")
             .to_request();
         let resp_options = test::call_service(&app, req_options).await;
         assert_ne!(
@@ -377,16 +336,14 @@ mod tests {
                     state,
                 ))
                 .route(
-                    "/graphql",
-                    web::post().to(|| async { HttpResponse::Ok().finish() }),
+                    "/api/v1/auth/status",
+                    web::get().to(|| async { HttpResponse::Ok().finish() }),
                 ),
         )
         .await;
 
-        let req = test::TestRequest::post()
-            .uri("/graphql")
-            .set_payload(r#"{ "query": "query { applicationStatus { adminConfigured } }" }"#)
-            .insert_header(("content-type", "application/json"))
+        let req = test::TestRequest::get()
+            .uri("/api/v1/auth/status")
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert!(resp.status().is_success());

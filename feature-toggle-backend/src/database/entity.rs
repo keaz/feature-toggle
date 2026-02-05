@@ -1,4 +1,3 @@
-use async_graphql::SimpleObject;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -153,7 +152,7 @@ pub struct Context {
     pub entries: Vec<ContextEntry>,
 }
 
-#[derive(SimpleObject, Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ContextEntry {
     pub id: Uuid,
     pub value: String,

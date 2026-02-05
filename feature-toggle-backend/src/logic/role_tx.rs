@@ -10,7 +10,7 @@ use crate::database::role::RoleRepositoryTx;
 use crate::logic::ActorContext;
 use crate::logic::role::{GqlRole, SYSTEM_ROLE_NAMES};
 use crate::utils::activity_logger::activity_types;
-use async_graphql::ID;
+use crate::model::ID;
 use sqlx::PgConnection;
 use uuid::Uuid;
 

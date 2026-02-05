@@ -13,14 +13,14 @@ A logically ordered, actionable checklist covering architectural and code-level 
    - [ ] Fail-fast on invalid/missing configuration with clear error messages
 
 3. [ ] Improve error handling and result types across services
-   - [ ] Standardize Error enums with thiserror and map to HTTP/gRPC/GraphQL error surfaces consistently
+   - [ ] Standardize Error enums with thiserror and map to HTTP/gRPC/REST error surfaces consistently
    - [ ] Ensure sensitive/internal errors are not leaked to clients; add user-facing codes/messages
    - [ ] Add tracing-friendly error contexts (anyhow/context or eyre with tracing-error)
 
 4. [ ] Logging, tracing, and observability
    - [ ] Adopt tracing + tracing-subscriber with JSON output option and request IDs
-   - [ ] Propagate trace IDs across Actix, async-graphql, and tonic gRPC
-   - [ ] Add key spans: DB queries, GraphQL resolvers, gRPC handlers, evaluation steps
+   - [ ] Propagate trace IDs across Actix REST handlers and tonic gRPC
+   - [ ] Add key spans: DB queries, REST handlers, gRPC handlers, evaluation steps
    - [ ] Expose Prometheus metrics (HTTP/gRPC latency, SQLx query duration, cache hits, evaluation outcomes)
 
 5. [ ] Database schema, constraints, and migrations
@@ -31,11 +31,11 @@ A logically ordered, actionable checklist covering architectural and code-level 
    - [ ] Add migration tests or verification step in CI to apply and rollback
 
 6. [ ] SQL performance and N+1 mitigation
-   - [ ] Audit sqlx queries for N+1 patterns in GraphQL resolvers (batch load with lookahead or dataloader)
+   - [ ] Audit sqlx queries for N+1 patterns in REST handlers (batch load where needed)
    - [ ] Add appropriate B-Tree/GIN indexes (feature_key, team_id, environment_id, context_key)
    - [ ] Use EXPLAIN ANALYZE on heavy queries and document findings
 
-7. [ ] GraphQL API hardening and ergonomics
+7. [ ] REST API hardening and ergonomics
    - [ ] Validate inputs (IDs, enums, pagination params) and return typed errors
    - [ ] Implement consistent pagination (cursor-based where applicable) and default limits
    - [ ] Fix TODOs and replace test stubs with real logic or feature-gated mocks
@@ -74,22 +74,22 @@ A logically ordered, actionable checklist covering architectural and code-level 
     - [ ] Store and rotate session/auth secrets securely; avoid default dev secrets in production
     - [ ] Validate and hash passwords with argon2 parameters from config; add password policy
     - [ ] Implement client credential validation in gRPC handlers; throttle failed attempts
-    - [ ] Add input validation to prevent injection in SQL/GraphQL (use bind parameters everywhere)
+    - [ ] Add input validation to prevent injection in SQL/REST (use bind parameters everywhere)
     - [ ] Add rate limiting on public endpoints (IP + client-based)
 
 14. [ ] Access control and multi-tenancy
-    - [ ] Enforce team scoping on all data access paths (GraphQL and gRPC)
+    - [ ] Enforce team scoping on all data access paths (REST and gRPC)
     - [ ] Add middleware to inject team context derived from session/client credentials
     - [ ] Add tests to ensure cross-team data access is impossible
 
 15. [ ] API documentation and SDKs
-    - [ ] Generate GraphQL schema documentation (SDL) and publish in docs
+    - [ ] Generate OpenAPI documentation and publish in docs
     - [ ] Document gRPC services with examples; provide sample curl/grpcurl invocations
     - [ ] Create a minimal client SDK shape (shared types) in feature-toggle-shared and publish crate docs
 
 16. [ ] Testing strategy
     - [ ] Add unit tests for repositories using sqlx::test or a test DB container
-    - [ ] Integration tests for GraphQL queries/mutations with Actix test server
+    - [ ] Integration tests for REST endpoints with Actix test server
     - [ ] gRPC integration tests for Evaluate/GetFeatureByKey and streaming paths
     - [ ] Golden tests for evaluation-engine inputs/outputs
     - [ ] Seeded test data via migrations/fixtures instead of ad-hoc init.sql
@@ -121,11 +121,11 @@ A logically ordered, actionable checklist covering architectural and code-level 
 
 22. [ ] Pagination and filtering consistency
     - [ ] Standardize pagination (cursor or offset) and expose consistent parameters across list endpoints
-    - [ ] Add total count endpoints or include page info in GraphQL types
+    - [ ] Add total count endpoints or include page info in REST list responses
 
 23. [ ] De-dup shared types and contracts
     - [ ] Move shared DTOs between backend and edge into feature-toggle-shared
-    - [ ] Align evaluation-engine input/output structs with gRPC/GraphQL contracts
+    - [ ] Align evaluation-engine input/output structs with gRPC/REST contracts
 
 24. [ ] Backwards compatibility and migrations
     - [ ] Plan removal of deprecated proto fields (feature_id) and add adapters during transition

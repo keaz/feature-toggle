@@ -1,10 +1,10 @@
 use crate::Error;
 use crate::database::client::{ClientRepository, CreateClient, UpdateClient};
 use crate::database::entity::ClientType as EntityClientType;
-use crate::graphql::schema::{
+use crate::model::{
     Client as GqlClient, ClientType as GqlClientType, CreateClientInput, UpdateClientInput,
 };
-use async_graphql::ID;
+use crate::model::ID;
 use uuid::Uuid;
 
 #[cfg(test)]

@@ -1,5 +1,5 @@
 use actix_web::{delete, get, patch, post, web, HttpMessage, HttpRequest, HttpResponse, Responder};
-use async_graphql::ID;
+use crate::model::ID;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -52,8 +52,8 @@ pub struct UpdateEnvironmentRequest {
     pub environment_type: Option<String>,
 }
 
-impl From<crate::graphql::schema::Environment> for EnvironmentResponse {
-    fn from(env: crate::graphql::schema::Environment) -> Self {
+impl From<crate::model::Environment> for EnvironmentResponse {
+    fn from(env: crate::model::Environment) -> Self {
         Self {
             id: env.id.to_string(),
             name: env.name,
@@ -226,7 +226,7 @@ pub(crate) async fn create_environment(
     let repo = environment_repository_tx(db_pool.get_ref().clone());
     ensure_environment_name_unique(&repo, ID::from(team_uuid), payload.name.as_str(), None).await?;
 
-    let input = crate::graphql::schema::CreateEnvironmentInput {
+    let input = crate::model::CreateEnvironmentInput {
         name: payload.name.clone(),
         active: payload.active,
         environment_type: payload.environment_type.clone(),
@@ -305,7 +305,7 @@ pub(crate) async fn update_environment(
         .await?;
     }
 
-    let input = crate::graphql::schema::UpdateEnvironmentInput {
+    let input = crate::model::UpdateEnvironmentInput {
         name: payload.name.clone(),
         active: payload.active,
         environment_type: payload.environment_type.clone(),
@@ -415,8 +415,8 @@ mod tests {
     use crate::logic::environment::MockEnvironmentLogic;
     use sqlx::postgres::PgPoolOptions;
 
-    fn sample_env(env_id: Uuid, team_id: Uuid) -> crate::graphql::schema::Environment {
-        crate::graphql::schema::Environment {
+    fn sample_env(env_id: Uuid, team_id: Uuid) -> crate::model::Environment {
+        crate::model::Environment {
             id: ID::from(env_id),
             name: "Production".to_string(),
             team_id: ID::from(team_id),

@@ -2,7 +2,7 @@ use crate::database::entity::FeatureType as EntityFeatureType;
 use crate::database::feature::{
     CreateFeature, CreateFeatureStage, FeatureRepository, UpdateFeature,
 };
-use crate::graphql::schema::{
+use crate::model::{
     CreateFeatureInput, CreateFeatureStageInput, CreateRelationshipInput, Feature,
     FeatureType as GraphQLFeatureType, LifecycleStage, UpdateFeatureInput,
 };
@@ -10,7 +10,7 @@ use crate::logic::approval::ApprovalLogic;
 use crate::logic::environment::EnvironmentLogic;
 use crate::logic::stage_builder::{build_stage_relationships, id_to_uuid};
 use crate::Error;
-use async_graphql::ID;
+use crate::model::ID;
 use feature_toggle_shared::constants::StageStatus;
 use uuid::Uuid;
 
@@ -147,23 +147,23 @@ pub trait StageLogic: Send + Sync {
     async fn get_stage_contexts(
         &self,
         stage_id: ID,
-    ) -> Result<Vec<crate::graphql::schema::Context>, Error>;
+    ) -> Result<Vec<crate::model::Context>, Error>;
     async fn set_stage_contexts(
         &self,
         stage_id: ID,
         context_ids: Vec<ID>,
-    ) -> Result<Vec<crate::graphql::schema::Context>, Error>;
+    ) -> Result<Vec<crate::model::Context>, Error>;
 
     // Stage-criteria
     async fn get_stage_criteria(
         &self,
         stage_id: ID,
-    ) -> Result<Vec<crate::graphql::schema::StageCriterion>, Error>;
+    ) -> Result<Vec<crate::model::StageCriterion>, Error>;
     async fn set_stage_criteria(
         &self,
         stage_id: ID,
-        criteria: Vec<crate::graphql::schema::CreateStageCriterionInput>,
-    ) -> Result<Vec<crate::graphql::schema::StageCriterion>, Error>;
+        criteria: Vec<crate::model::CreateStageCriterionInput>,
+    ) -> Result<Vec<crate::model::StageCriterion>, Error>;
 }
 
 /// Deployment workflow and stage change operations
@@ -260,21 +260,21 @@ mockall::mock! {
         async fn get_stage_contexts(
             &self,
             stage_id: ID,
-        ) -> Result<Vec<crate::graphql::schema::Context>, Error>;
+        ) -> Result<Vec<crate::model::Context>, Error>;
         async fn set_stage_contexts(
             &self,
             stage_id: ID,
             context_ids: Vec<ID>,
-        ) -> Result<Vec<crate::graphql::schema::Context>, Error>;
+        ) -> Result<Vec<crate::model::Context>, Error>;
         async fn get_stage_criteria(
             &self,
             stage_id: ID,
-        ) -> Result<Vec<crate::graphql::schema::StageCriterion>, Error>;
+        ) -> Result<Vec<crate::model::StageCriterion>, Error>;
         async fn set_stage_criteria(
             &self,
             stage_id: ID,
-            criteria: Vec<crate::graphql::schema::CreateStageCriterionInput>,
-        ) -> Result<Vec<crate::graphql::schema::StageCriterion>, Error>;
+            criteria: Vec<crate::model::CreateStageCriterionInput>,
+        ) -> Result<Vec<crate::model::StageCriterion>, Error>;
     }
 
     #[async_trait::async_trait]
@@ -383,22 +383,22 @@ impl FeatureLogicImpl {
             v.into_iter()
                 .map(|variant| {
                     let value_type = match variant.value_type {
-                        crate::graphql::schema::VariantValueType::String => {
+                        crate::model::VariantValueType::String => {
                             crate::database::entity::VariantValueType::String
                         }
-                        crate::graphql::schema::VariantValueType::Number => {
+                        crate::model::VariantValueType::Number => {
                             crate::database::entity::VariantValueType::Number
                         }
-                        crate::graphql::schema::VariantValueType::Boolean => {
+                        crate::model::VariantValueType::Boolean => {
                             crate::database::entity::VariantValueType::Boolean
                         }
-                        crate::graphql::schema::VariantValueType::Json => {
+                        crate::model::VariantValueType::Json => {
                             crate::database::entity::VariantValueType::Json
                         }
                     };
                     (
                         variant.control,
-                        variant.value.0,
+                        variant.value,
                         value_type,
                         variant.description,
                     )
@@ -458,22 +458,22 @@ impl FeatureLogicImpl {
             v.into_iter()
                 .map(|variant| {
                     let value_type = match variant.value_type {
-                        crate::graphql::schema::VariantValueType::String => {
+                        crate::model::VariantValueType::String => {
                             crate::database::entity::VariantValueType::String
                         }
-                        crate::graphql::schema::VariantValueType::Number => {
+                        crate::model::VariantValueType::Number => {
                             crate::database::entity::VariantValueType::Number
                         }
-                        crate::graphql::schema::VariantValueType::Boolean => {
+                        crate::model::VariantValueType::Boolean => {
                             crate::database::entity::VariantValueType::Boolean
                         }
-                        crate::graphql::schema::VariantValueType::Json => {
+                        crate::model::VariantValueType::Json => {
                             crate::database::entity::VariantValueType::Json
                         }
                     };
                     (
                         variant.control,
-                        variant.value.0,
+                        variant.value,
                         value_type,
                         variant.description,
                     )
@@ -973,7 +973,7 @@ impl StageLogic for FeatureLogicImpl {
     async fn get_stage_contexts(
         &self,
         stage_id: ID,
-    ) -> Result<Vec<crate::graphql::schema::Context>, Error> {
+    ) -> Result<Vec<crate::model::Context>, Error> {
         let stage_id = id_to_uuid(stage_id)?;
         let list = self.repository.get_stage_contexts(stage_id).await?;
         Ok(list.into_iter().map(map_db_ctx_to_gql).collect())
@@ -983,7 +983,7 @@ impl StageLogic for FeatureLogicImpl {
         &self,
         stage_id: ID,
         context_ids: Vec<ID>,
-    ) -> Result<Vec<crate::graphql::schema::Context>, Error> {
+    ) -> Result<Vec<crate::model::Context>, Error> {
         let stage_id = id_to_uuid(stage_id)?;
         let context_ids: Vec<Uuid> = context_ids
             .into_iter()
@@ -999,7 +999,7 @@ impl StageLogic for FeatureLogicImpl {
     async fn get_stage_criteria(
         &self,
         stage_id: ID,
-    ) -> Result<Vec<crate::graphql::schema::StageCriterion>, Error> {
+    ) -> Result<Vec<crate::model::StageCriterion>, Error> {
         let stage_id = id_to_uuid(stage_id)?;
         let list = self.repository.get_stage_criteria(stage_id).await?;
         Ok(list.into_iter().map(map_db_criterion_to_gql).collect())
@@ -1008,8 +1008,8 @@ impl StageLogic for FeatureLogicImpl {
     async fn set_stage_criteria(
         &self,
         stage_id: ID,
-        criteria: Vec<crate::graphql::schema::CreateStageCriterionInput>,
-    ) -> Result<Vec<crate::graphql::schema::StageCriterion>, Error> {
+        criteria: Vec<crate::model::CreateStageCriterionInput>,
+    ) -> Result<Vec<crate::model::StageCriterion>, Error> {
         let stage_id = id_to_uuid(stage_id)?;
         let create: Result<Vec<crate::database::feature::CreateStageCriterion>, Error> = criteria
             .into_iter()
@@ -1018,10 +1018,10 @@ impl StageLogic for FeatureLogicImpl {
                     Ok(crate::database::feature::CreateStageCriterion {
                         priority: c.priority,
                         variant_selection_mode: match c.variant_selection_mode.unwrap_or_default() {
-                            crate::graphql::schema::VariantSelectionMode::WeightedSplit => {
+                            crate::model::VariantSelectionMode::WeightedSplit => {
                                 crate::database::entity::VariantSelectionMode::WeightedSplit
                             }
-                            crate::graphql::schema::VariantSelectionMode::SpecificVariant => {
+                            crate::model::VariantSelectionMode::SpecificVariant => {
                                 crate::database::entity::VariantSelectionMode::SpecificVariant
                             }
                         },
@@ -1066,11 +1066,11 @@ impl DeploymentLogic for FeatureLogicImpl {
 
         // If no approval gating, validate transition immediately to fail fast before any DB side effects.
         if self.approval_logic.is_none() {
-            if let Err(e) = crate::graphql::validator::feature::validate_stage_transition(
+            if let Err(e) = crate::validation::validate_stage_transition(
                 &stage.status,
                 next_status,
             ) {
-                return Err(Error::InvalidInput(format!("{:?}", e)));
+                return Err(Error::InvalidInput(e));
             }
         }
 
@@ -1087,11 +1087,11 @@ impl DeploymentLogic for FeatureLogicImpl {
                 };
 
                 // Validate the transition to the pending state before further DB work.
-                if let Err(e) = crate::graphql::validator::feature::validate_stage_transition(
+                if let Err(e) = crate::validation::validate_stage_transition(
                     &stage.status,
                     pending_status,
                 ) {
-                    return Err(Error::InvalidInput(format!("{:?}", e)));
+                    return Err(Error::InvalidInput(e));
                 }
 
                 feature_id_for_stage = Some(
@@ -1131,11 +1131,11 @@ impl DeploymentLogic for FeatureLogicImpl {
         }
 
         // No approval gating: validate and apply directly.
-        if let Err(e) = crate::graphql::validator::feature::validate_stage_transition(
+        if let Err(e) = crate::validation::validate_stage_transition(
             &stage.status,
             next_status,
         ) {
-            return Err(Error::InvalidInput(format!("{:?}", e)));
+            return Err(Error::InvalidInput(e));
         }
 
         let feature_id_for_stage = match feature_id_for_stage {
@@ -1315,15 +1315,15 @@ impl FeatureLogic for FeatureLogicImpl {
     }
 }
 
-fn map_db_ctx_to_gql(c: crate::database::entity::Context) -> crate::graphql::schema::Context {
-    crate::graphql::schema::Context {
+fn map_db_ctx_to_gql(c: crate::database::entity::Context) -> crate::model::Context {
+    crate::model::Context {
         id: ID::from(c.id),
         team_id: ID::from(c.team_id),
         key: c.key,
         entries: c
             .entries
             .into_iter()
-            .map(|e| crate::graphql::schema::ContextEntry {
+            .map(|e| crate::model::ContextEntry {
                 id: ID::from(e.id),
                 value: e.value,
             })
@@ -1333,21 +1333,21 @@ fn map_db_ctx_to_gql(c: crate::database::entity::Context) -> crate::graphql::sch
 
 fn map_db_criterion_to_gql(
     sc: crate::database::entity::StageCriterion,
-) -> crate::graphql::schema::StageCriterion {
-    use crate::graphql::schema::RuleOperator;
+) -> crate::model::StageCriterion {
+    use crate::model::RuleOperator;
 
     // Map compound rule groups
     let rule_groups = sc
         .rule_groups
         .into_iter()
-        .map(|group| crate::graphql::schema::CompoundRuleGroup {
+        .map(|group| crate::model::CompoundRuleGroup {
             id: ID::from(group.id),
             logic_operator: match group.logic_operator {
                 crate::database::entity::LogicOperator::And => {
-                    crate::graphql::schema::LogicOperator::And
+                    crate::model::LogicOperator::And
                 }
                 crate::database::entity::LogicOperator::Or => {
-                    crate::graphql::schema::LogicOperator::Or
+                    crate::model::LogicOperator::Or
                 }
             },
             conditions: group
@@ -1375,11 +1375,11 @@ fn map_db_criterion_to_gql(
                         "SEMVERLESSTHAN" | "SEMVER_LESS_THAN" => RuleOperator::SemverLessThan,
                         _ => RuleOperator::In,
                     };
-                    crate::graphql::schema::CompoundRuleCondition {
+                    crate::model::CompoundRuleCondition {
                         id: ID::from(cond.id),
                         context_key: cond.context_key,
                         operator: cond_operator,
-                        value: async_graphql::Json(cond.value),
+                        value: cond.value,
                         order_index: cond.order_index,
                     }
                 })
@@ -1392,7 +1392,7 @@ fn map_db_criterion_to_gql(
         .variant_allocations
         .into_iter()
         .map(|alloc| {
-            crate::graphql::schema::VariantAllocation {
+            crate::model::VariantAllocation {
                 id: ID::from(uuid::Uuid::new_v4()), // Generate ID for GraphQL (not stored in simple version)
                 criteria_id: ID::from(sc.id),
                 variant_control: alloc.variant_control,
@@ -1401,7 +1401,7 @@ fn map_db_criterion_to_gql(
         })
         .collect();
 
-    crate::graphql::schema::StageCriterion {
+    crate::model::StageCriterion {
         id: ID::from(sc.id),
         stage_id: ID::from(sc.stage_id),
         priority: sc.priority,
@@ -1409,10 +1409,10 @@ fn map_db_criterion_to_gql(
         variant_allocations,
         variant_selection_mode: match sc.variant_selection_mode {
             crate::database::entity::VariantSelectionMode::WeightedSplit => {
-                crate::graphql::schema::VariantSelectionMode::WeightedSplit
+                crate::model::VariantSelectionMode::WeightedSplit
             }
             crate::database::entity::VariantSelectionMode::SpecificVariant => {
-                crate::graphql::schema::VariantSelectionMode::SpecificVariant
+                crate::model::VariantSelectionMode::SpecificVariant
             }
         },
         selected_variant_control: sc.selected_variant_control,
@@ -1425,7 +1425,7 @@ mod test {
     use crate::database::activity_log::MockActivityLogRepository;
     use crate::database::entity::{Feature as EntityFeature, FeaturePipelineStage};
     use crate::database::feature::MockFeatureRepository;
-    use crate::graphql::schema::FeatureType;
+    use crate::model::FeatureType;
     use crate::logic::environment::MockEnvironmentLogic;
 
     fn create_mock_activity_log() -> Box<dyn crate::database::activity_log::ActivityLogRepository> {
@@ -1857,7 +1857,7 @@ mod test {
             .expect_get_environment_by_id()
             .times(1)
             .returning(|_| {
-                Ok(crate::graphql::schema::Environment {
+                Ok(crate::model::Environment {
                     id: ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"),
                     name: "Test Environment".to_string(),
                     active: true,
@@ -1945,7 +1945,7 @@ mod test {
             .expect_get_environment_by_id()
             .times(1)
             .returning(|_| {
-                Ok(crate::graphql::schema::Environment {
+                Ok(crate::model::Environment {
                     id: ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"),
                     name: "Test Environment".to_string(),
                     active: true,
@@ -2028,7 +2028,7 @@ mod test {
             .expect_get_environment_by_id()
             .times(1)
             .returning(|_| {
-                Ok(crate::graphql::schema::Environment {
+                Ok(crate::model::Environment {
                     id: ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"),
                     name: "Test Environment".to_string(),
                     active: true,
@@ -2110,7 +2110,7 @@ mod test {
             .expect_get_environment_by_id()
             .times(1)
             .returning(|_| {
-                Ok(crate::graphql::schema::Environment {
+                Ok(crate::model::Environment {
                     id: ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"),
                     name: "Test Environment".to_string(),
                     active: true,
@@ -2193,7 +2193,7 @@ mod test {
             .expect_get_environment_by_id()
             .times(1)
             .returning(|_| {
-                Ok(crate::graphql::schema::Environment {
+                Ok(crate::model::Environment {
                     id: ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"),
                     name: "Test Environment".to_string(),
                     active: true,
@@ -2276,7 +2276,7 @@ mod test {
             .expect_get_environment_by_id()
             .times(1)
             .returning(|_| {
-                Ok(crate::graphql::schema::Environment {
+                Ok(crate::model::Environment {
                     id: ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"),
                     name: "Test Environment".to_string(),
                     active: true,
@@ -2653,7 +2653,7 @@ mod test {
             .get_features_paginated(
                 ID::from(team_id),
                 Some("test".to_string()),
-                Some(crate::graphql::schema::FeatureType::Simple),
+                Some(crate::model::FeatureType::Simple),
                 2,
                 5,
             )

@@ -245,11 +245,11 @@ impl KillSwitchRollbackScheduler {
 mod tests {
     use super::*;
     use crate::database::feature::MockFeatureRepository;
-    use crate::graphql::schema::Feature as GraphQLFeature;
-    use crate::graphql::schema::FeatureType as GraphQLFeatureType;
-    use crate::graphql::schema::LifecycleStage;
+    use crate::model::Feature as GraphQLFeature;
+    use crate::model::FeatureType as GraphQLFeatureType;
+    use crate::model::LifecycleStage;
     use crate::logic::feature::MockFeatureLogic;
-    use async_graphql::ID;
+    use crate::model::ID;
     use chrono::Utc;
 
     const FEATURE_ID: &str = "11111111-1111-1111-1111-111111111111";

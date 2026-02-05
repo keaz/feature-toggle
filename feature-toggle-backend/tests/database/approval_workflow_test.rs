@@ -1,4 +1,4 @@
-use async_graphql::ID;
+use feature_toggle_backend::model::ID;
 use feature_toggle_backend::database::{approval, feature, init_pg_pool, role};
 use feature_toggle_backend::grpc::pb::FeatureUpdate;
 use feature_toggle_backend::logic::approval::ApprovalRequestEvent;

@@ -1,5 +1,5 @@
 use actix_web::{get, patch, post, web, HttpMessage, HttpRequest, HttpResponse, Responder};
-use async_graphql::ID;
+use crate::model::ID;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -126,9 +126,23 @@ fn jwt_user(req: &HttpRequest) -> Result<JwtUser, RestError> {
 }
 
 fn validate_email(value: &str) -> Result<(), RestError> {
-    if async_graphql::validators::email(&value.to_string()).is_err() {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
         return Err(RestError::invalid_input("invalid email"));
     }
+
+    let mut parts = trimmed.split('@');
+    let local = parts.next().unwrap_or("");
+    let domain = parts.next().unwrap_or("");
+
+    if local.is_empty() || domain.is_empty() || parts.next().is_some() {
+        return Err(RestError::invalid_input("invalid email"));
+    }
+
+    if !domain.contains('.') || domain.starts_with('.') || domain.ends_with('.') {
+        return Err(RestError::invalid_input("invalid email"));
+    }
+
     Ok(())
 }
 

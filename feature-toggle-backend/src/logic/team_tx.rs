@@ -7,10 +7,10 @@
 use crate::Error;
 use crate::database::activity_log::{ActivityLogRepository, CreateActivityLog};
 use crate::database::team::{CreateTeam, TeamRepositoryTx, UpdateTeam};
-use crate::graphql::schema::{CreateTeamInput, Team, UpdateTeamInput};
+use crate::model::{CreateTeamInput, Team, UpdateTeamInput};
 use crate::logic::ActorContext;
 use crate::utils::activity_logger::activity_types;
-use async_graphql::ID;
+use crate::model::ID;
 use sqlx::PgConnection;
 use uuid::Uuid;
 

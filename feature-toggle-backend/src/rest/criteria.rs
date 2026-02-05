@@ -1,5 +1,5 @@
 use actix_web::{delete, get, patch, post, put, web, HttpResponse, Responder};
-use async_graphql::ID;
+use crate::model::ID;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -15,7 +15,7 @@ use crate::database::variant_allocations::{
     variant_allocations_repository_tx,
     CreateVariantAllocationInput as DbCreateVariantAllocationInput, VariantAllocationsRepositoryTx,
 };
-use crate::graphql::schema::{
+use crate::model::{
     CompoundRuleCondition as GqlCompoundRuleCondition, CompoundRuleGroup as GqlCompoundRuleGroup,
     CreateRuleConditionInput as GqlCreateRuleConditionInput,
     CreateStageCriterionInput as GqlCreateStageCriterionInput,
@@ -300,7 +300,7 @@ impl From<GqlCompoundRuleCondition> for CompoundRuleConditionResponse {
             id: value.id.to_string(),
             context_key: value.context_key,
             operator: value.operator.into(),
-            value: value.value.0,
+            value: value.value,
             order_index: value.order_index,
         }
     }
@@ -472,7 +472,7 @@ fn map_create_stage_criterion(
                         .map(|cond| GqlCreateRuleConditionInput {
                             context_key: cond.context_key.clone(),
                             operator: cond.operator.into(),
-                            value: async_graphql::Json(cond.value.clone()),
+                            value: cond.value.clone(),
                             order_index: cond.order_index,
                         })
                         .collect(),
@@ -493,8 +493,7 @@ async fn broadcast_feature_update(
 ) {
     if let Ok(db_feature) = feature_repo.get_feature_by_id(feature_id).await {
         if let Ok(full) =
-            crate::graphql::mutation::map_db_feature_to_full_for_broadcast(feature_repo, db_feature)
-                .await
+            crate::broadcast::map_db_feature_to_full_for_broadcast(feature_repo, db_feature).await
         {
             let _ = updates_tx.send(crate::grpc::pb::FeatureUpdate {
                 message_id: uuid::Uuid::new_v4().to_string(),
@@ -902,7 +901,7 @@ mod tests {
                     id: ID::from(Uuid::new_v4()),
                     context_key: "country".to_string(),
                     operator: GqlRuleOperator::Equals,
-                    value: async_graphql::Json(serde_json::Value::String("US".to_string())),
+                    value: serde_json::Value::String("US".to_string()),
                     order_index: 0,
                 }],
             }],

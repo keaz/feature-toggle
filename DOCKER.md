@@ -6,7 +6,7 @@ This document describes how to build and run Docker images for the feature toggl
 
 The system consists of three main components:
 - **PostgreSQL Database**: Stores feature flags, user data, and configurations
-- **Feature Toggle Backend**: Main API server (GraphQL + gRPC) running on port 8080
+- **Feature Toggle Backend**: Main API server (REST + gRPC) running on port 8080
 - **Feature Edge Server**: Lightweight evaluation server running on port 8081
 
 ## Quick Start

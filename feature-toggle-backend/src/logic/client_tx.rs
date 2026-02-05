@@ -8,10 +8,10 @@ use crate::Error;
 use crate::database::activity_log::{ActivityLogRepository, CreateActivityLog};
 use crate::database::client::{ClientRepositoryTx, CreateClient, UpdateClient};
 use crate::database::entity::ClientType as EntityClientType;
-use crate::graphql::schema::{ClientType as GqlClientType, CreateClientInput, UpdateClientInput};
+use crate::model::{ClientType as GqlClientType, CreateClientInput, UpdateClientInput};
 use crate::logic::ActorContext;
 use crate::utils::activity_logger::activity_types;
-use async_graphql::ID;
+use crate::model::ID;
 use sqlx::PgConnection;
 use uuid::Uuid;
 
@@ -42,7 +42,7 @@ pub async fn create_client_in_tx<R>(
     team_id: ID,
     input: CreateClientInput,
     actor: Option<ActorContext>,
-) -> Result<crate::graphql::schema::Client, Error>
+) -> Result<crate::model::Client, Error>
 where
     R: ClientRepositoryTx,
 {
@@ -94,7 +94,7 @@ where
         .map_err(Error::DatabaseError)?;
 
     // Convert entity::Client to schema::Client
-    Ok(crate::graphql::schema::Client {
+    Ok(crate::model::Client {
         id: ID::from(client.id),
         team_id: ID::from(client.team_id),
         name: client.name,
@@ -117,7 +117,7 @@ pub async fn update_client_in_tx<R>(
     id: ID,
     input: UpdateClientInput,
     actor: Option<ActorContext>,
-) -> Result<crate::graphql::schema::Client, Error>
+) -> Result<crate::model::Client, Error>
 where
     R: ClientRepositoryTx,
 {
@@ -162,7 +162,7 @@ where
         .map_err(Error::DatabaseError)?;
 
     // Convert entity::Client to schema::Client
-    Ok(crate::graphql::schema::Client {
+    Ok(crate::model::Client {
         id: ID::from(client.id),
         team_id: ID::from(client.team_id),
         name: client.name,

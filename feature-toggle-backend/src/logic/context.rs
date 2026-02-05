@@ -4,11 +4,11 @@ use crate::database::context::{
 };
 use crate::database::entity;
 use crate::database::feature::FeatureRepository;
-use crate::graphql::schema::{
+use crate::model::{
     Context as GqlContext, ContextEntry as GqlContextEntry, CreateContextInput, UpdateContextInput,
 };
 use crate::logic::stage_builder::id_to_uuid;
-use async_graphql::ID;
+use crate::model::ID;
 use mockall::automock;
 use uuid::Uuid;
 

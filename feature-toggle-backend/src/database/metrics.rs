@@ -13,7 +13,6 @@ use uuid::Uuid;
     PartialEq,
     Eq,
     sqlx::Type,
-    async_graphql::Enum,
     ToSchema,
 )]
 #[sqlx(type_name = "varchar", rename_all = "lowercase")]

@@ -95,7 +95,6 @@ where
             }
 
             let path = req.path().to_string();
-            let is_graphql_post = method == actix_web::http::Method::POST && path == "/graphql";
 
             let is_public_path = path == "/api/v1/health"
                 || path == "/api/v1/openapi.json"
@@ -111,32 +110,8 @@ where
                 return Ok(res.map_into_left_body());
             }
 
-            let mut is_reset_password_request =
+            let is_reset_password_request =
                 path == "/api/v1/auth/reset-password" && method == actix_web::http::Method::POST;
-            if is_graphql_post {
-                // Read body to inspect the operation name (login/createAdmin mutations and applicationStatus query skip JWT validation)
-                let mut body = Vec::new();
-                while let Some(chunk) = req.take_payload().next().await {
-                    body.extend_from_slice(&chunk?);
-                }
-
-                let body_str = String::from_utf8_lossy(&body);
-                let skip_jwt = (body_str.contains("mutation")
-                    && (body_str.contains("login") || body_str.contains("createAdmin")))
-                    || (body_str.contains("query") && body_str.contains("applicationStatus"));
-
-                // Check if this is a resetPassword mutation (needs special handling)
-                is_reset_password_request = body_str.contains("mutation")
-                    && (body_str.contains("resetPassword") || body_str.contains("reset_password"));
-
-                // Restore payload for downstream
-                req.set_payload(actix_web::web::Bytes::from(body.clone()).into());
-
-                if skip_jwt {
-                    let res = service.call(req).await?;
-                    return Ok(res.map_into_left_body());
-                }
-            }
 
             // Check JWT token in Authorization header (or query param for WebSocket)
             let auth_header = req.headers().get("Authorization");
@@ -354,7 +329,7 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn allows_login_mutation_without_token() {
+    async fn allows_login_without_token() {
         let app = test::init_service(
             App::new()
                 .wrap(JwtGuard::new(
@@ -363,15 +338,15 @@ mod tests {
                     test_pool(),
                 ))
                 .route(
-                    "/graphql",
+                    "/api/v1/auth/login",
                     web::post().to(|| async { HttpResponse::Ok().finish() }),
                 ),
         )
         .await;
 
         let req = test::TestRequest::post()
-            .uri("/graphql")
-            .set_payload(r#"{ "query": "mutation { login(input:{}) { id } }" }"#)
+            .uri("/api/v1/auth/login")
+            .set_payload(r#"{"username":"admin","password":"password"}"#)
             .insert_header(("content-type", "application/json"))
             .to_request();
         let resp = test::call_service(&app, req).await;
@@ -379,7 +354,7 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn blocks_graphql_post_without_valid_token() {
+    async fn blocks_protected_request_without_valid_token() {
         let app = test::init_service(
             App::new()
                 .wrap(JwtGuard::new(
@@ -388,15 +363,14 @@ mod tests {
                     test_pool(),
                 ))
                 .route(
-                    "/graphql",
+                    "/api/v1/teams",
                     web::post().to(|| async { HttpResponse::Ok().finish() }),
                 ),
         )
         .await;
 
         let req = test::TestRequest::post()
-            .uri("/graphql")
-            .set_payload(r#"{ "query": "query { features }" }"#)
+            .uri("/api/v1/teams")
             .insert_header(("content-type", "application/json"))
             .to_request();
         let resp = test::call_service(&app, req).await;
@@ -408,7 +382,7 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn allows_graphql_post_with_valid_token() {
+    async fn allows_protected_request_with_valid_token() {
         let secret = "test_secret";
         let user_id = Uuid::new_v4();
         let token = create_jwt_token(user_id, "testuser", false, vec![], secret).unwrap();
@@ -421,15 +395,14 @@ mod tests {
                     test_pool(),
                 ))
                 .route(
-                    "/graphql",
+                    "/api/v1/teams",
                     web::post().to(|| async { HttpResponse::Ok().finish() }),
                 ),
         )
         .await;
 
         let req = test::TestRequest::post()
-            .uri("/graphql")
-            .set_payload(r#"{ "query": "query { features }" }"#)
+            .uri("/api/v1/teams")
             .insert_header(("content-type", "application/json"))
             .insert_header(("Authorization", format!("Bearer {}", token)))
             .to_request();
@@ -452,7 +425,7 @@ mod tests {
                     test_pool(),
                 ))
                 .route(
-                    "/graphql",
+                    "/api/v1/teams",
                     web::post().to(|| async { HttpResponse::Ok().finish() }),
                 ),
         )
@@ -460,14 +433,14 @@ mod tests {
 
         let req = test::TestRequest::default()
             .method(actix_web::http::Method::OPTIONS)
-            .uri("/graphql")
+            .uri("/api/v1/teams")
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_ne!(resp.status(), actix_web::http::StatusCode::UNAUTHORIZED);
     }
 
     #[actix_web::test]
-    async fn allows_logout_mutation_with_valid_token() {
+    async fn allows_logout_with_valid_token() {
         let secret = "test_secret";
         let user_id = Uuid::new_v4();
         let token = create_jwt_token(user_id, "testuser", false, vec![], secret).unwrap();
@@ -480,7 +453,7 @@ mod tests {
                     test_pool(),
                 ))
                 .route(
-                    "/graphql",
+                    "/api/v1/auth/logout",
                     web::post().to(|req: actix_web::HttpRequest| async move {
                         // Check if JWT user data was injected
                         if req.extensions().get::<crate::JwtUser>().is_some() {
@@ -494,8 +467,7 @@ mod tests {
         .await;
 
         let req = test::TestRequest::post()
-            .uri("/graphql")
-            .set_payload(r#"{ "query": "mutation { logout }" }"#)
+            .uri("/api/v1/auth/logout")
             .insert_header(("content-type", "application/json"))
             .insert_header(("Authorization", format!("Bearer {}", token)))
             .to_request();
@@ -566,15 +538,15 @@ mod tests {
                     test_pool(),
                 ))
                 .route(
-                    "/graphql",
+                    "/api/v1/auth/reset-password",
                     web::post().to(|| async { HttpResponse::Ok().json("mutation_allowed") }),
                 ),
         )
         .await;
 
         let req = test::TestRequest::post()
-            .uri("/graphql")
-            .set_payload(r#"{ "query": "mutation { resetPassword(input:{}) }" }"#)
+            .uri("/api/v1/auth/reset-password")
+            .set_payload(r#"{"currentPassword":"temp123","newPassword":"newpass123"}"#)
             .insert_header(("content-type", "application/json"))
             .insert_header(("Authorization", format!("Bearer {}", token)))
             .to_request();
@@ -583,41 +555,6 @@ mod tests {
         // resetPassword mutation should be allowed even for users with temporary passwords
         // Note: This will likely return UNAUTHORIZED due to test pool setup, but that's testing
         // the JWT validation rather than the temporary password check
-        assert!(
-            resp.status() == actix_web::http::StatusCode::UNAUTHORIZED
-                || resp.status().is_success()
-        );
-    }
-
-    #[actix_web::test]
-    async fn test_allows_reset_password_snake_case_mutation() {
-        let secret = "test_secret";
-        let user_id = Uuid::new_v4();
-        let token = create_jwt_token(user_id, "tempuser", false, vec![], secret).unwrap();
-
-        let app = test::init_service(
-            App::new()
-                .wrap(JwtGuard::new(
-                    "http://localhost:3000".to_string(),
-                    mock_jwt_secret_logic(),
-                    test_pool(),
-                ))
-                .route(
-                    "/graphql",
-                    web::post().to(|| async { HttpResponse::Ok().json("mutation_allowed") }),
-                ),
-        )
-        .await;
-
-        let req = test::TestRequest::post()
-            .uri("/graphql")
-            .set_payload(r#"{ "query": "mutation { reset_password(input:{}) }" }"#)
-            .insert_header(("content-type", "application/json"))
-            .insert_header(("Authorization", format!("Bearer {}", token)))
-            .to_request();
-        let resp = test::call_service(&app, req).await;
-
-        // reset_password mutation should also be allowed
         assert!(
             resp.status() == actix_web::http::StatusCode::UNAUTHORIZED
                 || resp.status().is_success()
@@ -634,16 +571,14 @@ mod tests {
                     test_pool(),
                 ))
                 .route(
-                    "/graphql",
-                    web::post().to(|| async { HttpResponse::Ok().finish() }),
+                    "/api/v1/auth/status",
+                    web::get().to(|| async { HttpResponse::Ok().finish() }),
                 ),
         )
         .await;
 
-        let req = test::TestRequest::post()
-            .uri("/graphql")
-            .set_payload(r#"{ "query": "query { applicationStatus { adminConfigured } }" }"#)
-            .insert_header(("content-type", "application/json"))
+        let req = test::TestRequest::get()
+            .uri("/api/v1/auth/status")
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert!(resp.status().is_success());

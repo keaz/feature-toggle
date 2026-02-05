@@ -2,7 +2,7 @@ use crate::Error;
 use crate::database::entity::Role;
 use crate::database::role::RoleRepository;
 use crate::utils::activity_logger;
-use async_graphql::ID;
+use crate::model::ID;
 use mockall::automock;
 use uuid::Uuid;
 

@@ -155,7 +155,7 @@ mod tests {
     use crate::logic::role::MockRoleLogic;
     use crate::logic::user::GqlUser;
     use crate::logic::user::MockUserLogic;
-    use async_graphql::ID;
+    use crate::model::ID;
     use chrono::Utc;
     use mockall::predicate::*;
     use uuid::Uuid;

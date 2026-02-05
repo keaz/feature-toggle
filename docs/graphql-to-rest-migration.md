@@ -15,7 +15,7 @@ Goal: migrate domain-by-domain so each change is small, backend + UI are updated
 Backend
 - [x] Add REST routing module (e.g., src/rest) and register routes in lib.rs
 - [x] Add REST DTOs (serde) decoupled from GraphQL schema
-- [ ] Port GraphQL validation rules to REST validators
+- [x] Port GraphQL validation rules to REST validators
 - [x] Implement consistent error mapping to HTTP JSON responses
 - [x] Add common paging helpers + query parsing helpers
 - [x] Add utoipa OpenAPI docs (OpenApi derives + /openapi.json + Swagger UI endpoint)
@@ -249,19 +249,19 @@ Checkpoint
 
 ## 12) Phase K - Cleanup
 Backend
-- [ ] Remove graphql module (query/mutation/schema/subscription/validator) once parity reached
-- [ ] Remove async-graphql dependencies from Cargo.toml and Cargo.lock
-- [ ] Delete GraphiQL endpoint and /graphql route
-- [ ] Confirm all REST write endpoints use transaction manager pattern before cleanup
+- [x] Remove graphql module (query/mutation/schema/subscription/validator) once parity reached
+- [x] Remove async-graphql dependencies from Cargo.toml and Cargo.lock
+- [x] Delete GraphiQL endpoint and /graphql route
+- [x] Confirm all REST write endpoints use transaction manager pattern before cleanup
 
 Frontend
-- [ ] Remove @apollo/client, graphql, graphql-ws, @graphql-tools/* dependencies
-- [ ] Remove src/graphql/* and Apollo client wiring
-- [ ] Update runtime config keys (GRAPHQL_* -> REST_*)
+- [x] Remove @apollo/client, graphql, graphql-ws, @graphql-tools/* dependencies
+- [x] Remove src/graphql/* and Apollo client wiring
+- [x] Update runtime config keys (GRAPHQL_* -> REST_*)
 
 Docs + scripts
-- [ ] Update populate_test_data.js and perf-test scripts to REST
-- [ ] Update DOCKER.md and other docs referencing /graphql
+- [x] Update populate_test_data.js and perf-test scripts to REST
+- [x] Update DOCKER.md and other docs referencing /graphql
 
 Checkpoint
 - [ ] Commit: GraphQL removal and cleanup

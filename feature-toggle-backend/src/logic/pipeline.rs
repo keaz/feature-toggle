@@ -1,14 +1,14 @@
 use crate::Error;
 use crate::database::entity::DBStage;
 use crate::database::pipeline::{CreatePipeline, CreateStage, PipelineRepository, UpdatePipeline};
-use crate::graphql::schema::{
+use crate::model::{
     CreatePipelineInput, CreateRelationshipInput, CreateStageInput, Environment, Pipeline,
     PipelineRelationship, PipelineStage, UpdatePipelineInput,
 };
 use crate::logic::environment::EnvironmentLogic;
 use crate::logic::stage_builder::{build_stage_relationships, id_to_uuid};
 use crate::logic::{create_relationships, get_environment_map, map_stages};
-use async_graphql::ID;
+use crate::model::ID;
 use uuid::Uuid;
 
 #[cfg(test)]
@@ -464,9 +464,9 @@ mod test {
     use super::*;
     use crate::database::activity_log::{ActivityLogRepository, MockActivityLogRepository};
     use crate::database::pipeline::MockPipelineRepository;
-    use crate::graphql::schema::{CreateRelationshipInput, CreateStageInput};
+    use crate::model::{CreateRelationshipInput, CreateStageInput};
     use crate::logic::environment::MockEnvironmentLogic;
-    use async_graphql::ID;
+    use crate::model::ID;
 
     fn create_mock_activity_log() -> Box<dyn ActivityLogRepository> {
         let mut mock = MockActivityLogRepository::new();

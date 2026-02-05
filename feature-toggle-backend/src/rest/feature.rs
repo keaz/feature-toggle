@@ -1,5 +1,5 @@
 use actix_web::{get, patch, post, web, HttpMessage, HttpRequest, HttpResponse, Responder};
-use async_graphql::ID;
+use crate::model::ID;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -14,17 +14,17 @@ use crate::database::entity::{
 use crate::database::activity_log::ActivityLogRepository;
 use crate::database::feature::{feature_repository_tx, FeatureRepository};
 use crate::database::feature::FeatureRepositoryTx;
-use crate::graphql::mutation::map_db_feature_to_full_for_broadcast;
-use crate::graphql::schema::{
+use crate::broadcast::map_db_feature_to_full_for_broadcast;
+use crate::model::{
     CreateFeatureInput, CreateFeatureStageInput, CreateFeatureVariantInput,
     CreateRelationshipInput, Feature as GqlFeature, FeatureType as GqlFeatureType,
     LifecycleStage as GqlLifecycleStage, UpdateFeatureInput,
     VariantValueType as GqlVariantValueType,
 };
-use crate::graphql::validator::{
+use crate::validation::{
     validate_duplicate_environment_and_index, validate_relationships_and_stages,
+    validate_stage_transition,
 };
-use crate::graphql::validator::feature::validate_stage_transition;
 use crate::logic::approval::{policy_applies, status_requires_interception};
 use crate::logic::authorization::RoleAuthorizer;
 use crate::logic::environment::EnvironmentLogic;
@@ -156,7 +156,7 @@ pub struct FeatureRelationshipResponse {
     pub target_id: i32,
 }
 
-impl crate::graphql::schema::Relationship for FeatureRelationshipResponse {}
+impl crate::model::Relationship for FeatureRelationshipResponse {}
 
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -492,9 +492,9 @@ fn validate_feature_structure(
     relationships: &[CreateRelationshipInput],
 ) -> Result<(), RestError> {
     validate_relationships_and_stages(stages, relationships)
-        .map_err(|err| RestError::invalid_input(err.message.clone()))?;
+        .map_err(RestError::invalid_input)?;
     validate_duplicate_environment_and_index(stages)
-        .map_err(|err| RestError::invalid_input(err.message.clone()))?;
+        .map_err(RestError::invalid_input)?;
     Ok(())
 }
 
@@ -853,7 +853,7 @@ pub(crate) async fn create_feature(
                 .cloned()
                 .map(|variant| CreateFeatureVariantInput {
                     control: variant.control,
-                    value: async_graphql::types::Json(variant.value),
+                    value: variant.value,
                     value_type: GqlVariantValueType::from(variant.value_type),
                     description: variant.description,
                 })
@@ -978,7 +978,7 @@ pub(crate) async fn update_feature(
                 .cloned()
                 .map(|variant| CreateFeatureVariantInput {
                     control: variant.control,
-                    value: async_graphql::types::Json(variant.value),
+                    value: variant.value,
                     value_type: GqlVariantValueType::from(variant.value_type),
                     description: variant.description,
                 })
@@ -1273,7 +1273,7 @@ pub(crate) async fn request_stage_change(
             };
 
             validate_stage_transition(&stage.status, pending_status)
-                .map_err(|e| RestError::invalid_input(format!("{:?}", e)))?;
+                .map_err(RestError::invalid_input)?;
 
             let approval_target_status = match next_status {
                 "DEPLOYMENT_REQUESTED" => StageStatus::DeploymentApproved.as_str(),
@@ -1349,7 +1349,7 @@ pub(crate) async fn request_stage_change(
 
     if approval_request_id.is_none() {
         validate_stage_transition(&stage.status, next_status)
-            .map_err(|e| RestError::invalid_input(format!("{:?}", e)))?;
+            .map_err(RestError::invalid_input)?;
 
         let mut tx = db_pool
             .begin()
@@ -1591,7 +1591,7 @@ mod tests {
     use crate::database::environment::environment_repository;
     use crate::database::feature::{feature_repository, MockFeatureRepository};
     use crate::database::user::user_repository;
-    use crate::graphql::schema::{
+    use crate::model::{
         Feature as GqlFeature, FeatureType as GqlFeatureType, LifecycleStage as GqlLifecycleStage,
     };
     use crate::logic::environment::{environment_logic, MockEnvironmentLogic};
