@@ -112,6 +112,7 @@ pub struct FeatureStage {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[derive(Default)]
 pub enum Operator {
     Equals,
     NotEquals,
@@ -123,29 +124,20 @@ pub enum Operator {
     StartsWith,
     EndsWith,
     Regex,
+    #[default]
     In,
     NotIn,
     SemverGreaterThan,
     SemverLessThan,
 }
 
-impl Default for Operator {
-    fn default() -> Self {
-        Operator::In
-    }
-}
-
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[derive(Default)]
 pub enum VariantSelectionMode {
+    #[default]
     WeightedSplit,
     SpecificVariant,
-}
-
-impl Default for VariantSelectionMode {
-    fn default() -> Self {
-        VariantSelectionMode::WeightedSplit
-    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -273,9 +265,9 @@ fn matches_operator(operator: &Operator, provided: &str, allowed_values: &[Strin
 
         Operator::NotIn => !allowed_values.iter().any(|v| v == provided),
 
-        Operator::Equals => allowed_values.first().map_or(false, |v| v == provided),
+        Operator::Equals => allowed_values.first().is_some_and(|v| v == provided),
 
-        Operator::NotEquals => allowed_values.first().map_or(false, |v| v != provided),
+        Operator::NotEquals => allowed_values.first().is_some_and(|v| v != provided),
 
         Operator::GreaterThan => {
             if let (Ok(provided_num), Some(Ok(allowed_num))) = (
@@ -321,17 +313,15 @@ fn matches_operator(operator: &Operator, provided: &str, allowed_values: &[Strin
             }
         }
 
-        Operator::Contains => allowed_values
-            .first()
-            .map_or(false, |v| provided.contains(v)),
+        Operator::Contains => allowed_values.first().is_some_and(|v| provided.contains(v)),
 
         Operator::StartsWith => allowed_values
             .first()
-            .map_or(false, |v| provided.starts_with(v)),
+            .is_some_and(|v| provided.starts_with(v)),
 
         Operator::EndsWith => allowed_values
             .first()
-            .map_or(false, |v| provided.ends_with(v)),
+            .is_some_and(|v| provided.ends_with(v)),
 
         Operator::Regex => allowed_values
             .first()
@@ -506,10 +496,10 @@ fn passes_stage_criteria(
 }
 
 fn get_variant_value(feature: &Feature, variant_control: Option<String>) -> JsonValue {
-    if let Some(control) = variant_control {
-        if let Some(variant) = feature.variants.iter().find(|v| v.control == control) {
-            return variant.value.clone();
-        }
+    if let Some(control) = variant_control
+        && let Some(variant) = feature.variants.iter().find(|v| v.control == control)
+    {
+        return variant.value.clone();
     }
 
     // Default value if no variant found
@@ -588,7 +578,7 @@ pub fn evaluate(
     }
 
     // Evaluate stage criteria
-    let criteria_result = passes_stage_criteria(&evaluation_context, stage);
+    let criteria_result = passes_stage_criteria(evaluation_context, stage);
 
     if !criteria_result.matched {
         return EvaluationResult {
@@ -603,7 +593,7 @@ pub fn evaluate(
 
     // Feature is enabled, determine variant and value
     let variant = criteria_result.variant;
-    let value = get_variant_value(&feature, variant.clone());
+    let value = get_variant_value(feature, variant.clone());
 
     EvaluationResult {
         flag_key,
@@ -717,12 +707,12 @@ mod tests {
         assert!(matches_operator(
             &Operator::In,
             "admin",
-            &vec!["admin".to_string(), "user".to_string()]
+            &["admin".to_string(), "user".to_string()]
         ));
         assert!(!matches_operator(
             &Operator::In,
             "guest",
-            &vec!["admin".to_string(), "user".to_string()]
+            &["admin".to_string(), "user".to_string()]
         ));
     }
 
@@ -731,12 +721,12 @@ mod tests {
         assert!(matches_operator(
             &Operator::NotIn,
             "guest",
-            &vec!["admin".to_string(), "user".to_string()]
+            &["admin".to_string(), "user".to_string()]
         ));
         assert!(!matches_operator(
             &Operator::NotIn,
             "admin",
-            &vec!["admin".to_string(), "user".to_string()]
+            &["admin".to_string(), "user".to_string()]
         ));
     }
 
@@ -745,12 +735,12 @@ mod tests {
         assert!(matches_operator(
             &Operator::Equals,
             "admin",
-            &vec!["admin".to_string()]
+            &["admin".to_string()]
         ));
         assert!(!matches_operator(
             &Operator::Equals,
             "user",
-            &vec!["admin".to_string()]
+            &["admin".to_string()]
         ));
     }
 
@@ -759,12 +749,12 @@ mod tests {
         assert!(matches_operator(
             &Operator::NotEquals,
             "user",
-            &vec!["admin".to_string()]
+            &["admin".to_string()]
         ));
         assert!(!matches_operator(
             &Operator::NotEquals,
             "admin",
-            &vec!["admin".to_string()]
+            &["admin".to_string()]
         ));
     }
 
@@ -773,23 +763,23 @@ mod tests {
         assert!(matches_operator(
             &Operator::GreaterThan,
             "100",
-            &vec!["50".to_string()]
+            &["50".to_string()]
         ));
         assert!(!matches_operator(
             &Operator::GreaterThan,
             "30",
-            &vec!["50".to_string()]
+            &["50".to_string()]
         ));
         assert!(!matches_operator(
             &Operator::GreaterThan,
             "50",
-            &vec!["50".to_string()]
+            &["50".to_string()]
         ));
         // Test with decimals
         assert!(matches_operator(
             &Operator::GreaterThan,
             "10.5",
-            &vec!["10.2".to_string()]
+            &["10.2".to_string()]
         ));
     }
 
@@ -798,17 +788,17 @@ mod tests {
         assert!(matches_operator(
             &Operator::LessThan,
             "30",
-            &vec!["50".to_string()]
+            &["50".to_string()]
         ));
         assert!(!matches_operator(
             &Operator::LessThan,
             "100",
-            &vec!["50".to_string()]
+            &["50".to_string()]
         ));
         assert!(!matches_operator(
             &Operator::LessThan,
             "50",
-            &vec!["50".to_string()]
+            &["50".to_string()]
         ));
     }
 
@@ -817,17 +807,17 @@ mod tests {
         assert!(matches_operator(
             &Operator::GreaterThanOrEqual,
             "100",
-            &vec!["50".to_string()]
+            &["50".to_string()]
         ));
         assert!(matches_operator(
             &Operator::GreaterThanOrEqual,
             "50",
-            &vec!["50".to_string()]
+            &["50".to_string()]
         ));
         assert!(!matches_operator(
             &Operator::GreaterThanOrEqual,
             "30",
-            &vec!["50".to_string()]
+            &["50".to_string()]
         ));
     }
 
@@ -836,17 +826,17 @@ mod tests {
         assert!(matches_operator(
             &Operator::LessThanOrEqual,
             "30",
-            &vec!["50".to_string()]
+            &["50".to_string()]
         ));
         assert!(matches_operator(
             &Operator::LessThanOrEqual,
             "50",
-            &vec!["50".to_string()]
+            &["50".to_string()]
         ));
         assert!(!matches_operator(
             &Operator::LessThanOrEqual,
             "100",
-            &vec!["50".to_string()]
+            &["50".to_string()]
         ));
     }
 
@@ -855,17 +845,17 @@ mod tests {
         assert!(matches_operator(
             &Operator::Contains,
             "admin@example.com",
-            &vec!["@example.com".to_string()]
+            &["@example.com".to_string()]
         ));
         assert!(matches_operator(
             &Operator::Contains,
             "hello world test",
-            &vec!["world".to_string()]
+            &["world".to_string()]
         ));
         assert!(!matches_operator(
             &Operator::Contains,
             "user@test.com",
-            &vec!["@example.com".to_string()]
+            &["@example.com".to_string()]
         ));
     }
 
@@ -874,12 +864,12 @@ mod tests {
         assert!(matches_operator(
             &Operator::StartsWith,
             "admin@example.com",
-            &vec!["admin".to_string()]
+            &["admin".to_string()]
         ));
         assert!(!matches_operator(
             &Operator::StartsWith,
             "user@example.com",
-            &vec!["admin".to_string()]
+            &["admin".to_string()]
         ));
     }
 
@@ -888,12 +878,12 @@ mod tests {
         assert!(matches_operator(
             &Operator::EndsWith,
             "admin@example.com",
-            &vec![".com".to_string()]
+            &[".com".to_string()]
         ));
         assert!(!matches_operator(
             &Operator::EndsWith,
             "admin@example.org",
-            &vec![".com".to_string()]
+            &[".com".to_string()]
         ));
     }
 
@@ -903,19 +893,19 @@ mod tests {
         assert!(matches_operator(
             &Operator::Regex,
             "test@example.com",
-            &vec![r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$".to_string()]
+            &[r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$".to_string()]
         ));
         assert!(!matches_operator(
             &Operator::Regex,
             "invalid-email",
-            &vec![r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$".to_string()]
+            &[r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$".to_string()]
         ));
 
         // Match phone number pattern
         assert!(matches_operator(
             &Operator::Regex,
             "+1-555-123-4567",
-            &vec![r"^\+\d{1,3}-\d{3}-\d{3}-\d{4}$".to_string()]
+            &[r"^\+\d{1,3}-\d{3}-\d{3}-\d{4}$".to_string()]
         ));
     }
 
@@ -925,7 +915,7 @@ mod tests {
         assert!(!matches_operator(
             &Operator::Regex,
             "test",
-            &vec!["[invalid(".to_string()]
+            &["[invalid(".to_string()]
         ));
     }
 
@@ -934,22 +924,22 @@ mod tests {
         assert!(matches_operator(
             &Operator::SemverGreaterThan,
             "2.0.0",
-            &vec!["1.5.0".to_string()]
+            &["1.5.0".to_string()]
         ));
         assert!(matches_operator(
             &Operator::SemverGreaterThan,
             "1.6.0",
-            &vec!["1.5.0".to_string()]
+            &["1.5.0".to_string()]
         ));
         assert!(!matches_operator(
             &Operator::SemverGreaterThan,
             "1.4.0",
-            &vec!["1.5.0".to_string()]
+            &["1.5.0".to_string()]
         ));
         assert!(!matches_operator(
             &Operator::SemverGreaterThan,
             "1.5.0",
-            &vec!["1.5.0".to_string()]
+            &["1.5.0".to_string()]
         ));
     }
 
@@ -958,22 +948,22 @@ mod tests {
         assert!(matches_operator(
             &Operator::SemverLessThan,
             "1.4.0",
-            &vec!["1.5.0".to_string()]
+            &["1.5.0".to_string()]
         ));
         assert!(matches_operator(
             &Operator::SemverLessThan,
             "0.9.0",
-            &vec!["1.5.0".to_string()]
+            &["1.5.0".to_string()]
         ));
         assert!(!matches_operator(
             &Operator::SemverLessThan,
             "2.0.0",
-            &vec!["1.5.0".to_string()]
+            &["1.5.0".to_string()]
         ));
         assert!(!matches_operator(
             &Operator::SemverLessThan,
             "1.5.0",
-            &vec!["1.5.0".to_string()]
+            &["1.5.0".to_string()]
         ));
     }
 
@@ -983,12 +973,12 @@ mod tests {
         assert!(!matches_operator(
             &Operator::SemverGreaterThan,
             "invalid",
-            &vec!["1.5.0".to_string()]
+            &["1.5.0".to_string()]
         ));
         assert!(!matches_operator(
             &Operator::SemverGreaterThan,
             "1.5.0",
-            &vec!["invalid".to_string()]
+            &["invalid".to_string()]
         ));
     }
 

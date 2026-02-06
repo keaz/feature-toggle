@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 /// Stage status constants to avoid magic strings throughout the codebase
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StageStatus {
@@ -27,24 +29,32 @@ impl StageStatus {
     }
 
     /// Parse string representation back to enum variant
-    pub fn from_str(status: &str) -> Option<Self> {
-        match status {
-            "DEPLOYMENT_REQUESTED" => Some(StageStatus::DeploymentRequested),
-            "DEPLOYMENT_APPROVED" => Some(StageStatus::DeploymentApproved),
-            "DEPLOYMENT_REJECTED" => Some(StageStatus::DeploymentRejected),
-            "DEPLOYED" => Some(StageStatus::Deployed),
-            "ROLLBACK_REQUESTED" => Some(StageStatus::RollbackRequested),
-            "ROLLBACK_APPROVED" => Some(StageStatus::RollbackApproved),
-            "ROLLBACK_REJECTED" => Some(StageStatus::RollbackRejected),
-            "ROLLBACKED" => Some(StageStatus::Rollbacked),
-            _ => None,
-        }
+    pub fn parse(status: &str) -> Option<Self> {
+        status.parse().ok()
     }
 }
 
 impl std::fmt::Display for StageStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_str())
+    }
+}
+
+impl FromStr for StageStatus {
+    type Err = ();
+
+    fn from_str(status: &str) -> Result<Self, Self::Err> {
+        match status {
+            "DEPLOYMENT_REQUESTED" => Ok(StageStatus::DeploymentRequested),
+            "DEPLOYMENT_APPROVED" => Ok(StageStatus::DeploymentApproved),
+            "DEPLOYMENT_REJECTED" => Ok(StageStatus::DeploymentRejected),
+            "DEPLOYED" => Ok(StageStatus::Deployed),
+            "ROLLBACK_REQUESTED" => Ok(StageStatus::RollbackRequested),
+            "ROLLBACK_APPROVED" => Ok(StageStatus::RollbackApproved),
+            "ROLLBACK_REJECTED" => Ok(StageStatus::RollbackRejected),
+            "ROLLBACKED" => Ok(StageStatus::Rollbacked),
+            _ => Err(()),
+        }
     }
 }
 
@@ -69,18 +79,15 @@ mod tests {
     #[test]
     fn test_stage_status_from_str() {
         assert_eq!(
-            StageStatus::from_str("DEPLOYMENT_REQUESTED"),
+            StageStatus::parse("DEPLOYMENT_REQUESTED"),
             Some(StageStatus::DeploymentRequested)
         );
         assert_eq!(
-            StageStatus::from_str("DEPLOYMENT_APPROVED"),
+            StageStatus::parse("DEPLOYMENT_APPROVED"),
             Some(StageStatus::DeploymentApproved)
         );
-        assert_eq!(
-            StageStatus::from_str("DEPLOYED"),
-            Some(StageStatus::Deployed)
-        );
-        assert_eq!(StageStatus::from_str("INVALID"), None);
+        assert_eq!(StageStatus::parse("DEPLOYED"), Some(StageStatus::Deployed));
+        assert_eq!(StageStatus::parse("INVALID"), None);
     }
 
     #[test]
@@ -107,7 +114,7 @@ mod tests {
 
         for status in statuses {
             let str_repr = status.as_str();
-            let parsed = StageStatus::from_str(str_repr).unwrap();
+            let parsed = StageStatus::parse(str_repr).unwrap();
             assert_eq!(status, parsed);
         }
     }

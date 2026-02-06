@@ -2,7 +2,6 @@ use std::rc::Rc;
 
 use actix_web::dev::{Service, ServiceRequest, ServiceResponse, Transform, forward_ready};
 use actix_web::{Error, HttpMessage, HttpResponse};
-use futures_util::StreamExt;
 use futures_util::future::{LocalBoxFuture, Ready, ready};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use serde::{Deserialize, Serialize};
@@ -80,7 +79,7 @@ where
 
     forward_ready!(service);
 
-    fn call(&self, mut req: ServiceRequest) -> Self::Future {
+    fn call(&self, req: ServiceRequest) -> Self::Future {
         let service = self.service.clone();
         let ui_origin = self.ui_origin.clone();
         let jwt_secret_logic = self.jwt_secret_logic.clone();
@@ -141,10 +140,10 @@ where
                     Ok(secret) => secret,
                     Err(e) => {
                         // Log detailed error for debugging multi-instance issues
-                        let hostname = std::env::var("HOSTNAME")
-                            .unwrap_or_else(|_| "unknown".to_string());
-                        let pod_ip = std::env::var("POD_IP")
-                            .unwrap_or_else(|_| "unknown".to_string());
+                        let hostname =
+                            std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown".to_string());
+                        let pod_ip =
+                            std::env::var("POD_IP").unwrap_or_else(|_| "unknown".to_string());
                         log::error!(
                             "Failed to get JWT secret from database - Pod: {}, IP: {}, Error: {:?}, Path: {}",
                             hostname,
@@ -184,7 +183,9 @@ where
                                     if !is_reset_password_request {
                                         let user_repo =
                                             crate::database::user::user_repository(pool.clone());
-                                        if let Ok(user) = user_repo.get_user_by_id(user_id_uuid).await {
+                                        if let Ok(user) =
+                                            user_repo.get_user_by_id(user_id_uuid).await
+                                        {
                                             if user.is_temporary_password {
                                                 // User has temporary password, redirect to password reset
                                                 let target = format!(
@@ -240,8 +241,8 @@ where
                     }
                     Err(e) => {
                         // JWT decode failed (wrong secret, expired, or malformed)
-                        let hostname = std::env::var("HOSTNAME")
-                            .unwrap_or_else(|_| "unknown".to_string());
+                        let hostname =
+                            std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown".to_string());
                         log::debug!("JWT decode failed - Pod: {}, Error: {}", hostname, e);
                     }
                 }

@@ -30,7 +30,7 @@ fn mk_ctx(
 fn stage(
     env: &str,
     enabled: bool,
-    bucketing: Option<&str>,
+    _bucketing: Option<&str>,
     criterias: Vec<StageCriterion>,
 ) -> FeatureStage {
     FeatureStage {

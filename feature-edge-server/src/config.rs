@@ -69,15 +69,11 @@ pub struct GrpcConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum GrpcCompression {
+    #[default]
     None,
     Gzip,
-}
-
-impl Default for GrpcCompression {
-    fn default() -> Self {
-        GrpcCompression::None
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

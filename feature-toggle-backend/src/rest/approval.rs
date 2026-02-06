@@ -1,19 +1,20 @@
-use actix_web::{delete, get, patch, post, web, HttpMessage, HttpRequest, HttpResponse, Responder};
+use actix_web::{HttpMessage, HttpRequest, HttpResponse, Responder, delete, get, patch, post, web};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use crate::JwtUser;
 use crate::database::activity_log::ActivityLogRepository;
 use crate::database::approval::{
-    approval_repository_tx, ApprovalRepository, CreateApprovalPolicyInput, UpdateApprovalPolicyInput,
+    ApprovalRepository, CreateApprovalPolicyInput, UpdateApprovalPolicyInput,
+    approval_repository_tx,
 };
 use crate::database::entity::{ApprovalPolicy, ApprovalRequest, ApprovalStatus, ApprovalVote};
-use crate::logic::approval::ApprovalLogic;
 use crate::logic::ActorContext;
+use crate::logic::approval::ApprovalLogic;
 use crate::rest::error::RestError;
-use crate::rest::pagination::{normalize_pagination, PageMeta, PaginationQuery};
-use crate::JwtUser;
+use crate::rest::pagination::{PageMeta, PaginationQuery, normalize_pagination};
 
 #[derive(Debug, Serialize, Deserialize, ToSchema, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -237,7 +238,7 @@ fn parse_statuses(raw: Option<&str>) -> Result<Option<Vec<ApprovalStatus>>, Rest
             _ => {
                 return Err(RestError::invalid_input(format!(
                     "invalid approval status: {trimmed}"
-                )))
+                )));
             }
         };
         statuses.push(status);
@@ -604,9 +605,9 @@ pub(crate) async fn create_approval_policy(
 
     match result {
         Ok(policy) => {
-            tx.commit().await.map_err(|e| {
-                RestError::internal(format!("Failed to commit transaction: {e}"))
-            })?;
+            tx.commit()
+                .await
+                .map_err(|e| RestError::internal(format!("Failed to commit transaction: {e}")))?;
             Ok(HttpResponse::Created().json(map_policy(policy)))
         }
         Err(err) => {
@@ -699,9 +700,9 @@ pub(crate) async fn update_approval_policy(
 
     match result {
         Ok(policy) => {
-            tx.commit().await.map_err(|e| {
-                RestError::internal(format!("Failed to commit transaction: {e}"))
-            })?;
+            tx.commit()
+                .await
+                .map_err(|e| RestError::internal(format!("Failed to commit transaction: {e}")))?;
             Ok(HttpResponse::Ok().json(map_policy(policy)))
         }
         Err(err) => {
@@ -760,9 +761,9 @@ pub(crate) async fn delete_approval_policy(
 
     match result {
         Ok(_) => {
-            tx.commit().await.map_err(|e| {
-                RestError::internal(format!("Failed to commit transaction: {e}"))
-            })?;
+            tx.commit()
+                .await
+                .map_err(|e| RestError::internal(format!("Failed to commit transaction: {e}")))?;
             Ok(HttpResponse::NoContent().finish())
         }
         Err(err) => {
@@ -787,11 +788,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use actix_web::{http::StatusCode, test, App};
-    use crate::database::approval::MockApprovalRepository;
     use crate::database::activity_log::MockActivityLogRepository;
+    use crate::database::approval::MockApprovalRepository;
     use crate::database::entity::{ApprovalStatus, ApprovalVoteValue};
     use crate::logic::approval::MockApprovalLogic;
+    use actix_web::{App, http::StatusCode, test};
     use chrono::Utc;
     use sqlx::postgres::PgPoolOptions;
 
@@ -860,9 +861,8 @@ mod tests {
         )
         .await;
 
-        let uri = format!(
-            "/api/v1/teams/{team_id}/approval-requests?offset=10&limit=5&statuses=pending"
-        );
+        let uri =
+            format!("/api/v1/teams/{team_id}/approval-requests?offset=10&limit=5&statuses=pending");
         let req = test::TestRequest::get().uri(&uri).to_request();
         let resp = test::call_service(&app, req).await;
 
@@ -904,7 +904,7 @@ mod tests {
         )
         .await;
 
-        let mut req = test::TestRequest::post()
+        let req = test::TestRequest::post()
             .uri(&format!("/api/v1/approval-requests/{request_id}/approve"))
             .set_json(ApprovalActionRequest {
                 comment: Some("Looks good".to_string()),
@@ -939,7 +939,10 @@ mod tests {
         .await;
 
         let req = test::TestRequest::post()
-            .uri(&format!("/api/v1/teams/{}/approval-policies", Uuid::new_v4()))
+            .uri(&format!(
+                "/api/v1/teams/{}/approval-policies",
+                Uuid::new_v4()
+            ))
             .set_json(CreateApprovalPolicyRequest {
                 name: "   ".to_string(),
                 description: None,

@@ -529,41 +529,26 @@ impl PipelineRepository for PipelineRepositoryImpl {
             }
         }
 
-        let tx: Result<Transaction<'static, Postgres>, sqlx::Error> = self.pool.begin().await;
-        if tx.is_err() {
-            return Err(Error::DatabaseError(tx.err().unwrap()));
-        }
-        let mut tx: Transaction<'_, Postgres> = tx.unwrap();
+        let mut tx: Transaction<'_, Postgres> =
+            self.pool.begin().await.map_err(Error::DatabaseError)?;
 
         let id = Uuid::new_v4();
         let result = sqlx::query!(
-        r#"INSERT INTO pipelines (id, name, active, team_id) VALUES ($1, $2, true, $3) RETURNING id"#,
-        id,input.name, input.team_id ).fetch_one(&mut *tx).await;
-
-        let handled_error = handle_error(None, result);
-        match handled_error {
-            Ok(saved_pipeline) => {
-                let stages = self.create_stage(&id, input.stages, &mut tx).await;
-                if stages.is_err() {
-                    let _ = tx.rollback().await;
-                    return Err(stages.err().unwrap());
-                }
-                let _ = tx.commit().await;
-                Ok(saved_pipeline.id)
-            }
-            Err(e) => {
-                let _ = tx.rollback().await;
-                Err(e)
-            }
-        }
+            r#"INSERT INTO pipelines (id, name, active, team_id) VALUES ($1, $2, true, $3) RETURNING id"#,
+            id,
+            input.name,
+            input.team_id
+        )
+        .fetch_one(&mut *tx)
+        .await;
+        let saved_pipeline = handle_error(None, result)?;
+        self.create_stage(&id, input.stages, &mut tx).await?;
+        tx.commit().await.map_err(Error::DatabaseError)?;
+        Ok(saved_pipeline.id)
     }
 
     async fn update_pipeline(&self, input: UpdatePipeline) -> Result<Pipeline, Error> {
-        let tx = self.pool.begin().await;
-        if tx.is_err() {
-            return Err(Error::DatabaseError(tx.err().unwrap()));
-        }
-        let mut tx = tx.unwrap();
+        let mut tx = self.pool.begin().await.map_err(Error::DatabaseError)?;
 
         let existing_env = self.get_pipeline_by_id(input.id).await?;
         let result = sqlx::query!(
@@ -575,32 +560,15 @@ impl PipelineRepository for PipelineRepositoryImpl {
         .execute(&mut *tx)
         .await;
 
-        if result.is_err() {
-            let _ = tx.rollback().await;
-            return Err(Error::DatabaseError(result.err().unwrap()));
-        }
+        handle_error(Some(input.id), result)?;
 
         if !input.stages.is_empty() {
-            let stage_result = self
-                .update_pipeline_stage(&input.id, input.stages, &mut tx)
-                .await;
+            self.update_pipeline_stage(&input.id, input.stages, &mut tx)
+                .await?;
+        }
 
-            if stage_result.is_err() {
-                let _ = tx.rollback().await;
-                return Err(stage_result.err().unwrap());
-            }
-        }
-        let result = handle_error(Some(input.id), result);
-        match result {
-            Ok(_) => {
-                let _ = tx.commit().await;
-                self.get_pipeline_by_id(input.id).await
-            }
-            Err(e) => {
-                let _ = tx.rollback().await;
-                Err(e)
-            }
-        }
+        tx.commit().await.map_err(Error::DatabaseError)?;
+        self.get_pipeline_by_id(input.id).await
     }
 
     async fn delete_pipeline(&self, id: Uuid) -> Result<(), Error> {

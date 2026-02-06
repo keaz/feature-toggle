@@ -178,7 +178,6 @@ mod tests {
     #[tokio::test]
     async fn test_login_user_success() {
         let user = sample_api_user();
-        let user_uuid = Uuid::try_from(user.id.clone()).unwrap();
 
         let mut mock_user_logic = MockUserLogic::new();
         mock_user_logic

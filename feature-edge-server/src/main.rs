@@ -1,5 +1,9 @@
 use actix_web::{App, HttpServer, web};
-use std::{net::SocketAddr, sync::{Arc, atomic::AtomicU64}, time::Duration};
+use std::{
+    net::SocketAddr,
+    sync::{Arc, atomic::AtomicU64},
+    time::Duration,
+};
 use tonic::codec::CompressionEncoding;
 use tonic::transport::Endpoint;
 use tracing::{error, info};
@@ -499,7 +503,7 @@ mod tests {
         let retrieved = mapped_cache.get("test_key").await;
         assert!(retrieved.is_some());
         let retrieved_feature = retrieved.unwrap();
-        assert_eq!(retrieved_feature.enabled, true);
+        assert!(retrieved_feature.enabled);
 
         // Test cache hit (should return the same Arc)
         let retrieved_again = mapped_cache.get("test_key").await.unwrap();
@@ -585,7 +589,7 @@ mod tests {
     #[test]
     fn test_ofrep_evaluation_reasons_are_valid() {
         // Verify all evaluation reasons match OFREP spec (using JSON serialization)
-        let valid_reasons = vec!["STATIC", "TARGETING_MATCH", "SPLIT", "DISABLED", "UNKNOWN"];
+        let valid_reasons = ["STATIC", "TARGETING_MATCH", "SPLIT", "DISABLED", "UNKNOWN"];
 
         // Test that our engine reasons serialize correctly to JSON (SCREAMING_SNAKE_CASE)
         let reason1 = evaluation_engine::EvaluationReason::Static;
@@ -647,7 +651,7 @@ mod tests {
     #[test]
     fn test_ofrep_error_codes_are_valid() {
         // Verify all error codes match OFREP spec (using JSON serialization)
-        let valid_codes = vec![
+        let valid_codes = [
             "PARSE_ERROR",
             "TARGETING_KEY_MISSING",
             "INVALID_CONTEXT",

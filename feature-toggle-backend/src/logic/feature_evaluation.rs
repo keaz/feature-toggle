@@ -511,7 +511,7 @@ mod tests {
                 evaluation.environment_id,
                 evaluation.client_id,
                 evaluation.evaluated_at,
-                evaluation.evaluation_result,
+                evaluation.evaluation_success,
                 evaluation.evaluation_context,
                 evaluation.user_context,
                 evaluation.prior_assignment,

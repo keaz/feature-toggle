@@ -489,14 +489,15 @@ impl ClientRepository for ClientRepositoryImpl {
         if matches!(input.client_type, ClientType::Web) {
             if let Some(origins) = input.web_origins.clone() {
                 for origin in origins {
-                    let _ = sqlx::query!(
+                    sqlx::query!(
                         r#"INSERT INTO client_web_origins (id, client_id, origin) VALUES ($1, $2, $3)"#,
                         Uuid::new_v4(),
                         row.id,
                         origin
                     )
                     .execute(&self.pool)
-                    .await;
+                    .await
+                    .map_err(Error::DatabaseError)?;
                 }
             }
         }
@@ -544,18 +545,20 @@ impl ClientRepository for ClientRepositoryImpl {
         // Update web origins: replace set if provided
         if let Some(origins) = input.web_origins.clone() {
             // wipe then insert
-            let _ = sqlx::query!("DELETE FROM client_web_origins WHERE client_id = $1", id)
+            sqlx::query!("DELETE FROM client_web_origins WHERE client_id = $1", id)
                 .execute(&self.pool)
-                .await;
+                .await
+                .map_err(Error::DatabaseError)?;
             for origin in origins {
-                let _ = sqlx::query!(
+                sqlx::query!(
                     r#"INSERT INTO client_web_origins (id, client_id, origin) VALUES ($1, $2, $3)"#,
                     Uuid::new_v4(),
                     id,
                     origin
                 )
                 .execute(&self.pool)
-                .await;
+                .await
+                .map_err(Error::DatabaseError)?;
             }
         }
 
@@ -698,14 +701,15 @@ impl ClientRepositoryTx for ClientRepositoryImpl {
         if matches!(input.client_type, ClientType::Web) {
             if let Some(origins) = input.web_origins.clone() {
                 for origin in origins {
-                    let _ = sqlx::query!(
+                    sqlx::query!(
                         r#"INSERT INTO client_web_origins (id, client_id, origin) VALUES ($1, $2, $3)"#,
                         Uuid::new_v4(),
                         row.id,
                         origin
                     )
                     .execute(&mut *conn)
-                    .await;
+                    .await
+                    .map_err(Error::DatabaseError)?;
                 }
             }
         }
@@ -758,18 +762,20 @@ impl ClientRepositoryTx for ClientRepositoryImpl {
         // Update web origins: replace set if provided (within transaction)
         if let Some(origins) = input.web_origins.clone() {
             // wipe then insert
-            let _ = sqlx::query!("DELETE FROM client_web_origins WHERE client_id = $1", id)
+            sqlx::query!("DELETE FROM client_web_origins WHERE client_id = $1", id)
                 .execute(&mut *conn)
-                .await;
+                .await
+                .map_err(Error::DatabaseError)?;
             for origin in origins {
-                let _ = sqlx::query!(
+                sqlx::query!(
                     r#"INSERT INTO client_web_origins (id, client_id, origin) VALUES ($1, $2, $3)"#,
                     Uuid::new_v4(),
                     id,
                     origin
                 )
                 .execute(&mut *conn)
-                .await;
+                .await
+                .map_err(Error::DatabaseError)?;
             }
         }
 

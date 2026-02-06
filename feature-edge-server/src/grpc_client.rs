@@ -1,5 +1,5 @@
-use crate::pb;
 use crate::AppState;
+use crate::pb;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -241,11 +241,10 @@ async fn handle_feature_update(app: &AppState, update: pb::FeatureUpdate) {
             }
         }
         x if x == Action::Delete as i32 => {
-            if !update.feature_key.is_empty() {
-                if let Some(feature_id) = app.mapped_cache.delete_by_key(&update.feature_key).await
-                {
-                    app.purge_assignments_for_feature(&feature_id).await;
-                }
+            if !update.feature_key.is_empty()
+                && let Some(feature_id) = app.mapped_cache.delete_by_key(&update.feature_key).await
+            {
+                app.purge_assignments_for_feature(&feature_id).await;
             }
         }
         _ => {}
@@ -365,26 +364,27 @@ pub async fn run_flush_task(app: AppState) {
 
             let client_id = app.client_id.clone();
             let client_secret = app.client_secret.clone();
-            let stream = tokio_stream::iter(
-                dedup.into_values().enumerate().map(move |(idx, a)| pb::UserFlagAssignment {
-                    user_id: a.user_id,
-                    feature_id: a.feature_id,
-                    environment_id: a.environment_id,
-                    assigned: a.assigned,
-                    // Only send credentials on first message
-                    client_id: if idx == 0 {
-                        client_id.clone()
-                    } else {
-                        String::new()
-                    },
-                    client_secret: if idx == 0 {
-                        client_secret.clone()
-                    } else {
-                        String::new()
-                    },
-                    variant: a.variant.unwrap_or_default(),
-                }),
-            );
+            let stream =
+                tokio_stream::iter(dedup.into_values().enumerate().map(move |(idx, a)| {
+                    pb::UserFlagAssignment {
+                        user_id: a.user_id,
+                        feature_id: a.feature_id,
+                        environment_id: a.environment_id,
+                        assigned: a.assigned,
+                        // Only send credentials on first message
+                        client_id: if idx == 0 {
+                            client_id.clone()
+                        } else {
+                            String::new()
+                        },
+                        client_secret: if idx == 0 {
+                            client_secret.clone()
+                        } else {
+                            String::new()
+                        },
+                        variant: a.variant.unwrap_or_default(),
+                    }
+                }));
 
             // Use a cloned client to avoid holding the lock
             let mut client = {
@@ -515,9 +515,7 @@ pub async fn run_evaluation_flush_task(
                     let value_str = match value {
                         serde_json::Value::String(s) => s.clone(),
                         serde_json::Value::Number(n) => n.to_string(),
-                        serde_json::Value::Bool(b) => {
-                            if *b { "true" } else { "false" }.to_string()
-                        }
+                        serde_json::Value::Bool(b) => if *b { "true" } else { "false" }.to_string(),
                         _ => value.to_string(),
                     };
                     proto_context.push(pb::Context {

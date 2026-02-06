@@ -1,7 +1,7 @@
 use crate::grpc_client::{assignment_key, fetch_feature_via_grpc, get_or_fetch_client_info};
 use crate::pb;
 use crate::{AppState, EvaluationEvent};
-use actix_web::{web, HttpResponse, Responder};
+use actix_web::{HttpResponse, Responder, web};
 use evaluation_engine as engine;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::Ordering;
@@ -323,8 +323,7 @@ async fn get_or_fetch_feature(
     let app_clone = app.clone();
     let feature_key_owned = feature_key.to_string();
 
-    let result = app
-        .mapped_cache
+    app.mapped_cache
         .optionally_get_with(feature_key.to_string(), || async move {
             info_log!(
                 "Feature '{}' NOT in cache, fetching from backend via gRPC",
@@ -338,7 +337,7 @@ async fn get_or_fetch_feature(
                 &client_id_owned,
                 &client_secret_owned,
             )
-                .await;
+            .await;
 
             match pb_feature {
                 Some(pf) => {
@@ -372,9 +371,7 @@ async fn get_or_fetch_feature(
                 }
             }
         })
-        .await;
-
-    result
+        .await
 }
 
 /// HTTP handler for feature evaluation
@@ -406,7 +403,7 @@ pub async fn evaluate_handler(
         None => {
             return Err(actix_web::error::ErrorBadGateway(
                 "Failed to fetch client info",
-            ))
+            ));
         }
     };
 
@@ -452,12 +449,12 @@ pub async fn evaluate_handler(
         bucketing_key,
         mut attributes,
     } = req.context;
-    if let Some(req_env) = attributes.get("environment_id").and_then(|v| v.as_str()) {
-        if req_env != environment_id {
-            return Err(actix_web::error::ErrorUnauthorized(
-                "Environment mismatch for client",
-            ));
-        }
+    if let Some(req_env) = attributes.get("environment_id").and_then(|v| v.as_str())
+        && req_env != environment_id
+    {
+        return Err(actix_web::error::ErrorUnauthorized(
+            "Environment mismatch for client",
+        ));
     }
     attributes.remove("environment_id");
 
@@ -575,27 +572,25 @@ pub async fn evaluate_handler(
     // - For simple features (no variant): cache if value is true
     let should_cache_assignment =
         result.variant.is_some() || result.value.as_bool().unwrap_or(false);
-    if should_cache_assignment {
-        if let Some(user_id) = user_id_opt {
-            let key = assignment_key(&user_id, &feature.id, &eval_context.environment_id);
-            app.assigned_cache.insert(
-                key,
-                crate::CachedAssignment {
-                    value: result.value.clone(),
-                    variant: result.variant.clone(),
-                    reason: result.reason.clone(),
-                },
-            );
-            // Lock-free push - no await needed!
-            app.pending_assignments
-                .push(crate::grpc_client::UserAssignment {
-                    user_id,
-                    feature_id: feature.id.clone(),
-                    environment_id: eval_context.environment_id.clone(),
-                    assigned: true,
-                    variant: result.variant.clone(),
-                });
-        }
+    if should_cache_assignment && let Some(user_id) = user_id_opt {
+        let key = assignment_key(&user_id, &feature.id, &eval_context.environment_id);
+        app.assigned_cache.insert(
+            key,
+            crate::CachedAssignment {
+                value: result.value.clone(),
+                variant: result.variant.clone(),
+                reason: result.reason.clone(),
+            },
+        );
+        // Lock-free push - no await needed!
+        app.pending_assignments
+            .push(crate::grpc_client::UserAssignment {
+                user_id,
+                feature_id: feature.id.clone(),
+                environment_id: eval_context.environment_id.clone(),
+                assigned: true,
+                variant: result.variant.clone(),
+            });
     }
 
     // Convert evaluation reason to string using zero-allocation as_str()
@@ -641,22 +636,20 @@ fn extract_auth_from_headers(
     app: &AppState,
 ) -> (String, String) {
     // Try Bearer token first
-    if let Some(auth_header) = http_req.headers().get("authorization") {
-        if let Ok(auth_str) = auth_header.to_str() {
-            if auth_str.starts_with("Bearer ") {
-                let token = &auth_str[7..];
-                // For now, we don't parse JWT - just use the token as client_id
-                // In production, you'd validate the JWT and extract client_id
-                return (token.to_string(), String::new());
-            }
-        }
+    if let Some(auth_header) = http_req.headers().get("authorization")
+        && let Ok(auth_str) = auth_header.to_str()
+        && let Some(token) = auth_str.strip_prefix("Bearer ")
+    {
+        // For now, we don't parse JWT - just use the token as client_id
+        // In production, you'd validate the JWT and extract client_id
+        return (token.to_string(), String::new());
     }
 
     // Try X-API-Key
-    if let Some(api_key) = http_req.headers().get("x-api-key") {
-        if let Ok(key_str) = api_key.to_str() {
-            return (key_str.to_string(), String::new());
-        }
+    if let Some(api_key) = http_req.headers().get("x-api-key")
+        && let Ok(key_str) = api_key.to_str()
+    {
+        return (key_str.to_string(), String::new());
     }
 
     // Fallback to app defaults
@@ -724,7 +717,7 @@ pub async fn ofrep_evaluate_flag(
         None => {
             return Err(actix_web::error::ErrorBadGateway(
                 "Failed to fetch client info",
-            ))
+            ));
         }
     };
 
@@ -765,12 +758,12 @@ pub async fn ofrep_evaluate_flag(
         targeting_key,
         mut attributes,
     } = req.context;
-    if let Some(req_env) = attributes.get("environment_id").and_then(|v| v.as_str()) {
-        if req_env != environment_id {
-            return Err(actix_web::error::ErrorUnauthorized(
-                "Environment mismatch for client",
-            ));
-        }
+    if let Some(req_env) = attributes.get("environment_id").and_then(|v| v.as_str())
+        && req_env != environment_id
+    {
+        return Err(actix_web::error::ErrorUnauthorized(
+            "Environment mismatch for client",
+        ));
     }
     attributes.remove("environment_id");
 

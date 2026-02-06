@@ -1,16 +1,16 @@
+use crate::Error;
 use crate::database::entity::FeatureType as EntityFeatureType;
 use crate::database::feature::{
     CreateFeature, CreateFeatureStage, FeatureRepository, UpdateFeature,
 };
+use crate::logic::approval::ApprovalLogic;
+use crate::logic::environment::EnvironmentLogic;
+use crate::logic::stage_builder::{build_stage_relationships, id_to_uuid};
+use crate::model::ID;
 use crate::model::{
     CreateFeatureInput, CreateFeatureStageInput, CreateRelationshipInput, Feature,
     FeatureType as ModelFeatureType, LifecycleStage, UpdateFeatureInput,
 };
-use crate::logic::approval::ApprovalLogic;
-use crate::logic::environment::EnvironmentLogic;
-use crate::logic::stage_builder::{build_stage_relationships, id_to_uuid};
-use crate::Error;
-use crate::model::ID;
 use feature_toggle_shared::constants::StageStatus;
 use uuid::Uuid;
 
@@ -144,10 +144,7 @@ pub trait FeatureCrudLogic: Send + Sync {
 #[async_trait::async_trait]
 pub trait StageLogic: Send + Sync {
     // Stage-contexts
-    async fn get_stage_contexts(
-        &self,
-        stage_id: ID,
-    ) -> Result<Vec<crate::model::Context>, Error>;
+    async fn get_stage_contexts(&self, stage_id: ID) -> Result<Vec<crate::model::Context>, Error>;
     async fn set_stage_contexts(
         &self,
         stage_id: ID,
@@ -970,10 +967,7 @@ impl FeatureCrudLogic for FeatureLogicImpl {
 
 #[async_trait::async_trait]
 impl StageLogic for FeatureLogicImpl {
-    async fn get_stage_contexts(
-        &self,
-        stage_id: ID,
-    ) -> Result<Vec<crate::model::Context>, Error> {
+    async fn get_stage_contexts(&self, stage_id: ID) -> Result<Vec<crate::model::Context>, Error> {
         let stage_id = id_to_uuid(stage_id)?;
         let list = self.repository.get_stage_contexts(stage_id).await?;
         Ok(list.into_iter().map(map_db_ctx_to_model).collect())
@@ -1066,10 +1060,8 @@ impl DeploymentLogic for FeatureLogicImpl {
 
         // If no approval gating, validate transition immediately to fail fast before any DB side effects.
         if self.approval_logic.is_none() {
-            if let Err(e) = crate::validation::validate_stage_transition(
-                &stage.status,
-                next_status,
-            ) {
+            if let Err(e) = crate::validation::validate_stage_transition(&stage.status, next_status)
+            {
                 return Err(Error::InvalidInput(e));
             }
         }
@@ -1087,10 +1079,9 @@ impl DeploymentLogic for FeatureLogicImpl {
                 };
 
                 // Validate the transition to the pending state before further DB work.
-                if let Err(e) = crate::validation::validate_stage_transition(
-                    &stage.status,
-                    pending_status,
-                ) {
+                if let Err(e) =
+                    crate::validation::validate_stage_transition(&stage.status, pending_status)
+                {
                     return Err(Error::InvalidInput(e));
                 }
 
@@ -1122,8 +1113,7 @@ impl DeploymentLogic for FeatureLogicImpl {
                             return Err(Error::NotFound(stage_uuid));
                         }
                     }
-                    let mut api_feature =
-                        FeatureLogicImpl::map_entity_to_api_feature(db_feature);
+                    let mut api_feature = FeatureLogicImpl::map_entity_to_api_feature(db_feature);
                     api_feature.pending_approval_request_id = Some(ID::from(request.id));
                     return Ok(api_feature);
                 }
@@ -1131,10 +1121,7 @@ impl DeploymentLogic for FeatureLogicImpl {
         }
 
         // No approval gating: validate and apply directly.
-        if let Err(e) = crate::validation::validate_stage_transition(
-            &stage.status,
-            next_status,
-        ) {
+        if let Err(e) = crate::validation::validate_stage_transition(&stage.status, next_status) {
             return Err(Error::InvalidInput(e));
         }
 
@@ -1343,12 +1330,8 @@ fn map_db_criterion_to_model(
         .map(|group| crate::model::CompoundRuleGroup {
             id: ID::from(group.id),
             logic_operator: match group.logic_operator {
-                crate::database::entity::LogicOperator::And => {
-                    crate::model::LogicOperator::And
-                }
-                crate::database::entity::LogicOperator::Or => {
-                    crate::model::LogicOperator::Or
-                }
+                crate::database::entity::LogicOperator::And => crate::model::LogicOperator::And,
+                crate::database::entity::LogicOperator::Or => crate::model::LogicOperator::Or,
             },
             conditions: group
                 .conditions
@@ -1425,8 +1408,8 @@ mod test {
     use crate::database::activity_log::MockActivityLogRepository;
     use crate::database::entity::{Feature as EntityFeature, FeaturePipelineStage};
     use crate::database::feature::MockFeatureRepository;
-    use crate::model::FeatureType;
     use crate::logic::environment::MockEnvironmentLogic;
+    use crate::model::FeatureType;
 
     fn create_mock_activity_log() -> Box<dyn crate::database::activity_log::ActivityLogRepository> {
         let mut mock = MockActivityLogRepository::new();
@@ -1698,10 +1681,7 @@ mod test {
         let feature = result.unwrap();
         assert_eq!(feature.key, NAME);
         assert_eq!(feature.description, Some("Updated description".to_string()));
-        assert!(matches!(
-            feature.feature_type,
-            ModelFeatureType::Contextual
-        ));
+        assert!(matches!(feature.feature_type, ModelFeatureType::Contextual));
     }
 
     #[tokio::test]
@@ -2502,7 +2482,7 @@ mod test {
     fn create_entity_feature_with_stage_status(
         feature_id: Uuid,
         _stage_id: Uuid,
-        status: &str,
+        _status: &str,
     ) -> crate::database::entity::Feature {
         crate::database::entity::Feature {
             id: feature_id,
@@ -2667,7 +2647,7 @@ mod test {
     #[tokio::test]
     async fn test_get_features_paginated_edge_cases() {
         let mut repo = MockFeatureRepository::new();
-        let mut env_logic = MockEnvironmentLogic::new();
+        let env_logic = MockEnvironmentLogic::new();
         let environment_id = Uuid::new_v4();
 
         // Test with page_number = 0 (passed through as-is)
@@ -2745,7 +2725,7 @@ mod test {
     #[tokio::test]
     async fn test_get_features_paginated_zero_page_size() {
         let mut repo = MockFeatureRepository::new();
-        let mut env_logic = MockEnvironmentLogic::new();
+        let env_logic = MockEnvironmentLogic::new();
         let environment_id = Uuid::new_v4();
 
         // Test with zero page_size
@@ -2784,7 +2764,7 @@ mod test {
     #[tokio::test]
     async fn test_get_features_paginated_extreme_values() {
         let mut repo = MockFeatureRepository::new();
-        let mut env_logic = MockEnvironmentLogic::new();
+        let env_logic = MockEnvironmentLogic::new();
         let environment_id = Uuid::new_v4();
 
         // Test with extreme values

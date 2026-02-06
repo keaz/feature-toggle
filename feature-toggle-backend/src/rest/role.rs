@@ -1,14 +1,14 @@
-use actix_web::{delete, get, post, web, HttpMessage, HttpRequest, HttpResponse, Responder};
 use crate::model::ID;
+use actix_web::{HttpMessage, HttpRequest, HttpResponse, Responder, delete, get, post, web};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::logic::role::{ApiRole, RoleLogic};
+use crate::JwtUser;
 use crate::database::activity_log::ActivityLogRepository;
 use crate::database::role::role_repository_tx;
 use crate::logic::ActorContext;
+use crate::logic::role::{ApiRole, RoleLogic};
 use crate::rest::error::RestError;
-use crate::JwtUser;
 
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -71,7 +71,10 @@ pub(crate) async fn list_roles(
 ) -> Result<impl Responder, RestError> {
     let roles = logic.get_all_roles().await.map_err(RestError::from)?;
     Ok(HttpResponse::Ok().json(
-        roles.into_iter().map(RoleResponse::from).collect::<Vec<_>>(),
+        roles
+            .into_iter()
+            .map(RoleResponse::from)
+            .collect::<Vec<_>>(),
     ))
 }
 
@@ -118,9 +121,9 @@ pub(crate) async fn create_role(
 
     match result {
         Ok(role) => {
-            tx.commit().await.map_err(|e| {
-                RestError::internal(format!("Failed to commit transaction: {e}"))
-            })?;
+            tx.commit()
+                .await
+                .map_err(|e| RestError::internal(format!("Failed to commit transaction: {e}")))?;
             Ok(HttpResponse::Created().json(RoleResponse::from(role)))
         }
         Err(err) => {
@@ -176,9 +179,9 @@ pub(crate) async fn delete_role(
 
     match result {
         Ok(_) => {
-            tx.commit().await.map_err(|e| {
-                RestError::internal(format!("Failed to commit transaction: {e}"))
-            })?;
+            tx.commit()
+                .await
+                .map_err(|e| RestError::internal(format!("Failed to commit transaction: {e}")))?;
             Ok(HttpResponse::NoContent().finish())
         }
         Err(err) => {
@@ -197,8 +200,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use actix_web::{App, http::StatusCode, test, web};
     use crate::database::activity_log::PgActivityLogRepository;
+    use actix_web::{App, http::StatusCode, test, web};
     use sqlx::postgres::PgPoolOptions;
 
     fn sample_role() -> ApiRole {
@@ -235,7 +238,7 @@ mod tests {
         )
         .await;
 
-        let mut req = test::TestRequest::post()
+        let req = test::TestRequest::post()
             .uri("/api/v1/roles")
             .set_json(CreateRoleRequest {
                 name: "Role".to_string(),
@@ -270,15 +273,14 @@ mod tests {
         )
         .await;
 
-        let mut req = test::TestRequest::post()
+        let req = test::TestRequest::post()
             .uri("/api/v1/roles")
             .set_json(CreateRoleRequest {
                 name: role_name,
                 description: "Role".to_string(),
             })
             .to_request();
-        let admin_id =
-            uuid::Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").unwrap();
+        let admin_id = uuid::Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").unwrap();
         req.extensions_mut().insert(JwtUser {
             id: admin_id,
             username: "admin".to_string(),

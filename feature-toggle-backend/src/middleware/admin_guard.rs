@@ -5,8 +5,7 @@ use std::sync::{
 };
 
 use actix_web::dev::{Service, ServiceRequest, ServiceResponse, Transform, forward_ready};
-use actix_web::{Error, HttpMessage, HttpResponse};
-use futures_util::StreamExt;
+use actix_web::{Error, HttpResponse};
 use futures_util::future::{LocalBoxFuture, Ready, ready};
 use sqlx::PgPool;
 
@@ -95,7 +94,7 @@ where
 
     forward_ready!(service);
 
-    fn call(&self, mut req: ServiceRequest) -> Self::Future {
+    fn call(&self, req: ServiceRequest) -> Self::Future {
         let service = self.service.clone();
         let pool = self.pool.clone();
         let ui_origin = self.ui_origin.clone();
@@ -190,9 +189,7 @@ mod tests {
                 ),
         )
         .await;
-        let req = test::TestRequest::get()
-            .uri("/api/v1/teams")
-            .to_request();
+        let req = test::TestRequest::get().uri("/api/v1/teams").to_request();
         let resp = test::call_service(&app, req).await;
         assert!(resp.status().is_success());
     }
@@ -224,9 +221,7 @@ mod tests {
                 ),
         )
         .await;
-        let req = test::TestRequest::post()
-            .uri("/api/v1/teams")
-            .to_request();
+        let req = test::TestRequest::post().uri("/api/v1/teams").to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), actix_web::http::StatusCode::UNAUTHORIZED);
         let body: serde_json::Value = test::read_body_json(resp).await;
@@ -304,10 +299,7 @@ mod tests {
         // GET non-REST (guarded)
         let req_get = test::TestRequest::get().uri("/other").to_request();
         let resp_get = test::call_service(&app, req_get).await;
-        assert_eq!(
-            resp_get.status(),
-            actix_web::http::StatusCode::UNAUTHORIZED
-        );
+        assert_eq!(resp_get.status(), actix_web::http::StatusCode::UNAUTHORIZED);
 
         // POST non-REST (guarded)
         let req_post = test::TestRequest::post()

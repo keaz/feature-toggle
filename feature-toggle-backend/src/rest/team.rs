@@ -1,16 +1,16 @@
-use actix_web::{get, patch, post, web, HttpMessage, HttpRequest, HttpResponse, Responder};
 use crate::model::ID;
+use actix_web::{HttpMessage, HttpRequest, HttpResponse, Responder, get, patch, post, web};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use crate::JwtUser;
 use crate::database::activity_log::ActivityLogRepository;
-use crate::database::team::{team_repository_tx, TeamRepository};
+use crate::database::team::{TeamRepository, team_repository_tx};
+use crate::logic::ActorContext;
 use crate::logic::team::TeamLogic;
 use crate::logic::user::UserLogic;
-use crate::logic::ActorContext;
 use crate::rest::error::RestError;
-use crate::JwtUser;
 
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -145,7 +145,10 @@ pub(crate) async fn list_teams(
     };
 
     Ok(HttpResponse::Ok().json(
-        teams.into_iter().map(TeamResponse::from).collect::<Vec<_>>(),
+        teams
+            .into_iter()
+            .map(TeamResponse::from)
+            .collect::<Vec<_>>(),
     ))
 }
 
@@ -200,9 +203,9 @@ pub(crate) async fn create_team(
 
     match result {
         Ok(team) => {
-            tx.commit().await.map_err(|e| {
-                RestError::internal(format!("Failed to commit transaction: {e}"))
-            })?;
+            tx.commit()
+                .await
+                .map_err(|e| RestError::internal(format!("Failed to commit transaction: {e}")))?;
             Ok(HttpResponse::Created().json(TeamResponse::from(team)))
         }
         Err(err) => {
@@ -271,9 +274,9 @@ pub(crate) async fn update_team(
 
     match result {
         Ok(team) => {
-            tx.commit().await.map_err(|e| {
-                RestError::internal(format!("Failed to commit transaction: {e}"))
-            })?;
+            tx.commit()
+                .await
+                .map_err(|e| RestError::internal(format!("Failed to commit transaction: {e}")))?;
             Ok(HttpResponse::Ok().json(TeamResponse::from(team)))
         }
         Err(err) => {
@@ -292,10 +295,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use actix_web::{App, http::StatusCode, test, web};
     use crate::database::activity_log::PgActivityLogRepository;
     use crate::logic::team::MockTeamLogic;
     use crate::logic::user::MockUserLogic;
+    use actix_web::{App, http::StatusCode, test, web};
     use sqlx::postgres::PgPoolOptions;
 
     fn sample_team(team_id: Uuid) -> crate::model::Team {
@@ -355,7 +358,7 @@ mod tests {
         )
         .await;
 
-        let mut req = test::TestRequest::get().uri("/api/v1/teams").to_request();
+        let req = test::TestRequest::get().uri("/api/v1/teams").to_request();
         req.extensions_mut().insert(JwtUser {
             id: Uuid::new_v4(),
             username: "admin".to_string(),

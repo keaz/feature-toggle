@@ -1,11 +1,11 @@
+pub mod broadcast;
 pub mod cluster;
 mod config;
 pub mod database;
-pub mod broadcast;
 pub mod grpc;
 pub mod logic;
-pub mod model;
 mod middleware;
+pub mod model;
 pub mod rest;
 pub mod scheduler;
 pub mod streaming;
@@ -20,7 +20,7 @@ use actix_cors::Cors;
 use actix_web::error::{
     ErrorBadRequest, ErrorConflict, ErrorForbidden, ErrorInternalServerError, ErrorUnauthorized,
 };
-use actix_web::{guard, App, HttpMessage, HttpRequest, HttpResponse, HttpServer, Result, web};
+use actix_web::{App, HttpResponse, HttpServer, Result, guard, web};
 use chrono::{DateTime, Utc};
 use log::error;
 use std::sync::Arc;
@@ -50,11 +50,11 @@ pub async fn run() -> std::io::Result<()> {
     // Initialize activity log repository (shared across all logic layers)
     let activity_log_repository = database::activity_log::activity_log_repository(db_pool.clone());
     // Wrap in Arc for thread-safe cloning in HttpServer closure
-    let activity_log_repository_arc = Arc::new(activity_log_repository.clone_box());
+    let _activity_log_repository_arc = Arc::new(activity_log_repository.clone_box());
 
     // Initialize feature repository (needed for entity resolution in activity logs)
     let feature_repository = database::feature::feature_repository(db_pool.clone());
-    let feature_repository_arc = Arc::new(feature_repository.clone_box());
+    let _feature_repository_arc = Arc::new(feature_repository.clone_box());
 
     let environment_repository = database::environment::environment_repository(db_pool.clone());
     let variant_allocations_repository =

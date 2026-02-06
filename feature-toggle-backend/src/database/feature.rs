@@ -781,10 +781,7 @@ impl FeatureRepositoryImpl {
         .fetch_one(&mut *tx)
         .await;
 
-        let handled_error = handle_error(None, result);
-        if handled_error.is_err() {
-            return Err(handled_error.err().unwrap());
-        }
+        handle_error(None, result)?;
 
         Ok(id)
     }
@@ -834,11 +831,7 @@ impl FeatureRepositoryImpl {
         .execute(&mut *tx)
         .await;
 
-        if result.is_err() {
-            return Err(Error::DatabaseError(result.err().unwrap()));
-        }
-
-        Ok(result.unwrap())
+        result.map_err(Error::DatabaseError)
     }
 }
 
@@ -1412,107 +1405,57 @@ impl FeatureRepository for FeatureRepositoryImpl {
     async fn create_feature(&self, input: CreateFeature) -> Result<Uuid, Error> {
         self.check_feature_exists(&input).await?;
 
-        let tx: Result<Transaction<'static, Postgres>, sqlx::Error> = self.pool.begin().await;
-        if tx.is_err() {
-            return Err(Error::DatabaseError(tx.err().unwrap()));
-        }
-        let mut tx: Transaction<'_, Postgres> = tx.unwrap();
+        let mut tx: Transaction<'_, Postgres> =
+            self.pool.begin().await.map_err(Error::DatabaseError)?;
 
-        let saved_feature = Self::save_feature(&input, &mut tx).await;
-        match saved_feature {
-            Ok(id) => {
-                // Create stages
-                let stages = self.create_feature_stage(&id, input.stages, &mut tx).await;
-                if stages.is_err() {
-                    let _ = tx.rollback().await;
-                    return Err(stages.err().unwrap());
-                }
+        let id = Self::save_feature(&input, &mut tx).await?;
 
-                // Create dependencies
-                let dependencies = self
-                    .create_feature_dependencies(&id, input.dependencies, &mut tx)
-                    .await;
-                if dependencies.is_err() {
-                    let _ = tx.rollback().await;
-                    return Err(dependencies.err().unwrap());
-                }
+        // Create stages
+        self.create_feature_stage(&id, input.stages, &mut tx)
+            .await?;
 
-                // Create variants if provided
-                if let Some(variants) = input.variants {
-                    if !variants.is_empty() {
-                        let variants_result =
-                            self.create_feature_variants(&mut tx, id, variants).await;
-                        if variants_result.is_err() {
-                            let _ = tx.rollback().await;
-                            return Err(variants_result.err().unwrap());
-                        }
-                    }
-                }
+        // Create dependencies
+        self.create_feature_dependencies(&id, input.dependencies, &mut tx)
+            .await?;
 
-                let _ = tx.commit().await;
-                Ok(id)
-            }
-            Err(e) => {
-                let _ = tx.rollback().await;
-                Err(e)
+        // Create variants if provided
+        if let Some(variants) = input.variants {
+            if !variants.is_empty() {
+                self.create_feature_variants(&mut tx, id, variants).await?;
             }
         }
+
+        tx.commit().await.map_err(Error::DatabaseError)?;
+        Ok(id)
     }
 
     async fn update_feature(&self, input: UpdateFeature) -> Result<Feature, Error> {
-        let tx = self.pool.begin().await;
-        if tx.is_err() {
-            return Err(Error::DatabaseError(tx.err().unwrap()));
-        }
-        let mut tx = tx.unwrap();
+        let mut tx = self.pool.begin().await.map_err(Error::DatabaseError)?;
 
         // Update feature
-        let result = self.update_feature(&input, &mut tx).await;
-        if result.is_err() {
-            let _ = tx.rollback().await;
-            return Err(result.err().unwrap());
-        }
+        self.update_feature(&input, &mut tx).await?;
 
         // Update stages
-        let stage_result = self
-            .update_feature_stage(&input.id, input.stages, &mut tx)
-            .await;
-        if stage_result.is_err() {
-            let _ = tx.rollback().await;
-            return Err(stage_result.err().unwrap());
-        }
+        self.update_feature_stage(&input.id, input.stages, &mut tx)
+            .await?;
 
         // Update dependencies
-        let dependencies_result = self
-            .update_feature_dependencies(&input.id, input.dependencies, &mut tx)
-            .await;
-        if dependencies_result.is_err() {
-            let _ = tx.rollback().await;
-            return Err(dependencies_result.err().unwrap());
-        }
+        self.update_feature_dependencies(&input.id, input.dependencies, &mut tx)
+            .await?;
 
         // Update variants if provided (replace all)
         if let Some(variants) = input.variants {
             // Delete existing variants
-            let delete_result = self.delete_feature_variants(&mut tx, input.id).await;
-            if delete_result.is_err() {
-                let _ = tx.rollback().await;
-                return Err(delete_result.err().unwrap());
-            }
+            self.delete_feature_variants(&mut tx, input.id).await?;
 
             // Create new variants
             if !variants.is_empty() {
-                let create_result = self
-                    .create_feature_variants(&mut tx, input.id, variants)
-                    .await;
-                if create_result.is_err() {
-                    let _ = tx.rollback().await;
-                    return Err(create_result.err().unwrap());
-                }
+                self.create_feature_variants(&mut tx, input.id, variants)
+                    .await?;
             }
         }
 
-        let _ = tx.commit().await;
+        tx.commit().await.map_err(Error::DatabaseError)?;
         self.get_feature_by_id(input.id).await
     }
 

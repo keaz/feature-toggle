@@ -245,11 +245,11 @@ impl KillSwitchRollbackScheduler {
 mod tests {
     use super::*;
     use crate::database::feature::MockFeatureRepository;
+    use crate::logic::feature::MockFeatureLogic;
     use crate::model::Feature as ModelFeature;
     use crate::model::FeatureType as ModelFeatureType;
-    use crate::model::LifecycleStage;
-    use crate::logic::feature::MockFeatureLogic;
     use crate::model::ID;
+    use crate::model::LifecycleStage;
     use chrono::Utc;
 
     const FEATURE_ID: &str = "11111111-1111-1111-1111-111111111111";
@@ -337,7 +337,7 @@ mod tests {
             .times(1)
             .returning(|| Ok(vec![]));
 
-        let mut repo = MockFeatureRepository::new();
+        let repo = MockFeatureRepository::new();
         let pool = sqlx::PgPool::connect_lazy("postgres://unused").unwrap();
         let (tx, _rx) = tokio::sync::broadcast::channel(4);
 
@@ -366,7 +366,7 @@ mod tests {
             .withf(|id, actor| id == &ID::from(FEATURE_ID) && actor.is_none())
             .returning(|_, _| Err(crate::Error::NotFound(uuid::Uuid::new_v4())));
 
-        let mut repo = MockFeatureRepository::new();
+        let repo = MockFeatureRepository::new();
         let pool = sqlx::PgPool::connect_lazy("postgres://unused").unwrap();
         let (tx, _rx) = tokio::sync::broadcast::channel(4);
 
