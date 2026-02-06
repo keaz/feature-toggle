@@ -40,7 +40,7 @@ pub struct ActivityLogFilter {
     pub to_date: Option<DateTime<Utc>>,
     pub limit: Option<i32>,
     pub offset: Option<i32>,
-    /// Optional team filter (best-effort, applied in GraphQL layer where entity lookups are available)
+    /// Optional team filter (best-effort; enforced at the API/logic layer where entity lookups are available)
     pub team_id: Option<Uuid>,
 }
 

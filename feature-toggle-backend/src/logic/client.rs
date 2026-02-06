@@ -2,7 +2,7 @@ use crate::Error;
 use crate::database::client::{ClientRepository, CreateClient, UpdateClient};
 use crate::database::entity::ClientType as EntityClientType;
 use crate::model::{
-    Client as GqlClient, ClientType as GqlClientType, CreateClientInput, UpdateClientInput,
+    Client as ModelClient, ClientType as ModelClientType, CreateClientInput, UpdateClientInput,
 };
 use crate::model::ID;
 use uuid::Uuid;
@@ -14,46 +14,46 @@ use mockall::automock;
 #[async_trait::async_trait]
 pub trait ClientLogic: Send + Sync {
     fn clone_box(&self) -> Box<dyn ClientLogic>;
-    fn map_entity_to_graphql_type(&self, t: EntityClientType) -> GqlClientType;
-    fn map_graphql_to_entity_type(&self, t: GqlClientType) -> EntityClientType;
-    async fn get_client_by_id(&self, id: ID) -> Result<GqlClient, Error>;
+    fn map_entity_to_api_type(&self, t: EntityClientType) -> ModelClientType;
+    fn map_api_to_entity_type(&self, t: ModelClientType) -> EntityClientType;
+    async fn get_client_by_id(&self, id: ID) -> Result<ModelClient, Error>;
     async fn get_clients(
         &self,
         team_id: ID,
         name: Option<String>,
         enabled: Option<bool>,
-        client_type: Option<GqlClientType>,
-    ) -> Result<Vec<GqlClient>, Error>;
+        client_type: Option<ModelClientType>,
+    ) -> Result<Vec<ModelClient>, Error>;
     async fn get_clients_paginated(
         &self,
         team_id: ID,
         name: Option<String>,
         enabled: Option<bool>,
-        client_type: Option<GqlClientType>,
+        client_type: Option<ModelClientType>,
         page_number: i32,
         page_size: i32,
-    ) -> Result<(Vec<GqlClient>, i64), Error>;
+    ) -> Result<(Vec<ModelClient>, i64), Error>;
     async fn get_clients_with_offset(
         &self,
         team_id: ID,
         name: Option<String>,
         enabled: Option<bool>,
-        client_type: Option<GqlClientType>,
+        client_type: Option<ModelClientType>,
         offset: i64,
         limit: i64,
-    ) -> Result<(Vec<GqlClient>, i64), Error>;
+    ) -> Result<(Vec<ModelClient>, i64), Error>;
     async fn create_client(
         &self,
         team_id: ID,
         input: CreateClientInput,
         actor: Option<crate::logic::ActorContext>,
-    ) -> Result<GqlClient, Error>;
+    ) -> Result<ModelClient, Error>;
     async fn update_client(
         &self,
         id: ID,
         input: UpdateClientInput,
         actor: Option<crate::logic::ActorContext>,
-    ) -> Result<GqlClient, Error>;
+    ) -> Result<ModelClient, Error>;
     async fn delete_client(
         &self,
         id: ID,
@@ -101,31 +101,31 @@ impl ClientLogic for ClientLogicImpl {
         Box::new(self.clone())
     }
 
-    fn map_entity_to_graphql_type(&self, t: EntityClientType) -> GqlClientType {
+    fn map_entity_to_api_type(&self, t: EntityClientType) -> ModelClientType {
         match t {
-            EntityClientType::Web => GqlClientType::Web,
-            EntityClientType::Backend => GqlClientType::Backend,
+            EntityClientType::Web => ModelClientType::Web,
+            EntityClientType::Backend => ModelClientType::Backend,
         }
     }
 
-    fn map_graphql_to_entity_type(&self, t: GqlClientType) -> EntityClientType {
+    fn map_api_to_entity_type(&self, t: ModelClientType) -> EntityClientType {
         match t {
-            GqlClientType::Web => EntityClientType::Web,
-            GqlClientType::Backend => EntityClientType::Backend,
+            ModelClientType::Web => EntityClientType::Web,
+            ModelClientType::Backend => EntityClientType::Backend,
         }
     }
 
-    async fn get_client_by_id(&self, id: ID) -> Result<GqlClient, Error> {
+    async fn get_client_by_id(&self, id: ID) -> Result<ModelClient, Error> {
         let id =
             Uuid::parse_str(&id.to_string()).map_err(|e| Error::InvalidInput(e.to_string()))?;
         let c = self.repository.get_client_by_id(id).await?;
-        Ok(GqlClient {
+        Ok(ModelClient {
             id: ID::from(c.id.to_string()),
             team_id: ID::from(c.team_id.to_string()),
             name: c.name,
             description: c.description,
             enabled: c.enabled,
-            client_type: self.map_entity_to_graphql_type(c.client_type),
+            client_type: self.map_entity_to_api_type(c.client_type),
             api_key: c.api_key,
             web_origins: c.web_origins.unwrap_or_default(),
         })
@@ -136,24 +136,24 @@ impl ClientLogic for ClientLogicImpl {
         team_id: ID,
         name: Option<String>,
         enabled: Option<bool>,
-        client_type: Option<GqlClientType>,
-    ) -> Result<Vec<GqlClient>, Error> {
+        client_type: Option<ModelClientType>,
+    ) -> Result<Vec<ModelClient>, Error> {
         let team_id = Uuid::parse_str(&team_id.to_string())
             .map_err(|e| Error::InvalidInput(e.to_string()))?;
-        let ct = client_type.map(|t| self.map_graphql_to_entity_type(t));
+        let ct = client_type.map(|t| self.map_api_to_entity_type(t));
         let list = self
             .repository
             .get_clients(team_id, name, enabled, ct)
             .await?;
         Ok(list
             .into_iter()
-            .map(|c| GqlClient {
+            .map(|c| ModelClient {
                 id: ID::from(c.id.to_string()),
                 team_id: ID::from(c.team_id.to_string()),
                 name: c.name,
                 description: c.description,
                 enabled: c.enabled,
-                client_type: self.map_entity_to_graphql_type(c.client_type),
+                client_type: self.map_entity_to_api_type(c.client_type),
                 api_key: c.api_key,
                 web_origins: c.web_origins.unwrap_or_default(),
             })
@@ -165,26 +165,26 @@ impl ClientLogic for ClientLogicImpl {
         team_id: ID,
         name: Option<String>,
         enabled: Option<bool>,
-        client_type: Option<GqlClientType>,
+        client_type: Option<ModelClientType>,
         page_number: i32,
         page_size: i32,
-    ) -> Result<(Vec<GqlClient>, i64), Error> {
+    ) -> Result<(Vec<ModelClient>, i64), Error> {
         let team_id = Uuid::parse_str(&team_id.to_string())
             .map_err(|e| Error::InvalidInput(e.to_string()))?;
-        let ct = client_type.map(|t| self.map_graphql_to_entity_type(t));
+        let ct = client_type.map(|t| self.map_api_to_entity_type(t));
         let (list, total) = self
             .repository
             .get_clients_paginated(team_id, name, enabled, ct, page_number, page_size)
             .await?;
         let clients = list
             .into_iter()
-            .map(|c| GqlClient {
+            .map(|c| ModelClient {
                 id: ID::from(c.id.to_string()),
                 team_id: ID::from(c.team_id.to_string()),
                 name: c.name,
                 description: c.description,
                 enabled: c.enabled,
-                client_type: self.map_entity_to_graphql_type(c.client_type),
+                client_type: self.map_entity_to_api_type(c.client_type),
                 api_key: c.api_key,
                 web_origins: c.web_origins.unwrap_or_default(),
             })
@@ -197,26 +197,26 @@ impl ClientLogic for ClientLogicImpl {
         team_id: ID,
         name: Option<String>,
         enabled: Option<bool>,
-        client_type: Option<GqlClientType>,
+        client_type: Option<ModelClientType>,
         offset: i64,
         limit: i64,
-    ) -> Result<(Vec<GqlClient>, i64), Error> {
+    ) -> Result<(Vec<ModelClient>, i64), Error> {
         let team_id = Uuid::parse_str(&team_id.to_string())
             .map_err(|e| Error::InvalidInput(e.to_string()))?;
-        let ct = client_type.map(|t| self.map_graphql_to_entity_type(t));
+        let ct = client_type.map(|t| self.map_api_to_entity_type(t));
         let (list, total) = self
             .repository
             .get_clients_with_offset(team_id, name, enabled, ct, offset, limit)
             .await?;
         let clients = list
             .into_iter()
-            .map(|c| GqlClient {
+            .map(|c| ModelClient {
                 id: ID::from(c.id.to_string()),
                 team_id: ID::from(c.team_id.to_string()),
                 name: c.name,
                 description: c.description,
                 enabled: c.enabled,
-                client_type: self.map_entity_to_graphql_type(c.client_type),
+                client_type: self.map_entity_to_api_type(c.client_type),
                 api_key: c.api_key,
                 web_origins: c.web_origins.unwrap_or_default(),
             })
@@ -229,12 +229,12 @@ impl ClientLogic for ClientLogicImpl {
         team_id: ID,
         input: CreateClientInput,
         actor: Option<crate::logic::ActorContext>,
-    ) -> Result<GqlClient, Error> {
+    ) -> Result<ModelClient, Error> {
         let team_id = Uuid::parse_str(&team_id.to_string())
             .map_err(|e| Error::InvalidInput(e.to_string()))?;
         // Validation rules
         match input.client_type {
-            GqlClientType::Web => {
+            ModelClientType::Web => {
                 if input
                     .web_origins
                     .as_ref()
@@ -246,7 +246,7 @@ impl ClientLogic for ClientLogicImpl {
                     ));
                 }
             }
-            GqlClientType::Backend => {
+            ModelClientType::Backend => {
                 if let Some(origins) = &input.web_origins
                     && !origins.is_empty()
                 {
@@ -261,7 +261,7 @@ impl ClientLogic for ClientLogicImpl {
             name: input.name.clone(),
             description: input.description,
             enabled: input.enabled.unwrap_or(true),
-            client_type: self.map_graphql_to_entity_type(input.client_type),
+            client_type: self.map_api_to_entity_type(input.client_type),
             web_origins: input.web_origins,
         };
         let c = self.repository.create_client(team_id, create).await?;
@@ -289,13 +289,13 @@ impl ClientLogic for ClientLogicImpl {
         )
         .await;
 
-        Ok(GqlClient {
+        Ok(ModelClient {
             id: ID::from(c.id.to_string()),
             team_id: ID::from(c.team_id.to_string()),
             name: c.name,
             description: c.description,
             enabled: c.enabled,
-            client_type: self.map_entity_to_graphql_type(c.client_type),
+            client_type: self.map_entity_to_api_type(c.client_type),
             api_key: c.api_key,
             web_origins: c.web_origins.unwrap_or_default(),
         })
@@ -306,13 +306,13 @@ impl ClientLogic for ClientLogicImpl {
         id: ID,
         input: UpdateClientInput,
         actor: Option<crate::logic::ActorContext>,
-    ) -> Result<GqlClient, Error> {
+    ) -> Result<ModelClient, Error> {
         let id =
             Uuid::parse_str(&id.to_string()).map_err(|e| Error::InvalidInput(e.to_string()))?;
 
         if let Some(ct) = input.client_type {
             match ct {
-                GqlClientType::Web => {
+                ModelClientType::Web => {
                     if let Some(origins) = &input.web_origins
                         && origins.is_empty()
                     {
@@ -321,7 +321,7 @@ impl ClientLogic for ClientLogicImpl {
                         ));
                     }
                 }
-                GqlClientType::Backend => {
+                ModelClientType::Backend => {
                     if let Some(origins) = &input.web_origins
                         && !origins.is_empty()
                     {
@@ -339,7 +339,7 @@ impl ClientLogic for ClientLogicImpl {
             enabled: input.enabled,
             client_type: input
                 .client_type
-                .map(|t| self.map_graphql_to_entity_type(t)),
+                .map(|t| self.map_api_to_entity_type(t)),
             web_origins: input.web_origins,
         };
         let c = self.repository.update_client(id, update).await?;
@@ -376,13 +376,13 @@ impl ClientLogic for ClientLogicImpl {
         )
         .await;
 
-        Ok(GqlClient {
+        Ok(ModelClient {
             id: ID::from(c.id.to_string()),
             team_id: ID::from(c.team_id.to_string()),
             name: c.name,
             description: c.description,
             enabled: c.enabled,
-            client_type: self.map_entity_to_graphql_type(c.client_type),
+            client_type: self.map_entity_to_api_type(c.client_type),
             api_key: c.api_key,
             web_origins: c.web_origins.unwrap_or_default(),
         })
@@ -469,25 +469,25 @@ mod tests {
     #[test]
     fn test_type_mapping() {
         let (web_e, be_e) = (EntityClientType::Web, EntityClientType::Backend);
-        let (web_g, be_g) = (GqlClientType::Web, GqlClientType::Backend);
+        let (web_m, be_m) = (ModelClientType::Web, ModelClientType::Backend);
         let logic = super::client_logic(
             Box::new(MockClientRepository::new()),
             create_mock_activity_log(),
         );
         assert!(matches!(
-            logic.map_entity_to_graphql_type(web_e),
-            GqlClientType::Web
+            logic.map_entity_to_api_type(web_e),
+            ModelClientType::Web
         ));
         assert!(matches!(
-            logic.map_entity_to_graphql_type(be_e),
-            GqlClientType::Backend
+            logic.map_entity_to_api_type(be_e),
+            ModelClientType::Backend
         ));
         assert!(matches!(
-            logic.map_graphql_to_entity_type(web_g),
+            logic.map_api_to_entity_type(web_m),
             EntityClientType::Web
         ));
         assert!(matches!(
-            logic.map_graphql_to_entity_type(be_g),
+            logic.map_api_to_entity_type(be_m),
             EntityClientType::Backend
         ));
     }
@@ -502,7 +502,7 @@ mod tests {
             name: "WebC".into(),
             description: None,
             enabled: Some(true),
-            client_type: GqlClientType::Web,
+            client_type: ModelClientType::Web,
             web_origins: Some(vec![]),
         };
         let res = logic
@@ -521,7 +521,7 @@ mod tests {
             name: "BackendC".into(),
             description: None,
             enabled: Some(true),
-            client_type: GqlClientType::Backend,
+            client_type: ModelClientType::Backend,
             web_origins: Some(vec!["https://x".into()]),
         };
         let res = logic
@@ -542,7 +542,7 @@ mod tests {
             name: None,
             description: None,
             enabled: None,
-            client_type: Some(GqlClientType::Backend),
+            client_type: Some(ModelClientType::Backend),
             web_origins: Some(vec!["https://x".into()]),
         };
         let res = logic
@@ -580,14 +580,14 @@ mod tests {
             name: "n".into(),
             description: None,
             enabled: Some(true),
-            client_type: GqlClientType::Web,
+            client_type: ModelClientType::Web,
             web_origins: Some(vec!["https://a".into()]),
         };
         let out = logic
             .create_client(ID::from(team_id), input, None)
             .await
             .unwrap();
-        assert_eq!(out.client_type, GqlClientType::Web);
+        assert_eq!(out.client_type, ModelClientType::Web);
         assert_eq!(out.web_origins.len(), 1);
     }
 
@@ -642,10 +642,10 @@ mod tests {
         assert_eq!(clients.len(), 2);
         assert_eq!(total, 25);
         assert_eq!(clients[0].name, "Client 1");
-        assert_eq!(clients[0].client_type, GqlClientType::Web);
+        assert_eq!(clients[0].client_type, ModelClientType::Web);
         assert_eq!(clients[0].web_origins.len(), 1);
         assert_eq!(clients[1].name, "Client 2");
-        assert_eq!(clients[1].client_type, GqlClientType::Backend);
+        assert_eq!(clients[1].client_type, ModelClientType::Backend);
         assert_eq!(clients[1].web_origins.len(), 0);
     }
 
@@ -672,7 +672,7 @@ mod tests {
                 ID::from(team_id),
                 Some("Test".to_string()),
                 Some(true),
-                Some(GqlClientType::Web),
+                Some(ModelClientType::Web),
                 2,
                 5,
             )

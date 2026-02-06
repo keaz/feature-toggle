@@ -17,9 +17,9 @@ use crate::database::feature::FeatureRepositoryTx;
 use crate::broadcast::map_db_feature_to_full_for_broadcast;
 use crate::model::{
     CreateFeatureInput, CreateFeatureStageInput, CreateFeatureVariantInput,
-    CreateRelationshipInput, Feature as GqlFeature, FeatureType as GqlFeatureType,
-    LifecycleStage as GqlLifecycleStage, UpdateFeatureInput,
-    VariantValueType as GqlVariantValueType,
+    CreateRelationshipInput, Feature as ModelFeature, FeatureType as ModelFeatureType,
+    LifecycleStage as ModelLifecycleStage, UpdateFeatureInput,
+    VariantValueType as ModelVariantValueType,
 };
 use crate::validation::{
     validate_duplicate_environment_and_index, validate_relationships_and_stages,
@@ -46,20 +46,20 @@ pub enum FeatureType {
     Contextual,
 }
 
-impl From<GqlFeatureType> for FeatureType {
-    fn from(value: GqlFeatureType) -> Self {
+impl From<ModelFeatureType> for FeatureType {
+    fn from(value: ModelFeatureType) -> Self {
         match value {
-            GqlFeatureType::Simple => FeatureType::Simple,
-            GqlFeatureType::Contextual => FeatureType::Contextual,
+            ModelFeatureType::Simple => FeatureType::Simple,
+            ModelFeatureType::Contextual => FeatureType::Contextual,
         }
     }
 }
 
-impl From<FeatureType> for GqlFeatureType {
+impl From<FeatureType> for ModelFeatureType {
     fn from(value: FeatureType) -> Self {
         match value {
-            FeatureType::Simple => GqlFeatureType::Simple,
-            FeatureType::Contextual => GqlFeatureType::Contextual,
+            FeatureType::Simple => ModelFeatureType::Simple,
+            FeatureType::Contextual => ModelFeatureType::Contextual,
         }
     }
 }
@@ -73,13 +73,13 @@ pub enum LifecycleStage {
     Permanent,
 }
 
-impl From<GqlLifecycleStage> for LifecycleStage {
-    fn from(value: GqlLifecycleStage) -> Self {
+impl From<ModelLifecycleStage> for LifecycleStage {
+    fn from(value: ModelLifecycleStage) -> Self {
         match value {
-            GqlLifecycleStage::Active => LifecycleStage::Active,
-            GqlLifecycleStage::Deprecated => LifecycleStage::Deprecated,
-            GqlLifecycleStage::Archived => LifecycleStage::Archived,
-            GqlLifecycleStage::Permanent => LifecycleStage::Permanent,
+            ModelLifecycleStage::Active => LifecycleStage::Active,
+            ModelLifecycleStage::Deprecated => LifecycleStage::Deprecated,
+            ModelLifecycleStage::Archived => LifecycleStage::Archived,
+            ModelLifecycleStage::Permanent => LifecycleStage::Permanent,
         }
     }
 }
@@ -93,24 +93,24 @@ pub enum VariantValueType {
     Json,
 }
 
-impl From<GqlVariantValueType> for VariantValueType {
-    fn from(value: GqlVariantValueType) -> Self {
+impl From<ModelVariantValueType> for VariantValueType {
+    fn from(value: ModelVariantValueType) -> Self {
         match value {
-            GqlVariantValueType::String => VariantValueType::String,
-            GqlVariantValueType::Number => VariantValueType::Number,
-            GqlVariantValueType::Boolean => VariantValueType::Boolean,
-            GqlVariantValueType::Json => VariantValueType::Json,
+            ModelVariantValueType::String => VariantValueType::String,
+            ModelVariantValueType::Number => VariantValueType::Number,
+            ModelVariantValueType::Boolean => VariantValueType::Boolean,
+            ModelVariantValueType::Json => VariantValueType::Json,
         }
     }
 }
 
-impl From<VariantValueType> for GqlVariantValueType {
+impl From<VariantValueType> for ModelVariantValueType {
     fn from(value: VariantValueType) -> Self {
         match value {
-            VariantValueType::String => GqlVariantValueType::String,
-            VariantValueType::Number => GqlVariantValueType::Number,
-            VariantValueType::Boolean => GqlVariantValueType::Boolean,
-            VariantValueType::Json => GqlVariantValueType::Json,
+            VariantValueType::String => ModelVariantValueType::String,
+            VariantValueType::Number => ModelVariantValueType::Number,
+            VariantValueType::Boolean => ModelVariantValueType::Boolean,
+            VariantValueType::Json => ModelVariantValueType::Json,
         }
     }
 }
@@ -528,7 +528,7 @@ async fn ensure_feature_key_unique_for_update(
     logic: &dyn FeatureLogic,
     feature_id: &ID,
     key: &str,
-) -> Result<GqlFeature, RestError> {
+) -> Result<ModelFeature, RestError> {
     let feature = logic
         .get_feature_by_id(feature_id.clone())
         .await
@@ -553,7 +553,7 @@ async fn ensure_feature_key_unique_for_update(
     Ok(feature)
 }
 
-fn feature_base_response(feature: &GqlFeature) -> FeatureResponse {
+fn feature_base_response(feature: &ModelFeature) -> FeatureResponse {
     FeatureResponse {
         id: feature.id.to_string(),
         key: feature.key.clone(),
@@ -661,7 +661,7 @@ async fn load_variants(
 }
 
 async fn build_feature_response(
-    feature: &GqlFeature,
+    feature: &ModelFeature,
     feature_repo: &dyn FeatureRepository,
     env_logic: &dyn EnvironmentLogic,
     include_variants: bool,
@@ -739,7 +739,7 @@ pub(crate) async fn list_features(
         .get_features_with_offset(
             ID::from(team_uuid),
             query.name.clone(),
-            query.feature_type.map(GqlFeatureType::from),
+            query.feature_type.map(ModelFeatureType::from),
             offset,
             limit,
         )
@@ -854,7 +854,7 @@ pub(crate) async fn create_feature(
                 .map(|variant| CreateFeatureVariantInput {
                     control: variant.control,
                     value: variant.value,
-                    value_type: GqlVariantValueType::from(variant.value_type),
+                    value_type: ModelVariantValueType::from(variant.value_type),
                     description: variant.description,
                 })
                 .collect::<Vec<_>>()
@@ -873,7 +873,7 @@ pub(crate) async fn create_feature(
     let input = CreateFeatureInput {
         key: payload.key.clone(),
         description: payload.description.clone(),
-        feature_type: GqlFeatureType::from(payload.feature_type),
+        feature_type: ModelFeatureType::from(payload.feature_type),
         enabled: payload.enabled,
         dependencies,
         relationships,
@@ -979,7 +979,7 @@ pub(crate) async fn update_feature(
                 .map(|variant| CreateFeatureVariantInput {
                     control: variant.control,
                     value: variant.value,
-                    value_type: GqlVariantValueType::from(variant.value_type),
+                    value_type: ModelVariantValueType::from(variant.value_type),
                     description: variant.description,
                 })
                 .collect::<Vec<_>>()
@@ -998,7 +998,7 @@ pub(crate) async fn update_feature(
     let input = UpdateFeatureInput {
         key: payload.key.clone(),
         description: payload.description.clone(),
-        feature_type: GqlFeatureType::from(payload.feature_type),
+        feature_type: ModelFeatureType::from(payload.feature_type),
         enabled: payload.enabled,
         dependencies,
         relationships,
@@ -1592,7 +1592,8 @@ mod tests {
     use crate::database::feature::{feature_repository, MockFeatureRepository};
     use crate::database::user::user_repository;
     use crate::model::{
-        Feature as GqlFeature, FeatureType as GqlFeatureType, LifecycleStage as GqlLifecycleStage,
+        Feature as ModelFeature, FeatureType as ModelFeatureType,
+        LifecycleStage as ModelLifecycleStage,
     };
     use crate::logic::environment::{environment_logic, MockEnvironmentLogic};
     use crate::logic::feature::{feature_logic, MockFeatureLogic};
@@ -1600,17 +1601,17 @@ mod tests {
     use sqlx::postgres::PgPoolOptions;
     use uuid::Uuid;
 
-    fn sample_feature(feature_id: Uuid, team_id: Uuid) -> GqlFeature {
-        GqlFeature {
+    fn sample_feature(feature_id: Uuid, team_id: Uuid) -> ModelFeature {
+        ModelFeature {
             id: ID::from(feature_id),
             key: "checkout".to_string(),
             description: Some("Test feature".to_string()),
-            feature_type: GqlFeatureType::Simple,
+            feature_type: ModelFeatureType::Simple,
             enabled: true,
             kill_switch_enabled: true,
             kill_switch_activated_at: None,
             rollback_scheduled_at: None,
-            lifecycle_stage: GqlLifecycleStage::Active,
+            lifecycle_stage: ModelLifecycleStage::Active,
             deprecated_at: None,
             deprecation_notice: None,
             last_evaluated_at: None,
@@ -1677,7 +1678,7 @@ mod tests {
             .withf(move |id, name, feature_type, offset, limit| {
                 id.to_string() == team_id.to_string()
                     && name.as_deref() == Some("check")
-                    && matches!(feature_type, Some(GqlFeatureType::Simple))
+                    && matches!(feature_type, Some(ModelFeatureType::Simple))
                     && *offset == 10
                     && *limit == 5
             })

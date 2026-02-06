@@ -11,7 +11,7 @@ use mockall::automock;
 use uuid::Uuid;
 
 #[derive(Clone, Debug)]
-pub struct GqlUser {
+pub struct ApiUser {
     pub id: ID,
     pub username: String,
     pub first_name: String,
@@ -27,21 +27,21 @@ pub struct GqlUser {
 #[automock]
 #[async_trait::async_trait]
 pub trait UserLogic: Send + Sync {
-    async fn get_user_by_id(&self, id: ID) -> Result<GqlUser, Error>;
-    async fn get_user_by_username(&self, username: String) -> Result<GqlUser, Error>;
+    async fn get_user_by_id(&self, id: ID) -> Result<ApiUser, Error>;
+    async fn get_user_by_username(&self, username: String) -> Result<ApiUser, Error>;
     async fn register_user(
         &self,
         input: RegisterUserInput,
         actor: Option<crate::logic::ActorContext>,
-    ) -> Result<GqlUser, Error>;
+    ) -> Result<ApiUser, Error>;
     async fn authenticate_user(&self, username: String, password: String)
-    -> Result<GqlUser, Error>;
+    -> Result<ApiUser, Error>;
     async fn update_user(
         &self,
         id: ID,
-        input: UpdateGqlUserInput,
+        input: UpdateUserInput,
         actor: Option<crate::logic::ActorContext>,
-    ) -> Result<GqlUser, Error>;
+    ) -> Result<ApiUser, Error>;
     async fn reset_password(
         &self,
         id: ID,
@@ -68,7 +68,7 @@ pub trait UserLogic: Send + Sync {
         name: Option<String>,
         page_number: i32,
         page_size: i32,
-    ) -> Result<(Vec<GqlUser>, i64), Error>;
+    ) -> Result<(Vec<ApiUser>, i64), Error>;
     async fn admin_exists(&self) -> Result<bool, Error>;
     fn clone_box(&self) -> Box<dyn UserLogic>;
 }
@@ -115,7 +115,7 @@ pub struct RegisterUserInput {
 }
 
 #[derive(Clone, Debug)]
-pub struct UpdateGqlUserInput {
+pub struct UpdateUserInput {
     pub first_name: Option<String>,
     pub last_name: Option<String>,
     pub email: Option<String>,
@@ -125,10 +125,10 @@ pub struct UpdateGqlUserInput {
 
 #[async_trait::async_trait]
 impl UserLogic for UserLogicImpl {
-    async fn get_user_by_id(&self, id: ID) -> Result<GqlUser, Error> {
+    async fn get_user_by_id(&self, id: ID) -> Result<ApiUser, Error> {
         let id = Uuid::try_from(id).unwrap();
         let u = self.repository.get_user_by_id(id).await?;
-        Ok(GqlUser {
+        Ok(ApiUser {
             id: ID::from(u.id),
             username: u.username,
             first_name: u.first_name,
@@ -142,9 +142,9 @@ impl UserLogic for UserLogicImpl {
         })
     }
 
-    async fn get_user_by_username(&self, username: String) -> Result<GqlUser, Error> {
+    async fn get_user_by_username(&self, username: String) -> Result<ApiUser, Error> {
         let u = self.repository.get_user_by_username(&username).await?;
-        Ok(GqlUser {
+        Ok(ApiUser {
             id: ID::from(u.id),
             username: u.username,
             first_name: u.first_name,
@@ -162,7 +162,7 @@ impl UserLogic for UserLogicImpl {
         &self,
         input: RegisterUserInput,
         actor: Option<crate::logic::ActorContext>,
-    ) -> Result<GqlUser, Error> {
+    ) -> Result<ApiUser, Error> {
         if input.username.is_empty() || input.password.is_empty() {
             return Err(Error::InvalidInput(
                 "Username and password are required".to_string(),
@@ -227,7 +227,7 @@ impl UserLogic for UserLogicImpl {
         )
         .await;
 
-        Ok(GqlUser {
+        Ok(ApiUser {
             id: ID::from(created.id),
             username: created.username,
             first_name: created.first_name,
@@ -245,7 +245,7 @@ impl UserLogic for UserLogicImpl {
         &self,
         username: String,
         password: String,
-    ) -> Result<GqlUser, Error> {
+    ) -> Result<ApiUser, Error> {
         let u = self.repository.get_user_by_username(&username).await?;
         let parsed_hash = PasswordHash::new(&u.password_hash)
             .map_err(|_| Error::InvalidInput("Stored password hash is invalid".to_string()))?;
@@ -255,7 +255,7 @@ impl UserLogic for UserLogicImpl {
         let now = Utc::now();
         let _ = self.repository.update_last_login(u.id, now).await?;
         let u = self.repository.get_user_by_id(u.id).await?; // reload to get updated last_login
-        Ok(GqlUser {
+        Ok(ApiUser {
             id: ID::from(u.id),
             username: u.username,
             first_name: u.first_name,
@@ -272,9 +272,9 @@ impl UserLogic for UserLogicImpl {
     async fn update_user(
         &self,
         id: ID,
-        input: UpdateGqlUserInput,
+        input: UpdateUserInput,
         actor: Option<crate::logic::ActorContext>,
-    ) -> Result<GqlUser, Error> {
+    ) -> Result<ApiUser, Error> {
         let id = Uuid::try_from(id).unwrap();
 
         // If updating email, validate uniqueness (allow unchanged or same owner)
@@ -320,7 +320,7 @@ impl UserLogic for UserLogicImpl {
         )
         .await;
 
-        Ok(GqlUser {
+        Ok(ApiUser {
             id: ID::from(updated.id),
             username: updated.username,
             first_name: updated.first_name,
@@ -508,7 +508,7 @@ impl UserLogic for UserLogicImpl {
         name: Option<String>,
         page_number: i32,
         page_size: i32,
-    ) -> Result<(Vec<GqlUser>, i64), Error> {
+    ) -> Result<(Vec<ApiUser>, i64), Error> {
         let team_uuid: Option<Uuid> = match team_id {
             Some(id) => Some(Uuid::try_from(id).unwrap()),
             None => None,
@@ -519,7 +519,7 @@ impl UserLogic for UserLogicImpl {
             .await?;
         let mapped = items
             .into_iter()
-            .map(|u| GqlUser {
+            .map(|u| ApiUser {
                 id: ID::from(u.id),
                 username: u.username,
                 first_name: u.first_name,
@@ -844,7 +844,7 @@ mod tests {
         let res = logic
             .update_user(
                 ID::from(id),
-                UpdateGqlUserInput {
+                UpdateUserInput {
                     first_name: Some("Jane".to_string()),
                     last_name: None,
                     email: Some("new@example.com".to_string()),
@@ -872,7 +872,7 @@ mod tests {
         let err = logic
             .update_user(
                 ID::from(id),
-                UpdateGqlUserInput {
+                UpdateUserInput {
                     first_name: None,
                     last_name: None,
                     email: Some("dup@example.com".to_string()),

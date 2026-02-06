@@ -5,7 +5,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::model::{
-    Context as GqlContext, ContextEntry as GqlContextEntry, CreateContextInput,
+    Context as ModelContext, ContextEntry as ModelContextEntry, CreateContextInput,
     UpdateContextInput,
 };
 use crate::database::context::context_repository_tx;
@@ -56,8 +56,8 @@ pub struct UpdateContextRequest {
     pub entries: Option<Vec<String>>,
 }
 
-impl From<GqlContextEntry> for ContextEntryResponse {
-    fn from(entry: GqlContextEntry) -> Self {
+impl From<ModelContextEntry> for ContextEntryResponse {
+    fn from(entry: ModelContextEntry) -> Self {
         Self {
             id: entry.id.to_string(),
             value: entry.value,
@@ -65,8 +65,8 @@ impl From<GqlContextEntry> for ContextEntryResponse {
     }
 }
 
-impl From<GqlContext> for ContextResponse {
-    fn from(context: GqlContext) -> Self {
+impl From<ModelContext> for ContextResponse {
+    fn from(context: ModelContext) -> Self {
         Self {
             id: context.id.to_string(),
             team_id: context.team_id.to_string(),
@@ -355,12 +355,12 @@ mod tests {
     use crate::logic::context::MockContextLogic;
     use sqlx::postgres::PgPoolOptions;
 
-    fn sample_context(ctx_id: Uuid, team_id: Uuid) -> GqlContext {
-        GqlContext {
+    fn sample_context(ctx_id: Uuid, team_id: Uuid) -> ModelContext {
+        ModelContext {
             id: ID::from(ctx_id),
             team_id: ID::from(team_id),
             key: "country".to_string(),
-            entries: vec![GqlContextEntry {
+            entries: vec![ModelContextEntry {
                 id: ID::from(Uuid::new_v4()),
                 value: "US".to_string(),
             }],

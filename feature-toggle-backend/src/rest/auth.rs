@@ -310,8 +310,8 @@ mod tests {
         }
     }
 
-    fn sample_user() -> crate::logic::user::GqlUser {
-        crate::logic::user::GqlUser {
+    fn sample_user() -> crate::logic::user::ApiUser {
+        crate::logic::user::ApiUser {
             id: ID::from(Uuid::new_v4()),
             username: "admin".to_string(),
             first_name: "Admin".to_string(),

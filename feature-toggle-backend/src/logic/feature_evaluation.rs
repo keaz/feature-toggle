@@ -74,7 +74,7 @@ pub trait FeatureEvaluationLogic: Send + Sync {
         to_time: DateTime<Utc>,
     ) -> Result<EvaluationSummary, FeatureEvaluationLogicError>;
 
-    /// Count evaluations with simplified filters (for GraphQL API)
+    /// Count evaluations with simplified filters (for API/UI)
     async fn count_evaluations(
         &self,
         from_date: DateTime<Utc>,
@@ -112,7 +112,7 @@ impl Clone for Box<dyn FeatureEvaluationLogic> {
 
 /// Implementation of feature evaluation logic using the repository pattern
 /// Event emitted when a feature evaluation is recorded. This powers the
-/// event-driven GraphQL subscriptions to avoid periodic polling.
+/// event-driven REST streams to avoid periodic polling.
 #[derive(Debug, Clone)]
 pub struct FeatureEvaluationEvent {
     pub event_id: Uuid,

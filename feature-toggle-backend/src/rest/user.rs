@@ -8,7 +8,7 @@ use crate::database::activity_log::ActivityLogRepository;
 use crate::database::role::role_repository_tx;
 use crate::database::user::user_repository_tx;
 use crate::logic::role::RoleLogic;
-use crate::logic::user::{RegisterUserInput, UpdateGqlUserInput, UserLogic};
+use crate::logic::user::{RegisterUserInput, UpdateUserInput, UserLogic};
 use crate::logic::ActorContext;
 use crate::middleware::admin_guard::AdminState;
 use crate::rest::error::RestError;
@@ -84,7 +84,7 @@ pub struct AssignUserRolesRequest {
 }
 
 impl UserResponse {
-    fn from_gql(user: crate::logic::user::GqlUser) -> Self {
+    fn from_api(user: crate::logic::user::ApiUser) -> Self {
         Self {
             id: user.id.to_string(),
             username: user.username,
@@ -102,9 +102,9 @@ impl UserResponse {
     }
 }
 
-impl From<crate::logic::user::GqlUser> for UserResponse {
-    fn from(user: crate::logic::user::GqlUser) -> Self {
-        UserResponse::from_gql(user)
+impl From<crate::logic::user::ApiUser> for UserResponse {
+    fn from(user: crate::logic::user::ApiUser) -> Self {
+        UserResponse::from_api(user)
     }
 }
 
@@ -226,7 +226,7 @@ pub(crate) async fn get_user(
     user_id: web::Path<String>,
 ) -> Result<impl Responder, RestError> {
     let user_uuid = parse_uuid(&user_id, "user_id")?;
-    let gql_user = logic
+    let api_user = logic
         .get_user_by_id(ID::from(user_uuid))
         .await
         .map_err(RestError::from)?;
@@ -239,7 +239,7 @@ pub(crate) async fn get_user(
     let team_ids = teams.iter().map(|team| team.id.to_string()).collect();
     let team_responses = teams.into_iter().map(TeamResponse::from).collect();
 
-    let mut response = UserResponse::from(gql_user);
+    let mut response = UserResponse::from(api_user);
     response.team_ids = Some(team_ids);
     response.teams = Some(team_responses);
 
@@ -403,7 +403,7 @@ pub(crate) async fn update_user(
     }
 
     let actor = actor_from_request(&req);
-    let input = UpdateGqlUserInput {
+    let input = UpdateUserInput {
         first_name: payload.first_name.as_ref().map(|value| value.trim().to_string()),
         last_name: payload.last_name.as_ref().map(|value| value.trim().to_string()),
         email: payload.email.as_ref().map(|value| value.trim().to_string()),
@@ -625,8 +625,8 @@ mod tests {
     use crate::logic::user::MockUserLogic;
     use sqlx::postgres::PgPoolOptions;
 
-    fn sample_user(user_id: Uuid) -> crate::logic::user::GqlUser {
-        crate::logic::user::GqlUser {
+    fn sample_user(user_id: Uuid) -> crate::logic::user::ApiUser {
+        crate::logic::user::ApiUser {
             id: ID::from(user_id),
             username: "jdoe".to_string(),
             first_name: "Jane".to_string(),
@@ -713,7 +713,7 @@ mod tests {
     #[actix_web::test]
     async fn get_user_roles_returns_items() {
         let user_id = Uuid::new_v4();
-        let role = crate::logic::role::GqlRole {
+        let role = crate::logic::role::ApiRole {
             id: ID::from(Uuid::new_v4()),
             name: "Approver".to_string(),
             description: "Role".to_string(),

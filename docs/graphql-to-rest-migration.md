@@ -253,6 +253,8 @@ Backend
 - [x] Remove async-graphql dependencies from Cargo.toml and Cargo.lock
 - [x] Delete GraphiQL endpoint and /graphql route
 - [x] Confirm all REST write endpoints use transaction manager pattern before cleanup
+- [x] Rename remaining GraphQL-oriented Rust identifiers (e.g., `Gql*` types, `gql_*` variables, `to_gql_*` helpers) to REST/model naming
+- [x] Scan repository and remove historical "graphql/GraphQL" mentions outside this migration doc
 
 Frontend
 - [x] Remove @apollo/client, graphql, graphql-ws, @graphql-tools/* dependencies

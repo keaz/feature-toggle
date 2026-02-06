@@ -4,7 +4,8 @@ use crate::database::context::{
 };
 use crate::database::entity;
 use crate::model::{
-    Context as GqlContext, ContextEntry as GqlContextEntry, CreateContextInput, UpdateContextInput,
+    Context as ModelContext, ContextEntry as ModelContextEntry, CreateContextInput,
+    UpdateContextInput,
 };
 use crate::model::ID;
 use sqlx::PgConnection;
@@ -15,7 +16,7 @@ pub async fn create_context_in_tx<R>(
     repo: &R,
     team_id: ID,
     input: CreateContextInput,
-) -> Result<GqlContext, Error>
+) -> Result<ModelContext, Error>
 where
     R: ContextRepositoryTx + ?Sized,
 {
@@ -44,7 +45,7 @@ where
             },
         )
         .await?;
-    Ok(map_db_to_gql(created))
+    Ok(map_db_to_model(created))
 }
 
 pub async fn update_context_in_tx<R>(
@@ -52,7 +53,7 @@ pub async fn update_context_in_tx<R>(
     repo: &R,
     id: ID,
     input: UpdateContextInput,
-) -> Result<GqlContext, Error>
+) -> Result<ModelContext, Error>
 where
     R: ContextRepositoryTx + ?Sized,
 {
@@ -85,7 +86,7 @@ where
         )
         .await?;
 
-    Ok(map_db_to_gql(updated))
+    Ok(map_db_to_model(updated))
 }
 
 pub async fn delete_context_in_tx<R>(conn: &mut PgConnection, repo: &R, id: ID) -> Result<(), Error>
@@ -96,15 +97,15 @@ where
     repo.delete_context_tx(conn, id_uuid).await
 }
 
-fn map_db_to_gql(c: entity::Context) -> GqlContext {
-    GqlContext {
+fn map_db_to_model(c: entity::Context) -> ModelContext {
+    ModelContext {
         id: ID::from(c.id),
         team_id: ID::from(c.team_id),
         key: c.key,
         entries: c
             .entries
             .into_iter()
-            .map(|e| GqlContextEntry {
+            .map(|e| ModelContextEntry {
                 id: ID::from(e.id),
                 value: e.value,
             })

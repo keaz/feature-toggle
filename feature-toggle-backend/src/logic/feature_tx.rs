@@ -10,10 +10,10 @@ use crate::database::variant_allocations::{
     CreateVariantAllocationInput, VariantAllocationsRepositoryTx,
 };
 use crate::model::{
-    Context as GqlContext, ContextEntry as GqlContextEntry, CreateFeatureInput,
-    CreateStageCriterionInput, Feature as GqlFeature, FeatureType as GqlFeatureType, RuleOperator,
-    StageCriterion as GqlStageCriterion, UpdateFeatureInput,
-    VariantValueType as GqlVariantValueType,
+    Context as ModelContext, ContextEntry as ModelContextEntry, CreateFeatureInput,
+    CreateStageCriterionInput, Feature as ModelFeature, FeatureType as ModelFeatureType,
+    RuleOperator, StageCriterion as ModelStageCriterion, UpdateFeatureInput,
+    VariantValueType as ModelVariantValueType,
 };
 use crate::logic::ActorContext;
 use crate::logic::stage_builder::build_stage_relationships;
@@ -27,21 +27,21 @@ fn id_to_uuid(id: ID) -> Result<Uuid, Error> {
     Uuid::try_from(id).map_err(|e| Error::InvalidInput(e.to_string()))
 }
 
-fn map_graphql_to_entity_feature_type(ft: GqlFeatureType) -> crate::database::entity::FeatureType {
+fn map_api_to_entity_feature_type(ft: ModelFeatureType) -> crate::database::entity::FeatureType {
     match ft {
-        GqlFeatureType::Simple => crate::database::entity::FeatureType::Simple,
-        GqlFeatureType::Contextual => crate::database::entity::FeatureType::Contextual,
+        ModelFeatureType::Simple => crate::database::entity::FeatureType::Simple,
+        ModelFeatureType::Contextual => crate::database::entity::FeatureType::Contextual,
     }
 }
 
-fn map_entity_to_graphql_feature(feature_entity: crate::database::entity::Feature) -> GqlFeature {
-    GqlFeature {
+fn map_entity_to_api_feature(feature_entity: crate::database::entity::Feature) -> ModelFeature {
+    ModelFeature {
         id: feature_entity.id.into(),
         key: feature_entity.key,
         description: feature_entity.description,
         feature_type: match feature_entity.feature_type {
-            crate::database::entity::FeatureType::Simple => GqlFeatureType::Simple,
-            crate::database::entity::FeatureType::Contextual => GqlFeatureType::Contextual,
+            crate::database::entity::FeatureType::Simple => ModelFeatureType::Simple,
+            crate::database::entity::FeatureType::Contextual => ModelFeatureType::Contextual,
         },
         enabled: feature_entity.active,
         kill_switch_enabled: feature_entity.kill_switch_enabled,
@@ -96,7 +96,7 @@ pub async fn set_stage_contexts_in_tx<R>(
     repo: &R,
     stage_id: ID,
     context_ids: Vec<ID>,
-) -> Result<Vec<GqlContext>, Error>
+) -> Result<Vec<ModelContext>, Error>
 where
     R: FeatureRepositoryTx + ?Sized,
 {
@@ -112,14 +112,14 @@ where
 
     Ok(result
         .into_iter()
-        .map(|c| GqlContext {
+        .map(|c| ModelContext {
             id: ID::from(c.id),
             team_id: ID::from(c.team_id),
             key: c.key,
             entries: c
                 .entries
                 .into_iter()
-                .map(|e| GqlContextEntry {
+                .map(|e| ModelContextEntry {
                     id: ID::from(e.id),
                     value: e.value,
                 })
@@ -135,7 +135,7 @@ pub async fn set_stage_criteria_in_tx<F, V, C>(
     compound_rules_repo: &C,
     stage_id: ID,
     criteria: Vec<CreateStageCriterionInput>,
-) -> Result<Vec<GqlStageCriterion>, Error>
+) -> Result<Vec<ModelStageCriterion>, Error>
 where
     F: FeatureRepositoryTx + ?Sized,
     V: VariantAllocationsRepositoryTx + ?Sized,
@@ -143,7 +143,7 @@ where
 {
     let stage_uuid = id_to_uuid(stage_id)?;
 
-    // Map GraphQL input to DB input for criteria creation
+    // Map API input to DB input for criteria creation
     let db_criteria_input: Vec<CreateStageCriterion> = criteria
         .iter()
         .map(|c| {
@@ -289,7 +289,7 @@ where
                 })
                 .collect();
 
-            GqlStageCriterion {
+            ModelStageCriterion {
                 id: ID::from(c.id),
                 stage_id: ID::from(c.stage_id),
                 priority: c.priority,
@@ -346,16 +346,16 @@ where
         v.into_iter()
             .map(|variant| {
                 let value_type = match variant.value_type {
-                    GqlVariantValueType::String => {
+                    ModelVariantValueType::String => {
                         crate::database::entity::VariantValueType::String
                     }
-                    GqlVariantValueType::Number => {
+                    ModelVariantValueType::Number => {
                         crate::database::entity::VariantValueType::Number
                     }
-                    GqlVariantValueType::Boolean => {
+                    ModelVariantValueType::Boolean => {
                         crate::database::entity::VariantValueType::Boolean
                     }
-                    GqlVariantValueType::Json => crate::database::entity::VariantValueType::Json,
+                    ModelVariantValueType::Json => crate::database::entity::VariantValueType::Json,
                 };
                 (
                     variant.control,
@@ -371,7 +371,7 @@ where
         team_id: team_uuid,
         key: input.key,
         description: input.description,
-        feature_type: map_graphql_to_entity_feature_type(input.feature_type),
+        feature_type: map_api_to_entity_feature_type(input.feature_type),
         stages,
         dependencies: input
             .dependencies
@@ -418,7 +418,7 @@ pub async fn update_feature_in_tx<R, A>(
     id: ID,
     input: UpdateFeatureInput,
     actor: Option<ActorContext>,
-) -> Result<GqlFeature, Error>
+) -> Result<ModelFeature, Error>
 where
     R: FeatureRepositoryTx + ?Sized,
     A: ActivityLogRepository + ?Sized,
@@ -426,7 +426,7 @@ where
     let feature_uuid = id_to_uuid(id)?;
 
     // Map update input
-    let feature_type = Some(map_graphql_to_entity_feature_type(input.feature_type));
+    let feature_type = Some(map_api_to_entity_feature_type(input.feature_type));
 
     let stages = {
         let mapped = input
@@ -459,16 +459,16 @@ where
         v.into_iter()
             .map(|variant| {
                 let value_type = match variant.value_type {
-                    GqlVariantValueType::String => {
+                    ModelVariantValueType::String => {
                         crate::database::entity::VariantValueType::String
                     }
-                    GqlVariantValueType::Number => {
+                    ModelVariantValueType::Number => {
                         crate::database::entity::VariantValueType::Number
                     }
-                    GqlVariantValueType::Boolean => {
+                    ModelVariantValueType::Boolean => {
                         crate::database::entity::VariantValueType::Boolean
                     }
-                    GqlVariantValueType::Json => crate::database::entity::VariantValueType::Json,
+                    ModelVariantValueType::Json => crate::database::entity::VariantValueType::Json,
                 };
                 (
                     variant.control,
@@ -515,7 +515,7 @@ where
         .await
         .map_err(Error::DatabaseError)?;
 
-    Ok(map_entity_to_graphql_feature(updated_feature))
+    Ok(map_entity_to_api_feature(updated_feature))
 }
 
 pub async fn delete_feature_in_tx<R, A>(
@@ -567,7 +567,7 @@ pub async fn emergency_disable_feature_in_tx<R, A>(
     id: ID,
     rollback_in_minutes: Option<i32>,
     actor: Option<ActorContext>,
-) -> Result<GqlFeature, Error>
+) -> Result<ModelFeature, Error>
 where
     R: FeatureRepositoryTx + ?Sized,
     A: ActivityLogRepository + ?Sized,
@@ -616,7 +616,7 @@ where
         .await
         .map_err(Error::DatabaseError)?;
 
-    Ok(map_entity_to_graphql_feature(feature))
+    Ok(map_entity_to_api_feature(feature))
 }
 
 pub async fn emergency_enable_feature_in_tx<R, A>(
@@ -625,7 +625,7 @@ pub async fn emergency_enable_feature_in_tx<R, A>(
     activity_repo: &A,
     id: ID,
     actor: Option<ActorContext>,
-) -> Result<GqlFeature, Error>
+) -> Result<ModelFeature, Error>
 where
     R: FeatureRepositoryTx + ?Sized,
     A: ActivityLogRepository + ?Sized,
@@ -662,5 +662,5 @@ where
         .await
         .map_err(Error::DatabaseError)?;
 
-    Ok(map_entity_to_graphql_feature(feature))
+    Ok(map_entity_to_api_feature(feature))
 }

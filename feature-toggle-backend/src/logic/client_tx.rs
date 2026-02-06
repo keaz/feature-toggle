@@ -8,26 +8,26 @@ use crate::Error;
 use crate::database::activity_log::{ActivityLogRepository, CreateActivityLog};
 use crate::database::client::{ClientRepositoryTx, CreateClient, UpdateClient};
 use crate::database::entity::ClientType as EntityClientType;
-use crate::model::{ClientType as GqlClientType, CreateClientInput, UpdateClientInput};
+use crate::model::{ClientType as ModelClientType, CreateClientInput, UpdateClientInput};
 use crate::logic::ActorContext;
 use crate::utils::activity_logger::activity_types;
 use crate::model::ID;
 use sqlx::PgConnection;
 use uuid::Uuid;
 
-/// Convert GraphQL ClientType to entity ClientType
-fn to_entity_client_type(gql_type: GqlClientType) -> EntityClientType {
-    match gql_type {
-        GqlClientType::Web => EntityClientType::Web,
-        GqlClientType::Backend => EntityClientType::Backend,
+/// Convert API ClientType to entity ClientType
+fn to_entity_client_type(model_type: ModelClientType) -> EntityClientType {
+    match model_type {
+        ModelClientType::Web => EntityClientType::Web,
+        ModelClientType::Backend => EntityClientType::Backend,
     }
 }
 
-/// Convert entity ClientType to GraphQL ClientType
-fn to_gql_client_type(entity_type: EntityClientType) -> GqlClientType {
+/// Convert entity ClientType to API ClientType
+fn to_model_client_type(entity_type: EntityClientType) -> ModelClientType {
     match entity_type {
-        EntityClientType::Web => GqlClientType::Web,
-        EntityClientType::Backend => GqlClientType::Backend,
+        EntityClientType::Web => ModelClientType::Web,
+        EntityClientType::Backend => ModelClientType::Backend,
     }
 }
 
@@ -100,7 +100,7 @@ where
         name: client.name,
         description: client.description,
         enabled: client.enabled,
-        client_type: to_gql_client_type(client.client_type),
+        client_type: to_model_client_type(client.client_type),
         api_key: client.api_key,
         web_origins: client.web_origins.unwrap_or_default(),
     })
@@ -168,7 +168,7 @@ where
         name: client.name,
         description: client.description,
         enabled: client.enabled,
-        client_type: to_gql_client_type(client.client_type),
+        client_type: to_model_client_type(client.client_type),
         api_key: client.api_key,
         web_origins: client.web_origins.unwrap_or_default(),
     })

@@ -9,7 +9,7 @@ use uuid::Uuid;
 pub const SYSTEM_ROLE_NAMES: &[&str] = &["Approver", "Requester", "Team Admin"];
 
 #[derive(Clone, Debug)]
-pub struct GqlRole {
+pub struct ApiRole {
     pub id: ID,
     pub name: String,
     pub description: String,
@@ -17,9 +17,9 @@ pub struct GqlRole {
     pub updated_at: String,
 }
 
-impl From<Role> for GqlRole {
+impl From<Role> for ApiRole {
     fn from(role: Role) -> Self {
-        GqlRole {
+        ApiRole {
             id: ID::from(role.id),
             name: role.name,
             description: role.description,
@@ -38,15 +38,15 @@ pub struct AssignRolesInput {
 #[automock]
 #[async_trait::async_trait]
 pub trait RoleLogic: Send + Sync {
-    async fn get_all_roles(&self) -> Result<Vec<GqlRole>, Error>;
-    async fn get_role_by_id(&self, id: ID) -> Result<GqlRole, Error>;
-    async fn get_user_roles(&self, user_id: ID) -> Result<Vec<GqlRole>, Error>;
+    async fn get_all_roles(&self) -> Result<Vec<ApiRole>, Error>;
+    async fn get_role_by_id(&self, id: ID) -> Result<ApiRole, Error>;
+    async fn get_user_roles(&self, user_id: ID) -> Result<Vec<ApiRole>, Error>;
     async fn create_role(
         &self,
         name: String,
         description: String,
         actor: Option<crate::logic::ActorContext>,
-    ) -> Result<GqlRole, Error>;
+    ) -> Result<ApiRole, Error>;
     async fn delete_role(
         &self,
         id: ID,
@@ -57,7 +57,7 @@ pub trait RoleLogic: Send + Sync {
         user_id: ID,
         role_ids: Vec<ID>,
         actor: Option<crate::logic::ActorContext>,
-    ) -> Result<Vec<GqlRole>, Error>;
+    ) -> Result<Vec<ApiRole>, Error>;
     async fn user_has_role(&self, user_id: ID, role_name: &str) -> Result<bool, Error>;
     fn clone_box(&self) -> Box<dyn RoleLogic>;
 }
@@ -107,21 +107,21 @@ fn is_system_role(name: &str) -> bool {
 
 #[async_trait::async_trait]
 impl RoleLogic for RoleLogicImpl {
-    async fn get_all_roles(&self) -> Result<Vec<GqlRole>, Error> {
+    async fn get_all_roles(&self) -> Result<Vec<ApiRole>, Error> {
         let roles = self.repository.get_all_roles().await?;
-        Ok(roles.into_iter().map(GqlRole::from).collect())
+        Ok(roles.into_iter().map(ApiRole::from).collect())
     }
 
-    async fn get_role_by_id(&self, id: ID) -> Result<GqlRole, Error> {
+    async fn get_role_by_id(&self, id: ID) -> Result<ApiRole, Error> {
         let uuid_id = Uuid::try_from(id).map_err(|e| Error::InvalidInput(e.to_string()))?;
         let role = self.repository.get_role_by_id(uuid_id).await?;
-        Ok(GqlRole::from(role))
+        Ok(ApiRole::from(role))
     }
 
-    async fn get_user_roles(&self, user_id: ID) -> Result<Vec<GqlRole>, Error> {
+    async fn get_user_roles(&self, user_id: ID) -> Result<Vec<ApiRole>, Error> {
         let uuid_id = Uuid::try_from(user_id).map_err(|e| Error::InvalidInput(e.to_string()))?;
         let roles = self.repository.get_user_roles(uuid_id).await?;
-        Ok(roles.into_iter().map(GqlRole::from).collect())
+        Ok(roles.into_iter().map(ApiRole::from).collect())
     }
 
     async fn create_role(
@@ -129,7 +129,7 @@ impl RoleLogic for RoleLogicImpl {
         name: String,
         description: String,
         actor: Option<crate::logic::ActorContext>,
-    ) -> Result<GqlRole, Error> {
+    ) -> Result<ApiRole, Error> {
         let trimmed_name = name.trim();
         if trimmed_name.is_empty() {
             return Err(Error::InvalidInput("Role name cannot be empty".to_string()));
@@ -160,7 +160,7 @@ impl RoleLogic for RoleLogicImpl {
         )
         .await;
 
-        Ok(GqlRole::from(role))
+        Ok(ApiRole::from(role))
     }
 
     async fn delete_role(
@@ -200,7 +200,7 @@ impl RoleLogic for RoleLogicImpl {
         user_id: ID,
         role_ids: Vec<ID>,
         actor: Option<crate::logic::ActorContext>,
-    ) -> Result<Vec<GqlRole>, Error> {
+    ) -> Result<Vec<ApiRole>, Error> {
         let user_uuid =
             Uuid::try_from(user_id.clone()).map_err(|e| Error::InvalidInput(e.to_string()))?;
         let role_uuids: Result<Vec<Uuid>, _> = role_ids

@@ -245,8 +245,8 @@ impl KillSwitchRollbackScheduler {
 mod tests {
     use super::*;
     use crate::database::feature::MockFeatureRepository;
-    use crate::model::Feature as GraphQLFeature;
-    use crate::model::FeatureType as GraphQLFeatureType;
+    use crate::model::Feature as ModelFeature;
+    use crate::model::FeatureType as ModelFeatureType;
     use crate::model::LifecycleStage;
     use crate::logic::feature::MockFeatureLogic;
     use crate::model::ID;
@@ -254,12 +254,12 @@ mod tests {
 
     const FEATURE_ID: &str = "11111111-1111-1111-1111-111111111111";
 
-    fn sample_feature_pending_rollback() -> GraphQLFeature {
-        GraphQLFeature {
+    fn sample_feature_pending_rollback() -> ModelFeature {
+        ModelFeature {
             id: ID::from(FEATURE_ID),
             key: "scheduled-kill".to_string(),
             description: None,
-            feature_type: GraphQLFeatureType::Simple,
+            feature_type: ModelFeatureType::Simple,
             enabled: true,                  // Feature is still enabled
             kill_switch_enabled: true,      // Kill switch is enabled (not activated yet)
             kill_switch_activated_at: None, // Not activated yet
@@ -277,12 +277,12 @@ mod tests {
         }
     }
 
-    fn sample_feature_after_disable() -> GraphQLFeature {
-        GraphQLFeature {
+    fn sample_feature_after_disable() -> ModelFeature {
+        ModelFeature {
             id: ID::from(FEATURE_ID),
             key: "scheduled-kill".to_string(),
             description: None,
-            feature_type: GraphQLFeatureType::Simple,
+            feature_type: ModelFeatureType::Simple,
             enabled: false,             // Feature is now disabled (active = false)
             kill_switch_enabled: false, // Kill switch is now activated (disabled)
             kill_switch_activated_at: Some(Utc::now()), // Activation timestamp set

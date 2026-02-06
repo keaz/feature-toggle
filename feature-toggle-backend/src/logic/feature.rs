@@ -4,7 +4,7 @@ use crate::database::feature::{
 };
 use crate::model::{
     CreateFeatureInput, CreateFeatureStageInput, CreateRelationshipInput, Feature,
-    FeatureType as GraphQLFeatureType, LifecycleStage, UpdateFeatureInput,
+    FeatureType as ModelFeatureType, LifecycleStage, UpdateFeatureInput,
 };
 use crate::logic::approval::ApprovalLogic;
 use crate::logic::environment::EnvironmentLogic;
@@ -49,13 +49,13 @@ pub trait FeatureCrudLogic: Send + Sync {
         &self,
         team_id: ID,
         name: Option<String>,
-        feature_type: Option<GraphQLFeatureType>,
+        feature_type: Option<ModelFeatureType>,
     ) -> Result<Vec<Feature>, Error>;
     async fn get_features_paginated(
         &self,
         team_id: ID,
         name: Option<String>,
-        feature_type: Option<GraphQLFeatureType>,
+        feature_type: Option<ModelFeatureType>,
         page_number: i32,
         page_size: i32,
     ) -> Result<(Vec<Feature>, i64), Error>;
@@ -63,7 +63,7 @@ pub trait FeatureCrudLogic: Send + Sync {
         &self,
         team_id: ID,
         name: Option<String>,
-        feature_type: Option<GraphQLFeatureType>,
+        feature_type: Option<ModelFeatureType>,
         offset: i64,
         limit: i64,
     ) -> Result<(Vec<Feature>, i64), Error>;
@@ -177,7 +177,7 @@ pub trait DeploymentLogic: Send + Sync {
         user_id: Uuid,
     ) -> Result<Feature, Error>;
 
-    // Helper for GraphQL broadcasting: get owning feature id by stage id
+    // Helper for broadcasting: get owning feature id by stage id
     async fn get_feature_id_by_stage_id(&self, stage_id: ID) -> Result<Option<Uuid>, Error>;
 }
 
@@ -197,13 +197,13 @@ mockall::mock! {
             &self,
             team_id: ID,
             name: Option<String>,
-            feature_type: Option<GraphQLFeatureType>,
+            feature_type: Option<ModelFeatureType>,
         ) -> Result<Vec<Feature>, Error>;
         async fn get_features_paginated(
             &self,
             team_id: ID,
             name: Option<String>,
-            feature_type: Option<GraphQLFeatureType>,
+            feature_type: Option<ModelFeatureType>,
             page_number: i32,
             page_size: i32,
         ) -> Result<(Vec<Feature>, i64), Error>;
@@ -211,7 +211,7 @@ mockall::mock! {
             &self,
             team_id: ID,
             name: Option<String>,
-            feature_type: Option<GraphQLFeatureType>,
+            feature_type: Option<ModelFeatureType>,
             offset: i64,
             limit: i64,
         ) -> Result<(Vec<Feature>, i64), Error>;
@@ -351,17 +351,17 @@ impl Clone for FeatureLogicImpl {
 }
 
 impl FeatureLogicImpl {
-    fn map_graphql_to_entity_feature_type(feature_type: GraphQLFeatureType) -> EntityFeatureType {
+    fn map_api_to_entity_feature_type(feature_type: ModelFeatureType) -> EntityFeatureType {
         match feature_type {
-            GraphQLFeatureType::Simple => EntityFeatureType::Simple,
-            GraphQLFeatureType::Contextual => EntityFeatureType::Contextual,
+            ModelFeatureType::Simple => EntityFeatureType::Simple,
+            ModelFeatureType::Contextual => EntityFeatureType::Contextual,
         }
     }
 
-    fn map_entity_to_graphql_feature_type(feature_type: EntityFeatureType) -> GraphQLFeatureType {
+    fn map_entity_to_api_feature_type(feature_type: EntityFeatureType) -> ModelFeatureType {
         match feature_type {
-            EntityFeatureType::Simple => GraphQLFeatureType::Simple,
-            EntityFeatureType::Contextual => GraphQLFeatureType::Contextual,
+            EntityFeatureType::Simple => ModelFeatureType::Simple,
+            EntityFeatureType::Contextual => ModelFeatureType::Contextual,
         }
     }
 
@@ -369,7 +369,7 @@ impl FeatureLogicImpl {
         team_id: Uuid,
         input: CreateFeatureInput,
     ) -> Result<CreateFeature, Error> {
-        let feature_type = Self::map_graphql_to_entity_feature_type(input.feature_type);
+        let feature_type = Self::map_api_to_entity_feature_type(input.feature_type);
         let stages = Self::get_create_stages_to_create(input.stages, input.relationships)?;
 
         let dependencies = input
@@ -378,7 +378,7 @@ impl FeatureLogicImpl {
             .map(|id| id_to_uuid(id))
             .collect::<Result<Vec<_>, _>>()?;
 
-        // Map variants from GraphQL to database format
+        // Map variants from API model to database format
         let variants = input.variants.map(|v| {
             v.into_iter()
                 .map(|variant| {
@@ -444,7 +444,7 @@ impl FeatureLogicImpl {
 
     fn map_to_update_feature(id: ID, input: UpdateFeatureInput) -> Result<UpdateFeature, Error> {
         let id = id_to_uuid(id)?;
-        let feature_type = Some(Self::map_graphql_to_entity_feature_type(input.feature_type));
+        let feature_type = Some(Self::map_api_to_entity_feature_type(input.feature_type));
 
         let stages = Self::get_create_stages_to_create(input.stages, input.relationships)?;
         let dependencies = input
@@ -453,7 +453,7 @@ impl FeatureLogicImpl {
             .map(|id| id_to_uuid(id))
             .collect::<Result<Vec<_>, _>>()?;
 
-        // Map variants from GraphQL to database format
+        // Map variants from API model to database format
         let variants = input.variants.map(|v| {
             v.into_iter()
                 .map(|variant| {
@@ -492,12 +492,12 @@ impl FeatureLogicImpl {
         })
     }
 
-    fn map_entity_to_graphql_feature(feature: crate::database::entity::Feature) -> Feature {
+    fn map_entity_to_api_feature(feature: crate::database::entity::Feature) -> Feature {
         Feature {
             id: feature.id.into(),
             key: feature.key,
             description: feature.description,
-            feature_type: Self::map_entity_to_graphql_feature_type(feature.feature_type),
+            feature_type: Self::map_entity_to_api_feature_type(feature.feature_type),
             enabled: feature.active,
             kill_switch_enabled: feature.kill_switch_enabled,
             kill_switch_activated_at: feature.kill_switch_activated_at,
@@ -534,7 +534,7 @@ impl FeatureCrudLogic for FeatureLogicImpl {
     async fn get_feature_by_id(&self, id: ID) -> Result<Feature, Error> {
         let id = Uuid::try_from(id).map_err(|_| Error::InvalidInput("Invalid ID".to_string()))?;
         let feature = self.repository.get_feature_by_id(id).await?;
-        let feature = Self::map_entity_to_graphql_feature(feature);
+        let feature = Self::map_entity_to_api_feature(feature);
         Ok(feature)
     }
 
@@ -542,10 +542,10 @@ impl FeatureCrudLogic for FeatureLogicImpl {
         &self,
         team_id: ID,
         name: Option<String>,
-        feature_type: Option<GraphQLFeatureType>,
+        feature_type: Option<ModelFeatureType>,
     ) -> Result<Vec<Feature>, Error> {
         let team_id = Uuid::try_from(team_id).unwrap();
-        let entity_feature_type = feature_type.map(Self::map_graphql_to_entity_feature_type);
+        let entity_feature_type = feature_type.map(Self::map_api_to_entity_feature_type);
         let features = self
             .repository
             .get_features(team_id, name, entity_feature_type)
@@ -553,7 +553,7 @@ impl FeatureCrudLogic for FeatureLogicImpl {
 
         Ok(features
             .into_iter()
-            .map(Self::map_entity_to_graphql_feature)
+            .map(Self::map_entity_to_api_feature)
             .collect())
     }
 
@@ -561,12 +561,12 @@ impl FeatureCrudLogic for FeatureLogicImpl {
         &self,
         team_id: ID,
         name: Option<String>,
-        feature_type: Option<GraphQLFeatureType>,
+        feature_type: Option<ModelFeatureType>,
         page_number: i32,
         page_size: i32,
     ) -> Result<(Vec<Feature>, i64), Error> {
         let team_id = Uuid::try_from(team_id).map_err(|e| Error::InvalidInput(e.to_string()))?;
-        let entity_feature_type = feature_type.map(Self::map_graphql_to_entity_feature_type);
+        let entity_feature_type = feature_type.map(Self::map_api_to_entity_feature_type);
         let (features, total) = self
             .repository
             .get_features_paginated(team_id, name, entity_feature_type, page_number, page_size)
@@ -574,7 +574,7 @@ impl FeatureCrudLogic for FeatureLogicImpl {
 
         let mapped_features = features
             .into_iter()
-            .map(Self::map_entity_to_graphql_feature)
+            .map(Self::map_entity_to_api_feature)
             .collect();
 
         Ok((mapped_features, total))
@@ -584,12 +584,12 @@ impl FeatureCrudLogic for FeatureLogicImpl {
         &self,
         team_id: ID,
         name: Option<String>,
-        feature_type: Option<GraphQLFeatureType>,
+        feature_type: Option<ModelFeatureType>,
         offset: i64,
         limit: i64,
     ) -> Result<(Vec<Feature>, i64), Error> {
         let team_id = Uuid::try_from(team_id).map_err(|e| Error::InvalidInput(e.to_string()))?;
-        let entity_feature_type = feature_type.map(Self::map_graphql_to_entity_feature_type);
+        let entity_feature_type = feature_type.map(Self::map_api_to_entity_feature_type);
         let (features, total) = self
             .repository
             .get_features_with_offset(team_id, name, entity_feature_type, offset, limit)
@@ -597,7 +597,7 @@ impl FeatureCrudLogic for FeatureLogicImpl {
 
         let mapped_features = features
             .into_iter()
-            .map(Self::map_entity_to_graphql_feature)
+            .map(Self::map_entity_to_api_feature)
             .collect();
 
         Ok((mapped_features, total))
@@ -669,7 +669,7 @@ impl FeatureCrudLogic for FeatureLogicImpl {
         )
         .await;
 
-        Ok(Self::map_entity_to_graphql_feature(feature))
+        Ok(Self::map_entity_to_api_feature(feature))
     }
 
     async fn delete_feature(
@@ -762,7 +762,7 @@ impl FeatureCrudLogic for FeatureLogicImpl {
         // Map each feature and load its environments
         let mut mapped_features = Vec::new();
         for feature in features {
-            let mapped_feature = Self::map_entity_to_graphql_feature(feature);
+            let mapped_feature = Self::map_entity_to_api_feature(feature);
             mapped_features.push(mapped_feature);
         }
 
@@ -783,7 +783,7 @@ impl FeatureCrudLogic for FeatureLogicImpl {
 
         let mut mapped_features = Vec::new();
         for feature in features {
-            let mapped_feature = Self::map_entity_to_graphql_feature(feature);
+            let mapped_feature = Self::map_entity_to_api_feature(feature);
             mapped_features.push(mapped_feature);
         }
 
@@ -806,7 +806,7 @@ impl FeatureCrudLogic for FeatureLogicImpl {
         let mut mapped_features = Vec::new();
         for feature in features {
             // Create feature with properly mapped stages
-            let mapped_feature = Self::map_entity_to_graphql_feature(feature);
+            let mapped_feature = Self::map_entity_to_api_feature(feature);
             mapped_features.push(mapped_feature);
         }
 
@@ -827,7 +827,7 @@ impl FeatureCrudLogic for FeatureLogicImpl {
 
         let mut mapped_features = Vec::new();
         for feature in features {
-            let mapped_feature = Self::map_entity_to_graphql_feature(feature);
+            let mapped_feature = Self::map_entity_to_api_feature(feature);
             mapped_features.push(mapped_feature);
         }
 
@@ -882,7 +882,7 @@ impl FeatureCrudLogic for FeatureLogicImpl {
         )
         .await;
 
-        Ok(Self::map_entity_to_graphql_feature(feature))
+        Ok(Self::map_entity_to_api_feature(feature))
     }
 
     async fn emergency_enable_feature(
@@ -917,14 +917,14 @@ impl FeatureCrudLogic for FeatureLogicImpl {
         )
         .await;
 
-        Ok(Self::map_entity_to_graphql_feature(feature))
+        Ok(Self::map_entity_to_api_feature(feature))
     }
 
     async fn get_features_pending_rollback(&self) -> Result<Vec<Feature>, Error> {
         let features = self.repository.get_features_pending_rollback().await?;
         Ok(features
             .into_iter()
-            .map(Self::map_entity_to_graphql_feature)
+            .map(Self::map_entity_to_api_feature)
             .collect())
     }
 
@@ -964,7 +964,7 @@ impl FeatureCrudLogic for FeatureLogicImpl {
         )
         .await;
 
-        Ok(Self::map_entity_to_graphql_feature(feature))
+        Ok(Self::map_entity_to_api_feature(feature))
     }
 }
 
@@ -976,7 +976,7 @@ impl StageLogic for FeatureLogicImpl {
     ) -> Result<Vec<crate::model::Context>, Error> {
         let stage_id = id_to_uuid(stage_id)?;
         let list = self.repository.get_stage_contexts(stage_id).await?;
-        Ok(list.into_iter().map(map_db_ctx_to_gql).collect())
+        Ok(list.into_iter().map(map_db_ctx_to_model).collect())
     }
 
     async fn set_stage_contexts(
@@ -993,7 +993,7 @@ impl StageLogic for FeatureLogicImpl {
             .repository
             .set_stage_contexts(stage_id, context_ids)
             .await?;
-        Ok(list.into_iter().map(map_db_ctx_to_gql).collect())
+        Ok(list.into_iter().map(map_db_ctx_to_model).collect())
     }
 
     async fn get_stage_criteria(
@@ -1002,7 +1002,7 @@ impl StageLogic for FeatureLogicImpl {
     ) -> Result<Vec<crate::model::StageCriterion>, Error> {
         let stage_id = id_to_uuid(stage_id)?;
         let list = self.repository.get_stage_criteria(stage_id).await?;
-        Ok(list.into_iter().map(map_db_criterion_to_gql).collect())
+        Ok(list.into_iter().map(map_db_criterion_to_model).collect())
     }
 
     async fn set_stage_criteria(
@@ -1034,7 +1034,7 @@ impl StageLogic for FeatureLogicImpl {
             .repository
             .set_stage_criteria(stage_id, create?)
             .await?;
-        Ok(list.into_iter().map(map_db_criterion_to_gql).collect())
+        Ok(list.into_iter().map(map_db_criterion_to_model).collect())
     }
 }
 
@@ -1122,10 +1122,10 @@ impl DeploymentLogic for FeatureLogicImpl {
                             return Err(Error::NotFound(stage_uuid));
                         }
                     }
-                    let mut gql_feature =
-                        FeatureLogicImpl::map_entity_to_graphql_feature(db_feature);
-                    gql_feature.pending_approval_request_id = Some(ID::from(request.id));
-                    return Ok(gql_feature);
+                    let mut api_feature =
+                        FeatureLogicImpl::map_entity_to_api_feature(db_feature);
+                    api_feature.pending_approval_request_id = Some(ID::from(request.id));
+                    return Ok(api_feature);
                 }
             }
         }
@@ -1168,7 +1168,7 @@ impl DeploymentLogic for FeatureLogicImpl {
             return Err(Error::NotFound(stage_uuid));
         }
 
-        // Load the owning feature of this stage and return it, mapped to GraphQL Feature
+        // Load the owning feature of this stage and return it, mapped to the API model
         let db_feature = self
             .repository
             .get_feature_by_id(feature_id_for_stage)
@@ -1300,7 +1300,7 @@ impl DeploymentLogic for FeatureLogicImpl {
         )
         .await;
 
-        Ok(FeatureLogicImpl::map_entity_to_graphql_feature(db_feature))
+        Ok(FeatureLogicImpl::map_entity_to_api_feature(db_feature))
     }
 
     async fn get_feature_id_by_stage_id(&self, stage_id: ID) -> Result<Option<Uuid>, Error> {
@@ -1315,7 +1315,7 @@ impl FeatureLogic for FeatureLogicImpl {
     }
 }
 
-fn map_db_ctx_to_gql(c: crate::database::entity::Context) -> crate::model::Context {
+fn map_db_ctx_to_model(c: crate::database::entity::Context) -> crate::model::Context {
     crate::model::Context {
         id: ID::from(c.id),
         team_id: ID::from(c.team_id),
@@ -1331,7 +1331,7 @@ fn map_db_ctx_to_gql(c: crate::database::entity::Context) -> crate::model::Conte
     }
 }
 
-fn map_db_criterion_to_gql(
+fn map_db_criterion_to_model(
     sc: crate::database::entity::StageCriterion,
 ) -> crate::model::StageCriterion {
     use crate::model::RuleOperator;
@@ -1393,7 +1393,7 @@ fn map_db_criterion_to_gql(
         .into_iter()
         .map(|alloc| {
             crate::model::VariantAllocation {
-                id: ID::from(uuid::Uuid::new_v4()), // Generate ID for GraphQL (not stored in simple version)
+                id: ID::from(uuid::Uuid::new_v4()), // Generate an API ID (not stored in simple version)
                 criteria_id: ID::from(sc.id),
                 variant_control: alloc.variant_control,
                 weight: alloc.weight,
@@ -1567,7 +1567,7 @@ mod test {
         assert_eq!(feature.id.to_string(), ID);
         assert_eq!(feature.key, "Test Feature");
         assert_eq!(feature.description, Some("Test description".to_string()));
-        assert!(matches!(feature.feature_type, GraphQLFeatureType::Simple));
+        assert!(matches!(feature.feature_type, ModelFeatureType::Simple));
     }
 
     #[tokio::test]
@@ -1603,7 +1603,7 @@ mod test {
         let input = CreateFeatureInput {
             key: "New Feature".to_string(),
             description: Some("New feature description".to_string()),
-            feature_type: GraphQLFeatureType::Simple,
+            feature_type: ModelFeatureType::Simple,
             enabled: Some(true),
             dependencies: vec![],
             relationships: vec![],
@@ -1649,7 +1649,7 @@ mod test {
         let input = UpdateFeatureInput {
             key: NAME.to_string(),
             description: Some("Updated description".to_string()),
-            feature_type: GraphQLFeatureType::Contextual,
+            feature_type: ModelFeatureType::Contextual,
             enabled: Some(true),
             dependencies: vec![],
             relationships: vec![],
@@ -1700,7 +1700,7 @@ mod test {
         assert_eq!(feature.description, Some("Updated description".to_string()));
         assert!(matches!(
             feature.feature_type,
-            GraphQLFeatureType::Contextual
+            ModelFeatureType::Contextual
         ));
     }
 

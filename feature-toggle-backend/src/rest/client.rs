@@ -5,7 +5,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::model::{
-    Client as GqlClient, ClientType as GqlClientType, CreateClientInput, UpdateClientInput,
+    Client as ModelClient, ClientType as ModelClientType, CreateClientInput, UpdateClientInput,
 };
 use crate::database::activity_log::ActivityLogRepository;
 use crate::database::client::client_repository_tx;
@@ -22,20 +22,20 @@ pub enum ClientType {
     Backend,
 }
 
-impl From<GqlClientType> for ClientType {
-    fn from(value: GqlClientType) -> Self {
+impl From<ModelClientType> for ClientType {
+    fn from(value: ModelClientType) -> Self {
         match value {
-            GqlClientType::Web => ClientType::Web,
-            GqlClientType::Backend => ClientType::Backend,
+            ModelClientType::Web => ClientType::Web,
+            ModelClientType::Backend => ClientType::Backend,
         }
     }
 }
 
-impl From<ClientType> for GqlClientType {
+impl From<ClientType> for ModelClientType {
     fn from(value: ClientType) -> Self {
         match value {
-            ClientType::Web => GqlClientType::Web,
-            ClientType::Backend => GqlClientType::Backend,
+            ClientType::Web => ModelClientType::Web,
+            ClientType::Backend => ModelClientType::Backend,
         }
     }
 }
@@ -89,8 +89,8 @@ pub struct UpdateClientRequest {
     pub web_origins: Option<Vec<String>>,
 }
 
-impl From<GqlClient> for ClientResponse {
-    fn from(client: GqlClient) -> Self {
+impl From<ModelClient> for ClientResponse {
+    fn from(client: ModelClient) -> Self {
         Self {
             id: client.id.to_string(),
             team_id: client.team_id.to_string(),
@@ -226,7 +226,7 @@ pub(crate) async fn list_clients(
         .filter(|value| !value.is_empty())
         .map(|value| value.to_string());
 
-    let client_type = query.client_type.map(GqlClientType::from);
+    let client_type = query.client_type.map(ModelClientType::from);
 
     let (items, total) = logic
         .get_clients_with_offset(ID::from(team_uuid), name, query.enabled, client_type, offset, limit)
@@ -377,7 +377,7 @@ pub(crate) async fn update_client(
         name: payload.name.clone(),
         description: payload.description.clone(),
         enabled: payload.enabled,
-        client_type: payload.client_type.map(GqlClientType::from),
+        client_type: payload.client_type.map(ModelClientType::from),
         web_origins: payload.web_origins.clone(),
     };
 
@@ -427,14 +427,14 @@ mod tests {
     use crate::logic::client::MockClientLogic;
     use sqlx::postgres::PgPoolOptions;
 
-    fn sample_client(client_id: Uuid, team_id: Uuid) -> GqlClient {
-        GqlClient {
+    fn sample_client(client_id: Uuid, team_id: Uuid) -> ModelClient {
+        ModelClient {
             id: ID::from(client_id),
             team_id: ID::from(team_id),
             name: "Web Client".to_string(),
             description: Some("Test".to_string()),
             enabled: true,
-            client_type: GqlClientType::Web,
+            client_type: ModelClientType::Web,
             api_key: "api_key".to_string(),
             web_origins: vec!["https://example.com".to_string()],
         }
@@ -498,7 +498,7 @@ mod tests {
                 id.to_string() == team_id.to_string()
                     && name.as_deref() == Some("client")
                     && *enabled == Some(true)
-                    && matches!(client_type, Some(GqlClientType::Web))
+                    && matches!(client_type, Some(ModelClientType::Web))
                     && *offset == 0
                     && *limit == 10
             })

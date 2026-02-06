@@ -2,13 +2,13 @@ use crate::Error;
 use crate::database::jwt_token::{JwtToken, JwtTokenRepository};
 use crate::logic::jwt_secret::JwtSecretLogic;
 use crate::logic::role::RoleLogic;
-use crate::logic::user::{GqlUser, UserLogic};
+use crate::logic::user::{ApiUser, UserLogic};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 #[derive(Clone, Debug)]
 pub struct LoginResult {
-    pub user: GqlUser,
+    pub user: ApiUser,
     pub token: String,
     pub is_temporary: bool,
 }
@@ -153,15 +153,15 @@ mod tests {
     use crate::database::jwt_token::MockJwtTokenRepository;
     use crate::logic::jwt_secret::MockJwtSecretLogic;
     use crate::logic::role::MockRoleLogic;
-    use crate::logic::user::GqlUser;
+    use crate::logic::user::ApiUser;
     use crate::logic::user::MockUserLogic;
     use crate::model::ID;
     use chrono::Utc;
     use mockall::predicate::*;
     use uuid::Uuid;
 
-    fn sample_gql_user() -> GqlUser {
-        GqlUser {
+    fn sample_api_user() -> ApiUser {
+        ApiUser {
             id: ID::from(Uuid::new_v4()),
             username: "testuser".to_string(),
             first_name: "Test".to_string(),
@@ -177,7 +177,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_login_user_success() {
-        let user = sample_gql_user();
+        let user = sample_api_user();
         let user_uuid = Uuid::try_from(user.id.clone()).unwrap();
 
         let mut mock_user_logic = MockUserLogic::new();
@@ -255,7 +255,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_login_user_with_temporary_password() {
-        let mut user = sample_gql_user();
+        let mut user = sample_api_user();
         user.is_temporary_password = true; // Set as temporary password
 
         let mut mock_user_logic = MockUserLogic::new();

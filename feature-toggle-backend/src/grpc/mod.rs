@@ -184,7 +184,7 @@ impl FeatureEvaluationSvc {
             crate::logic::user_flag::user_flag_logic(client_repo.clone(), user_flag_repo.clone());
         let feature_evaluation_repo =
             crate::database::feature_evaluation::feature_evaluation_repository(pool.clone());
-        // Use event-enabled logic so gRPC ingested evaluations broadcast to GraphQL subscriptions
+        // Use event-enabled logic so gRPC ingested evaluations broadcast to REST stream consumers.
         let feature_evaluation_logic =
             crate::logic::feature_evaluation::feature_evaluation_logic_with_events(
                 feature_evaluation_repo,

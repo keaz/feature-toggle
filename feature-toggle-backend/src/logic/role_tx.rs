@@ -8,7 +8,7 @@ use crate::Error;
 use crate::database::activity_log::{ActivityLogRepository, CreateActivityLog};
 use crate::database::role::RoleRepositoryTx;
 use crate::logic::ActorContext;
-use crate::logic::role::{GqlRole, SYSTEM_ROLE_NAMES};
+use crate::logic::role::{ApiRole, SYSTEM_ROLE_NAMES};
 use crate::utils::activity_logger::activity_types;
 use crate::model::ID;
 use sqlx::PgConnection;
@@ -38,7 +38,7 @@ pub async fn create_role_in_tx<R>(
     name: String,
     description: String,
     actor: Option<ActorContext>,
-) -> Result<GqlRole, Error>
+) -> Result<ApiRole, Error>
 where
     R: RoleRepositoryTx,
 {
@@ -81,7 +81,7 @@ where
         .await
         .map_err(Error::DatabaseError)?;
 
-    Ok(GqlRole::from(role))
+    Ok(ApiRole::from(role))
 }
 
 /// Delete a role within a transaction.
@@ -149,7 +149,7 @@ pub async fn assign_user_roles_in_tx<R>(
     user_id: ID,
     role_ids: Vec<ID>,
     actor: Option<ActorContext>,
-) -> Result<Vec<GqlRole>, Error>
+) -> Result<Vec<ApiRole>, Error>
 where
     R: RoleRepositoryTx,
 {
@@ -195,5 +195,5 @@ where
 
     // Get updated roles for the user within the transaction
     let roles = repo.get_user_roles_tx(conn, user_uuid).await?;
-    Ok(roles.into_iter().map(GqlRole::from).collect())
+    Ok(roles.into_iter().map(ApiRole::from).collect())
 }

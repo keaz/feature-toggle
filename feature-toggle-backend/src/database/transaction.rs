@@ -1,7 +1,7 @@
 //! Transaction management utilities for database operations.
 //!
 //! This module provides types and utilities for managing database transactions
-//! across multiple repository operations, ensuring atomicity of GraphQL mutations.
+//! across multiple repository operations, ensuring atomicity of REST write handlers.
 
 use sqlx::{PgPool, Postgres, Transaction};
 
@@ -10,9 +10,9 @@ pub type DbTransaction<'a> = Transaction<'a, Postgres>;
 
 /// Transaction manager for creating and managing database transactions.
 ///
-/// This is injected into the GraphQL context and used by mutations
-/// to ensure all repository operations within a single mutation
-/// share the same transaction context.
+/// This is injected into the request/logic layer and used by write endpoints to
+/// ensure all repository operations within a single API request share the same
+/// transaction context.
 #[derive(Clone)]
 pub struct TransactionManager {
     pool: PgPool,

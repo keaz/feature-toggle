@@ -3,7 +3,7 @@ use crate::model::ID;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::logic::role::{GqlRole, RoleLogic};
+use crate::logic::role::{ApiRole, RoleLogic};
 use crate::database::activity_log::ActivityLogRepository;
 use crate::database::role::role_repository_tx;
 use crate::logic::ActorContext;
@@ -20,8 +20,8 @@ pub struct RoleResponse {
     pub updated_at: String,
 }
 
-impl From<GqlRole> for RoleResponse {
-    fn from(role: GqlRole) -> Self {
+impl From<ApiRole> for RoleResponse {
+    fn from(role: ApiRole) -> Self {
         Self {
             id: role.id.to_string(),
             name: role.name,
@@ -201,8 +201,8 @@ mod tests {
     use crate::database::activity_log::PgActivityLogRepository;
     use sqlx::postgres::PgPoolOptions;
 
-    fn sample_role() -> GqlRole {
-        GqlRole {
+    fn sample_role() -> ApiRole {
+        ApiRole {
             id: ID::from(uuid::Uuid::new_v4()),
             name: "Role".to_string(),
             description: "Role description".to_string(),

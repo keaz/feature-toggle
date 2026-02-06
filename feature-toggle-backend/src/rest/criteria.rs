@@ -16,13 +16,13 @@ use crate::database::variant_allocations::{
     CreateVariantAllocationInput as DbCreateVariantAllocationInput, VariantAllocationsRepositoryTx,
 };
 use crate::model::{
-    CompoundRuleCondition as GqlCompoundRuleCondition, CompoundRuleGroup as GqlCompoundRuleGroup,
-    CreateRuleConditionInput as GqlCreateRuleConditionInput,
-    CreateStageCriterionInput as GqlCreateStageCriterionInput,
-    CreateVariantAllocationInput as GqlCreateVariantAllocationInput,
-    InlineRuleGroupInput as GqlInlineRuleGroupInput, LogicOperator as GqlLogicOperator,
-    RuleOperator as GqlRuleOperator, StageCriterion as GqlStageCriterion,
-    VariantAllocation as GqlVariantAllocation, VariantSelectionMode as GqlVariantSelectionMode,
+    CompoundRuleCondition as ModelCompoundRuleCondition, CompoundRuleGroup as ModelCompoundRuleGroup,
+    CreateRuleConditionInput as ModelCreateRuleConditionInput,
+    CreateStageCriterionInput as ModelCreateStageCriterionInput,
+    CreateVariantAllocationInput as ModelCreateVariantAllocationInput,
+    InlineRuleGroupInput as ModelInlineRuleGroupInput, LogicOperator as ModelLogicOperator,
+    RuleOperator as ModelRuleOperator, StageCriterion as ModelStageCriterion,
+    VariantAllocation as ModelVariantAllocation, VariantSelectionMode as ModelVariantSelectionMode,
 };
 use crate::logic::feature::FeatureLogic;
 use crate::logic::feature_tx;
@@ -88,44 +88,44 @@ impl RuleOperator {
     }
 }
 
-impl From<GqlRuleOperator> for RuleOperator {
-    fn from(value: GqlRuleOperator) -> Self {
+impl From<ModelRuleOperator> for RuleOperator {
+    fn from(value: ModelRuleOperator) -> Self {
         match value {
-            GqlRuleOperator::Equals => RuleOperator::Equals,
-            GqlRuleOperator::NotEquals => RuleOperator::NotEquals,
-            GqlRuleOperator::GreaterThan => RuleOperator::GreaterThan,
-            GqlRuleOperator::LessThan => RuleOperator::LessThan,
-            GqlRuleOperator::GreaterThanOrEqual => RuleOperator::GreaterThanOrEqual,
-            GqlRuleOperator::LessThanOrEqual => RuleOperator::LessThanOrEqual,
-            GqlRuleOperator::Contains => RuleOperator::Contains,
-            GqlRuleOperator::StartsWith => RuleOperator::StartsWith,
-            GqlRuleOperator::EndsWith => RuleOperator::EndsWith,
-            GqlRuleOperator::Regex => RuleOperator::Regex,
-            GqlRuleOperator::In => RuleOperator::In,
-            GqlRuleOperator::NotIn => RuleOperator::NotIn,
-            GqlRuleOperator::SemverGreaterThan => RuleOperator::SemverGreaterThan,
-            GqlRuleOperator::SemverLessThan => RuleOperator::SemverLessThan,
+            ModelRuleOperator::Equals => RuleOperator::Equals,
+            ModelRuleOperator::NotEquals => RuleOperator::NotEquals,
+            ModelRuleOperator::GreaterThan => RuleOperator::GreaterThan,
+            ModelRuleOperator::LessThan => RuleOperator::LessThan,
+            ModelRuleOperator::GreaterThanOrEqual => RuleOperator::GreaterThanOrEqual,
+            ModelRuleOperator::LessThanOrEqual => RuleOperator::LessThanOrEqual,
+            ModelRuleOperator::Contains => RuleOperator::Contains,
+            ModelRuleOperator::StartsWith => RuleOperator::StartsWith,
+            ModelRuleOperator::EndsWith => RuleOperator::EndsWith,
+            ModelRuleOperator::Regex => RuleOperator::Regex,
+            ModelRuleOperator::In => RuleOperator::In,
+            ModelRuleOperator::NotIn => RuleOperator::NotIn,
+            ModelRuleOperator::SemverGreaterThan => RuleOperator::SemverGreaterThan,
+            ModelRuleOperator::SemverLessThan => RuleOperator::SemverLessThan,
         }
     }
 }
 
-impl From<RuleOperator> for GqlRuleOperator {
+impl From<RuleOperator> for ModelRuleOperator {
     fn from(value: RuleOperator) -> Self {
         match value {
-            RuleOperator::Equals => GqlRuleOperator::Equals,
-            RuleOperator::NotEquals => GqlRuleOperator::NotEquals,
-            RuleOperator::GreaterThan => GqlRuleOperator::GreaterThan,
-            RuleOperator::LessThan => GqlRuleOperator::LessThan,
-            RuleOperator::GreaterThanOrEqual => GqlRuleOperator::GreaterThanOrEqual,
-            RuleOperator::LessThanOrEqual => GqlRuleOperator::LessThanOrEqual,
-            RuleOperator::Contains => GqlRuleOperator::Contains,
-            RuleOperator::StartsWith => GqlRuleOperator::StartsWith,
-            RuleOperator::EndsWith => GqlRuleOperator::EndsWith,
-            RuleOperator::Regex => GqlRuleOperator::Regex,
-            RuleOperator::In => GqlRuleOperator::In,
-            RuleOperator::NotIn => GqlRuleOperator::NotIn,
-            RuleOperator::SemverGreaterThan => GqlRuleOperator::SemverGreaterThan,
-            RuleOperator::SemverLessThan => GqlRuleOperator::SemverLessThan,
+            RuleOperator::Equals => ModelRuleOperator::Equals,
+            RuleOperator::NotEquals => ModelRuleOperator::NotEquals,
+            RuleOperator::GreaterThan => ModelRuleOperator::GreaterThan,
+            RuleOperator::LessThan => ModelRuleOperator::LessThan,
+            RuleOperator::GreaterThanOrEqual => ModelRuleOperator::GreaterThanOrEqual,
+            RuleOperator::LessThanOrEqual => ModelRuleOperator::LessThanOrEqual,
+            RuleOperator::Contains => ModelRuleOperator::Contains,
+            RuleOperator::StartsWith => ModelRuleOperator::StartsWith,
+            RuleOperator::EndsWith => ModelRuleOperator::EndsWith,
+            RuleOperator::Regex => ModelRuleOperator::Regex,
+            RuleOperator::In => ModelRuleOperator::In,
+            RuleOperator::NotIn => ModelRuleOperator::NotIn,
+            RuleOperator::SemverGreaterThan => ModelRuleOperator::SemverGreaterThan,
+            RuleOperator::SemverLessThan => ModelRuleOperator::SemverLessThan,
         }
     }
 }
@@ -137,20 +137,20 @@ pub enum LogicOperator {
     Or,
 }
 
-impl From<GqlLogicOperator> for LogicOperator {
-    fn from(value: GqlLogicOperator) -> Self {
+impl From<ModelLogicOperator> for LogicOperator {
+    fn from(value: ModelLogicOperator) -> Self {
         match value {
-            GqlLogicOperator::And => LogicOperator::And,
-            GqlLogicOperator::Or => LogicOperator::Or,
+            ModelLogicOperator::And => LogicOperator::And,
+            ModelLogicOperator::Or => LogicOperator::Or,
         }
     }
 }
 
-impl From<LogicOperator> for GqlLogicOperator {
+impl From<LogicOperator> for ModelLogicOperator {
     fn from(value: LogicOperator) -> Self {
         match value {
-            LogicOperator::And => GqlLogicOperator::And,
-            LogicOperator::Or => GqlLogicOperator::Or,
+            LogicOperator::And => ModelLogicOperator::And,
+            LogicOperator::Or => ModelLogicOperator::Or,
         }
     }
 }
@@ -180,20 +180,20 @@ pub enum VariantSelectionMode {
     SpecificVariant,
 }
 
-impl From<GqlVariantSelectionMode> for VariantSelectionMode {
-    fn from(value: GqlVariantSelectionMode) -> Self {
+impl From<ModelVariantSelectionMode> for VariantSelectionMode {
+    fn from(value: ModelVariantSelectionMode) -> Self {
         match value {
-            GqlVariantSelectionMode::WeightedSplit => VariantSelectionMode::WeightedSplit,
-            GqlVariantSelectionMode::SpecificVariant => VariantSelectionMode::SpecificVariant,
+            ModelVariantSelectionMode::WeightedSplit => VariantSelectionMode::WeightedSplit,
+            ModelVariantSelectionMode::SpecificVariant => VariantSelectionMode::SpecificVariant,
         }
     }
 }
 
-impl From<VariantSelectionMode> for GqlVariantSelectionMode {
+impl From<VariantSelectionMode> for ModelVariantSelectionMode {
     fn from(value: VariantSelectionMode) -> Self {
         match value {
-            VariantSelectionMode::WeightedSplit => GqlVariantSelectionMode::WeightedSplit,
-            VariantSelectionMode::SpecificVariant => GqlVariantSelectionMode::SpecificVariant,
+            VariantSelectionMode::WeightedSplit => ModelVariantSelectionMode::WeightedSplit,
+            VariantSelectionMode::SpecificVariant => ModelVariantSelectionMode::SpecificVariant,
         }
     }
 }
@@ -294,8 +294,8 @@ pub struct UpdateRuleGroupRequest {
     pub conditions: Option<Vec<CreateRuleConditionRequest>>,
 }
 
-impl From<GqlCompoundRuleCondition> for CompoundRuleConditionResponse {
-    fn from(value: GqlCompoundRuleCondition) -> Self {
+impl From<ModelCompoundRuleCondition> for CompoundRuleConditionResponse {
+    fn from(value: ModelCompoundRuleCondition) -> Self {
         Self {
             id: value.id.to_string(),
             context_key: value.context_key,
@@ -306,8 +306,8 @@ impl From<GqlCompoundRuleCondition> for CompoundRuleConditionResponse {
     }
 }
 
-impl From<GqlCompoundRuleGroup> for CompoundRuleGroupResponse {
-    fn from(value: GqlCompoundRuleGroup) -> Self {
+impl From<ModelCompoundRuleGroup> for CompoundRuleGroupResponse {
+    fn from(value: ModelCompoundRuleGroup) -> Self {
         Self {
             id: value.id.to_string(),
             logic_operator: value.logic_operator.into(),
@@ -320,8 +320,8 @@ impl From<GqlCompoundRuleGroup> for CompoundRuleGroupResponse {
     }
 }
 
-impl From<GqlVariantAllocation> for VariantAllocationResponse {
-    fn from(value: GqlVariantAllocation) -> Self {
+impl From<ModelVariantAllocation> for VariantAllocationResponse {
+    fn from(value: ModelVariantAllocation) -> Self {
         Self {
             id: Some(value.id.to_string()),
             criteria_id: value.criteria_id.to_string(),
@@ -331,8 +331,8 @@ impl From<GqlVariantAllocation> for VariantAllocationResponse {
     }
 }
 
-impl From<GqlStageCriterion> for StageCriterionResponse {
-    fn from(value: GqlStageCriterion) -> Self {
+impl From<ModelStageCriterion> for StageCriterionResponse {
+    fn from(value: ModelStageCriterion) -> Self {
         Self {
             id: value.id.to_string(),
             stage_id: value.stage_id.to_string(),
@@ -449,13 +449,13 @@ fn map_rule_group_response(
 
 fn map_create_stage_criterion(
     criterion: &CreateStageCriterionRequest,
-) -> GqlCreateStageCriterionInput {
-    GqlCreateStageCriterionInput {
+) -> ModelCreateStageCriterionInput {
+    ModelCreateStageCriterionInput {
         priority: criterion.priority,
         variant_allocations: criterion.variant_allocations.as_ref().map(|allocs| {
             allocs
                 .iter()
-                .map(|alloc| GqlCreateVariantAllocationInput {
+                .map(|alloc| ModelCreateVariantAllocationInput {
                     variant_control: alloc.variant_control.clone(),
                     weight: alloc.weight,
                 })
@@ -464,12 +464,12 @@ fn map_create_stage_criterion(
         rule_groups: criterion.rule_groups.as_ref().map(|groups| {
             groups
                 .iter()
-                .map(|group| GqlInlineRuleGroupInput {
+                .map(|group| ModelInlineRuleGroupInput {
                     logic_operator: group.logic_operator.into(),
                     conditions: group
                         .conditions
                         .iter()
-                        .map(|cond| GqlCreateRuleConditionInput {
+                        .map(|cond| ModelCreateRuleConditionInput {
                             context_key: cond.context_key.clone(),
                             operator: cond.operator.into(),
                             value: cond.value.clone(),
@@ -566,7 +566,7 @@ pub(crate) async fn set_stage_criteria(
 
     validate_stage_criteria(&criteria)?;
 
-    let gql_criteria: Vec<GqlCreateStageCriterionInput> = criteria
+    let model_criteria: Vec<ModelCreateStageCriterionInput> = criteria
         .iter()
         .map(map_create_stage_criterion)
         .collect();
@@ -591,7 +591,7 @@ pub(crate) async fn set_stage_criteria(
         &variant_repo_tx,
         &rules_repo_tx,
         ID::from(stage_uuid),
-        gql_criteria,
+        model_criteria,
     )
     .await;
 
@@ -889,29 +889,29 @@ mod tests {
     use crate::logic::feature::MockFeatureLogic;
     use sqlx::postgres::PgPoolOptions;
 
-    fn sample_stage_criterion(stage_id: Uuid) -> GqlStageCriterion {
-        GqlStageCriterion {
+    fn sample_stage_criterion(stage_id: Uuid) -> ModelStageCriterion {
+        ModelStageCriterion {
             id: ID::from(Uuid::new_v4()),
             stage_id: ID::from(stage_id),
             priority: 0,
-            rule_groups: vec![GqlCompoundRuleGroup {
+            rule_groups: vec![ModelCompoundRuleGroup {
                 id: ID::from(Uuid::new_v4()),
-                logic_operator: GqlLogicOperator::And,
-                conditions: vec![GqlCompoundRuleCondition {
+                logic_operator: ModelLogicOperator::And,
+                conditions: vec![ModelCompoundRuleCondition {
                     id: ID::from(Uuid::new_v4()),
                     context_key: "country".to_string(),
-                    operator: GqlRuleOperator::Equals,
+                    operator: ModelRuleOperator::Equals,
                     value: serde_json::Value::String("US".to_string()),
                     order_index: 0,
                 }],
             }],
-            variant_allocations: vec![GqlVariantAllocation {
+            variant_allocations: vec![ModelVariantAllocation {
                 id: ID::from(Uuid::new_v4()),
                 criteria_id: ID::from(Uuid::new_v4()),
                 variant_control: "control".to_string(),
                 weight: 100,
             }],
-            variant_selection_mode: GqlVariantSelectionMode::WeightedSplit,
+            variant_selection_mode: ModelVariantSelectionMode::WeightedSplit,
             selected_variant_control: None,
         }
     }

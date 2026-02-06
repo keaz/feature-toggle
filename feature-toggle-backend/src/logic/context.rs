@@ -5,7 +5,8 @@ use crate::database::context::{
 use crate::database::entity;
 use crate::database::feature::FeatureRepository;
 use crate::model::{
-    Context as GqlContext, ContextEntry as GqlContextEntry, CreateContextInput, UpdateContextInput,
+    Context as ModelContext, ContextEntry as ModelContextEntry, CreateContextInput,
+    UpdateContextInput,
 };
 use crate::logic::stage_builder::id_to_uuid;
 use crate::model::ID;
@@ -15,32 +16,36 @@ use uuid::Uuid;
 #[automock]
 #[async_trait::async_trait]
 pub trait ContextLogic: Send + Sync {
-    async fn get_context_by_id(&self, id: ID) -> Result<GqlContext, Error>;
+    async fn get_context_by_id(&self, id: ID) -> Result<ModelContext, Error>;
     async fn get_contexts(
         &self,
         team_id: ID,
         key: Option<String>,
-    ) -> Result<Vec<GqlContext>, Error>;
+    ) -> Result<Vec<ModelContext>, Error>;
     async fn get_contexts_paginated(
         &self,
         team_id: ID,
         key: Option<String>,
         page_number: i32,
         page_size: i32,
-    ) -> Result<(Vec<GqlContext>, i64), Error>;
+    ) -> Result<(Vec<ModelContext>, i64), Error>;
     async fn get_contexts_with_offset(
         &self,
         team_id: ID,
         key: Option<String>,
         offset: i64,
         limit: i64,
-    ) -> Result<(Vec<GqlContext>, i64), Error>;
+    ) -> Result<(Vec<ModelContext>, i64), Error>;
     async fn create_context(
         &self,
         team_id: ID,
         input: CreateContextInput,
-    ) -> Result<GqlContext, Error>;
-    async fn update_context(&self, id: ID, input: UpdateContextInput) -> Result<GqlContext, Error>;
+    ) -> Result<ModelContext, Error>;
+    async fn update_context(
+        &self,
+        id: ID,
+        input: UpdateContextInput,
+    ) -> Result<ModelContext, Error>;
     async fn delete_context(&self, id: ID) -> Result<(), Error>;
     fn clone_box(&self) -> Box<dyn ContextLogic>;
 }
@@ -198,20 +203,20 @@ async fn map_db_feature_to_full_for_broadcast(
 
 #[async_trait::async_trait]
 impl ContextLogic for ContextLogicImpl {
-    async fn get_context_by_id(&self, id: ID) -> Result<GqlContext, Error> {
+    async fn get_context_by_id(&self, id: ID) -> Result<ModelContext, Error> {
         let id = id_to_uuid(id)?;
         let ctx = self.repository.get_context_by_id(id).await?;
-        Ok(map_db_to_gql(ctx))
+        Ok(map_db_to_model(ctx))
     }
 
     async fn get_contexts(
         &self,
         team_id: ID,
         key: Option<String>,
-    ) -> Result<Vec<GqlContext>, Error> {
+    ) -> Result<Vec<ModelContext>, Error> {
         let team_id = id_to_uuid(team_id)?;
         let list = self.repository.get_contexts(team_id, key).await?;
-        Ok(list.into_iter().map(map_db_to_gql).collect())
+        Ok(list.into_iter().map(map_db_to_model).collect())
     }
 
     async fn get_contexts_paginated(
@@ -220,13 +225,13 @@ impl ContextLogic for ContextLogicImpl {
         key: Option<String>,
         page_number: i32,
         page_size: i32,
-    ) -> Result<(Vec<GqlContext>, i64), Error> {
+    ) -> Result<(Vec<ModelContext>, i64), Error> {
         let team_id = id_to_uuid(team_id)?;
         let (list, total) = self
             .repository
             .get_contexts_paginated(team_id, key, page_number, page_size)
             .await?;
-        let contexts = list.into_iter().map(map_db_to_gql).collect();
+        let contexts = list.into_iter().map(map_db_to_model).collect();
         Ok((contexts, total))
     }
 
@@ -236,13 +241,13 @@ impl ContextLogic for ContextLogicImpl {
         key: Option<String>,
         offset: i64,
         limit: i64,
-    ) -> Result<(Vec<GqlContext>, i64), Error> {
+    ) -> Result<(Vec<ModelContext>, i64), Error> {
         let team_id = id_to_uuid(team_id)?;
         let (list, total) = self
             .repository
             .get_contexts_with_offset(team_id, key, offset, limit)
             .await?;
-        let contexts = list.into_iter().map(map_db_to_gql).collect();
+        let contexts = list.into_iter().map(map_db_to_model).collect();
         Ok((contexts, total))
     }
 
@@ -250,7 +255,7 @@ impl ContextLogic for ContextLogicImpl {
         &self,
         team_id: ID,
         input: CreateContextInput,
-    ) -> Result<GqlContext, Error> {
+    ) -> Result<ModelContext, Error> {
         // Basic validation
         if input.key.trim().is_empty() {
             return Err(Error::InvalidInput(
@@ -274,10 +279,14 @@ impl ContextLogic for ContextLogicImpl {
                 },
             )
             .await?;
-        Ok(map_db_to_gql(created))
+        Ok(map_db_to_model(created))
     }
 
-    async fn update_context(&self, id: ID, input: UpdateContextInput) -> Result<GqlContext, Error> {
+    async fn update_context(
+        &self,
+        id: ID,
+        input: UpdateContextInput,
+    ) -> Result<ModelContext, Error> {
         if let Some(k) = &input.key
             && k.trim().is_empty()
         {
@@ -329,7 +338,7 @@ impl ContextLogic for ContextLogicImpl {
             }
         }
 
-        Ok(map_db_to_gql(updated))
+        Ok(map_db_to_model(updated))
     }
 
     async fn delete_context(&self, id: ID) -> Result<(), Error> {
@@ -342,15 +351,15 @@ impl ContextLogic for ContextLogicImpl {
     }
 }
 
-fn map_db_to_gql(c: entity::Context) -> GqlContext {
-    GqlContext {
+fn map_db_to_model(c: entity::Context) -> ModelContext {
+    ModelContext {
         id: ID::from(c.id),
         team_id: ID::from(c.team_id),
         key: c.key,
         entries: c
             .entries
             .into_iter()
-            .map(|e| GqlContextEntry {
+            .map(|e| ModelContextEntry {
                 id: ID::from(e.id),
                 value: e.value,
             })

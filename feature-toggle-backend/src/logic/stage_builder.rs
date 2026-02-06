@@ -37,7 +37,7 @@ pub fn build_stage_relationships<T: StageWithRelationship>(
     stages
 }
 
-/// Helper function to safely convert GraphQL ID to Uuid
+/// Helper function to safely convert API ID to Uuid
 pub fn id_to_uuid(id: ID) -> Result<Uuid, crate::Error> {
     Uuid::try_from(id).map_err(|_| crate::Error::InvalidInput("Invalid UUID format".to_string()))
 }

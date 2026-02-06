@@ -8,7 +8,7 @@ use crate::Error;
 use crate::database::activity_log::{ActivityLogRepository, CreateActivityLog};
 use crate::database::user::{CreateUser, UpdateUser, UserRepositoryTx};
 use crate::logic::ActorContext;
-use crate::logic::user::{GqlUser, RegisterUserInput, UpdateGqlUserInput};
+use crate::logic::user::{ApiUser, RegisterUserInput, UpdateUserInput};
 use crate::utils::activity_logger::activity_types;
 use argon2::{
     Argon2,
@@ -28,7 +28,7 @@ pub async fn register_user_in_tx<R>(
     activity_repo: &dyn ActivityLogRepository,
     input: RegisterUserInput,
     actor: Option<ActorContext>,
-) -> Result<GqlUser, Error>
+) -> Result<ApiUser, Error>
 where
     R: UserRepositoryTx,
 {
@@ -98,7 +98,7 @@ where
         .await
         .map_err(Error::DatabaseError)?;
 
-    Ok(GqlUser {
+    Ok(ApiUser {
         id: ID::from(created.id),
         username: created.username,
         first_name: created.first_name,
@@ -121,9 +121,9 @@ pub async fn update_user_in_tx<R>(
     repo: &R,
     activity_repo: &dyn ActivityLogRepository,
     id: ID,
-    input: UpdateGqlUserInput,
+    input: UpdateUserInput,
     actor: Option<ActorContext>,
-) -> Result<GqlUser, Error>
+) -> Result<ApiUser, Error>
 where
     R: UserRepositoryTx,
 {
@@ -176,7 +176,7 @@ where
         .await
         .map_err(Error::DatabaseError)?;
 
-    Ok(GqlUser {
+    Ok(ApiUser {
         id: ID::from(updated.id),
         username: updated.username,
         first_name: updated.first_name,

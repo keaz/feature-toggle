@@ -301,7 +301,7 @@ mod tests {
             actix_web::http::StatusCode::UNAUTHORIZED
         );
 
-        // GET non-graphql
+        // GET non-REST (guarded)
         let req_get = test::TestRequest::get().uri("/other").to_request();
         let resp_get = test::call_service(&app, req_get).await;
         assert_eq!(
@@ -309,7 +309,7 @@ mod tests {
             actix_web::http::StatusCode::UNAUTHORIZED
         );
 
-        // POST non-graphql
+        // POST non-REST (guarded)
         let req_post = test::TestRequest::post()
             .uri("/other")
             .set_payload("{}")
