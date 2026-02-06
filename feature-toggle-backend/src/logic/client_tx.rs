@@ -47,6 +47,8 @@ where
     R: ClientRepositoryTx,
 {
     let team_uuid = Uuid::try_from(team_id).map_err(|e| Error::InvalidInput(e.to_string()))?;
+    let environment_uuid =
+        Uuid::try_from(input.environment_id.clone()).map_err(|e| Error::InvalidInput(e.to_string()))?;
     let client_name = input.name.clone();
 
     let db_input = CreateClient {
@@ -55,6 +57,7 @@ where
         enabled: input.enabled.unwrap_or(true),
         client_type: to_entity_client_type(input.client_type),
         web_origins: input.web_origins,
+        environment_id: environment_uuid,
     };
 
     if db_input.name.is_empty() {
@@ -97,6 +100,7 @@ where
     Ok(crate::model::Client {
         id: ID::from(client.id),
         team_id: ID::from(client.team_id),
+        environment_id: ID::from(client.environment_id),
         name: client.name,
         description: client.description,
         enabled: client.enabled,
@@ -165,6 +169,7 @@ where
     Ok(crate::model::Client {
         id: ID::from(client.id),
         team_id: ID::from(client.team_id),
+        environment_id: ID::from(client.environment_id),
         name: client.name,
         description: client.description,
         enabled: client.enabled,

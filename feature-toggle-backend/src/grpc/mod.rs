@@ -777,6 +777,7 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
             enabled: client.enabled,
             client_type: client_type_str.to_string(),
             web_origins: client.web_origins.unwrap_or_default(),
+            environment_id: client.environment_id.to_string(),
         };
 
         Ok(Response::new(response))

@@ -252,6 +252,7 @@ pub enum ClientType {
 pub struct Client {
     pub id: Uuid,
     pub team_id: Uuid,
+    pub environment_id: Uuid,
     pub name: String,
     pub description: Option<String>,
     pub enabled: bool,

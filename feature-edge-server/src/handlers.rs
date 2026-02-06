@@ -14,23 +14,24 @@ pub struct EvaluateHttpRequest {
     /// The feature key to evaluate
     #[serde(rename = "flagKey")]
     pub flag_key: String,
-    /// Context object with bucketing_key, environment_id, and dynamic attributes
-    pub context: EvaluateContext,
-    /// Optional client credentials overriding server defaults
-    pub client_id: Option<String>,
-    /// Optional client credentials overriding server defaults
-    pub client_secret: Option<String>,
+    /// Context object with bucketing_key and dynamic attributes
+    pub context: EvaluateRequestContext,
 }
 
 #[derive(Deserialize, ToSchema, Clone, Debug, PartialEq)]
-pub struct EvaluateContext {
+pub struct EvaluateRequestContext {
     /// Bucketing key for consistent user experience
     #[serde(rename = "bucketingKey")]
     pub bucketing_key: String,
-    /// Environment identifier (UUID as string)
-    pub environment_id: String,
     /// Dynamic attributes (flattened into the context object)
     #[serde(flatten)]
+    pub attributes: std::collections::HashMap<String, serde_json::Value>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct EvaluateContext {
+    pub bucketing_key: String,
+    pub environment_id: String,
     pub attributes: std::collections::HashMap<String, serde_json::Value>,
 }
 
@@ -264,13 +265,6 @@ pub fn map_http_context_to_engine(
     }
 }
 
-/// Resolve client credentials from request or app defaults
-fn resolve_credentials<'a>(app: &'a AppState, req: &'a EvaluateHttpRequest) -> (&'a str, &'a str) {
-    let client_id = req.client_id.as_deref().unwrap_or(&app.client_id);
-    let client_secret = req.client_secret.as_deref().unwrap_or(&app.client_secret);
-    (client_id, client_secret)
-}
-
 /// Validate web origin for Web client types
 fn validate_web_origin(
     http_req: &actix_web::HttpRequest,
@@ -403,15 +397,21 @@ pub async fn evaluate_handler(
     let req = req.into_inner();
     let feature_key = req.flag_key.clone();
 
-    let (client_id, client_secret) = resolve_credentials(&app, &req);
+    let client_id = app.client_id.clone();
+    let client_secret = app.client_secret.clone();
 
     // Fetch client information for origin validation (uses cache with 5min TTL)
-    let client_info = get_or_fetch_client_info(&app, &client_id, &client_secret).await;
+    let client_info = match get_or_fetch_client_info(&app, &client_id, &client_secret).await {
+        Some(info) => info,
+        None => {
+            return Err(actix_web::error::ErrorBadGateway(
+                "Failed to fetch client info",
+            ))
+        }
+    };
 
-    // Validate web origin for web clients (if client info is available)
-    if let Some(ref client_info) = client_info
-        && !validate_web_origin(&http_req, client_info)
-    {
+    // Validate web origin for web clients
+    if !validate_web_origin(&http_req, &client_info) {
         error!("Origin validation failed for client: {}", client_info.name);
         return Err(actix_web::error::ErrorUnauthorized(
             "Invalid origin for web client",
@@ -447,10 +447,30 @@ pub async fn evaluate_handler(
         }));
     }
 
+    let environment_id = client_info.environment_id.clone();
+    let EvaluateRequestContext {
+        bucketing_key,
+        mut attributes,
+    } = req.context;
+    if let Some(req_env) = attributes.get("environment_id").and_then(|v| v.as_str()) {
+        if req_env != environment_id {
+            return Err(actix_web::error::ErrorUnauthorized(
+                "Environment mismatch for client",
+            ));
+        }
+    }
+    attributes.remove("environment_id");
+
+    let eval_context = EvaluateContext {
+        bucketing_key,
+        environment_id: environment_id.clone(),
+        attributes,
+    };
+
     let stage = feature
         .stages
         .iter()
-        .find(|s| s.environment_id == req.context.environment_id);
+        .find(|s| s.environment_id == eval_context.environment_id);
 
     if stage.is_none() || !stage.unwrap().enabled {
         return Ok(web::Json(EvaluateHttpResponse {
@@ -475,11 +495,11 @@ pub async fn evaluate_handler(
     let _stage = stage.unwrap();
 
     // Use targeting_key from request context (OpenFeature standard)
-    let user_id_opt = Some(req.context.bucketing_key.clone());
+    let user_id_opt = Some(eval_context.bucketing_key.clone());
 
     // Perform evaluation (check cache first if we have a user_id)
     let (mut result, prior_assignment) = if let Some(user_id) = &user_id_opt {
-        let key = assignment_key(user_id, &feature.id, &req.context.environment_id);
+        let key = assignment_key(user_id, &feature.id, &eval_context.environment_id);
         let cached = app
             .assigned_cache
             .get(&key)
@@ -499,12 +519,12 @@ pub async fn evaluate_handler(
                 true,
             )
         } else {
-            let ec = map_http_context_to_engine(feature_key.clone(), req.context.clone());
+            let ec = map_http_context_to_engine(feature_key.clone(), eval_context.clone());
             let result = engine::evaluate(&ec, &feature);
             (result, false)
         }
     } else {
-        let ec = map_http_context_to_engine(feature_key.clone(), req.context.clone());
+        let ec = map_http_context_to_engine(feature_key.clone(), eval_context.clone());
         let result = engine::evaluate(&ec, &feature);
         (result, false)
     };
@@ -524,9 +544,9 @@ pub async fn evaluate_handler(
 
     let evaluation_event = EvaluationEvent {
         feature_key: feature.key.clone(),
-        environment_id: req.context.environment_id.clone(),
+        environment_id: eval_context.environment_id.clone(),
         evaluation_result,
-        evaluation_context: req.context.clone(),
+        evaluation_context: eval_context.clone(),
         user_context: user_id_opt.clone(),
         evaluated_at: std::time::SystemTime::now(),
         prior_assignment,
@@ -557,7 +577,7 @@ pub async fn evaluate_handler(
         result.variant.is_some() || result.value.as_bool().unwrap_or(false);
     if should_cache_assignment {
         if let Some(user_id) = user_id_opt {
-            let key = assignment_key(&user_id, &feature.id, &req.context.environment_id);
+            let key = assignment_key(&user_id, &feature.id, &eval_context.environment_id);
             app.assigned_cache.insert(
                 key,
                 crate::CachedAssignment {
@@ -571,7 +591,7 @@ pub async fn evaluate_handler(
                 .push(crate::grpc_client::UserAssignment {
                     user_id,
                     feature_id: feature.id.clone(),
-                    environment_id: req.context.environment_id.clone(),
+                    environment_id: eval_context.environment_id.clone(),
                     assigned: true,
                     variant: result.variant.clone(),
                 });
@@ -647,15 +667,8 @@ fn extract_auth_from_headers(
 fn map_ofrep_context_to_engine(
     flag_key: String,
     ofrep_ctx: OFREPContext,
+    environment_id: String,
 ) -> engine::FeatureEvaluationContext {
-    // Extract environment_id from attributes or use a default
-    let environment_id = ofrep_ctx
-        .attributes
-        .get("environment_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("default")
-        .to_string();
-
     engine::FeatureEvaluationContext {
         flag_key,
         context: engine::ContextObject {
@@ -706,15 +719,20 @@ pub async fn ofrep_evaluate_flag(
     }
 
     // Fetch client information for origin validation
-    let client_info = get_or_fetch_client_info(&app, &client_id, &client_secret).await;
+    let client_info = match get_or_fetch_client_info(&app, &client_id, &client_secret).await {
+        Some(info) => info,
+        None => {
+            return Err(actix_web::error::ErrorBadGateway(
+                "Failed to fetch client info",
+            ))
+        }
+    };
 
     // Validate web origin for web clients
-    if let Some(ref client_info) = client_info {
-        if !validate_web_origin(&http_req, client_info) {
-            return Err(actix_web::error::ErrorUnauthorized(
-                "Invalid origin for web client",
-            ));
-        }
+    if !validate_web_origin(&http_req, &client_info) {
+        return Err(actix_web::error::ErrorUnauthorized(
+            "Invalid origin for web client",
+        ));
     }
 
     // Get feature from cache or backend
@@ -742,14 +760,19 @@ pub async fn ofrep_evaluate_flag(
         }));
     }
 
-    // Check environment stage enabled
-    let environment_id = req
-        .context
-        .attributes
-        .get("environment_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("default")
-        .to_string();
+    let environment_id = client_info.environment_id.clone();
+    let OFREPContext {
+        targeting_key,
+        mut attributes,
+    } = req.context;
+    if let Some(req_env) = attributes.get("environment_id").and_then(|v| v.as_str()) {
+        if req_env != environment_id {
+            return Err(actix_web::error::ErrorUnauthorized(
+                "Environment mismatch for client",
+            ));
+        }
+    }
+    attributes.remove("environment_id");
 
     let stage_enabled = feature
         .stages
@@ -769,7 +792,7 @@ pub async fn ofrep_evaluate_flag(
     }
 
     // Extract user_id from targeting_key
-    let user_id = req.context.targeting_key.clone();
+    let user_id = targeting_key.clone();
 
     // Check cache for sticky assignment
     let (mut result, prior_assignment) = {
@@ -794,7 +817,12 @@ pub async fn ofrep_evaluate_flag(
             )
         } else {
             // Perform fresh evaluation
-            let ec = map_ofrep_context_to_engine(feature_key.clone(), req.context.clone());
+            let ofrep_ctx = OFREPContext {
+                targeting_key: targeting_key.clone(),
+                attributes: attributes.clone(),
+            };
+            let ec =
+                map_ofrep_context_to_engine(feature_key.clone(), ofrep_ctx, environment_id.clone());
             let result = engine::evaluate(&ec, &feature);
             (result, false)
         }
@@ -812,7 +840,7 @@ pub async fn ofrep_evaluate_flag(
     let evaluation_context = EvaluateContext {
         bucketing_key: user_id.clone(),
         environment_id: environment_id.clone(),
-        attributes: req.context.attributes.clone(),
+        attributes: attributes.clone(),
     };
     let evaluation_event = EvaluationEvent {
         feature_key: feature.key.clone(),

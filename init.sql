@@ -880,6 +880,7 @@ INSERT INTO
     public.clients (
         id,
         team_id,
+        environment_id,
         name,
         description,
         enabled,
@@ -888,6 +889,7 @@ INSERT INTO
     )
 VALUES (
         'a1b2c3d4-0000-4000-8000-000000000001',
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
         '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
         'Web Client 1',
         'Seed web client',
@@ -898,6 +900,7 @@ VALUES (
     (
         'a1b2c3d4-0000-4000-8000-000000000002',
         '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
         'Backend Client 1',
         'Seed backend client',
         true,
@@ -906,6 +909,7 @@ VALUES (
     ),
     (
         'a1b2c3d4-0000-4000-8000-000000000003',
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
         '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
         'Paginated 1',
         'Seed web client',
@@ -916,6 +920,7 @@ VALUES (
     (
         'a1b2c3d4-0000-4000-8000-000000000004',
         '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
         'Paginated 2',
         'Seed backend client',
         true,
@@ -924,6 +929,7 @@ VALUES (
     ),
     (
         'a1b2c3d4-0000-4000-8000-000000000005',
+        '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
         '51ecc366-f1cd-4d3d-ab73-fa60bad98f27',
         'Paginated 3',
         'Seed backend client',

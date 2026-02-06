@@ -55,6 +55,7 @@ pub struct ClientListQuery {
 pub struct ClientResponse {
     pub id: String,
     pub team_id: String,
+    pub environment_id: String,
     pub name: String,
     pub description: Option<String>,
     pub enabled: bool,
@@ -77,6 +78,7 @@ pub struct CreateClientRequest {
     pub enabled: Option<bool>,
     pub client_type: ClientType,
     pub web_origins: Option<Vec<String>>,
+    pub environment_id: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
@@ -94,6 +96,7 @@ impl From<ModelClient> for ClientResponse {
         Self {
             id: client.id.to_string(),
             team_id: client.team_id.to_string(),
+            environment_id: client.environment_id.to_string(),
             name: client.name,
             description: client.description,
             enabled: client.enabled,
@@ -302,6 +305,7 @@ pub(crate) async fn create_client(
     validate_client_name(&payload.name)?;
     validate_client_description(&payload.description)?;
     validate_web_origins_for_create(payload.client_type, &payload.web_origins)?;
+    let env_uuid = parse_uuid(&payload.environment_id, "environment_id")?;
 
     let input = CreateClientInput {
         name: payload.name.clone(),
@@ -309,6 +313,7 @@ pub(crate) async fn create_client(
         enabled: payload.enabled,
         client_type: payload.client_type.into(),
         web_origins: payload.web_origins.clone(),
+        environment_id: ID::from(env_uuid),
     };
 
     let repo = client_repository_tx(db_pool.get_ref().clone());
@@ -431,6 +436,7 @@ mod tests {
         ModelClient {
             id: ID::from(client_id),
             team_id: ID::from(team_id),
+            environment_id: ID::from(team_id),
             name: "Web Client".to_string(),
             description: Some("Test".to_string()),
             enabled: true,
@@ -464,14 +470,37 @@ mod tests {
         team_id
     }
 
-    async fn insert_client(pool: &sqlx::PgPool, team_id: Uuid, name: &str) -> Uuid {
+    async fn insert_environment(pool: &sqlx::PgPool, team_id: Uuid) -> Uuid {
+        let environment_id = Uuid::new_v4();
+        sqlx::query!(
+            r#"INSERT INTO environments (id, name, active, team_id, environment_type)
+               VALUES ($1, $2, $3, $4, $5)"#,
+            environment_id,
+            format!("env-{}", environment_id),
+            true,
+            team_id,
+            "Development"
+        )
+        .execute(pool)
+        .await
+        .expect("Failed to insert environment");
+        environment_id
+    }
+
+    async fn insert_client(
+        pool: &sqlx::PgPool,
+        team_id: Uuid,
+        environment_id: Uuid,
+        name: &str,
+    ) -> Uuid {
         let client_id = Uuid::new_v4();
         let api_key = format!("api-{}", client_id);
         sqlx::query!(
-            r#"INSERT INTO clients (id, team_id, name, description, enabled, client_type, api_key)
-               VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+            r#"INSERT INTO clients (id, team_id, environment_id, name, description, enabled, client_type, api_key)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"#,
             client_id,
             team_id,
+            environment_id,
             name,
             Some("Test".to_string()),
             true,
@@ -567,6 +596,7 @@ mod tests {
     async fn create_client_returns_created() {
         let pool = test_pool().await;
         let team_id = insert_team(&pool).await;
+        let environment_id = insert_environment(&pool, team_id).await;
         let activity_repo = PgActivityLogRepository::new(pool.clone());
 
         let app = test::init_service(
@@ -588,6 +618,7 @@ mod tests {
                 enabled: Some(true),
                 client_type: ClientType::Web,
                 web_origins: Some(vec!["https://example.com".to_string()]),
+                environment_id: environment_id.to_string(),
             })
             .to_request();
         let resp = test::call_service(&app, req).await;
@@ -598,6 +629,7 @@ mod tests {
     #[actix_web::test]
     async fn create_client_missing_web_origins_returns_bad_request() {
         let team_id = Uuid::new_v4();
+        let environment_id = Uuid::new_v4();
         let pool = PgPoolOptions::new()
             .connect_lazy("postgres://postgres:postgres@localhost/feature_toggle")
             .unwrap();
@@ -622,6 +654,7 @@ mod tests {
                 enabled: Some(true),
                 client_type: ClientType::Web,
                 web_origins: Some(vec![]),
+                environment_id: environment_id.to_string(),
             })
             .to_request();
         let resp = test::call_service(&app, req).await;
@@ -637,7 +670,8 @@ mod tests {
     async fn create_client_conflict_returns_conflict() {
         let pool = test_pool().await;
         let team_id = insert_team(&pool).await;
-        let _client_id = insert_client(&pool, team_id, "Web Client").await;
+        let environment_id = insert_environment(&pool, team_id).await;
+        let _client_id = insert_client(&pool, team_id, environment_id, "Web Client").await;
         let activity_repo = PgActivityLogRepository::new(pool.clone());
 
         let app = test::init_service(
@@ -659,6 +693,7 @@ mod tests {
                 enabled: Some(true),
                 client_type: ClientType::Web,
                 web_origins: Some(vec!["https://example.com".to_string()]),
+                environment_id: environment_id.to_string(),
             })
             .to_request();
         let resp = test::call_service(&app, req).await;
@@ -673,7 +708,8 @@ mod tests {
     async fn update_client_returns_updated() {
         let pool = test_pool().await;
         let team_id = insert_team(&pool).await;
-        let client_id = insert_client(&pool, team_id, "Web Client").await;
+        let environment_id = insert_environment(&pool, team_id).await;
+        let client_id = insert_client(&pool, team_id, environment_id, "Web Client").await;
         let activity_repo = PgActivityLogRepository::new(pool.clone());
 
         let app = test::init_service(

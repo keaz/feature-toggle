@@ -11,6 +11,7 @@ pub struct CreateClient {
     pub enabled: bool,
     pub client_type: ClientType,
     pub web_origins: Option<Vec<String>>, // Only for Web
+    pub environment_id: Uuid,
 }
 
 pub struct UpdateClient {
@@ -166,7 +167,7 @@ impl ClientRepositoryImpl {
 impl ClientRepository for ClientRepositoryImpl {
     async fn get_client_by_id(&self, id: Uuid) -> Result<Client, Error> {
         let result = sqlx::query!(
-            r#"SELECT id, team_id, name, description, enabled, client_type, api_key
+            r#"SELECT id, team_id, environment_id, name, description, enabled, client_type, api_key
                FROM clients WHERE id = $1"#,
             id
         )
@@ -184,6 +185,7 @@ impl ClientRepository for ClientRepositoryImpl {
         Ok(Client {
             id: row.id,
             team_id: row.team_id,
+            environment_id: row.environment_id,
             name: row.name,
             description: row.description,
             enabled: row.enabled,
@@ -201,7 +203,7 @@ impl ClientRepository for ClientRepositoryImpl {
         client_type: Option<ClientType>,
     ) -> Result<Vec<Client>, Error> {
         let mut qb = QueryBuilder::<Postgres>::new(
-            "SELECT id, team_id, name, description, enabled, client_type, api_key FROM clients WHERE team_id = ",
+            "SELECT id, team_id, environment_id, name, description, enabled, client_type, api_key FROM clients WHERE team_id = ",
         );
         qb.push_bind(team_id);
 
@@ -228,6 +230,7 @@ impl ClientRepository for ClientRepositoryImpl {
             // row is PgRow; extract columns
             let id: Uuid = row.get("id");
             let team_id: Uuid = row.get("team_id");
+            let environment_id: Uuid = row.get("environment_id");
             let name: String = row.get("name");
             let description: Option<String> = row.get("description");
             let enabled: bool = row.get::<bool, _>("enabled");
@@ -242,6 +245,7 @@ impl ClientRepository for ClientRepositoryImpl {
             clients.push(Client {
                 id,
                 team_id,
+                environment_id,
                 name,
                 description,
                 enabled,
@@ -297,7 +301,7 @@ impl ClientRepository for ClientRepositoryImpl {
         let size = page_size as i64;
         let offset = (page - 1) * size;
         let mut qb = QueryBuilder::<Postgres>::new(
-            "SELECT id, team_id, name, description, enabled, client_type, api_key FROM clients WHERE team_id = ",
+            "SELECT id, team_id, environment_id, name, description, enabled, client_type, api_key FROM clients WHERE team_id = ",
         );
         qb.push_bind(team_id);
 
@@ -325,6 +329,7 @@ impl ClientRepository for ClientRepositoryImpl {
             // row is PgRow; extract columns
             let id: Uuid = row.get("id");
             let team_id: Uuid = row.get("team_id");
+            let environment_id: Uuid = row.get("environment_id");
             let name: String = row.get("name");
             let description: Option<String> = row.get("description");
             let enabled: bool = row.get::<bool, _>("enabled");
@@ -339,6 +344,7 @@ impl ClientRepository for ClientRepositoryImpl {
             clients.push(Client {
                 id,
                 team_id,
+                environment_id,
                 name,
                 description,
                 enabled,
@@ -387,7 +393,7 @@ impl ClientRepository for ClientRepositoryImpl {
             .map_err(Error::DatabaseError)?;
 
         let mut qb = QueryBuilder::<Postgres>::new(
-            "SELECT id, team_id, name, description, enabled, client_type, api_key FROM clients WHERE team_id = ",
+            "SELECT id, team_id, environment_id, name, description, enabled, client_type, api_key FROM clients WHERE team_id = ",
         );
         qb.push_bind(team_id);
 
@@ -413,6 +419,7 @@ impl ClientRepository for ClientRepositoryImpl {
         for row in rows {
             let id: Uuid = row.get("id");
             let team_id: Uuid = row.get("team_id");
+            let environment_id: Uuid = row.get("environment_id");
             let name: String = row.get("name");
             let description: Option<String> = row.get("description");
             let enabled: bool = row.get::<bool, _>("enabled");
@@ -427,6 +434,7 @@ impl ClientRepository for ClientRepositoryImpl {
             clients.push(Client {
                 id,
                 team_id,
+                environment_id,
                 name,
                 description,
                 enabled,
@@ -461,11 +469,12 @@ impl ClientRepository for ClientRepositoryImpl {
         let client_type_str = Self::to_type_str(&input.client_type);
 
         let result = sqlx::query!(
-            r#"INSERT INTO clients (id, team_id, name, description, enabled, client_type, api_key)
-               VALUES ($1, $2, $3, $4, $5, $6, $7)
-               RETURNING id, team_id, name, description, enabled, client_type, api_key"#,
+            r#"INSERT INTO clients (id, team_id, environment_id, name, description, enabled, client_type, api_key)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+               RETURNING id, team_id, environment_id, name, description, enabled, client_type, api_key"#,
             id,
             team_id,
+            input.environment_id,
             input.name,
             input.description,
             input.enabled,
@@ -501,6 +510,7 @@ impl ClientRepository for ClientRepositoryImpl {
         Ok(Client {
             id: row.id,
             team_id: row.team_id,
+            environment_id: row.environment_id,
             name: row.name,
             description: row.description,
             enabled: row.enabled,
@@ -520,7 +530,7 @@ impl ClientRepository for ClientRepositoryImpl {
 
         let result = sqlx::query!(
             r#"UPDATE clients SET name = $1, description = $2, enabled = $3, client_type = $4 WHERE id = $5
-               RETURNING id, team_id, name, description, enabled, client_type, api_key"#,
+               RETURNING id, team_id, environment_id, name, description, enabled, client_type, api_key"#,
             input.name.clone().unwrap_or(existing.name),
             input.description.clone().or(existing.description),
             input.enabled.unwrap_or(existing.enabled),
@@ -559,6 +569,7 @@ impl ClientRepository for ClientRepositoryImpl {
         Ok(Client {
             id: row.id,
             team_id: row.team_id,
+            environment_id: row.environment_id,
             name: row.name,
             description: row.description,
             enabled: row.enabled,
@@ -667,11 +678,12 @@ impl ClientRepositoryTx for ClientRepositoryImpl {
         let client_type_str = Self::to_type_str(&input.client_type);
 
         let result = sqlx::query!(
-            r#"INSERT INTO clients (id, team_id, name, description, enabled, client_type, api_key)
-               VALUES ($1, $2, $3, $4, $5, $6, $7)
-               RETURNING id, team_id, name, description, enabled, client_type, api_key"#,
+            r#"INSERT INTO clients (id, team_id, environment_id, name, description, enabled, client_type, api_key)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+               RETURNING id, team_id, environment_id, name, description, enabled, client_type, api_key"#,
             id,
             team_id,
+            input.environment_id,
             input.name,
             input.description,
             input.enabled,
@@ -707,6 +719,7 @@ impl ClientRepositoryTx for ClientRepositoryImpl {
         Ok(Client {
             id: row.id,
             team_id: row.team_id,
+            environment_id: row.environment_id,
             name: row.name,
             description: row.description,
             enabled: row.enabled,
@@ -731,7 +744,7 @@ impl ClientRepositoryTx for ClientRepositoryImpl {
 
         let result = sqlx::query!(
             r#"UPDATE clients SET name = $1, description = $2, enabled = $3, client_type = $4 WHERE id = $5
-               RETURNING id, team_id, name, description, enabled, client_type, api_key"#,
+               RETURNING id, team_id, environment_id, name, description, enabled, client_type, api_key"#,
             input.name.clone().unwrap_or(existing.name),
             input.description.clone().or(existing.description),
             input.enabled.unwrap_or(existing.enabled),
@@ -770,6 +783,7 @@ impl ClientRepositoryTx for ClientRepositoryImpl {
         Ok(Client {
             id: row.id,
             team_id: row.team_id,
+            environment_id: row.environment_id,
             name: row.name,
             description: row.description,
             enabled: row.enabled,

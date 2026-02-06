@@ -258,6 +258,7 @@ pub enum ClientType {
 pub struct Client {
     pub id: ID,
     pub team_id: ID,
+    pub environment_id: ID,
     pub name: String,
     pub description: Option<String>,
     pub enabled: bool,
@@ -493,6 +494,7 @@ pub struct CreateClientInput {
     pub enabled: Option<bool>,
     pub client_type: ClientType,
     pub web_origins: Option<Vec<String>>,
+    pub environment_id: ID,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

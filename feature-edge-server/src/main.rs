@@ -255,7 +255,7 @@ fn setup_logger() -> actix_web::Result<(), Box<dyn std::error::Error>> {
     components(schemas(
         handlers::EvaluateHttpRequest,
         handlers::EvaluateHttpResponse,
-        handlers::EvaluateContext,
+        handlers::EvaluateRequestContext,
         handlers::OFREPContext,
         handlers::OFREPEvaluationRequest,
         handlers::OFREPSuccessResponse,
@@ -516,8 +516,7 @@ mod tests {
 
     #[test]
     fn test_ofrep_context_serialization() {
-        use handlers::{OFREPContext, OFREPEvaluationRequest};
-        use std::collections::HashMap;
+        use handlers::OFREPContext;
 
         // Test that OFREPContext properly deserializes with both targetingKey and attributes
         let json_str = r#"{"targetingKey":"user-123","environment_id":"env-prod","country":"US"}"#;
@@ -535,6 +534,21 @@ mod tests {
         let minimal_context: OFREPContext = serde_json::from_str(minimal_json).unwrap();
         assert_eq!(minimal_context.targeting_key, "user-456");
         assert!(minimal_context.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_evaluate_request_context_deserialization() {
+        use handlers::EvaluateRequestContext;
+
+        let json_str = r#"{"bucketingKey":"user-123","environment_id":"env-prod","country":"US"}"#;
+        let context: EvaluateRequestContext = serde_json::from_str(json_str).unwrap();
+
+        assert_eq!(context.bucketing_key, "user-123");
+        assert_eq!(
+            context.attributes.get("environment_id").unwrap(),
+            "env-prod"
+        );
+        assert_eq!(context.attributes.get("country").unwrap(), "US");
     }
 
     #[test]

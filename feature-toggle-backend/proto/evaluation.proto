@@ -241,6 +241,7 @@ message GetClientInfoResponse {
   bool enabled = 5;
   string client_type = 6; // "Web" or "Backend"
   repeated string web_origins = 7; // Only populated for Web clients
+  string environment_id = 8;
 }
 
 service FeatureEvaluation {

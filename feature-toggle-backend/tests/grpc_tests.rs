@@ -66,6 +66,7 @@ async fn evaluate_validation_errors() {
             Ok(db::Client {
                 id,
                 team_id,
+                environment_id: env_id,
                 name: "Client".into(),
                 description: None,
                 enabled: true,
@@ -218,6 +219,7 @@ async fn evaluate_auth_and_success() {
             Ok(db::Client {
                 id,
                 team_id,
+                environment_id: env_id,
                 name: "Client".into(),
                 description: None,
                 enabled: true,
@@ -229,6 +231,7 @@ async fn evaluate_auth_and_success() {
             Ok(db::Client {
                 id,
                 team_id,
+                environment_id: env_id,
                 name: "Disabled".into(),
                 description: None,
                 enabled: false,
@@ -370,6 +373,7 @@ async fn get_feature_by_key_and_stream_branches() {
             Ok(db::Client {
                 id,
                 team_id,
+                environment_id: env_id,
                 name: "Client".into(),
                 description: None,
                 enabled: true,

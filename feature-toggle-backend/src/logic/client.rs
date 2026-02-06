@@ -122,6 +122,7 @@ impl ClientLogic for ClientLogicImpl {
         Ok(ModelClient {
             id: ID::from(c.id.to_string()),
             team_id: ID::from(c.team_id.to_string()),
+            environment_id: ID::from(c.environment_id.to_string()),
             name: c.name,
             description: c.description,
             enabled: c.enabled,
@@ -150,6 +151,7 @@ impl ClientLogic for ClientLogicImpl {
             .map(|c| ModelClient {
                 id: ID::from(c.id.to_string()),
                 team_id: ID::from(c.team_id.to_string()),
+                environment_id: ID::from(c.environment_id.to_string()),
                 name: c.name,
                 description: c.description,
                 enabled: c.enabled,
@@ -181,6 +183,7 @@ impl ClientLogic for ClientLogicImpl {
             .map(|c| ModelClient {
                 id: ID::from(c.id.to_string()),
                 team_id: ID::from(c.team_id.to_string()),
+                environment_id: ID::from(c.environment_id.to_string()),
                 name: c.name,
                 description: c.description,
                 enabled: c.enabled,
@@ -213,6 +216,7 @@ impl ClientLogic for ClientLogicImpl {
             .map(|c| ModelClient {
                 id: ID::from(c.id.to_string()),
                 team_id: ID::from(c.team_id.to_string()),
+                environment_id: ID::from(c.environment_id.to_string()),
                 name: c.name,
                 description: c.description,
                 enabled: c.enabled,
@@ -231,6 +235,8 @@ impl ClientLogic for ClientLogicImpl {
         actor: Option<crate::logic::ActorContext>,
     ) -> Result<ModelClient, Error> {
         let team_id = Uuid::parse_str(&team_id.to_string())
+            .map_err(|e| Error::InvalidInput(e.to_string()))?;
+        let environment_id = Uuid::parse_str(&input.environment_id.to_string())
             .map_err(|e| Error::InvalidInput(e.to_string()))?;
         // Validation rules
         match input.client_type {
@@ -263,6 +269,7 @@ impl ClientLogic for ClientLogicImpl {
             enabled: input.enabled.unwrap_or(true),
             client_type: self.map_api_to_entity_type(input.client_type),
             web_origins: input.web_origins,
+            environment_id,
         };
         let c = self.repository.create_client(team_id, create).await?;
 
@@ -292,6 +299,7 @@ impl ClientLogic for ClientLogicImpl {
         Ok(ModelClient {
             id: ID::from(c.id.to_string()),
             team_id: ID::from(c.team_id.to_string()),
+            environment_id: ID::from(c.environment_id.to_string()),
             name: c.name,
             description: c.description,
             enabled: c.enabled,
@@ -379,6 +387,7 @@ impl ClientLogic for ClientLogicImpl {
         Ok(ModelClient {
             id: ID::from(c.id.to_string()),
             team_id: ID::from(c.team_id.to_string()),
+            environment_id: ID::from(c.environment_id.to_string()),
             name: c.name,
             description: c.description,
             enabled: c.enabled,
@@ -504,6 +513,7 @@ mod tests {
             enabled: Some(true),
             client_type: ModelClientType::Web,
             web_origins: Some(vec![]),
+            environment_id: ID::from(Uuid::new_v4()),
         };
         let res = logic
             .create_client(ID::from(Uuid::new_v4()), input, None)
@@ -523,6 +533,7 @@ mod tests {
             enabled: Some(true),
             client_type: ModelClientType::Backend,
             web_origins: Some(vec!["https://x".into()]),
+            environment_id: ID::from(Uuid::new_v4()),
         };
         let res = logic
             .create_client(ID::from(Uuid::new_v4()), input, None)
@@ -560,13 +571,16 @@ mod tests {
         let team_id_str = team_id.to_string();
         repo.expect_create_client()
             .withf(move |tid, ci| {
-                tid.to_string() == team_id_str && matches!(ci.client_type, EntityClientType::Web)
+                tid.to_string() == team_id_str
+                    && matches!(ci.client_type, EntityClientType::Web)
+                    && ci.environment_id != Uuid::nil()
             })
             .times(1)
             .returning(|tid, _| {
                 Ok(EntityClient {
                     id: Uuid::new_v4(),
                     team_id: tid,
+                    environment_id: Uuid::new_v4(),
                     name: "n".into(),
                     description: None,
                     enabled: true,
@@ -582,6 +596,7 @@ mod tests {
             enabled: Some(true),
             client_type: ModelClientType::Web,
             web_origins: Some(vec!["https://a".into()]),
+            environment_id: ID::from(Uuid::new_v4()),
         };
         let out = logic
             .create_client(ID::from(team_id), input, None)
@@ -602,6 +617,7 @@ mod tests {
             EntityClient {
                 id: client1_id,
                 team_id,
+                environment_id: Uuid::new_v4(),
                 name: "Client 1".into(),
                 description: Some("First client".into()),
                 enabled: true,
@@ -612,6 +628,7 @@ mod tests {
             EntityClient {
                 id: client2_id,
                 team_id,
+                environment_id: Uuid::new_v4(),
                 name: "Client 2".into(),
                 description: Some("Second client".into()),
                 enabled: false,

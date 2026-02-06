@@ -181,6 +181,7 @@ mod tests {
         crate::database::entity::Client {
             id: Uuid::new_v4(),
             team_id: Uuid::new_v4(),
+            environment_id: Uuid::new_v4(),
             name: "c".into(),
             description: None,
             enabled,

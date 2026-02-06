@@ -133,6 +133,7 @@ async fn test_create_and_delete_client() {
     let pool = pool().await;
     let repo = client_repository(pool);
     let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+    let environment_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
 
     let name = format!("it-client-{}", Uuid::new_v4());
     let create = CreateClient {
@@ -141,6 +142,7 @@ async fn test_create_and_delete_client() {
         enabled: true,
         client_type: ClientType::Web,
         web_origins: Some(vec!["http://test.local".into()]),
+        environment_id,
     };
 
     let created = repo
