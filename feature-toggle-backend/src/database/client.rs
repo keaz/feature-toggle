@@ -226,6 +226,39 @@ impl ClientRepositoryImpl {
             .collect())
     }
 
+    async fn count_filtered_clients(
+        &self,
+        team_id: Uuid,
+        name: Option<String>,
+        enabled: Option<bool>,
+        client_type: Option<ClientType>,
+    ) -> Result<i64, Error> {
+        let mut count_qb =
+            QueryBuilder::<Postgres>::new("SELECT COUNT(*) FROM clients WHERE team_id = ");
+        count_qb.push_bind(team_id);
+
+        if let Some(filter_name) = name {
+            count_qb
+                .push(" AND name ILIKE ")
+                .push_bind(format!("%{}%", filter_name));
+        }
+        if let Some(enabled_value) = enabled {
+            count_qb.push(" AND enabled = ").push_bind(enabled_value);
+        }
+        if let Some(ct) = client_type {
+            count_qb
+                .push(" AND client_type = ")
+                .push_bind(Self::to_type_str(&ct));
+        }
+
+        let count: i64 = count_qb
+            .build_query_scalar()
+            .fetch_one(&self.pool)
+            .await
+            .map_err(Error::DatabaseError)?;
+        Ok(count)
+    }
+
     async fn is_api_key_unique(&self, api_key: &str) -> Result<bool, Error> {
         let result = sqlx::query_scalar!(
             r#"SELECT EXISTS(SELECT 1 FROM clients WHERE api_key = $1) AS exists"#,
@@ -331,29 +364,10 @@ impl ClientRepository for ClientRepositoryImpl {
         page_number: i32,
         page_size: i32,
     ) -> Result<(Vec<Client>, i64), Error> {
-        // Handle invalid page_size (0 or negative) by returning empty results
         if page_size <= 0 {
-            let mut count_qb =
-                QueryBuilder::<Postgres>::new("SELECT COUNT(*) FROM clients WHERE team_id = ");
-            count_qb.push_bind(team_id);
-            if let Some(filter_name) = &name {
-                count_qb
-                    .push(" AND name ILIKE ")
-                    .push_bind(format!("%{}%", filter_name));
-            }
-            if let Some(enabled_value) = enabled {
-                count_qb.push(" AND enabled = ").push_bind(enabled_value);
-            }
-            if let Some(ct) = &client_type {
-                count_qb
-                    .push(" AND client_type = ")
-                    .push_bind(Self::to_type_str(ct));
-            }
-            let total_count: i64 = count_qb
-                .build_query_scalar()
-                .fetch_one(&self.pool)
-                .await
-                .map_err(Error::DatabaseError)?;
+            let total_count = self
+                .count_filtered_clients(team_id, name.clone(), enabled, client_type.clone())
+                .await?;
             return Ok((Vec::new(), total_count));
         }
 
@@ -365,14 +379,17 @@ impl ClientRepository for ClientRepositoryImpl {
         );
         qb.push_bind(team_id);
 
-        if let Some(filter_name) = name {
+        let name_for_query = name.clone();
+        let client_type_for_query = client_type.clone();
+
+        if let Some(filter_name) = name_for_query {
             qb.push(" AND name ILIKE ")
                 .push_bind(format!("%{}%", filter_name));
         }
         if let Some(enabled_value) = enabled {
             qb.push(" AND enabled = ").push_bind(enabled_value);
         }
-        if let Some(ct) = client_type {
+        if let Some(ct) = client_type_for_query {
             qb.push(" AND client_type = ")
                 .push_bind(Self::to_type_str(&ct));
         }
@@ -382,10 +399,12 @@ impl ClientRepository for ClientRepositoryImpl {
 
         let rows = qb.build().fetch_all(&self.pool).await;
         let rows = handle_error(None, rows)?;
-        let total_count = rows
-            .first()
-            .map(|row| row.get::<i64, _>("total_count"))
-            .unwrap_or(0);
+        let total_count = if let Some(row) = rows.first() {
+            row.get::<i64, _>("total_count")
+        } else {
+            self.count_filtered_clients(team_id, name, enabled, client_type)
+                .await?
+        };
         let base_rows = rows
             .iter()
             .map(Self::parse_client_base_row)

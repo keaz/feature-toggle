@@ -844,31 +844,14 @@ impl FeatureRepositoryImpl {
         offset: i64,
     ) -> Result<(Vec<FeatureWithStageRow>, i64), Error> {
         if limit <= 0 {
-            let mut count_query = sqlx::QueryBuilder::new("SELECT COUNT(*) FROM features f");
-            count_query.push(" WHERE f.team_id = ").push_bind(team_id);
-
-            if let Some(key) = &key {
-                count_query.push(" AND f.key ILIKE ");
-                count_query.push_bind(format!("%{key}%"));
-            }
-            if let Some(feature_type_value) = &feature_type {
-                let feature_type_str = match feature_type_value {
-                    FeatureType::Simple => "Simple",
-                    FeatureType::Contextual => "Contextual",
-                };
-                count_query
-                    .push(" AND f.feature_type = ")
-                    .push_bind(feature_type_str);
-            }
-
-            let total_count: i64 = count_query
-                .build_query_scalar()
-                .fetch_one(&self.pool)
-                .await
-                .map_err(Error::DatabaseError)?;
-
+            let total_count = self
+                .count_filtered_features(team_id, key.clone(), feature_type.clone())
+                .await?;
             return Ok((Vec::new(), total_count));
         }
+
+        let key_for_query = key.clone();
+        let feature_type_for_query = feature_type.clone();
 
         let mut query_builder = sqlx::QueryBuilder::new(
             r#"SELECT f.id as feature_id, f.key as feature_key, f.description, f.feature_type, f.team_id, f.created_at,
@@ -880,11 +863,11 @@ impl FeatureRepositoryImpl {
         );
         query_builder.push(" WHERE f.team_id = ").push_bind(team_id);
 
-        if let Some(key) = key {
+        if let Some(key) = key_for_query {
             query_builder.push(" AND f.key ILIKE ");
             query_builder.push_bind(format!("%{key}%"));
         }
-        if let Some(feature_type_value) = feature_type {
+        if let Some(feature_type_value) = feature_type_for_query {
             let feature_type_str = match feature_type_value {
                 FeatureType::Simple => "Simple",
                 FeatureType::Contextual => "Contextual",
@@ -900,10 +883,12 @@ impl FeatureRepositoryImpl {
         let result = query_builder.build().fetch_all(&self.pool).await;
         let rows = handle_error(None, result)?;
 
-        let total_count = rows
-            .first()
-            .map(|row| row.get::<i64, _>("total_count"))
-            .unwrap_or(0);
+        let total_count = if let Some(row) = rows.first() {
+            row.get::<i64, _>("total_count")
+        } else {
+            self.count_filtered_features(team_id, key.clone(), feature_type.clone())
+                .await?
+        };
 
         let mut feature_rows = Vec::with_capacity(rows.len());
         for row in rows {
@@ -911,6 +896,38 @@ impl FeatureRepositoryImpl {
         }
 
         Ok((feature_rows, total_count))
+    }
+
+    async fn count_filtered_features(
+        &self,
+        team_id: Uuid,
+        key: Option<String>,
+        feature_type: Option<FeatureType>,
+    ) -> Result<i64, Error> {
+        let mut count_query = sqlx::QueryBuilder::new("SELECT COUNT(*) FROM features f");
+        count_query.push(" WHERE f.team_id = ").push_bind(team_id);
+
+        if let Some(key) = key {
+            count_query.push(" AND f.key ILIKE ");
+            count_query.push_bind(format!("%{key}%"));
+        }
+        if let Some(feature_type_value) = feature_type {
+            let feature_type_str = match feature_type_value {
+                FeatureType::Simple => "Simple",
+                FeatureType::Contextual => "Contextual",
+            };
+            count_query
+                .push(" AND f.feature_type = ")
+                .push_bind(feature_type_str);
+        }
+
+        let total_count: i64 = count_query
+            .build_query_scalar()
+            .fetch_one(&self.pool)
+            .await
+            .map_err(Error::DatabaseError)?;
+
+        Ok(total_count)
     }
 
     async fn save_feature(input: &CreateFeature, tx: &mut PgConnection) -> Result<Uuid, Error> {
