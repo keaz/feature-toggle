@@ -1,0 +1,38 @@
+{
+    "name": "fluxgate-api-tests",
+    "version": "1.0.0",
+    "description": "API automation tests for FluxGate backend",
+    "type": "module",
+    "scripts": {
+        "test": "jest --runInBand",
+        "test:watch": "jest --watch",
+        "test:environment": "jest environment.test.ts",
+        "test:context": "jest context.test.ts",
+        "test:team": "jest team.test.ts",
+        "test:role": "jest role.test.ts",
+        "test:user": "jest user.test.ts",
+        "test:client": "jest client.test.ts",
+        "test:feature": "jest feature.test.ts",
+        "test:pipeline": "jest pipeline.test.ts",
+        "test:criteria": "jest criteria.test.ts",
+        "test:approval": "jest approval.test.ts",
+        "test:auth": "jest auth.test.ts",
+        "test:advanced": "jest --testPathPattern=advanced",
+        "test:stage-deployment": "jest stage-deployment.test.ts",
+        "test:approval-workflow": "jest approval-workflow.test.ts",
+        "test:rollback": "jest rollback.test.ts",
+        "test:criteria-extended": "jest criteria-extended.test.ts",
+        "test:gradual-rollout": "jest gradual-rollout.test.ts"
+    },
+    "devDependencies": {
+        "@types/jest": "^29.5.12",
+        "@types/node": "^20.11.0",
+        "axios": "^1.6.5",
+        "jest": "^29.7.0",
+        "ts-jest": "^29.1.2",
+        "typescript": "^5.3.3"
+    },
+    "engines": {
+        "node": ">=18.0.0"
+    }
+}
