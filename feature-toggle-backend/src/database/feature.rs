@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use mockall::automock;
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgQueryResult;
-use sqlx::{PgConnection, PgPool, Postgres, Transaction};
+use sqlx::{FromRow, PgConnection, PgPool, Postgres, Row, Transaction};
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -470,6 +470,40 @@ impl FeatureRepositoryImpl {
         Ok(dependencies)
     }
 
+    async fn get_feature_dependencies_batch(
+        &self,
+        feature_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, Vec<FeatureDependency>>, Error> {
+        if feature_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let result = sqlx::query_as!(
+            FeatureDependencyRow,
+            r#"SELECT feature_id, depends_on_id
+               FROM feature_dependencies
+               WHERE feature_id = ANY($1)
+               ORDER BY feature_id"#,
+            feature_ids
+        )
+        .fetch_all(&self.pool)
+        .await;
+
+        let rows = handle_error(None, result)?;
+        let mut dependencies_by_feature: HashMap<Uuid, Vec<FeatureDependency>> = HashMap::new();
+        for row in rows {
+            dependencies_by_feature
+                .entry(row.feature_id)
+                .or_default()
+                .push(FeatureDependency {
+                    feature_id: row.feature_id,
+                    depends_on_id: row.depends_on_id,
+                });
+        }
+
+        Ok(dependencies_by_feature)
+    }
+
     async fn create_feature_stage(
         &self,
         feature_id: &Uuid,
@@ -580,7 +614,7 @@ impl FeatureRepositoryImpl {
         input: Vec<CreateFeatureStage>,
         tx: &mut PgConnection,
     ) -> Result<PgQueryResult, Error> {
-        let existing_stages = self.get_feature_stages(feature_id.clone()).await?;
+        let existing_stages = self.get_feature_stages(*feature_id).await?;
         if existing_stages.is_empty() {
             return self.create_feature_stage(feature_id, input, tx).await;
         }
@@ -762,6 +796,123 @@ impl FeatureRepositoryImpl {
         }
     }
 
+    fn map_rows_to_feature_list(features_rows: Vec<FeatureWithStageRow>) -> Vec<Feature> {
+        let mut map: HashMap<Uuid, Vec<FeatureWithStageRow>> = HashMap::new();
+        // Preserve ordering by feature name as returned from SQL by tracking first-seen order
+        let mut order: Vec<Uuid> = Vec::new();
+
+        for row in features_rows {
+            if !map.contains_key(&row.feature_id) {
+                order.push(row.feature_id);
+            }
+            map.entry(row.feature_id).or_default().push(row);
+        }
+
+        let mut features: Vec<Feature> = Vec::with_capacity(order.len());
+        for id in order {
+            if let Some(rows) = map.remove(&id) {
+                features.push(Self::map_row_to_feature(rows));
+            }
+        }
+        features
+    }
+
+    async fn hydrate_feature_dependencies(&self, features: &mut [Feature]) -> Result<(), Error> {
+        if features.is_empty() {
+            return Ok(());
+        }
+
+        let feature_ids: Vec<Uuid> = features.iter().map(|feature| feature.id).collect();
+        let dependencies_by_feature = self.get_feature_dependencies_batch(&feature_ids).await?;
+
+        for feature in features {
+            feature.dependencies = dependencies_by_feature
+                .get(&feature.id)
+                .cloned()
+                .unwrap_or_default();
+        }
+
+        Ok(())
+    }
+
+    async fn get_features_windowed(
+        &self,
+        team_id: Uuid,
+        key: Option<String>,
+        feature_type: Option<FeatureType>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<FeatureWithStageRow>, i64), Error> {
+        if limit <= 0 {
+            let mut count_query = sqlx::QueryBuilder::new("SELECT COUNT(*) FROM features f");
+            count_query.push(" WHERE f.team_id = ").push_bind(team_id);
+
+            if let Some(key) = &key {
+                count_query.push(" AND f.key ILIKE ");
+                count_query.push_bind(format!("%{key}%"));
+            }
+            if let Some(feature_type_value) = &feature_type {
+                let feature_type_str = match feature_type_value {
+                    FeatureType::Simple => "Simple",
+                    FeatureType::Contextual => "Contextual",
+                };
+                count_query
+                    .push(" AND f.feature_type = ")
+                    .push_bind(feature_type_str);
+            }
+
+            let total_count: i64 = count_query
+                .build_query_scalar()
+                .fetch_one(&self.pool)
+                .await
+                .map_err(Error::DatabaseError)?;
+
+            return Ok((Vec::new(), total_count));
+        }
+
+        let mut query_builder = sqlx::QueryBuilder::new(
+            r#"SELECT f.id as feature_id, f.key as feature_key, f.description, f.feature_type, f.team_id, f.created_at,
+               f.kill_switch_enabled, f.kill_switch_activated_at, f.rollback_scheduled_at, f.active as feature_enabled,
+               f.lifecycle_stage, f.deprecated_at, f.deprecation_notice, f.last_evaluated_at,
+               f.evaluation_count_7d, f.evaluation_count_30d, f.evaluation_count_90d,
+               COUNT(*) OVER() as total_count
+               FROM features f"#,
+        );
+        query_builder.push(" WHERE f.team_id = ").push_bind(team_id);
+
+        if let Some(key) = key {
+            query_builder.push(" AND f.key ILIKE ");
+            query_builder.push_bind(format!("%{key}%"));
+        }
+        if let Some(feature_type_value) = feature_type {
+            let feature_type_str = match feature_type_value {
+                FeatureType::Simple => "Simple",
+                FeatureType::Contextual => "Contextual",
+            };
+            query_builder
+                .push(" AND f.feature_type = ")
+                .push_bind(feature_type_str);
+        }
+        query_builder.push(" ORDER BY f.key");
+        query_builder.push(" LIMIT ").push_bind(limit);
+        query_builder.push(" OFFSET ").push_bind(offset);
+
+        let result = query_builder.build().fetch_all(&self.pool).await;
+        let rows = handle_error(None, result)?;
+
+        let total_count = rows
+            .first()
+            .map(|row| row.get::<i64, _>("total_count"))
+            .unwrap_or(0);
+
+        let mut feature_rows = Vec::with_capacity(rows.len());
+        for row in rows {
+            feature_rows.push(FeatureWithStageRow::from_row(&row).map_err(Error::DatabaseError)?);
+        }
+
+        Ok((feature_rows, total_count))
+    }
+
     async fn save_feature(input: &CreateFeature, tx: &mut PgConnection) -> Result<Uuid, Error> {
         let id = Uuid::new_v4();
         let feature_type_str = match input.feature_type {
@@ -791,14 +942,13 @@ impl FeatureRepositoryImpl {
             .get_features(input.team_id, Some(input.key.clone()), None)
             .await;
 
-        if let Ok(existing_feature) = existing_feature {
-            if !existing_feature.is_empty() {
+        if let Ok(existing_feature) = existing_feature
+            && !existing_feature.is_empty() {
                 return Err(Error::RecordAlreadyExists(format!(
                     "Feature with key '{}' already exists",
                     input.key
                 )));
             }
-        }
         Ok(())
     }
 
@@ -932,7 +1082,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
             if !row.value.is_empty() {
                 context_value_map
                     .entry(row.key)
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(row.value);
             }
         }
@@ -971,7 +1121,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
             for alloc in allocations {
                 allocations_map
                     .entry(alloc.criteria_id)
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(crate::database::entity::VariantAllocationSimple {
                         variant_control: alloc.variant_control,
                         weight: alloc.weight,
@@ -1010,7 +1160,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
             for row in rule_rows {
                 let by_group = rule_groups_by_criteria
                     .entry(row.criteria_id)
-                    .or_insert_with(std::collections::HashMap::new);
+                    .or_default();
 
                 let entry = by_group.entry(row.group_id).or_insert_with(|| {
                     let logic_operator = match row.logic_operator.to_uppercase().as_str() {
@@ -1027,9 +1177,9 @@ impl FeatureRepository for FeatureRepositoryImpl {
                     row.order_index,
                 ) {
                     let mut value = row.value.unwrap_or(serde_json::Value::Null);
-                    if operator.eq_ignore_ascii_case("IN") {
-                        if let Some(key_str) = value.as_str() {
-                            if let Some(entries) = context_value_map.get(key_str) {
+                    if operator.eq_ignore_ascii_case("IN")
+                        && let Some(key_str) = value.as_str()
+                            && let Some(entries) = context_value_map.get(key_str) {
                                 value = serde_json::Value::Array(
                                     entries
                                         .iter()
@@ -1037,8 +1187,6 @@ impl FeatureRepository for FeatureRepositoryImpl {
                                         .collect(),
                                 );
                             }
-                        }
-                    }
                     entry
                         .1
                         .push(crate::database::entity::CompoundRuleCondition {
@@ -1079,7 +1227,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
                 stage_id: r.stage_id,
                 priority: r.priority,
                 rule_groups,
-                variant_allocations: allocations_map.remove(&r.id).unwrap_or_else(Vec::new),
+                variant_allocations: allocations_map.remove(&r.id).unwrap_or_default(),
                 variant_selection_mode,
                 selected_variant_control: r.selected_variant_control,
             });
@@ -1206,28 +1354,8 @@ impl FeatureRepository for FeatureRepositoryImpl {
             .await;
 
         let features_rows = handle_error(None, result)?;
-        let mut map: HashMap<Uuid, Vec<FeatureWithStageRow>> = HashMap::new();
-        // Preserve ordering by feature name as returned from SQL by tracking first-seen order
-        let mut order: Vec<Uuid> = Vec::new();
-
-        for row in features_rows {
-            if !map.contains_key(&row.feature_id) {
-                order.push(row.feature_id);
-            }
-            map.entry(row.feature_id).or_default().push(row);
-        }
-
-        // Load dependencies for each feature while preserving order by name
-        let mut features: Vec<Feature> = Vec::with_capacity(order.len());
-        for id in order {
-            if let Some(rows) = map.remove(&id) {
-                features.push(Self::map_row_to_feature(rows));
-            }
-        }
-        for feature in &mut features {
-            let dependencies = self.get_feature_dependencies(&feature.id).await?;
-            feature.dependencies = dependencies;
-        }
+        let mut features = Self::map_rows_to_feature_list(features_rows);
+        self.hydrate_feature_dependencies(&mut features).await?;
 
         Ok(features)
     }
@@ -1240,81 +1368,12 @@ impl FeatureRepository for FeatureRepositoryImpl {
         page_number: i32,
         page_size: i32,
     ) -> Result<(Vec<Feature>, i64), Error> {
-        // First, get the total count
-        let mut count_query =
-            sqlx::QueryBuilder::new("SELECT COUNT(DISTINCT f.id) FROM features f");
-        count_query.push(" WHERE f.team_id = ").push_bind(team_id);
-
-        if let Some(key) = &key {
-            count_query.push(" AND f.key ILIKE ");
-            count_query.push_bind(format!("%{key}%"));
-        }
-        if let Some(feature_type_value) = &feature_type {
-            let feature_type_str = match feature_type_value {
-                FeatureType::Simple => "Simple",
-                FeatureType::Contextual => "Contextual",
-            };
-            count_query
-                .push(" AND f.feature_type = ")
-                .push_bind(feature_type_str);
-        }
-
-        let total_count: i64 = count_query
-            .build_query_scalar()
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|e| Error::DatabaseError(e))?;
-
-        // Now get the paginated results
         let offset = (page_number - 1) * page_size;
-        let mut query_builder = sqlx::QueryBuilder::new(FEATURE_SELECT);
-        query_builder.push(" WHERE f.team_id = ").push_bind(team_id);
-
-        if let Some(key) = key {
-            query_builder.push(" AND f.key ILIKE ");
-            query_builder.push_bind(format!("%{key}%"));
-        }
-        if let Some(feature_type_value) = feature_type {
-            let feature_type_str = match feature_type_value {
-                FeatureType::Simple => "Simple",
-                FeatureType::Contextual => "Contextual",
-            };
-            query_builder
-                .push(" AND f.feature_type = ")
-                .push_bind(feature_type_str);
-        }
-        query_builder.push(" ORDER BY f.key");
-        query_builder.push(" LIMIT ").push_bind(page_size);
-        query_builder.push(" OFFSET ").push_bind(offset);
-
-        let result = query_builder
-            .build_query_as::<FeatureWithStageRow>()
-            .fetch_all(&self.pool)
-            .await;
-
-        let features_rows = handle_error(None, result)?;
-        let mut map: HashMap<Uuid, Vec<FeatureWithStageRow>> = HashMap::new();
-        // Preserve ordering by feature name as returned from SQL by tracking first-seen order
-        let mut order: Vec<Uuid> = Vec::new();
-
-        for row in features_rows {
-            if !map.contains_key(&row.feature_id) {
-                order.push(row.feature_id);
-            }
-            map.entry(row.feature_id).or_default().push(row);
-        }
-
-        // Load dependencies for each feature while preserving order by name
-        let mut features: Vec<Feature> = Vec::with_capacity(order.len());
-        for id in order {
-            if let Some(rows) = map.remove(&id) {
-                features.push(Self::map_row_to_feature(rows));
-            }
-        }
-        for feature in &mut features {
-            let dependencies = self.get_feature_dependencies(&feature.id).await?;
-            feature.dependencies = dependencies;
-        }
+        let (feature_rows, total_count) = self
+            .get_features_windowed(team_id, key, feature_type, page_size as i64, offset as i64)
+            .await?;
+        let mut features = Self::map_rows_to_feature_list(feature_rows);
+        self.hydrate_feature_dependencies(&mut features).await?;
 
         Ok((features, total_count))
     }
@@ -1327,77 +1386,11 @@ impl FeatureRepository for FeatureRepositoryImpl {
         offset: i64,
         limit: i64,
     ) -> Result<(Vec<Feature>, i64), Error> {
-        // First, get the total count
-        let mut count_query =
-            sqlx::QueryBuilder::new("SELECT COUNT(DISTINCT f.id) FROM features f");
-        count_query.push(" WHERE f.team_id = ").push_bind(team_id);
-
-        if let Some(key) = &key {
-            count_query.push(" AND f.key ILIKE ");
-            count_query.push_bind(format!("%{key}%"));
-        }
-        if let Some(feature_type_value) = &feature_type {
-            let feature_type_str = match feature_type_value {
-                FeatureType::Simple => "Simple",
-                FeatureType::Contextual => "Contextual",
-            };
-            count_query
-                .push(" AND f.feature_type = ")
-                .push_bind(feature_type_str);
-        }
-
-        let total_count: i64 = count_query
-            .build_query_scalar()
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|e| Error::DatabaseError(e))?;
-
-        let mut query_builder = sqlx::QueryBuilder::new(FEATURE_SELECT);
-        query_builder.push(" WHERE f.team_id = ").push_bind(team_id);
-
-        if let Some(key) = key {
-            query_builder.push(" AND f.key ILIKE ");
-            query_builder.push_bind(format!("%{key}%"));
-        }
-        if let Some(feature_type_value) = feature_type {
-            let feature_type_str = match feature_type_value {
-                FeatureType::Simple => "Simple",
-                FeatureType::Contextual => "Contextual",
-            };
-            query_builder
-                .push(" AND f.feature_type = ")
-                .push_bind(feature_type_str);
-        }
-        query_builder.push(" ORDER BY f.key");
-        query_builder.push(" LIMIT ").push_bind(limit);
-        query_builder.push(" OFFSET ").push_bind(offset);
-
-        let result = query_builder
-            .build_query_as::<FeatureWithStageRow>()
-            .fetch_all(&self.pool)
-            .await;
-
-        let features_rows = handle_error(None, result)?;
-        let mut map: HashMap<Uuid, Vec<FeatureWithStageRow>> = HashMap::new();
-        let mut order: Vec<Uuid> = Vec::new();
-
-        for row in features_rows {
-            if !map.contains_key(&row.feature_id) {
-                order.push(row.feature_id);
-            }
-            map.entry(row.feature_id).or_default().push(row);
-        }
-
-        let mut features: Vec<Feature> = Vec::with_capacity(order.len());
-        for id in order {
-            if let Some(rows) = map.remove(&id) {
-                features.push(Self::map_row_to_feature(rows));
-            }
-        }
-        for feature in &mut features {
-            let dependencies = self.get_feature_dependencies(&feature.id).await?;
-            feature.dependencies = dependencies;
-        }
+        let (feature_rows, total_count) = self
+            .get_features_windowed(team_id, key, feature_type, limit, offset)
+            .await?;
+        let mut features = Self::map_rows_to_feature_list(feature_rows);
+        self.hydrate_feature_dependencies(&mut features).await?;
 
         Ok((features, total_count))
     }
@@ -1419,11 +1412,10 @@ impl FeatureRepository for FeatureRepositoryImpl {
             .await?;
 
         // Create variants if provided
-        if let Some(variants) = input.variants {
-            if !variants.is_empty() {
+        if let Some(variants) = input.variants
+            && !variants.is_empty() {
                 self.create_feature_variants(&mut tx, id, variants).await?;
             }
-        }
 
         tx.commit().await.map_err(Error::DatabaseError)?;
         Ok(id)
@@ -1787,31 +1779,8 @@ impl FeatureRepository for FeatureRepositoryImpl {
         .await;
 
         let rows = handle_error(None, result)?;
-
-        // Group rows by feature ID and convert to Feature objects
-        let mut map: HashMap<Uuid, Vec<FeatureWithStageRow>> = HashMap::new();
-        let mut order: Vec<Uuid> = Vec::new();
-
-        for row in rows {
-            if !map.contains_key(&row.feature_id) {
-                order.push(row.feature_id);
-            }
-            map.entry(row.feature_id).or_default().push(row);
-        }
-
-        // Convert each group to a Feature
-        let mut features: Vec<Feature> = Vec::with_capacity(order.len());
-        for id in order {
-            if let Some(rows) = map.remove(&id) {
-                features.push(Self::map_row_to_feature(rows));
-            }
-        }
-
-        // Load dependencies for each feature
-        for feature in &mut features {
-            let dependencies = self.get_feature_dependencies(&feature.id).await?;
-            feature.dependencies = dependencies;
-        }
+        let mut features = Self::map_rows_to_feature_list(rows);
+        self.hydrate_feature_dependencies(&mut features).await?;
 
         Ok(features)
     }
@@ -1824,7 +1793,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
             .pool
             .begin()
             .await
-            .map_err(|e| Error::DatabaseError(e))?;
+            .map_err(Error::DatabaseError)?;
 
         // Disable the feature (kill_switch_enabled = false means feature is disabled)
         let result = sqlx::query!(
@@ -1841,7 +1810,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
         .await;
 
         handle_error(Some(feature_id), result)?;
-        tx.commit().await.map_err(|e| Error::DatabaseError(e))?;
+        tx.commit().await.map_err(Error::DatabaseError)?;
 
         self.get_feature_by_id(feature_id).await
     }
@@ -1949,7 +1918,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
                 .await
         };
 
-        result.map_err(|e| Error::DatabaseError(e))
+        result.map_err(Error::DatabaseError)
     }
 
     async fn count_features(&self, team_id: Option<Uuid>) -> Result<i64, Error> {
@@ -1964,7 +1933,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
             )
             .fetch_one(&self.pool)
             .await
-            .map_err(|e| Error::DatabaseError(e))?
+            .map_err(Error::DatabaseError)?
         } else {
             sqlx::query_scalar!(
                 r#"
@@ -1974,7 +1943,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
             )
             .fetch_one(&self.pool)
             .await
-            .map_err(|e| Error::DatabaseError(e))?
+            .map_err(Error::DatabaseError)?
         };
 
         Ok(count)
@@ -1993,20 +1962,18 @@ impl FeatureRepository for FeatureRepositoryImpl {
 
         // 1. Get counts of deployed and rejected features
         let status_counts: (i64, i64) = if let Some(team_id) = team_id {
-            sqlx::query_as::<_, (i64, i64)>(&format!(
-                r#"
+            sqlx::query_as::<_, (i64, i64)>(&r#"
                 SELECT 
                     COUNT(*) FILTER (WHERE fps.status = 'DEPLOYED') as deployed,
                     COUNT(*) FILTER (WHERE fps.status IN ('DEPLOYMENT_REJECTED', 'ROLLBACK_REJECTED')) as rejected
                 FROM features_pipeline_stages fps
                 JOIN features f ON f.id = fps.feature_id
                 WHERE f.team_id = $1
-                "#
-            ))
+                "#.to_string())
             .bind(team_id)
             .fetch_one(&self.pool)
             .await
-            .map_err(|e| Error::DatabaseError(e))?
+            .map_err(Error::DatabaseError)?
         } else {
             sqlx::query_as::<_, (i64, i64)>(
                 r#"
@@ -2019,13 +1986,12 @@ impl FeatureRepository for FeatureRepositoryImpl {
             )
             .fetch_one(&self.pool)
             .await
-            .map_err(|e| Error::DatabaseError(e))?
+            .map_err(Error::DatabaseError)?
         };
 
         // 2. Get deployed features this week and last week
         let (deployed_this_week, deployed_last_week): (i64, i64) = if let Some(team_id) = team_id {
-            sqlx::query_as::<_, (i64, i64)>(&format!(
-                r#"
+            sqlx::query_as::<_, (i64, i64)>(&r#"
                 SELECT 
                     COUNT(DISTINCT fps.feature_id) FILTER (
                         WHERE fps.status = 'DEPLOYED' 
@@ -2040,12 +2006,11 @@ impl FeatureRepository for FeatureRepositoryImpl {
                 FROM features_pipeline_stages fps
                 JOIN features f ON f.id = fps.feature_id
                 WHERE f.team_id = $1
-                "#
-            ))
+                "#.to_string())
             .bind(team_id)
             .fetch_one(&self.pool)
             .await
-            .map_err(|e| Error::DatabaseError(e))?
+            .map_err(Error::DatabaseError)?
         } else {
             sqlx::query_as::<_, (i64, i64)>(
                 r#"
@@ -2066,7 +2031,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
             )
             .fetch_one(&self.pool)
             .await
-            .map_err(|e| Error::DatabaseError(e))?
+            .map_err(Error::DatabaseError)?
         };
 
         // 3. Get pending approvals count
@@ -2083,7 +2048,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
             )
             .fetch_one(&self.pool)
             .await
-            .map_err(|e| Error::DatabaseError(e))?
+            .map_err(Error::DatabaseError)?
         } else {
             sqlx::query_scalar!(
                 r#"
@@ -2095,7 +2060,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
             )
             .fetch_one(&self.pool)
             .await
-            .map_err(|e| Error::DatabaseError(e))?
+            .map_err(Error::DatabaseError)?
         };
 
         // 4. Get bottleneck stage (environment with longest average wait time)
@@ -2119,7 +2084,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
             .bind(team_id)
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| Error::DatabaseError(e))?
+            .map_err(Error::DatabaseError)?
         } else {
             sqlx::query_as::<_, (String, f64)>(
                 r#"
@@ -2138,7 +2103,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
             )
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| Error::DatabaseError(e))?
+            .map_err(Error::DatabaseError)?
         };
 
         Ok(RolloutMetricsData {
@@ -2173,7 +2138,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
             .build_query_scalar()
             .fetch_one(&self.pool)
             .await
-            .map_err(|e| Error::DatabaseError(e))?;
+            .map_err(Error::DatabaseError)?;
 
         // Build query with pagination
         let (limit, offset) = if let (Some(page_num), Some(page_sz)) = (page_number, page_size) {
@@ -2211,27 +2176,8 @@ impl FeatureRepository for FeatureRepositoryImpl {
             .await;
 
         let features_rows = handle_error(None, result)?;
-        let mut map: HashMap<Uuid, Vec<FeatureWithStageRow>> = HashMap::new();
-        let mut order: Vec<Uuid> = Vec::new();
-
-        for row in features_rows {
-            if !map.contains_key(&row.feature_id) {
-                order.push(row.feature_id);
-            }
-            map.entry(row.feature_id).or_default().push(row);
-        }
-
-        // Convert rows to features and load all stages + dependencies
-        let mut features: Vec<Feature> = Vec::with_capacity(order.len());
-        for id in order {
-            if let Some(rows) = map.remove(&id) {
-                let mut feature = Self::map_row_to_feature(rows);
-                // Load dependencies
-                let dependencies = self.get_feature_dependencies(&id).await?;
-                feature.dependencies = dependencies;
-                features.push(feature);
-            }
-        }
+        let mut features = Self::map_rows_to_feature_list(features_rows);
+        self.hydrate_feature_dependencies(&mut features).await?;
 
         Ok((features, total))
     }
@@ -2256,7 +2202,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
             .build_query_scalar()
             .fetch_one(&self.pool)
             .await
-            .map_err(|e| Error::DatabaseError(e))?;
+            .map_err(Error::DatabaseError)?;
 
         let mut query_builder = sqlx::QueryBuilder::new(
             r#"SELECT DISTINCT ON (f.id) f.id as feature_id, f.key as feature_key, f.description,
@@ -2285,25 +2231,8 @@ impl FeatureRepository for FeatureRepositoryImpl {
             .await;
 
         let features_rows = handle_error(None, result)?;
-        let mut map: HashMap<Uuid, Vec<FeatureWithStageRow>> = HashMap::new();
-        let mut order: Vec<Uuid> = Vec::new();
-
-        for row in features_rows {
-            if !map.contains_key(&row.feature_id) {
-                order.push(row.feature_id);
-            }
-            map.entry(row.feature_id).or_default().push(row);
-        }
-
-        let mut features: Vec<Feature> = Vec::with_capacity(order.len());
-        for id in order {
-            if let Some(rows) = map.remove(&id) {
-                let mut feature = Self::map_row_to_feature(rows);
-                let dependencies = self.get_feature_dependencies(&id).await?;
-                feature.dependencies = dependencies;
-                features.push(feature);
-            }
-        }
+        let mut features = Self::map_rows_to_feature_list(features_rows);
+        self.hydrate_feature_dependencies(&mut features).await?;
 
         Ok((features, total))
     }
@@ -2328,7 +2257,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
             .build_query_scalar()
             .fetch_one(&self.pool)
             .await
-            .map_err(|e| Error::DatabaseError(e))?;
+            .map_err(Error::DatabaseError)?;
 
         // Build query with pagination
         let (limit, offset) = if let (Some(page_num), Some(page_sz)) = (page_number, page_size) {
@@ -2366,27 +2295,8 @@ impl FeatureRepository for FeatureRepositoryImpl {
             .await;
 
         let features_rows = handle_error(None, result)?;
-        let mut map: HashMap<Uuid, Vec<FeatureWithStageRow>> = HashMap::new();
-        let mut order: Vec<Uuid> = Vec::new();
-
-        for row in features_rows {
-            if !map.contains_key(&row.feature_id) {
-                order.push(row.feature_id);
-            }
-            map.entry(row.feature_id).or_default().push(row);
-        }
-
-        // Convert rows to features and load all stages + dependencies
-        let mut features: Vec<Feature> = Vec::with_capacity(order.len());
-        for id in order {
-            if let Some(rows) = map.remove(&id) {
-                let mut feature = Self::map_row_to_feature(rows);
-                // Load dependencies
-                let dependencies = self.get_feature_dependencies(&id).await?;
-                feature.dependencies = dependencies;
-                features.push(feature);
-            }
-        }
+        let mut features = Self::map_rows_to_feature_list(features_rows);
+        self.hydrate_feature_dependencies(&mut features).await?;
 
         Ok((features, total))
     }
@@ -2410,7 +2320,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
             .build_query_scalar()
             .fetch_one(&self.pool)
             .await
-            .map_err(|e| Error::DatabaseError(e))?;
+            .map_err(Error::DatabaseError)?;
 
         let mut query_builder = sqlx::QueryBuilder::new(
             r#"SELECT DISTINCT ON (f.id) f.id as feature_id, f.key as feature_key, f.description,
@@ -2439,25 +2349,8 @@ impl FeatureRepository for FeatureRepositoryImpl {
             .await;
 
         let features_rows = handle_error(None, result)?;
-        let mut map: HashMap<Uuid, Vec<FeatureWithStageRow>> = HashMap::new();
-        let mut order: Vec<Uuid> = Vec::new();
-
-        for row in features_rows {
-            if !map.contains_key(&row.feature_id) {
-                order.push(row.feature_id);
-            }
-            map.entry(row.feature_id).or_default().push(row);
-        }
-
-        let mut features: Vec<Feature> = Vec::with_capacity(order.len());
-        for id in order {
-            if let Some(rows) = map.remove(&id) {
-                let mut feature = Self::map_row_to_feature(rows);
-                let dependencies = self.get_feature_dependencies(&id).await?;
-                feature.dependencies = dependencies;
-                features.push(feature);
-            }
-        }
+        let mut features = Self::map_rows_to_feature_list(features_rows);
+        self.hydrate_feature_dependencies(&mut features).await?;
 
         Ok((features, total))
     }
@@ -2757,7 +2650,7 @@ impl FeatureRepositoryTx for FeatureRepositoryImpl {
             if !row.value.is_empty() {
                 context_value_map
                     .entry(row.key)
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(row.value);
             }
         }
@@ -2796,7 +2689,7 @@ impl FeatureRepositoryTx for FeatureRepositoryImpl {
             for alloc in allocations {
                 allocations_map
                     .entry(alloc.criteria_id)
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(crate::database::entity::VariantAllocationSimple {
                         variant_control: alloc.variant_control,
                         weight: alloc.weight,
@@ -2835,7 +2728,7 @@ impl FeatureRepositoryTx for FeatureRepositoryImpl {
             for row in rule_rows {
                 let by_group = rule_groups_by_criteria
                     .entry(row.criteria_id)
-                    .or_insert_with(std::collections::HashMap::new);
+                    .or_default();
 
                 let entry = by_group.entry(row.group_id).or_insert_with(|| {
                     let logic_operator = match row.logic_operator.to_uppercase().as_str() {
@@ -2852,9 +2745,9 @@ impl FeatureRepositoryTx for FeatureRepositoryImpl {
                     row.order_index,
                 ) {
                     let mut value = row.value.unwrap_or(serde_json::Value::Null);
-                    if operator.eq_ignore_ascii_case("IN") {
-                        if let Some(key_str) = value.as_str() {
-                            if let Some(entries) = context_value_map.get(key_str) {
+                    if operator.eq_ignore_ascii_case("IN")
+                        && let Some(key_str) = value.as_str()
+                            && let Some(entries) = context_value_map.get(key_str) {
                                 value = serde_json::Value::Array(
                                     entries
                                         .iter()
@@ -2862,8 +2755,6 @@ impl FeatureRepositoryTx for FeatureRepositoryImpl {
                                         .collect(),
                                 );
                             }
-                        }
-                    }
                     entry
                         .1
                         .push(crate::database::entity::CompoundRuleCondition {
@@ -3405,7 +3296,7 @@ impl FeatureRepositoryImpl {
             if !row.value.is_empty() {
                 context_value_map
                     .entry(row.key)
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(row.value);
             }
         }
@@ -3444,7 +3335,7 @@ impl FeatureRepositoryImpl {
             for alloc in allocations {
                 allocations_map
                     .entry(alloc.criteria_id)
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(crate::database::entity::VariantAllocationSimple {
                         variant_control: alloc.variant_control,
                         weight: alloc.weight,
@@ -3483,7 +3374,7 @@ impl FeatureRepositoryImpl {
             for row in rule_rows {
                 let by_group = rule_groups_by_criteria
                     .entry(row.criteria_id)
-                    .or_insert_with(std::collections::HashMap::new);
+                    .or_default();
 
                 let entry = by_group.entry(row.group_id).or_insert_with(|| {
                     let logic_operator = match row.logic_operator.to_uppercase().as_str() {
@@ -3500,9 +3391,9 @@ impl FeatureRepositoryImpl {
                     row.order_index,
                 ) {
                     let mut value = row.value.unwrap_or(serde_json::Value::Null);
-                    if operator.eq_ignore_ascii_case("IN") {
-                        if let Some(key_str) = value.as_str() {
-                            if let Some(entries) = context_value_map.get(key_str) {
+                    if operator.eq_ignore_ascii_case("IN")
+                        && let Some(key_str) = value.as_str()
+                            && let Some(entries) = context_value_map.get(key_str) {
                                 value = serde_json::Value::Array(
                                     entries
                                         .iter()
@@ -3510,8 +3401,6 @@ impl FeatureRepositoryImpl {
                                         .collect(),
                                 );
                             }
-                        }
-                    }
                     entry
                         .1
                         .push(crate::database::entity::CompoundRuleCondition {

@@ -202,13 +202,12 @@ fn validate_approver_roles(roles: &[String]) -> Result<(), RestError> {
 }
 
 fn validate_auto_approve(value: Option<i32>) -> Result<(), RestError> {
-    if let Some(hours) = value {
-        if hours < 1 {
+    if let Some(hours) = value
+        && hours < 1 {
             return Err(RestError::invalid_input(
                 "Auto-approve hours must be at least 1",
             ));
         }
-    }
     Ok(())
 }
 

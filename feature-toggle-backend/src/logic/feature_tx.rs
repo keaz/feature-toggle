@@ -103,7 +103,7 @@ where
     let stage_uuid = id_to_uuid(stage_id)?;
     let ctx_uuids: Vec<Uuid> = context_ids
         .into_iter()
-        .map(|id| id_to_uuid(id))
+        .map(id_to_uuid)
         .collect::<Result<Vec<Uuid>, _>>()?;
 
     let result = repo

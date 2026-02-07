@@ -693,25 +693,23 @@ async fn get_feature_by_key_and_stream_branches() {
     });
 
     for _ in 0..5 {
-        if let Some(Ok(update)) = stream.message().await.transpose() {
-            if update.action == (pb::feature_update::Action::Snapshot as i32) {
+        if let Some(Ok(update)) = stream.message().await.transpose()
+            && update.action == (pb::feature_update::Action::Snapshot as i32) {
                 assert!(update.feature.as_ref().map(|f| f.key.as_str()) == Some("Test Feature"));
                 got_snapshot = true;
                 break;
             }
-        }
     }
     assert!(got_snapshot, "did not receive snapshot");
 
     // Now expect a heartbeat update at some point
     let mut got_heartbeat = false;
     for _ in 0..10 {
-        if let Some(Ok(update)) = stream.message().await.transpose() {
-            if update.action == (pb::feature_update::Action::Heartbeat as i32) {
+        if let Some(Ok(update)) = stream.message().await.transpose()
+            && update.action == (pb::feature_update::Action::Heartbeat as i32) {
                 got_heartbeat = true;
                 break;
             }
-        }
     }
     assert!(got_heartbeat, "did not receive heartbeat");
 
@@ -767,14 +765,13 @@ async fn get_feature_by_key_and_stream_branches() {
     // Expect to receive the matching update soon, and not necessarily the other one
     let mut got_matching = false;
     for _ in 0..10 {
-        if let Some(Ok(update)) = stream.message().await.transpose() {
-            if update.action == (pb::feature_update::Action::Upsert as i32)
+        if let Some(Ok(update)) = stream.message().await.transpose()
+            && update.action == (pb::feature_update::Action::Upsert as i32)
                 && update.feature.as_ref().map(|f| f.key.as_str()) == Some("Test Feature")
             {
                 got_matching = true;
                 break;
             }
-        }
     }
     assert!(got_matching, "did not receive matching UPSERT");
 

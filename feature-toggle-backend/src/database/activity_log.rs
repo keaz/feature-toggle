@@ -148,12 +148,11 @@ impl ActivityLogRepository for PgActivityLogRepository {
         let mut param_count = 0;
 
         // Build dynamic WHERE clause
-        if let Some(ref activity_types) = filter.activity_types {
-            if !activity_types.is_empty() {
+        if let Some(ref activity_types) = filter.activity_types
+            && !activity_types.is_empty() {
                 param_count += 1;
                 query.push_str(&format!(" AND activity_type = ANY(${})", param_count));
             }
-        }
         if filter.entity_type.is_some() {
             param_count += 1;
             query.push_str(&format!(" AND entity_type = ${}", param_count));
@@ -189,11 +188,10 @@ impl ActivityLogRepository for PgActivityLogRepository {
         let mut sql_query = sqlx::query_as::<_, ActivityLogRow>(&query);
 
         // Bind parameters in the same order
-        if let Some(ref activity_types) = filter.activity_types {
-            if !activity_types.is_empty() {
+        if let Some(ref activity_types) = filter.activity_types
+            && !activity_types.is_empty() {
                 sql_query = sql_query.bind(activity_types);
             }
-        }
         if let Some(entity_type) = filter.entity_type {
             sql_query = sql_query.bind(entity_type);
         }
@@ -238,12 +236,11 @@ impl ActivityLogRepository for PgActivityLogRepository {
         let mut param_count = 0;
 
         // Build dynamic WHERE clause (same as get_activities but without pagination)
-        if let Some(ref activity_types) = filter.activity_types {
-            if !activity_types.is_empty() {
+        if let Some(ref activity_types) = filter.activity_types
+            && !activity_types.is_empty() {
                 param_count += 1;
                 query.push_str(&format!(" AND activity_type = ANY(${})", param_count));
             }
-        }
         if filter.entity_type.is_some() {
             param_count += 1;
             query.push_str(&format!(" AND entity_type = ${}", param_count));
@@ -268,11 +265,10 @@ impl ActivityLogRepository for PgActivityLogRepository {
         let mut sql_query = sqlx::query_scalar::<_, i64>(&query);
 
         // Bind parameters in the same order
-        if let Some(ref activity_types) = filter.activity_types {
-            if !activity_types.is_empty() {
+        if let Some(ref activity_types) = filter.activity_types
+            && !activity_types.is_empty() {
                 sql_query = sql_query.bind(activity_types);
             }
-        }
         if let Some(entity_type) = filter.entity_type {
             sql_query = sql_query.bind(entity_type);
         }

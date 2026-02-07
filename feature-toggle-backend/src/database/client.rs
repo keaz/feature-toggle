@@ -3,6 +3,7 @@ use crate::database::{Error, handle_error};
 use mockall::automock;
 use rand::{Rng, distr::Alphanumeric};
 use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder, Row};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 pub struct CreateClient {
@@ -104,6 +105,18 @@ pub struct ClientRepositoryImpl {
     pool: PgPool,
 }
 
+#[derive(Debug, Clone)]
+struct ClientBaseRow {
+    id: Uuid,
+    team_id: Uuid,
+    environment_id: Uuid,
+    name: String,
+    description: Option<String>,
+    enabled: bool,
+    client_type: ClientType,
+    api_key: String,
+}
+
 impl ClientRepositoryImpl {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
@@ -132,6 +145,85 @@ impl ClientRepositoryImpl {
         .await;
         let rows = handle_error(Some(client_id), result)?;
         Ok(rows.into_iter().map(|r| r.origin).collect())
+    }
+
+    async fn load_web_origins_batch(
+        &self,
+        client_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, Vec<String>>, Error> {
+        if client_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let result = sqlx::query!(
+            r#"SELECT client_id, origin
+               FROM client_web_origins
+               WHERE client_id = ANY($1)
+               ORDER BY client_id, origin"#,
+            client_ids
+        )
+        .fetch_all(&self.pool)
+        .await;
+        let rows = handle_error(None, result)?;
+        let mut origins_by_client: HashMap<Uuid, Vec<String>> = HashMap::new();
+        for row in rows {
+            origins_by_client
+                .entry(row.client_id)
+                .or_default()
+                .push(row.origin);
+        }
+        Ok(origins_by_client)
+    }
+
+    fn parse_client_base_row(row: &sqlx::postgres::PgRow) -> ClientBaseRow {
+        let client_type_str: String = row.get("client_type");
+        ClientBaseRow {
+            id: row.get("id"),
+            team_id: row.get("team_id"),
+            environment_id: row.get("environment_id"),
+            name: row.get("name"),
+            description: row.get("description"),
+            enabled: row.get::<bool, _>("enabled"),
+            client_type: Self::from_type_str(&client_type_str),
+            api_key: row.get("api_key"),
+        }
+    }
+
+    async fn map_client_rows(&self, base_rows: Vec<ClientBaseRow>) -> Result<Vec<Client>, Error> {
+        let web_client_ids: Vec<Uuid> = base_rows
+            .iter()
+            .filter(|row| matches!(row.client_type, ClientType::Web))
+            .map(|row| row.id)
+            .collect();
+        let web_origins_by_client = self.load_web_origins_batch(&web_client_ids).await?;
+
+        Ok(base_rows
+            .into_iter()
+            .map(|row| {
+                let web_origins = if matches!(row.client_type, ClientType::Web) {
+                    Some(
+                        web_origins_by_client
+                            .get(&row.id)
+                            .cloned()
+                            .unwrap_or_default(),
+                    )
+                } else {
+                    None
+                };
+
+                Client {
+                    id: row.id,
+                    team_id: row.team_id,
+                    environment_id: row.environment_id,
+                    name: row.name,
+                    description: row.description,
+                    enabled: row.enabled,
+                    client_type: row.client_type,
+                    api_key: row.api_key,
+                    web_origins,
+                }
+            })
+            .collect())
     }
 
     async fn is_api_key_unique(&self, api_key: &str) -> Result<bool, Error> {
@@ -221,39 +313,12 @@ impl ClientRepository for ClientRepositoryImpl {
         qb.push(" ORDER BY name");
 
         let rows = qb.build().fetch_all(&self.pool).await;
-
         let rows = handle_error(None, rows)?;
-
-        // Map and fetch origins for web clients in a second pass
-        let mut clients: Vec<Client> = Vec::with_capacity(rows.len());
-        for row in rows {
-            // row is PgRow; extract columns
-            let id: Uuid = row.get("id");
-            let team_id: Uuid = row.get("team_id");
-            let environment_id: Uuid = row.get("environment_id");
-            let name: String = row.get("name");
-            let description: Option<String> = row.get("description");
-            let enabled: bool = row.get::<bool, _>("enabled");
-            let client_type_str: String = row.get("client_type");
-            let api_key: String = row.get("api_key");
-            let client_type = Self::from_type_str(&client_type_str);
-            let web_origins = if matches!(client_type, ClientType::Web) {
-                Some(self.load_web_origins(id).await?)
-            } else {
-                None
-            };
-            clients.push(Client {
-                id,
-                team_id,
-                environment_id,
-                name,
-                description,
-                enabled,
-                client_type,
-                api_key,
-                web_origins,
-            });
-        }
+        let base_rows = rows
+            .iter()
+            .map(Self::parse_client_base_row)
+            .collect::<Vec<_>>();
+        let clients = self.map_client_rows(base_rows).await?;
         Ok(clients)
     }
 
@@ -266,42 +331,37 @@ impl ClientRepository for ClientRepositoryImpl {
         page_number: i32,
         page_size: i32,
     ) -> Result<(Vec<Client>, i64), Error> {
-        // First, get the total count
-        let mut count_qb =
-            QueryBuilder::<Postgres>::new("SELECT COUNT(*) FROM clients WHERE team_id = ");
-        count_qb.push_bind(team_id);
-
-        if let Some(filter_name) = &name {
-            count_qb
-                .push(" AND name ILIKE ")
-                .push_bind(format!("%{}%", filter_name));
-        }
-        if let Some(enabled_value) = enabled {
-            count_qb.push(" AND enabled = ").push_bind(enabled_value);
-        }
-        if let Some(ct) = &client_type {
-            count_qb
-                .push(" AND client_type = ")
-                .push_bind(Self::to_type_str(&ct));
-        }
-
-        let total_count: i64 = count_qb
-            .build_query_scalar()
-            .fetch_one(&self.pool)
-            .await
-            .map_err(Error::DatabaseError)?;
-
         // Handle invalid page_size (0 or negative) by returning empty results
         if page_size <= 0 {
+            let mut count_qb =
+                QueryBuilder::<Postgres>::new("SELECT COUNT(*) FROM clients WHERE team_id = ");
+            count_qb.push_bind(team_id);
+            if let Some(filter_name) = &name {
+                count_qb
+                    .push(" AND name ILIKE ")
+                    .push_bind(format!("%{}%", filter_name));
+            }
+            if let Some(enabled_value) = enabled {
+                count_qb.push(" AND enabled = ").push_bind(enabled_value);
+            }
+            if let Some(ct) = &client_type {
+                count_qb
+                    .push(" AND client_type = ")
+                    .push_bind(Self::to_type_str(ct));
+            }
+            let total_count: i64 = count_qb
+                .build_query_scalar()
+                .fetch_one(&self.pool)
+                .await
+                .map_err(Error::DatabaseError)?;
             return Ok((Vec::new(), total_count));
         }
 
-        // Now get the paginated results
         let page = if page_number < 1 { 1 } else { page_number } as i64;
         let size = page_size as i64;
         let offset = (page - 1) * size;
         let mut qb = QueryBuilder::<Postgres>::new(
-            "SELECT id, team_id, environment_id, name, description, enabled, client_type, api_key FROM clients WHERE team_id = ",
+            "SELECT id, team_id, environment_id, name, description, enabled, client_type, api_key, COUNT(*) OVER() as total_count FROM clients WHERE team_id = ",
         );
         qb.push_bind(team_id);
 
@@ -322,37 +382,15 @@ impl ClientRepository for ClientRepositoryImpl {
 
         let rows = qb.build().fetch_all(&self.pool).await;
         let rows = handle_error(None, rows)?;
-
-        // Map and fetch origins for web clients in a second pass
-        let mut clients: Vec<Client> = Vec::with_capacity(rows.len());
-        for row in rows {
-            // row is PgRow; extract columns
-            let id: Uuid = row.get("id");
-            let team_id: Uuid = row.get("team_id");
-            let environment_id: Uuid = row.get("environment_id");
-            let name: String = row.get("name");
-            let description: Option<String> = row.get("description");
-            let enabled: bool = row.get::<bool, _>("enabled");
-            let client_type_str: String = row.get("client_type");
-            let api_key: String = row.get("api_key");
-            let client_type = Self::from_type_str(&client_type_str);
-            let web_origins = if matches!(client_type, ClientType::Web) {
-                Some(self.load_web_origins(id).await?)
-            } else {
-                None
-            };
-            clients.push(Client {
-                id,
-                team_id,
-                environment_id,
-                name,
-                description,
-                enabled,
-                client_type,
-                api_key,
-                web_origins,
-            });
-        }
+        let total_count = rows
+            .first()
+            .map(|row| row.get::<i64, _>("total_count"))
+            .unwrap_or(0);
+        let base_rows = rows
+            .iter()
+            .map(Self::parse_client_base_row)
+            .collect::<Vec<_>>();
+        let clients = self.map_client_rows(base_rows).await?;
         Ok((clients, total_count))
     }
 
@@ -368,32 +406,8 @@ impl ClientRepository for ClientRepositoryImpl {
         let offset = offset.max(0);
         let limit = limit.max(1);
 
-        let mut count_qb =
-            QueryBuilder::<Postgres>::new("SELECT COUNT(*) FROM clients WHERE team_id = ");
-        count_qb.push_bind(team_id);
-
-        if let Some(filter_name) = &name {
-            count_qb
-                .push(" AND name ILIKE ")
-                .push_bind(format!("%{}%", filter_name));
-        }
-        if let Some(enabled_value) = enabled {
-            count_qb.push(" AND enabled = ").push_bind(enabled_value);
-        }
-        if let Some(ct) = &client_type {
-            count_qb
-                .push(" AND client_type = ")
-                .push_bind(Self::to_type_str(&ct));
-        }
-
-        let total_count: i64 = count_qb
-            .build_query_scalar()
-            .fetch_one(&self.pool)
-            .await
-            .map_err(Error::DatabaseError)?;
-
         let mut qb = QueryBuilder::<Postgres>::new(
-            "SELECT id, team_id, environment_id, name, description, enabled, client_type, api_key FROM clients WHERE team_id = ",
+            "SELECT id, team_id, environment_id, name, description, enabled, client_type, api_key, COUNT(*) OVER() as total_count FROM clients WHERE team_id = ",
         );
         qb.push_bind(team_id);
 
@@ -414,35 +428,15 @@ impl ClientRepository for ClientRepositoryImpl {
 
         let rows = qb.build().fetch_all(&self.pool).await;
         let rows = handle_error(None, rows)?;
-
-        let mut clients: Vec<Client> = Vec::with_capacity(rows.len());
-        for row in rows {
-            let id: Uuid = row.get("id");
-            let team_id: Uuid = row.get("team_id");
-            let environment_id: Uuid = row.get("environment_id");
-            let name: String = row.get("name");
-            let description: Option<String> = row.get("description");
-            let enabled: bool = row.get::<bool, _>("enabled");
-            let client_type_str: String = row.get("client_type");
-            let api_key: String = row.get("api_key");
-            let client_type = Self::from_type_str(&client_type_str);
-            let web_origins = if matches!(client_type, ClientType::Web) {
-                Some(self.load_web_origins(id).await?)
-            } else {
-                None
-            };
-            clients.push(Client {
-                id,
-                team_id,
-                environment_id,
-                name,
-                description,
-                enabled,
-                client_type,
-                api_key,
-                web_origins,
-            });
-        }
+        let total_count = rows
+            .first()
+            .map(|row| row.get::<i64, _>("total_count"))
+            .unwrap_or(0);
+        let base_rows = rows
+            .iter()
+            .map(Self::parse_client_base_row)
+            .collect::<Vec<_>>();
+        let clients = self.map_client_rows(base_rows).await?;
 
         Ok((clients, total_count))
     }
@@ -486,8 +480,8 @@ impl ClientRepository for ClientRepositoryImpl {
         let row = handle_error(None, result)?;
 
         // Insert web origins if needed
-        if matches!(input.client_type, ClientType::Web) {
-            if let Some(origins) = input.web_origins.clone() {
+        if matches!(input.client_type, ClientType::Web)
+            && let Some(origins) = input.web_origins.clone() {
                 for origin in origins {
                     sqlx::query!(
                         r#"INSERT INTO client_web_origins (id, client_id, origin) VALUES ($1, $2, $3)"#,
@@ -500,7 +494,6 @@ impl ClientRepository for ClientRepositoryImpl {
                     .map_err(Error::DatabaseError)?;
                 }
             }
-        }
 
         let web_origins = if matches!(input.client_type, ClientType::Web) {
             Some(self.load_web_origins(row.id).await?)
@@ -610,7 +603,7 @@ impl ClientRepository for ClientRepositoryImpl {
             )
             .fetch_one(&self.pool)
             .await
-            .map_err(|e| Error::DatabaseError(e))?,
+            .map_err(Error::DatabaseError)?,
             (Some(team_id), None) => sqlx::query_scalar!(
                 r#"
                     SELECT COUNT(*) as "count!"
@@ -621,7 +614,7 @@ impl ClientRepository for ClientRepositoryImpl {
             )
             .fetch_one(&self.pool)
             .await
-            .map_err(|e| Error::DatabaseError(e))?,
+            .map_err(Error::DatabaseError)?,
             (None, Some(enabled)) => sqlx::query_scalar!(
                 r#"
                     SELECT COUNT(*) as "count!"
@@ -632,7 +625,7 @@ impl ClientRepository for ClientRepositoryImpl {
             )
             .fetch_one(&self.pool)
             .await
-            .map_err(|e| Error::DatabaseError(e))?,
+            .map_err(Error::DatabaseError)?,
             (None, None) => sqlx::query_scalar!(
                 r#"
                     SELECT COUNT(*) as "count!"
@@ -641,7 +634,7 @@ impl ClientRepository for ClientRepositoryImpl {
             )
             .fetch_one(&self.pool)
             .await
-            .map_err(|e| Error::DatabaseError(e))?,
+            .map_err(Error::DatabaseError)?,
         };
 
         Ok(count)
@@ -698,8 +691,8 @@ impl ClientRepositoryTx for ClientRepositoryImpl {
         let row = handle_error(None, result)?;
 
         // Insert web origins if needed (within transaction)
-        if matches!(input.client_type, ClientType::Web) {
-            if let Some(origins) = input.web_origins.clone() {
+        if matches!(input.client_type, ClientType::Web)
+            && let Some(origins) = input.web_origins.clone() {
                 for origin in origins {
                     sqlx::query!(
                         r#"INSERT INTO client_web_origins (id, client_id, origin) VALUES ($1, $2, $3)"#,
@@ -712,7 +705,6 @@ impl ClientRepositoryTx for ClientRepositoryImpl {
                     .map_err(Error::DatabaseError)?;
                 }
             }
-        }
 
         let web_origins = if matches!(input.client_type, ClientType::Web) {
             Some(self.load_web_origins(row.id).await?)

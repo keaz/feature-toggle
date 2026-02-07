@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::sync::{OnceLock, RwLock};
 
 // Evaluation request with dynamic context object
 #[derive(Deserialize, Clone, Debug)]
@@ -206,6 +207,39 @@ fn hash_to_percentage(hash: &[u8]) -> f32 {
     (ratio * 100.0) as f32
 }
 
+static REGEX_CACHE: OnceLock<RwLock<HashMap<String, Option<Regex>>>> = OnceLock::new();
+
+fn regex_cache() -> &'static RwLock<HashMap<String, Option<Regex>>> {
+    REGEX_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn matches_regex_pattern(provided: &str, pattern: Option<&String>) -> bool {
+    let Some(pattern) = pattern else {
+        return false;
+    };
+
+    if let Ok(cache) = regex_cache().read()
+        && let Some(cached) = cache.get(pattern)
+    {
+        return cached.as_ref().is_some_and(|re| re.is_match(provided));
+    }
+
+    let compiled = Regex::new(pattern).ok();
+    if let Ok(mut cache) = regex_cache().write() {
+        cache
+            .entry(pattern.clone())
+            .or_insert_with(|| compiled.clone());
+    }
+
+    compiled.as_ref().is_some_and(|re| re.is_match(provided))
+}
+
+fn allocations_sorted_by_control(allocations: &[VariantAllocation]) -> bool {
+    allocations
+        .windows(2)
+        .all(|pair| pair[0].variant_control <= pair[1].variant_control)
+}
+
 /// Selects a variant based on weighted allocations using cumulative distribution
 ///
 /// This function implements deterministic weighted traffic splitting:
@@ -233,6 +267,19 @@ fn select_variant_by_weight(allocations: &[VariantAllocation], user_bucket: f32)
         return None;
     }
 
+    if allocations_sorted_by_control(allocations) {
+        let mut cumulative = 0.0;
+        let mut last_variant = None;
+        for alloc in allocations {
+            cumulative += alloc.weight as f32;
+            last_variant = Some(alloc.variant_control.as_str());
+            if user_bucket < cumulative {
+                return Some(alloc.variant_control.clone());
+            }
+        }
+        return last_variant.map(str::to_owned);
+    }
+
     // Sort allocations by variant name for deterministic ordering
     // This ensures the same user always gets the same variant
     let mut sorted = allocations.to_vec();
@@ -240,8 +287,10 @@ fn select_variant_by_weight(allocations: &[VariantAllocation], user_bucket: f32)
 
     // Calculate cumulative weights and select variant
     let mut cumulative = 0.0;
-    for alloc in sorted {
+    let mut last_variant = None;
+    for alloc in &sorted {
         cumulative += alloc.weight as f32;
+        last_variant = Some(alloc.variant_control.as_str());
         if user_bucket < cumulative {
             return Some(alloc.variant_control.clone());
         }
@@ -249,7 +298,7 @@ fn select_variant_by_weight(allocations: &[VariantAllocation], user_bucket: f32)
 
     // Fallback: if user_bucket >= total weight, return last variant
     // This handles edge cases where weights don't sum to exactly 100
-    allocations.last().map(|a| a.variant_control.clone())
+    last_variant.map(str::to_owned)
 }
 
 struct CriteriaEvaluationResult {
@@ -323,10 +372,7 @@ fn matches_operator(operator: &Operator, provided: &str, allowed_values: &[Strin
             .first()
             .is_some_and(|v| provided.ends_with(v)),
 
-        Operator::Regex => allowed_values
-            .first()
-            .and_then(|pattern| Regex::new(pattern).ok().map(|re| re.is_match(provided)))
-            .unwrap_or(false),
+        Operator::Regex => matches_regex_pattern(provided, allowed_values.first()),
 
         Operator::SemverGreaterThan => {
             if let (Ok(provided_ver), Some(allowed_ver)) = (
@@ -506,10 +552,15 @@ fn get_variant_value(feature: &Feature, variant_control: Option<String>) -> Json
     JsonValue::Bool(true)
 }
 
-pub fn evaluate(
+fn evaluate_with_memo(
     evaluation_context: &FeatureEvaluationContext,
     feature: &Feature,
+    memo: &mut HashMap<String, EvaluationResult>,
 ) -> EvaluationResult {
+    if let Some(cached) = memo.get(&feature.id) {
+        return cached.clone();
+    }
+
     // Evaluation walkthrough:
     // 1) Kill switch: if the feature is disabled, short-circuit to false.
     // 2) Resolve dependencies recursively; any failed dependency disables this feature.
@@ -521,7 +572,7 @@ pub fn evaluate(
 
     // Kill switch check: if enabled is false, feature is disabled
     if !feature.enabled {
-        return EvaluationResult {
+        let result = EvaluationResult {
             flag_key,
             value: JsonValue::Bool(false),
             variant: None,
@@ -529,13 +580,15 @@ pub fn evaluate(
             error_code: None,
             metadata: None,
         };
+        memo.insert(feature.id.clone(), result.clone());
+        return result;
     }
 
     // All dependencies must evaluate to true
     for dependency in &feature.dependencies {
-        let dep_result = evaluate(evaluation_context, dependency);
+        let dep_result = evaluate_with_memo(evaluation_context, dependency, memo);
         if !dep_result.value.as_bool().unwrap_or(false) {
-            return EvaluationResult {
+            let result = EvaluationResult {
                 flag_key,
                 value: JsonValue::Bool(false),
                 variant: None,
@@ -543,6 +596,8 @@ pub fn evaluate(
                 error_code: None,
                 metadata: None,
             };
+            memo.insert(feature.id.clone(), result.clone());
+            return result;
         }
     }
 
@@ -553,7 +608,7 @@ pub fn evaluate(
         .find(|stage| stage.environment_id == evaluation_context.context.environment_id)
     {
         None => {
-            return EvaluationResult {
+            let result = EvaluationResult {
                 flag_key,
                 value: JsonValue::Bool(false),
                 variant: None,
@@ -561,13 +616,15 @@ pub fn evaluate(
                 error_code: Some(ErrorCode::FlagNotFound),
                 metadata: None,
             };
+            memo.insert(feature.id.clone(), result.clone());
+            return result;
         }
         Some(stage) => stage,
     };
 
     // Stage must be enabled
     if !stage.enabled {
-        return EvaluationResult {
+        let result = EvaluationResult {
             flag_key,
             value: JsonValue::Bool(false),
             variant: None,
@@ -575,13 +632,15 @@ pub fn evaluate(
             error_code: None,
             metadata: None,
         };
+        memo.insert(feature.id.clone(), result.clone());
+        return result;
     }
 
     // Evaluate stage criteria
     let criteria_result = passes_stage_criteria(evaluation_context, stage);
 
     if !criteria_result.matched {
-        return EvaluationResult {
+        let result = EvaluationResult {
             flag_key,
             value: JsonValue::Bool(false),
             variant: None,
@@ -589,20 +648,32 @@ pub fn evaluate(
             error_code: None,
             metadata: None,
         };
+        memo.insert(feature.id.clone(), result.clone());
+        return result;
     }
 
     // Feature is enabled, determine variant and value
     let variant = criteria_result.variant;
     let value = get_variant_value(feature, variant.clone());
 
-    EvaluationResult {
+    let result = EvaluationResult {
         flag_key,
         value,
         variant,
         reason: criteria_result.reason,
         error_code: None,
         metadata: None,
-    }
+    };
+    memo.insert(feature.id.clone(), result.clone());
+    result
+}
+
+pub fn evaluate(
+    evaluation_context: &FeatureEvaluationContext,
+    feature: &Feature,
+) -> EvaluationResult {
+    let mut memo = HashMap::new();
+    evaluate_with_memo(evaluation_context, feature, &mut memo)
 }
 
 #[cfg(test)]

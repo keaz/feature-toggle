@@ -119,7 +119,7 @@ impl PipelineLogic for PipelineLogicImpl {
     async fn get_pipeline_by_id(&self, env_id: ID) -> Result<Pipeline, Error> {
         let pipeline_id = Uuid::try_from(env_id).unwrap();
         let pipeline = self.repository.get_pipeline_by_id(pipeline_id).await?;
-        let pipelines = vec![pipeline.clone()]; // Wrap in a vector to reuse the same logic
+        let pipelines = [pipeline.clone()]; // Wrap in a vector to reuse the same logic
 
         let stages = pipelines
             .iter()

@@ -34,7 +34,7 @@ async fn test_create_evaluation() {
     let created = repo.create_evaluation(eval.clone()).await.unwrap();
     assert_eq!(created.feature_key, eval.feature_key);
     assert_eq!(created.environment_id, eval.environment_id);
-    assert_eq!(created.evaluation_result, true);
+    assert!(created.evaluation_result);
 }
 
 #[tokio::test]

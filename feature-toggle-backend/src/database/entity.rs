@@ -95,16 +95,13 @@ pub enum VariantValueType {
     type_name = "variant_selection_mode",
     rename_all = "SCREAMING_SNAKE_CASE"
 )]
+#[derive(Default)]
 pub enum VariantSelectionMode {
+    #[default]
     WeightedSplit,
     SpecificVariant,
 }
 
-impl Default for VariantSelectionMode {
-    fn default() -> Self {
-        VariantSelectionMode::WeightedSplit
-    }
-}
 
 // Feature variant entity
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]

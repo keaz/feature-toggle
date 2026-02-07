@@ -105,7 +105,7 @@ fn handle_error<T>(id: Option<Uuid>, result: Result<T, sqlx::Error>) -> Result<T
             }
             Err(Error::DatabaseError(sqlx::Error::Database(db_err)))
         }
-        Err(e) => Err(Error::DatabaseError(e.into())),
+        Err(e) => Err(Error::DatabaseError(e)),
     }
 }
 
@@ -205,7 +205,7 @@ impl RoleRepository for RoleRepositoryImpl {
             .pool
             .begin()
             .await
-            .map_err(|e| Error::DatabaseError(e.into()))?;
+            .map_err(|e| Error::DatabaseError(e))?;
 
         // Remove existing role assignments
         handle_error(
@@ -234,7 +234,7 @@ impl RoleRepository for RoleRepositoryImpl {
 
         tx.commit()
             .await
-            .map_err(|e| Error::DatabaseError(e.into()))?;
+            .map_err(|e| Error::DatabaseError(e))?;
         Ok(())
     }
 
@@ -265,7 +265,7 @@ impl RoleRepository for RoleRepositoryImpl {
 
         match result {
             Ok(row) => Ok(row.count.unwrap_or(0) > 0),
-            Err(e) => Err(Error::DatabaseError(e.into())),
+            Err(e) => Err(Error::DatabaseError(e)),
         }
     }
 

@@ -130,11 +130,10 @@ where
     let user_id = Uuid::try_from(id).map_err(|e| Error::InvalidInput(e.to_string()))?;
 
     // If updating email, validate uniqueness (allow unchanged or same owner)
-    if let Some(ref new_email) = input.email {
-        if repo.user_exists_by_email(new_email, Some(user_id)).await? {
+    if let Some(ref new_email) = input.email
+        && repo.user_exists_by_email(new_email, Some(user_id)).await? {
             return Err(Error::RecordAlreadyExists("email".to_string()));
         }
-    }
 
     // Update user within transaction
     let updated = repo

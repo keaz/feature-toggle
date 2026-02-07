@@ -1,21 +1,22 @@
-use actix_web::{get, post, web, HttpRequest, HttpResponse, Responder};
+use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::database::activity_log::ActivityLogRepository;
 use crate::database::feature::FeatureRepository;
-use crate::database::metrics::{metric_repository_tx, MetricType as DbMetricType};
+use crate::database::metrics::{MetricType as DbMetricType, metric_repository_tx};
 use crate::logic::client::ClientLogic;
+use crate::logic::environment::EnvironmentLogic;
 use crate::logic::feature::FeatureLogic;
 use crate::logic::feature_evaluation::FeatureEvaluationLogic;
 use crate::logic::metrics::MetricLogic;
 use crate::logic::pipeline::PipelineLogic;
-use crate::logic::environment::EnvironmentLogic;
 use crate::model::ID;
 use crate::rest::error::RestError;
-use crate::rest::pagination::{normalize_pagination, PageMeta, PaginationQuery};
+use crate::rest::pagination::{PageMeta, PaginationQuery, normalize_pagination};
 use crate::rest::serde::{deserialize_optional_string_or_vec, deserialize_string_or_vec};
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -328,10 +329,7 @@ fn parse_uuid(value: &str, field: &str) -> Result<Uuid, RestError> {
 }
 
 fn parse_opt_uuid(value: Option<&String>, field: &str) -> Result<Option<Uuid>, RestError> {
-    value
-        .as_ref()
-        .map(|raw| parse_uuid(raw, field))
-        .transpose()
+    value.as_ref().map(|raw| parse_uuid(raw, field)).transpose()
 }
 
 fn parse_datetime(value: &str, field: &str) -> Result<DateTime<Utc>, RestError> {
@@ -376,9 +374,8 @@ fn resolve_time_range_with_period(
 }
 
 fn parse_metric_keys_from_query(query: &str) -> Result<Vec<String>, RestError> {
-    let pairs: Vec<(String, String)> = serde_urlencoded::from_str(query).map_err(|_| {
-        RestError::invalid_input("invalid query parameters")
-    })?;
+    let pairs: Vec<(String, String)> = serde_urlencoded::from_str(query)
+        .map_err(|_| RestError::invalid_input("invalid query parameters"))?;
     let mut metric_keys = Vec::new();
     for (key, value) in pairs {
         if key == "metricKeys" || key == "metricKeys[]" || key == "metric_keys" {
@@ -398,63 +395,134 @@ fn parse_metric_keys_from_query(query: &str) -> Result<Vec<String>, RestError> {
     Ok(metric_keys)
 }
 
+#[derive(Default)]
+struct ActivityEntityLookupCache {
+    feature_by_id: HashMap<Uuid, Option<crate::database::entity::Feature>>,
+    feature_id_by_stage_id: HashMap<Uuid, Option<Uuid>>,
+    feature_stages_by_feature_id:
+        HashMap<Uuid, Option<Vec<crate::database::entity::FeaturePipelineStage>>>,
+    environment_by_id: HashMap<Uuid, Option<crate::model::Environment>>,
+}
+
+impl ActivityEntityLookupCache {
+    async fn feature(
+        &mut self,
+        feature_id: Uuid,
+        feature_repo: &dyn FeatureRepository,
+    ) -> Option<crate::database::entity::Feature> {
+        if let Some(cached) = self.feature_by_id.get(&feature_id) {
+            return cached.clone();
+        }
+
+        let resolved = feature_repo.get_feature_by_id(feature_id).await.ok();
+        self.feature_by_id.insert(feature_id, resolved.clone());
+        resolved
+    }
+
+    async fn feature_id_for_stage(
+        &mut self,
+        stage_id: Uuid,
+        feature_repo: &dyn FeatureRepository,
+    ) -> Option<Uuid> {
+        if let Some(cached) = self.feature_id_by_stage_id.get(&stage_id) {
+            return *cached;
+        }
+
+        let resolved = feature_repo
+            .get_feature_id_by_stage_id(stage_id)
+            .await
+            .ok()
+            .flatten();
+        self.feature_id_by_stage_id.insert(stage_id, resolved);
+        resolved
+    }
+
+    async fn feature_stages(
+        &mut self,
+        feature_id: Uuid,
+        feature_repo: &dyn FeatureRepository,
+    ) -> Option<Vec<crate::database::entity::FeaturePipelineStage>> {
+        if let Some(cached) = self.feature_stages_by_feature_id.get(&feature_id) {
+            return cached.clone();
+        }
+
+        let resolved = feature_repo.get_feature_stages(feature_id).await.ok();
+        self.feature_stages_by_feature_id
+            .insert(feature_id, resolved.clone());
+        resolved
+    }
+
+    async fn environment(
+        &mut self,
+        environment_id: Uuid,
+        environment_logic: &dyn crate::logic::environment::EnvironmentLogic,
+    ) -> Option<crate::model::Environment> {
+        if let Some(cached) = self.environment_by_id.get(&environment_id) {
+            return cached.clone();
+        }
+
+        let resolved = environment_logic
+            .get_environment_by_id(ID::from(environment_id))
+            .await
+            .ok();
+        self.environment_by_id
+            .insert(environment_id, resolved.clone());
+        resolved
+    }
+}
+
 async fn resolve_activity_entity_details(
     activity: &crate::database::activity_log::ActivityLogRow,
     feature_repo: &dyn FeatureRepository,
     environment_logic: &dyn crate::logic::environment::EnvironmentLogic,
+    cache: &mut ActivityEntityLookupCache,
 ) -> Option<ActivityEntityDetailsResponse> {
     let entity_type = activity.entity_type.as_str();
     let entity_id = activity.entity_id.as_str();
 
     match entity_type {
         "stage" => {
-            if let Ok(stage_uuid) = Uuid::parse_str(entity_id) {
-                if let Ok(Some(feature_id)) =
-                    feature_repo.get_feature_id_by_stage_id(stage_uuid).await
-                {
-                    if let Ok(feature) = feature_repo.get_feature_by_id(feature_id).await {
-                        if let Ok(stages) = feature_repo.get_feature_stages(feature_id).await {
-                            if let Some(stage) = stages.iter().find(|s| s.id == stage_uuid) {
-                                let environment = environment_logic
-                                    .get_environment_by_id(ID::from(stage.environment_id))
-                                    .await
-                                    .ok();
+            if let Ok(stage_uuid) = Uuid::parse_str(entity_id)
+                && let Some(feature_id) = cache.feature_id_for_stage(stage_uuid, feature_repo).await
+                && let Some(feature) = cache.feature(feature_id, feature_repo).await
+                && let Some(stages) = cache.feature_stages(feature_id, feature_repo).await
+                && let Some(stage) = stages.iter().find(|s| s.id == stage_uuid)
+            {
+                let environment = cache
+                    .environment(stage.environment_id, environment_logic)
+                    .await;
 
-                                let environment_name = environment
-                                    .as_ref()
-                                    .map(|env| env.name.clone())
-                                    .unwrap_or_else(|| format!("Stage ({})", stage.status));
+                let environment_name = environment
+                    .as_ref()
+                    .map(|env| env.name.clone())
+                    .unwrap_or_else(|| format!("Stage ({})", stage.status));
 
-                                let stage_details = serde_json::json!({
-                                    "id": stage.id.to_string(),
-                                    "status": stage.status,
-                                    "order_index": stage.order_index,
-                                    "position": stage.position,
-                                    "environment": environment.as_ref().map(|env| serde_json::json!({
-                                        "id": env.id.to_string(),
-                                        "name": env.name,
-                                        "active": env.active,
-                                    }))
-                                });
+                let stage_details = serde_json::json!({
+                    "id": stage.id.to_string(),
+                    "status": stage.status,
+                    "order_index": stage.order_index,
+                    "position": stage.position,
+                    "environment": environment.as_ref().map(|env| serde_json::json!({
+                        "id": env.id.to_string(),
+                        "name": env.name,
+                        "active": env.active,
+                    }))
+                });
 
-                                return Some(ActivityEntityDetailsResponse {
-                                    id: entity_id.to_string(),
-                                    name: format!("{} - {}", feature.key, environment_name),
-                                    entity_type: entity_type.to_string(),
-                                    details: Some(serde_json::json!({
-                                        "feature_key": feature.key,
-                                        "feature_id": feature_id.to_string(),
-                                        "stage": stage_details,
-                                    })),
-                                });
-                            }
-                        }
-                    }
-                }
+                return Some(ActivityEntityDetailsResponse {
+                    id: entity_id.to_string(),
+                    name: format!("{} - {}", feature.key, environment_name),
+                    entity_type: entity_type.to_string(),
+                    details: Some(serde_json::json!({
+                        "feature_key": feature.key,
+                        "feature_id": feature_id.to_string(),
+                        "stage": stage_details,
+                    })),
+                });
             }
 
-            if let Some(meta) = activity.metadata.as_ref() {
-                if let (Some(feature_key), Some(status)) = (
+            if let Some(meta) = activity.metadata.as_ref()
+                && let (Some(feature_key), Some(status)) = (
                     meta.get("feature_key").and_then(|v| v.as_str()),
                     meta.get("status").and_then(|v| v.as_str()),
                 ) {
@@ -465,28 +533,27 @@ async fn resolve_activity_entity_details(
                         details: Some(meta.clone()),
                     });
                 }
-            }
 
             None
         }
         "feature" => {
-            if let Ok(feature_uuid) = Uuid::parse_str(entity_id) {
-                if let Ok(feature) = feature_repo.get_feature_by_id(feature_uuid).await {
-                    return Some(ActivityEntityDetailsResponse {
-                        id: entity_id.to_string(),
-                        name: feature.key.clone(),
-                        entity_type: entity_type.to_string(),
-                        details: Some(serde_json::json!({
-                            "feature_key": feature.key,
-                            "feature_id": feature_uuid.to_string(),
-                            "description": feature.description,
-                        })),
-                    });
-                }
+            if let Ok(feature_uuid) = Uuid::parse_str(entity_id)
+                && let Some(feature) = cache.feature(feature_uuid, feature_repo).await
+            {
+                return Some(ActivityEntityDetailsResponse {
+                    id: entity_id.to_string(),
+                    name: feature.key.clone(),
+                    entity_type: entity_type.to_string(),
+                    details: Some(serde_json::json!({
+                        "feature_key": feature.key,
+                        "feature_id": feature_uuid.to_string(),
+                        "description": feature.description,
+                    })),
+                });
             }
 
-            if let Some(meta) = activity.metadata.as_ref() {
-                if let Some(feature_key) = meta.get("feature_key").and_then(|v| v.as_str()) {
+            if let Some(meta) = activity.metadata.as_ref()
+                && let Some(feature_key) = meta.get("feature_key").and_then(|v| v.as_str()) {
                     return Some(ActivityEntityDetailsResponse {
                         id: entity_id.to_string(),
                         name: feature_key.to_string(),
@@ -494,7 +561,6 @@ async fn resolve_activity_entity_details(
                         details: Some(meta.clone()),
                     });
                 }
-            }
 
             None
         }
@@ -566,7 +632,9 @@ fn map_metric_result(row: crate::database::metrics::MetricAggregationRow) -> Met
     }
 }
 
-fn map_evaluation_rate(point: crate::database::feature_evaluation::EvaluationRatePoint) -> EvaluationRateResponse {
+fn map_evaluation_rate(
+    point: crate::database::feature_evaluation::EvaluationRatePoint,
+) -> EvaluationRateResponse {
     let success_rate = if point.evaluation_count > 0 {
         (point.success_count as f64 / point.evaluation_count as f64) * 100.0
     } else {
@@ -678,9 +746,9 @@ pub(crate) async fn create_metric(
 
     match created {
         Ok(metric) => {
-            tx.commit().await.map_err(|e| {
-                RestError::internal(format!("Failed to commit transaction: {e}"))
-            })?;
+            tx.commit()
+                .await
+                .map_err(|e| RestError::internal(format!("Failed to commit transaction: {e}")))?;
 
             Ok(HttpResponse::Created().json(MetricResponse {
                 id: metric.id.to_string(),
@@ -764,9 +832,7 @@ pub(crate) async fn metrics_by_feature(
         .await
         .map_err(RestError::from)?;
 
-    Ok(HttpResponse::Ok().json(
-        rows.into_iter().map(map_metric_result).collect::<Vec<_>>(),
-    ))
+    Ok(HttpResponse::Ok().json(rows.into_iter().map(map_metric_result).collect::<Vec<_>>()))
 }
 
 #[utoipa::path(
@@ -815,25 +881,24 @@ pub(crate) async fn experiment_results(
         .await
         .map_err(RestError::from)?;
 
-    let requested: std::collections::HashSet<String> =
-        metric_keys.iter().cloned().collect();
+    let requested: std::collections::HashSet<String> = metric_keys.iter().cloned().collect();
 
     let mut aggregated: std::collections::HashMap<
         String,
         std::collections::HashMap<Option<String>, (i64, i64, f64, Option<f64>, DateTime<Utc>)>,
     > = std::collections::HashMap::new();
 
-    for row in rows.into_iter().filter(|r| requested.contains(&r.metric_key)) {
+    for row in rows
+        .into_iter()
+        .filter(|r| requested.contains(&r.metric_key))
+    {
         let metric_entry = aggregated
             .entry(row.metric_key.clone())
-            .or_insert_with(std::collections::HashMap::new);
-        let entry = metric_entry.entry(row.variant.clone()).or_insert((
-            0,
-            0,
-            0.0,
-            None,
-            row.time_bucket,
-        ));
+            .or_default();
+        let entry =
+            metric_entry
+                .entry(row.variant.clone())
+                .or_insert((0, 0, 0.0, None, row.time_bucket));
 
         entry.0 += row.sample_size;
         entry.1 += row.conversion_count.unwrap_or(0);
@@ -987,7 +1052,10 @@ pub(crate) async fn evaluation_rates(
         .map_err(RestError::from)?;
 
     Ok(HttpResponse::Ok().json(
-        rates.into_iter().map(map_evaluation_rate).collect::<Vec<_>>(),
+        rates
+            .into_iter()
+            .map(map_evaluation_rate)
+            .collect::<Vec<_>>(),
     ))
 }
 
@@ -1220,32 +1288,36 @@ pub(crate) async fn recent_activity(
 
     let mut items = Vec::new();
     let mut filtered_count: i64 = 0;
+    let feature_repo_arc = std::sync::Arc::new(feature_repo.clone());
+    let feature_repo_ref = feature_repo.as_ref().as_ref();
+    let environment_logic_ref = environment_logic.as_ref().as_ref();
+    let client_logic_ref = client_logic.as_ref().as_ref();
+    let pipeline_logic_ref = pipeline_logic.as_ref().as_ref();
+    let mut team_cache = crate::streaming::ActivityTeamMatchCache::default();
+    let mut entity_cache = ActivityEntityLookupCache::default();
 
     for activity in activities.into_iter() {
-        if let Some(team_id) = team_id {
-            let feature_repo_arc = std::sync::Arc::new(feature_repo.clone());
-            let env_logic_box = environment_logic.get_ref();
-            let client_logic_box = client_logic.get_ref();
-            let pipeline_logic_box = pipeline_logic.get_ref();
-            if !crate::streaming::activity_matches_team(
+        if let Some(team_id) = team_id
+            && !crate::streaming::activity_matches_team_cached(
                 &activity,
                 team_id,
                 &feature_repo_arc,
-                env_logic_box,
-                client_logic_box,
-                pipeline_logic_box,
+                environment_logic_ref,
+                client_logic_ref,
+                pipeline_logic_ref,
+                &mut team_cache,
             )
             .await
             {
                 continue;
             }
-        }
 
         filtered_count += 1;
         let entity_details = resolve_activity_entity_details(
             &activity,
-            feature_repo.as_ref().as_ref(),
-            environment_logic.as_ref().as_ref(),
+            feature_repo_ref,
+            environment_logic_ref,
+            &mut entity_cache,
         )
         .await;
 
@@ -1268,7 +1340,11 @@ pub(crate) async fn recent_activity(
         meta: PageMeta {
             offset,
             limit,
-            total: if team_id.is_some() { filtered_count } else { total },
+            total: if team_id.is_some() {
+                filtered_count
+            } else {
+                total
+            },
         },
     }))
 }
@@ -1305,17 +1381,30 @@ pub(crate) async fn system_metrics(
         .unwrap()
         .and_utc();
     let yesterday_end = today_start;
-    let (from_7d, to_7d) =
-        resolve_time_range_with_period(crate::streaming::TimePeriod::D7);
+    let (from_7d, to_7d) = resolve_time_range_with_period(crate::streaming::TimePeriod::D7);
 
     let team_id_arg = team_id.map(ID::from);
 
-    let (total_features, active_clients, total_clients, evaluations_today, evaluations_yesterday, summary_7d) = tokio::join!(
+    let (
+        total_features,
+        active_clients,
+        total_clients,
+        evaluations_today,
+        evaluations_yesterday,
+        summary_7d,
+    ) = tokio::join!(
         feature_logic.count_features(team_id_arg.clone()),
         client_logic.count_clients(team_id_arg.clone(), Some(true)),
         client_logic.count_clients(team_id_arg.clone(), None),
         evaluation_logic.count_evaluations(today_start, today_end, None, None, None, team_id),
-        evaluation_logic.count_evaluations(yesterday_start, yesterday_end, None, None, None, team_id),
+        evaluation_logic.count_evaluations(
+            yesterday_start,
+            yesterday_end,
+            None,
+            None,
+            None,
+            team_id
+        ),
         evaluation_logic.get_evaluation_summary(None, None, None, team_id, from_7d, to_7d),
     );
 
@@ -1356,9 +1445,10 @@ pub(crate) async fn track_metrics(
     let mut events = Vec::with_capacity(body.events.len());
     for ev in body.events {
         let environment_id = match ev.environment_id {
-            Some(ref env) if !env.is_empty() => {
-                Some(Uuid::parse_str(env).map_err(|_| RestError::invalid_input("invalid environment_id"))?)
-            }
+            Some(ref env) if !env.is_empty() => Some(
+                Uuid::parse_str(env)
+                    .map_err(|_| RestError::invalid_input("invalid environment_id"))?,
+            ),
             _ => None,
         };
 
@@ -1408,16 +1498,18 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use actix_web::{http::StatusCode, test, App};
-    use sqlx::postgres::PgPoolOptions;
-    use crate::database::activity_log::{ActivityLogRepository, CreateActivityLog, PgActivityLogRepository};
+    use crate::database::activity_log::{
+        ActivityLogRepository, CreateActivityLog, PgActivityLogRepository,
+    };
     use crate::database::client::client_repository;
     use crate::database::feature::{FeatureRepository, MockFeatureRepository};
     use crate::database::metrics::{CreateMetric, MetricType as DbMetricType, metric_repository};
     use crate::logic::client::{ClientLogic, MockClientLogic};
     use crate::logic::environment::{EnvironmentLogic, MockEnvironmentLogic};
     use crate::logic::metrics::metric_logic;
-    use crate::logic::pipeline::{PipelineLogic, MockPipelineLogic};
+    use crate::logic::pipeline::{MockPipelineLogic, PipelineLogic};
+    use actix_web::{App, http::StatusCode, test};
+    use sqlx::postgres::PgPoolOptions;
 
     async fn test_pool() -> sqlx::PgPool {
         let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL not set");

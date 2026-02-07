@@ -2,7 +2,7 @@ use crate::database::entity::{Pipeline, PipelineStage};
 use crate::database::{Error, handle_error};
 use mockall::automock;
 use sqlx::postgres::PgQueryResult;
-use sqlx::{PgConnection, PgPool, Postgres, Transaction};
+use sqlx::{FromRow, PgConnection, PgPool, Postgres, Row, Transaction};
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -244,30 +244,131 @@ impl PipelineRepositoryImpl {
     }
 
     fn map_row_to_pipeline(pipelines: Vec<PipelineWithStageRow>) -> Result<Pipeline, Error> {
-        let pipeline = &pipelines[0];
-        let stages = &pipelines
-            .clone()
-            .split_off(0)
+        let pipeline = pipelines[0].clone();
+        let stages = pipelines
             .into_iter()
-            .filter_map(|r| {
-                r.stage_id.map(|id| PipelineStage {
+            .filter_map(|row| {
+                row.stage_id.map(|id| PipelineStage {
                     id,
-                    pipeline_id: r.pipeline_id_stage.unwrap(),
-                    environment_id: r.environment_id.unwrap(),
-                    order_index: r.order_index.unwrap(),
-                    parent_stage_id: r.parent_stage_id,
-                    position: r.position,
+                    pipeline_id: row.pipeline_id_stage.unwrap(),
+                    environment_id: row.environment_id.unwrap(),
+                    order_index: row.order_index.unwrap(),
+                    parent_stage_id: row.parent_stage_id,
+                    position: row.position,
                 })
             })
             .collect::<Vec<PipelineStage>>();
 
         Ok(Pipeline {
             id: pipeline.pipeline_id,
-            name: pipeline.pipeline_name.clone(),
+            name: pipeline.pipeline_name,
             active: pipeline.active,
             team_id: pipeline.team_id,
-            stages: stages.clone(),
+            stages,
         })
+    }
+
+    fn map_rows_to_pipelines(rows: Vec<PipelineWithStageRow>) -> Vec<Pipeline> {
+        let mut map: HashMap<Uuid, Pipeline> = HashMap::new();
+
+        for row in rows {
+            let pipeline_entry = map.entry(row.pipeline_id).or_insert(Pipeline {
+                id: row.pipeline_id,
+                name: row.pipeline_name.clone(),
+                active: row.active,
+                team_id: row.team_id,
+                stages: vec![],
+            });
+
+            if let Some(stage_id) = row.stage_id {
+                pipeline_entry.stages.push(PipelineStage {
+                    id: stage_id,
+                    pipeline_id: row.pipeline_id_stage.unwrap(),
+                    environment_id: row.environment_id.unwrap(),
+                    order_index: row.order_index.unwrap(),
+                    parent_stage_id: row.parent_stage_id,
+                    position: row.position,
+                });
+            }
+        }
+
+        let mut pipelines = map.into_values().collect::<Vec<Pipeline>>();
+        pipelines.sort_by(|a, b| a.name.cmp(&b.name));
+        pipelines
+    }
+
+    async fn get_pipelines_windowed(
+        &self,
+        team_id: Uuid,
+        name: Option<String>,
+        active: Option<bool>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<PipelineWithStageRow>, i64), Error> {
+        if limit <= 0 {
+            let mut count_query = sqlx::QueryBuilder::new("SELECT COUNT(*) FROM pipelines p");
+            count_query.push(" WHERE p.team_id = ").push_bind(team_id);
+
+            if let Some(name) = &name {
+                count_query.push(" AND p.name ILIKE ");
+                count_query.push_bind(format!("%{name}%"));
+            }
+            if let Some(active_value) = active {
+                count_query.push(" AND p.active = ").push_bind(active_value);
+            }
+
+            let total_count: i64 = count_query
+                .build_query_scalar()
+                .fetch_one(&self.pool)
+                .await
+                .map_err(Error::DatabaseError)?;
+
+            return Ok((Vec::new(), total_count));
+        }
+
+        let mut query_builder = sqlx::QueryBuilder::new(
+            r#"WITH paged_pipelines AS (
+               SELECT p.id, p.name, p.active, p.team_id, COUNT(*) OVER() as total_count
+               FROM pipelines p"#,
+        );
+        query_builder.push(" WHERE p.team_id = ").push_bind(team_id);
+
+        if let Some(name) = name {
+            query_builder.push(" AND p.name ILIKE ");
+            query_builder.push_bind(format!("%{name}%"));
+        }
+        if let Some(active_value) = active {
+            query_builder
+                .push(" AND p.active = ")
+                .push_bind(active_value);
+        }
+        query_builder.push(" ORDER BY p.name");
+        query_builder.push(" LIMIT ").push_bind(limit);
+        query_builder.push(" OFFSET ").push_bind(offset);
+        query_builder.push(
+            r#")
+               SELECT pp.id as pipeline_id, pp.name as pipeline_name, pp.active, pp.team_id,
+                      s.id as stage_id, s.pipeline_id as pipeline_id_stage, s.environment_id,
+                      s.order_index, s.parent_stage_id, s.position, pp.total_count
+               FROM paged_pipelines pp
+               LEFT JOIN pipeline_stages s ON s.pipeline_id = pp.id
+               ORDER BY pp.name, s.order_index"#,
+        );
+
+        let result = query_builder.build().fetch_all(&self.pool).await;
+        let rows = handle_error(None, result)?;
+
+        let total_count = rows
+            .first()
+            .map(|row| row.get::<i64, _>("total_count"))
+            .unwrap_or(0);
+
+        let mut pipeline_rows = Vec::with_capacity(rows.len());
+        for row in rows {
+            pipeline_rows.push(PipelineWithStageRow::from_row(&row).map_err(Error::DatabaseError)?);
+        }
+
+        Ok((pipeline_rows, total_count))
     }
 }
 
@@ -321,32 +422,7 @@ impl PipelineRepository for PipelineRepositoryImpl {
             .await;
 
         let pipelines = handle_error(None, result)?;
-        let mut map: HashMap<Uuid, Pipeline> = HashMap::new();
-
-        for row in pipelines {
-            let pipeline_entry = map.entry(row.pipeline_id).or_insert(Pipeline {
-                id: row.pipeline_id,
-                name: row.pipeline_name.clone(),
-                active: row.active,
-                team_id: row.team_id,
-                stages: vec![],
-            });
-
-            if let Some(stage_id) = row.stage_id {
-                pipeline_entry.stages.push(PipelineStage {
-                    id: stage_id,
-                    pipeline_id: row.pipeline_id_stage.unwrap(),
-                    environment_id: row.environment_id.unwrap(),
-                    order_index: row.order_index.unwrap(),
-                    parent_stage_id: row.parent_stage_id,
-                    position: row.position,
-                });
-            }
-        }
-
-        let mut pipelines = map.into_values().collect::<Vec<Pipeline>>();
-        pipelines.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(pipelines)
+        Ok(Self::map_rows_to_pipelines(pipelines))
     }
 
     async fn get_pipelines_paginated(
@@ -357,78 +433,11 @@ impl PipelineRepository for PipelineRepositoryImpl {
         page_number: i32,
         page_size: i32,
     ) -> Result<(Vec<Pipeline>, i64), Error> {
-        // First, get the total count
-        let mut count_query =
-            sqlx::QueryBuilder::new("SELECT COUNT(DISTINCT p.id) FROM pipelines p");
-        count_query.push(" WHERE p.team_id = ").push_bind(team_id);
-
-        if let Some(name) = &name {
-            count_query.push(" AND p.name ILIKE ");
-            count_query.push_bind(format!("%{name}%"));
-        }
-        if let Some(active_value) = active {
-            count_query.push(" AND p.active = ").push_bind(active_value);
-        }
-
-        let total_count: i64 = count_query
-            .build_query_scalar()
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|e| Error::DatabaseError(e))?;
-
-        // Now get the paginated results
         let offset = (page_number - 1) * page_size;
-        let mut query_builder = sqlx::QueryBuilder::new(
-            r#"SELECT p.id as pipeline_id, p.name as pipeline_name, p.active, p.team_id, 
-            s.id as stage_id, s.pipeline_id as pipeline_id_stage, s.environment_id, s.order_index,
-            s.parent_stage_id, s.position FROM pipelines p LEFT JOIN pipeline_stages s ON s.pipeline_id = p.id"#,
-        );
-        query_builder.push(" WHERE p.team_id = ").push_bind(team_id);
-
-        if let Some(name) = name {
-            query_builder.push(" AND p.name ILIKE ");
-            query_builder.push_bind(format!("%{name}%"));
-        }
-        if let Some(active_value) = active {
-            query_builder
-                .push(" AND p.active = ")
-                .push_bind(active_value);
-        }
-        query_builder.push(" ORDER BY p.name");
-        query_builder.push(" LIMIT ").push_bind(page_size);
-        query_builder.push(" OFFSET ").push_bind(offset);
-
-        let result = query_builder
-            .build_query_as::<PipelineWithStageRow>()
-            .fetch_all(&self.pool)
-            .await;
-
-        let pipelines = handle_error(None, result)?;
-        let mut map: HashMap<Uuid, Pipeline> = HashMap::new();
-
-        for row in pipelines {
-            let pipeline_entry = map.entry(row.pipeline_id).or_insert(Pipeline {
-                id: row.pipeline_id,
-                name: row.pipeline_name.clone(),
-                active: row.active,
-                team_id: row.team_id,
-                stages: vec![],
-            });
-
-            if let Some(stage_id) = row.stage_id {
-                pipeline_entry.stages.push(PipelineStage {
-                    id: stage_id,
-                    pipeline_id: row.pipeline_id_stage.unwrap(),
-                    environment_id: row.environment_id.unwrap(),
-                    order_index: row.order_index.unwrap(),
-                    parent_stage_id: row.parent_stage_id,
-                    position: row.position,
-                });
-            }
-        }
-
-        let mut pipelines = map.into_values().collect::<Vec<Pipeline>>();
-        pipelines.sort_by(|a, b| a.name.cmp(&b.name));
+        let (pipeline_rows, total_count) = self
+            .get_pipelines_windowed(team_id, name, active, page_size as i64, offset as i64)
+            .await?;
+        let pipelines = Self::map_rows_to_pipelines(pipeline_rows);
         Ok((pipelines, total_count))
     }
 
@@ -442,76 +451,10 @@ impl PipelineRepository for PipelineRepositoryImpl {
     ) -> Result<(Vec<Pipeline>, i64), Error> {
         let offset = offset.max(0);
         let limit = limit.max(1);
-
-        let mut count_query =
-            sqlx::QueryBuilder::new("SELECT COUNT(DISTINCT p.id) FROM pipelines p");
-        count_query.push(" WHERE p.team_id = ").push_bind(team_id);
-
-        if let Some(name) = &name {
-            count_query.push(" AND p.name ILIKE ");
-            count_query.push_bind(format!("%{name}%"));
-        }
-        if let Some(active_value) = active {
-            count_query.push(" AND p.active = ").push_bind(active_value);
-        }
-
-        let total_count: i64 = count_query
-            .build_query_scalar()
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|e| Error::DatabaseError(e))?;
-
-        let mut query_builder = sqlx::QueryBuilder::new(
-            r#"SELECT p.id as pipeline_id, p.name as pipeline_name, p.active, p.team_id, 
-            s.id as stage_id, s.pipeline_id as pipeline_id_stage, s.environment_id, s.order_index,
-            s.parent_stage_id, s.position FROM pipelines p LEFT JOIN pipeline_stages s ON s.pipeline_id = p.id"#,
-        );
-        query_builder.push(" WHERE p.team_id = ").push_bind(team_id);
-
-        if let Some(name) = name {
-            query_builder.push(" AND p.name ILIKE ");
-            query_builder.push_bind(format!("%{name}%"));
-        }
-        if let Some(active_value) = active {
-            query_builder
-                .push(" AND p.active = ")
-                .push_bind(active_value);
-        }
-        query_builder.push(" ORDER BY p.name");
-        query_builder.push(" LIMIT ").push_bind(limit);
-        query_builder.push(" OFFSET ").push_bind(offset);
-
-        let result = query_builder
-            .build_query_as::<PipelineWithStageRow>()
-            .fetch_all(&self.pool)
-            .await;
-
-        let pipelines = handle_error(None, result)?;
-        let mut map: HashMap<Uuid, Pipeline> = HashMap::new();
-
-        for row in pipelines {
-            let pipeline_entry = map.entry(row.pipeline_id).or_insert(Pipeline {
-                id: row.pipeline_id,
-                name: row.pipeline_name.clone(),
-                active: row.active,
-                team_id: row.team_id,
-                stages: vec![],
-            });
-
-            if let Some(stage_id) = row.stage_id {
-                pipeline_entry.stages.push(PipelineStage {
-                    id: stage_id,
-                    pipeline_id: row.pipeline_id_stage.unwrap(),
-                    environment_id: row.environment_id.unwrap(),
-                    order_index: row.order_index.unwrap(),
-                    parent_stage_id: row.parent_stage_id,
-                    position: row.position,
-                });
-            }
-        }
-
-        let mut pipelines = map.into_values().collect::<Vec<Pipeline>>();
-        pipelines.sort_by(|a, b| a.name.cmp(&b.name));
+        let (pipeline_rows, total_count) = self
+            .get_pipelines_windowed(team_id, name, active, limit, offset)
+            .await?;
+        let pipelines = Self::map_rows_to_pipelines(pipeline_rows);
         Ok((pipelines, total_count))
     }
 
@@ -520,14 +463,13 @@ impl PipelineRepository for PipelineRepositoryImpl {
             .get_pipelines(input.team_id, Some(input.name.clone()), None)
             .await;
 
-        if let Ok(existing_pipeline) = existing_pipeline {
-            if !existing_pipeline.is_empty() {
+        if let Ok(existing_pipeline) = existing_pipeline
+            && !existing_pipeline.is_empty() {
                 return Err(Error::RecordAlreadyExists(format!(
                     "Pipeline with name '{}' already exists",
                     input.name
                 )));
             }
-        }
 
         let mut tx: Transaction<'_, Postgres> =
             self.pool.begin().await.map_err(Error::DatabaseError)?;
@@ -600,14 +542,13 @@ impl PipelineRepositoryTx for PipelineRepositoryImpl {
             .get_pipelines(input.team_id, Some(input.name.clone()), None)
             .await;
 
-        if let Ok(existing_pipeline) = existing_pipeline {
-            if !existing_pipeline.is_empty() {
+        if let Ok(existing_pipeline) = existing_pipeline
+            && !existing_pipeline.is_empty() {
                 return Err(Error::RecordAlreadyExists(format!(
                     "Pipeline with name '{}' already exists",
                     input.name
                 )));
             }
-        }
 
         let id = Uuid::new_v4();
         let result = sqlx::query!(

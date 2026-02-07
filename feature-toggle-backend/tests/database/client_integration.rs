@@ -272,7 +272,7 @@ async fn test_pagination_edge_cases_and_boundary_conditions() {
 
     if total_all_clients > 0 {
         let mut all_client_ids = std::collections::HashSet::new();
-        let total_pages = (total_all_clients + 1 - 1) / 1; // ceil(total / 1)
+        let total_pages = (total_all_clients + 1 - 1); // ceil(total / 1)
 
         for page in 1..=std::cmp::min(total_pages, 5) {
             // Test first 5 pages max
@@ -286,7 +286,7 @@ async fn test_pagination_edge_cases_and_boundary_conditions() {
                     1,
                 )
                 .await
-                .expect(&format!("page {} should work", page));
+                .unwrap_or_else(|_| panic!("page {} should work", page));
 
             assert_eq!(
                 page_total, total_all_clients,
@@ -301,7 +301,7 @@ async fn test_pagination_edge_cases_and_boundary_conditions() {
                     "Should have exactly 1 client on page {}",
                     page
                 );
-                let client_id = page_clients[0].id.clone();
+                let client_id = page_clients[0].id;
                 assert!(
                     !all_client_ids.contains(&client_id),
                     "Client ID should be unique on page {}",

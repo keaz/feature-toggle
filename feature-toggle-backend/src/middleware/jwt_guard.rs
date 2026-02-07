@@ -185,8 +185,7 @@ where
                                             crate::database::user::user_repository(pool.clone());
                                         if let Ok(user) =
                                             user_repo.get_user_by_id(user_id_uuid).await
-                                        {
-                                            if user.is_temporary_password {
+                                            && user.is_temporary_password {
                                                 // User has temporary password, redirect to password reset
                                                 let target = format!(
                                                     "{}/reset-password",
@@ -201,7 +200,6 @@ where
                                                     .map_into_right_body();
                                                 return Ok(req.into_response(res));
                                             }
-                                        }
                                     }
 
                                     // Token is valid and user doesn't have temporary password (or this is resetPassword), inject user data

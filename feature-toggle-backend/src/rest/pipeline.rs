@@ -169,7 +169,7 @@ fn map_stage_requests(stages: &[CreateStageRequest]) -> Result<Vec<CreateStageIn
             ));
         }
         let position_len = stage.position.trim().len();
-        if position_len < 1 || position_len > 50 {
+        if !(1..=50).contains(&position_len) {
             return Err(RestError::invalid_input(
                 "Stage position must be between 1 and 50 characters",
             ));

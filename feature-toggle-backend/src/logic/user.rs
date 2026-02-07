@@ -476,7 +476,7 @@ impl UserLogic for UserLogicImpl {
                 &team_id.to_string(),
                 actor_id,
                 actor_name.clone(),
-                format!("User '{}' added to team", id.to_string()),
+                format!("User '{}' added to team", id),
                 Some(serde_json::json!({
                     "user_id": id.to_string(),
                     "team_id": team_id.to_string(),
@@ -509,10 +509,7 @@ impl UserLogic for UserLogicImpl {
         page_number: i32,
         page_size: i32,
     ) -> Result<(Vec<ApiUser>, i64), Error> {
-        let team_uuid: Option<Uuid> = match team_id {
-            Some(id) => Some(Uuid::try_from(id).unwrap()),
-            None => None,
-        };
+        let team_uuid: Option<Uuid> = team_id.map(|id| Uuid::try_from(id).unwrap());
         let (items, total) = self
             .repository
             .search_users(team_uuid, name, page_number, page_size)

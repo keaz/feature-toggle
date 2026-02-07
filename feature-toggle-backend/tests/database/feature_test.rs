@@ -998,7 +998,7 @@ async fn test_get_features_paginated_with_real_data() {
             .await
             .expect("get_features_paginated large page ok");
 
-        assert!(features_large_page.len() >= 1);
+        assert!(!features_large_page.is_empty());
         assert_eq!(total3, total, "Total should be consistent");
     }
 }

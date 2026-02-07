@@ -190,7 +190,44 @@ impl ClusterState {
 struct Deduper {
     ttl: Duration,
     max_entries: usize,
-    entries: Mutex<std::collections::HashMap<String, Instant>>,
+    entries: Mutex<DeduperEntries>,
+}
+
+struct DeduperEntries {
+    by_key: std::collections::HashMap<String, Instant>,
+    order: std::collections::VecDeque<(String, Instant)>,
+}
+
+impl DeduperEntries {
+    fn new() -> Self {
+        Self {
+            by_key: std::collections::HashMap::new(),
+            order: std::collections::VecDeque::new(),
+        }
+    }
+
+    fn prune_expired(&mut self, now: Instant, ttl: Duration) {
+        loop {
+            let Some((key, seen_at)) = self.order.front() else {
+                break;
+            };
+
+            let is_current_entry =
+                matches!(self.by_key.get(key), Some(current) if *current == *seen_at);
+            if !is_current_entry {
+                self.order.pop_front();
+                continue;
+            }
+
+            if now.saturating_duration_since(*seen_at) < ttl {
+                break;
+            }
+
+            let stale_key = key.clone();
+            self.by_key.remove(&stale_key);
+            self.order.pop_front();
+        }
+    }
 }
 
 impl Deduper {
@@ -198,22 +235,26 @@ impl Deduper {
         Self {
             ttl,
             max_entries,
-            entries: Mutex::new(std::collections::HashMap::new()),
+            entries: Mutex::new(DeduperEntries::new()),
         }
     }
 
     async fn mark_seen(&self, key: &str) -> bool {
         let mut guard = self.entries.lock().await;
         let now = Instant::now();
+        guard.prune_expired(now, self.ttl);
 
-        if let Some(ts) = guard.get_mut(key) {
+        if let Some(ts) = guard.by_key.get_mut(key) {
             *ts = now;
+            guard.order.push_back((key.to_string(), now));
             return false;
         }
 
-        guard.insert(key.to_string(), now);
-        if guard.len() > self.max_entries {
-            guard.retain(|_, ts| now.saturating_duration_since(*ts) < self.ttl);
+        let key_owned = key.to_string();
+        guard.by_key.insert(key_owned.clone(), now);
+        guard.order.push_back((key_owned, now));
+        if guard.by_key.len() > self.max_entries {
+            guard.prune_expired(now, self.ttl);
         }
         true
     }
@@ -327,16 +368,17 @@ pub fn start(
                                 continue;
                             }
 
-                            if !peer_connectors.contains_key(&peer_addr) {
+                            if let std::collections::hash_map::Entry::Vacant(e) =
+                                peer_connectors.entry(peer_addr.clone())
+                            {
                                 info!("Connecting to discovered peer: {}", peer_addr);
                                 let state_for_peer = state_clone.clone();
-                                let peer_clone = peer_addr.clone();
+                                let peer_clone = peer_addr;
                                 let connector_handle = tokio::spawn(async move {
                                     run_peer_connector(state_for_peer, peer_clone, reconnect_delay)
                                         .await;
                                 });
-                                peer_connectors
-                                    .insert(peer_addr, AbortOnDrop::new(connector_handle));
+                                e.insert(AbortOnDrop::new(connector_handle));
                             }
                         }
                         discovery::PeerEvent::PeerRemoved(peer_addr) => {
@@ -741,15 +783,12 @@ fn decode_cluster_message(bytes: &WireMessage) -> Result<pb::ClusterMessage, pro
 }
 
 fn should_skip_peer(self_addr: Option<SocketAddr>, peer: &str) -> bool {
-    if let Some(self_addr) = self_addr {
-        if let Ok(peer_addr) = peer.parse::<SocketAddr>() {
-            if self_addr.port() == peer_addr.port() {
-                if self_addr.ip().is_unspecified() || self_addr.ip() == peer_addr.ip() {
+    if let Some(self_addr) = self_addr
+        && let Ok(peer_addr) = peer.parse::<SocketAddr>()
+            && self_addr.port() == peer_addr.port()
+                && (self_addr.ip().is_unspecified() || self_addr.ip() == peer_addr.ip()) {
                     return true;
                 }
-            }
-        }
-    }
     false
 }
 

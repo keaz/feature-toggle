@@ -169,7 +169,7 @@ impl EnvironmentRepository for EnvironmentRepositoryImpl {
             .build_query_scalar()
             .fetch_one(&self.pool)
             .await
-            .map_err(|e| Error::DatabaseError(e))?;
+            .map_err(Error::DatabaseError)?;
 
         // Now get the paginated results
         let offset = (page_number - 1) * page_size;
@@ -225,7 +225,7 @@ impl EnvironmentRepository for EnvironmentRepositoryImpl {
             .build_query_scalar()
             .fetch_one(&self.pool)
             .await
-            .map_err(|e| Error::DatabaseError(e))?;
+            .map_err(Error::DatabaseError)?;
 
         let mut qb = QueryBuilder::<Postgres>::new(
             "SELECT id, name, active, team_id, environment_type FROM environments WHERE team_id = ",
@@ -259,14 +259,13 @@ impl EnvironmentRepository for EnvironmentRepositoryImpl {
         let existing_result = self
             .get_environments(team_id, Some(input.name.clone()), None)
             .await;
-        if let Ok(existing_environments) = existing_result {
-            if !existing_environments.is_empty() {
+        if let Ok(existing_environments) = existing_result
+            && !existing_environments.is_empty() {
                 return Err(Error::RecordAlreadyExists(format!(
                     "Environment with name '{}' already exists for team {}",
                     input.name, team_id
                 )));
             }
-        }
         let id = Uuid::new_v4();
         let environment_type = input
             .environment_type
@@ -344,14 +343,13 @@ impl EnvironmentRepositoryTx for EnvironmentRepositoryImpl {
         let existing_result = self
             .get_environments(team_id, Some(input.name.clone()), None)
             .await;
-        if let Ok(existing_environments) = existing_result {
-            if !existing_environments.is_empty() {
+        if let Ok(existing_environments) = existing_result
+            && !existing_environments.is_empty() {
                 return Err(Error::RecordAlreadyExists(format!(
                     "Environment with name '{}' already exists for team {}",
                     input.name, team_id
                 )));
             }
-        }
 
         let id = Uuid::new_v4();
         let environment_type = input

@@ -40,7 +40,7 @@ async fn auto_approval_scheduler_processes_pending_requests() {
     mock_logic
         .expect_auto_approve_request()
         .times(1)
-        .returning(|req| Ok(req));
+        .returning(Ok);
 
     let scheduler = AutoApprovalScheduler::new(
         Box::new(mock_repo),

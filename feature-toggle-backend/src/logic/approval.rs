@@ -154,8 +154,8 @@ struct ApprovalLogicImpl {
 
 impl ApprovalLogicImpl {
     async fn notify_edge_servers(&self, feature_id: Uuid) {
-        if let Ok(db_feature) = self.feature_repository.get_feature_by_id(feature_id).await {
-            if let Ok(full) = crate::broadcast::map_db_feature_to_full_for_broadcast(
+        if let Ok(db_feature) = self.feature_repository.get_feature_by_id(feature_id).await
+            && let Ok(full) = crate::broadcast::map_db_feature_to_full_for_broadcast(
                 self.feature_repository.as_ref(),
                 db_feature,
             )
@@ -171,7 +171,6 @@ impl ApprovalLogicImpl {
                         error: String::new(),
                     });
             }
-        }
     }
 
     async fn get_applicable_policy(
@@ -802,9 +801,7 @@ impl ApprovalLogic for ApprovalLogicImpl {
         }
 
         let team_id = self.policy_team_id(request.policy_id).await?;
-        if let Err(exec_err) = self.execute_change(&request, SENTINEL_UUID).await {
-            return Err(exec_err);
-        }
+        self.execute_change(&request, SENTINEL_UUID).await?;
         let updated = self
             .approval_repository
             .update_request_status(request.id, ApprovalStatus::AutoApproved, Some(Utc::now()))

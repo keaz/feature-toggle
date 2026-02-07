@@ -108,13 +108,12 @@ fn validate_team_name(name: &str) -> Result<(), RestError> {
 }
 
 fn validate_team_description(description: &Option<String>) -> Result<(), RestError> {
-    if let Some(value) = description {
-        if value.trim().len() > 200 {
+    if let Some(value) = description
+        && value.trim().len() > 200 {
             return Err(RestError::invalid_input(
                 "Team description must be 200 characters or fewer",
             ));
         }
-    }
     Ok(())
 }
 

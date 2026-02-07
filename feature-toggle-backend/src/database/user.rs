@@ -353,7 +353,7 @@ impl UserRepository for UserRepositoryImpl {
             .pool
             .begin()
             .await
-            .map_err(|e| Error::DatabaseError(e.into()))?;
+            .map_err(|e| Error::DatabaseError(e))?;
         // delete existing assignments
         handle_error(
             Some(id),
@@ -381,7 +381,7 @@ impl UserRepository for UserRepositoryImpl {
         }
         tx.commit()
             .await
-            .map_err(|e| Error::DatabaseError(e.into()))?;
+            .map_err(|e| Error::DatabaseError(e))?;
         Ok(())
     }
 

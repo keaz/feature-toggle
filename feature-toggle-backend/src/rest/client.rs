@@ -128,13 +128,12 @@ fn validate_client_name(name: &str) -> Result<(), RestError> {
 }
 
 fn validate_client_description(description: &Option<String>) -> Result<(), RestError> {
-    if let Some(desc) = description {
-        if desc.len() > 500 {
+    if let Some(desc) = description
+        && desc.len() > 500 {
             return Err(RestError::invalid_input(
                 "Client description must be 500 characters or fewer",
             ));
         }
-    }
     Ok(())
 }
 

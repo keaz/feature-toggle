@@ -176,7 +176,7 @@ impl ContextRepository for ContextRepositoryImpl {
             .build_query_scalar()
             .fetch_one(&self.pool)
             .await
-            .map_err(|e| Error::DatabaseError(e))?;
+            .map_err(Error::DatabaseError)?;
 
         // Now get the paginated results
         let offset = (page_number - 1) * page_size;

@@ -372,7 +372,7 @@ impl FeatureLogicImpl {
         let dependencies = input
             .dependencies
             .into_iter()
-            .map(|id| id_to_uuid(id))
+            .map(id_to_uuid)
             .collect::<Result<Vec<_>, _>>()?;
 
         // Map variants from API model to database format
@@ -447,7 +447,7 @@ impl FeatureLogicImpl {
         let dependencies = input
             .dependencies
             .into_iter()
-            .map(|id| id_to_uuid(id))
+            .map(id_to_uuid)
             .collect::<Result<Vec<_>, _>>()?;
 
         // Map variants from API model to database format
@@ -690,7 +690,7 @@ impl FeatureCrudLogic for FeatureLogicImpl {
             &id.to_string(),
             actor_id,
             actor_name,
-            format!("Deleted feature with ID '{}'", id.to_string()),
+            format!("Deleted feature with ID '{}'", id),
             Some(serde_json::json!({
                 "feature_id": id.to_string(),
             })),
@@ -701,12 +701,12 @@ impl FeatureCrudLogic for FeatureLogicImpl {
     }
 
     async fn count_features(&self, team_id: Option<ID>) -> Result<i64, Error> {
-        let team_uuid = team_id.map(|id| id_to_uuid(id)).transpose()?;
+        let team_uuid = team_id.map(id_to_uuid).transpose()?;
         self.repository.count_features(team_uuid).await
     }
 
     async fn get_rollout_metrics(&self, team_id: Option<ID>) -> Result<RolloutMetrics, Error> {
-        let team_uuid = team_id.map(|id| id_to_uuid(id)).transpose()?;
+        let team_uuid = team_id.map(id_to_uuid).transpose()?;
         let data = self.repository.get_rollout_metrics_data(team_uuid).await?;
 
         // Calculate approval rate (avoid division by zero)
@@ -750,7 +750,7 @@ impl FeatureCrudLogic for FeatureLogicImpl {
         page_number: Option<i32>,
         page_size: Option<i32>,
     ) -> Result<(Vec<Feature>, i64), Error> {
-        let team_uuid = team_id.map(|id| id_to_uuid(id)).transpose()?;
+        let team_uuid = team_id.map(id_to_uuid).transpose()?;
         let (features, total) = self
             .repository
             .get_features_with_pending_approvals(team_uuid, page_number, page_size)
@@ -772,7 +772,7 @@ impl FeatureCrudLogic for FeatureLogicImpl {
         offset: i64,
         limit: i64,
     ) -> Result<(Vec<Feature>, i64), Error> {
-        let team_uuid = team_id.map(|id| id_to_uuid(id)).transpose()?;
+        let team_uuid = team_id.map(id_to_uuid).transpose()?;
         let (features, total) = self
             .repository
             .get_features_with_pending_approvals_with_offset(team_uuid, offset, limit)
@@ -793,7 +793,7 @@ impl FeatureCrudLogic for FeatureLogicImpl {
         page_number: Option<i32>,
         page_size: Option<i32>,
     ) -> Result<(Vec<Feature>, i64), Error> {
-        let team_uuid = team_id.map(|id| id_to_uuid(id)).transpose()?;
+        let team_uuid = team_id.map(id_to_uuid).transpose()?;
         let (features, total) = self
             .repository
             .get_features_with_kill_switches(team_uuid, page_number, page_size)
@@ -816,7 +816,7 @@ impl FeatureCrudLogic for FeatureLogicImpl {
         offset: i64,
         limit: i64,
     ) -> Result<(Vec<Feature>, i64), Error> {
-        let team_uuid = team_id.map(|id| id_to_uuid(id)).transpose()?;
+        let team_uuid = team_id.map(id_to_uuid).transpose()?;
         let (features, total) = self
             .repository
             .get_features_with_kill_switches_with_offset(team_uuid, offset, limit)
@@ -981,7 +981,7 @@ impl StageLogic for FeatureLogicImpl {
         let stage_id = id_to_uuid(stage_id)?;
         let context_ids: Vec<Uuid> = context_ids
             .into_iter()
-            .map(|id| id_to_uuid(id))
+            .map(id_to_uuid)
             .collect::<Result<Vec<_>, _>>()?;
         let list = self
             .repository
@@ -1059,18 +1059,17 @@ impl DeploymentLogic for FeatureLogicImpl {
             .ok_or(Error::NotFound(stage_uuid))?;
 
         // If no approval gating, validate transition immediately to fail fast before any DB side effects.
-        if self.approval_logic.is_none() {
-            if let Err(e) = crate::validation::validate_stage_transition(&stage.status, next_status)
+        if self.approval_logic.is_none()
+            && let Err(e) = crate::validation::validate_stage_transition(&stage.status, next_status)
             {
                 return Err(Error::InvalidInput(e));
             }
-        }
 
         let mut feature_id_for_stage: Option<Uuid> = None;
 
         // If an approval policy applies, create a pending approval request instead of executing immediately.
-        if let Some(approval_logic) = &self.approval_logic {
-            if crate::logic::approval::status_requires_interception(next_status) {
+        if let Some(approval_logic) = &self.approval_logic
+            && crate::logic::approval::status_requires_interception(next_status) {
                 // Set a pending status to indicate a gated action while approvals are collected.
                 let pending_status = match next_status {
                     "DEPLOYED" | "DEPLOYMENT_REJECTED" => StageStatus::DeploymentRequested.as_str(),
@@ -1118,7 +1117,6 @@ impl DeploymentLogic for FeatureLogicImpl {
                     return Ok(api_feature);
                 }
             }
-        }
 
         // No approval gating: validate and apply directly.
         if let Err(e) = crate::validation::validate_stage_transition(&stage.status, next_status) {
@@ -1164,7 +1162,7 @@ impl DeploymentLogic for FeatureLogicImpl {
         // Find the stage to get environment information
         let stages = self
             .repository
-            .get_feature_stages(db_feature.id.clone())
+            .get_feature_stages(db_feature.id)
             .await?;
         let stage = stages.iter().find(|s| s.id == stage_uuid);
 
@@ -1194,7 +1192,7 @@ impl DeploymentLogic for FeatureLogicImpl {
                     format!(
                         "Deployed feature '{}' to stage '{}'",
                         db_feature.key,
-                        stage_id.to_string()
+                        stage_id
                     )
                 };
                 (
@@ -1213,7 +1211,7 @@ impl DeploymentLogic for FeatureLogicImpl {
                     format!(
                         "Rejected change request for feature '{}' stage '{}'",
                         db_feature.key,
-                        stage_id.to_string()
+                        stage_id
                     )
                 };
                 (
@@ -1231,7 +1229,7 @@ impl DeploymentLogic for FeatureLogicImpl {
                     format!(
                         "Rolled back feature '{}' from stage '{}'",
                         db_feature.key,
-                        stage_id.to_string()
+                        stage_id
                     )
                 };
                 (
@@ -1250,7 +1248,7 @@ impl DeploymentLogic for FeatureLogicImpl {
                         "Requested {} for feature '{}' stage '{}'",
                         next_status,
                         db_feature.key,
-                        stage_id.to_string()
+                        stage_id
                     )
                 };
                 ("stage_change_requested", desc)

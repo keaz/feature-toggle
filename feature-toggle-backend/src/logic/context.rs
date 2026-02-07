@@ -322,8 +322,8 @@ impl ContextLogic for ContextLogicImpl {
                 .await
         {
             for fid in feature_ids {
-                if let Ok(db_feature) = self.feature_repo.get_feature_by_id(fid).await {
-                    if let Ok(full) =
+                if let Ok(db_feature) = self.feature_repo.get_feature_by_id(fid).await
+                    && let Ok(full) =
                         map_db_feature_to_full_for_broadcast(&*self.feature_repo, db_feature).await
                     {
                         let _ = self.updates_tx.send(crate::grpc::pb::FeatureUpdate {
@@ -334,7 +334,6 @@ impl ContextLogic for ContextLogicImpl {
                             error: String::new(),
                         });
                     }
-                }
             }
         }
 

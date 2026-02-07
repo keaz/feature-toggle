@@ -359,7 +359,7 @@ fn parse_uuid(value: &str, field: &str) -> Result<Uuid, RestError> {
 
 fn validate_context_key(value: &str) -> Result<(), RestError> {
     let len = value.trim().len();
-    if len < 1 || len > 100 {
+    if !(1..=100).contains(&len) {
         return Err(RestError::invalid_input(
             "contextKey must be between 1 and 100 characters",
         ));
@@ -369,7 +369,7 @@ fn validate_context_key(value: &str) -> Result<(), RestError> {
 
 fn validate_variant_control(value: &str) -> Result<(), RestError> {
     let len = value.trim().len();
-    if len < 1 || len > 100 {
+    if !(1..=100).contains(&len) {
         return Err(RestError::invalid_input(
             "variantControl must be between 1 and 100 characters",
         ));
@@ -378,7 +378,7 @@ fn validate_variant_control(value: &str) -> Result<(), RestError> {
 }
 
 fn validate_weight(weight: i32) -> Result<(), RestError> {
-    if weight < 0 || weight > 100 {
+    if !(0..=100).contains(&weight) {
         return Err(RestError::invalid_input(
             "weight must be between 0 and 100",
         ));
@@ -491,8 +491,8 @@ async fn broadcast_feature_update(
     updates_tx: &tokio::sync::broadcast::Sender<crate::grpc::pb::FeatureUpdate>,
     feature_id: Uuid,
 ) {
-    if let Ok(db_feature) = feature_repo.get_feature_by_id(feature_id).await {
-        if let Ok(full) =
+    if let Ok(db_feature) = feature_repo.get_feature_by_id(feature_id).await
+        && let Ok(full) =
             crate::broadcast::map_db_feature_to_full_for_broadcast(feature_repo, db_feature).await
         {
             let _ = updates_tx.send(crate::grpc::pb::FeatureUpdate {
@@ -503,7 +503,6 @@ async fn broadcast_feature_update(
                 error: String::new(),
             });
         }
-    }
 }
 
 #[utoipa::path(

@@ -86,6 +86,7 @@ pub enum VariantValueType {
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[derive(Default)]
 pub enum RuleOperator {
     Equals,
     NotEquals,
@@ -97,17 +98,13 @@ pub enum RuleOperator {
     StartsWith,
     EndsWith,
     Regex,
+    #[default]
     In,
     NotIn,
     SemverGreaterThan,
     SemverLessThan,
 }
 
-impl Default for RuleOperator {
-    fn default() -> Self {
-        RuleOperator::In
-    }
-}
 
 impl RuleOperator {
     pub fn to_db_string(&self) -> String {
@@ -132,18 +129,15 @@ impl RuleOperator {
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[derive(Default)]
 pub enum LifecycleStage {
+    #[default]
     Active,
     Deprecated,
     Archived,
     Permanent,
 }
 
-impl Default for LifecycleStage {
-    fn default() -> Self {
-        LifecycleStage::Active
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Feature {
@@ -317,16 +311,13 @@ pub enum LogicOperator {
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[derive(Default)]
 pub enum VariantSelectionMode {
+    #[default]
     WeightedSplit,
     SpecificVariant,
 }
 
-impl Default for VariantSelectionMode {
-    fn default() -> Self {
-        VariantSelectionMode::WeightedSplit
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VariantAllocation {

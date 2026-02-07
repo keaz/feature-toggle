@@ -408,18 +408,17 @@ fn validate_variant_requests(variants: &Option<Vec<CreateFeatureVariantRequest>>
     if let Some(list) = variants {
         for variant in list {
             let control_len = variant.control.trim().len();
-            if control_len < 1 || control_len > 100 {
+            if !(1..=100).contains(&control_len) {
                 return Err(RestError::invalid_input(
                     "Variant control must be between 1 and 100 characters",
                 ));
             }
-            if let Some(desc) = variant.description.as_deref() {
-                if desc.trim().len() > 500 {
+            if let Some(desc) = variant.description.as_deref()
+                && desc.trim().len() > 500 {
                     return Err(RestError::invalid_input(
                         "Variant description must be at most 500 characters",
                     ));
                 }
-            }
         }
     }
     Ok(())
@@ -442,7 +441,7 @@ fn map_stage_requests(
             ));
         }
         let position_len = stage.position.trim().len();
-        if position_len < 1 || position_len > 50 {
+        if !(1..=50).contains(&position_len) {
             return Err(RestError::invalid_input(
                 "Stage position must be between 1 and 50 characters",
             ));
@@ -693,8 +692,8 @@ async fn broadcast_feature_update(
     updates_tx: &tokio::sync::broadcast::Sender<crate::grpc::pb::FeatureUpdate>,
     feature_id: Uuid,
 ) {
-    if let Ok(db_feature) = feature_repo.get_feature_by_id(feature_id).await {
-        if let Ok(full) = map_db_feature_to_full_for_broadcast(feature_repo, db_feature).await {
+    if let Ok(db_feature) = feature_repo.get_feature_by_id(feature_id).await
+        && let Ok(full) = map_db_feature_to_full_for_broadcast(feature_repo, db_feature).await {
             let _ = updates_tx.send(crate::grpc::pb::FeatureUpdate {
                 message_id: uuid::Uuid::new_v4().to_string(),
                 action: crate::grpc::pb::feature_update::Action::Upsert as i32,
@@ -703,7 +702,6 @@ async fn broadcast_feature_update(
                 error: String::new(),
             });
         }
-    }
 }
 
 #[utoipa::path(
@@ -860,15 +858,13 @@ pub(crate) async fn create_feature(
                 .collect::<Vec<_>>()
         });
 
-    if payload.feature_type == FeatureType::Simple {
-        if let Some(ref list) = variants {
-            if !list.is_empty() {
+    if payload.feature_type == FeatureType::Simple
+        && let Some(ref list) = variants
+            && !list.is_empty() {
                 return Err(RestError::invalid_input(
                     "Variants can only be defined for Contextual features, not Simple features",
                 ));
             }
-        }
-    }
 
     let input = CreateFeatureInput {
         key: payload.key.clone(),
@@ -985,15 +981,13 @@ pub(crate) async fn update_feature(
                 .collect::<Vec<_>>()
         });
 
-    if payload.feature_type == FeatureType::Simple {
-        if let Some(ref list) = variants {
-            if !list.is_empty() {
+    if payload.feature_type == FeatureType::Simple
+        && let Some(ref list) = variants
+            && !list.is_empty() {
                 return Err(RestError::invalid_input(
                     "Variants can only be defined for Contextual features, not Simple features",
                 ));
             }
-        }
-    }
 
     let input = UpdateFeatureInput {
         key: payload.key.clone(),
@@ -1257,8 +1251,8 @@ pub(crate) async fn request_stage_change(
 
     let mut approval_request_id: Option<Uuid> = None;
 
-    if status_requires_interception(next_status) {
-        if let Some(policy) = find_applicable_policy(
+    if status_requires_interception(next_status)
+        && let Some(policy) = find_applicable_policy(
             approval_repo.as_ref().as_ref(),
             env_logic.as_ref().as_ref(),
             db_feature.team_id,
@@ -1345,7 +1339,6 @@ pub(crate) async fn request_stage_change(
 
             approval_request_id = Some(request.id);
         }
-    }
 
     if approval_request_id.is_none() {
         validate_stage_transition(&stage.status, next_status)

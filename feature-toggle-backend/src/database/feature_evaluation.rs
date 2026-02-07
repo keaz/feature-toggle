@@ -254,7 +254,7 @@ impl PgFeatureEvaluationRepository {
                 .bind(&evaluation.environment_id)
                 .bind(evaluation.client_id)
                 .bind(evaluation.evaluated_at)
-                .bind(&evaluation.evaluation_result)
+                .bind(evaluation.evaluation_result)
                 .bind(&evaluation.evaluation_context)
                 .bind(&evaluation.user_context)
                 .bind(evaluation.prior_assignment)

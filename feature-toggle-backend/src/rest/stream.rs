@@ -1,9 +1,10 @@
-use actix_web::{get, web, HttpRequest, HttpResponse};
+use actix_web::{HttpRequest, HttpResponse, get, web};
 use actix_ws::{Message, Session};
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
@@ -17,14 +18,16 @@ use crate::logic::feature::FeatureLogic;
 use crate::logic::feature_evaluation::{FeatureEvaluationEvent, FeatureEvaluationLogic};
 use crate::logic::pipeline::PipelineLogic;
 use crate::model::ID;
-use crate::rest::approval::{ApprovalRequestResponse, ApprovalRequestsResponse, ApprovalRequestStatus, ApprovalVoteResponse};
+use crate::rest::approval::{
+    ApprovalRequestResponse, ApprovalRequestStatus, ApprovalRequestsResponse, ApprovalVoteResponse,
+};
 use crate::rest::error::ErrorResponse;
 use crate::rest::metrics::{
     ActivityEntityDetailsResponse, ActivityLogPageResponse, ActivityLogResponse,
-    EvaluationByFeatureResponse, EvaluationsByFeatureResponse, EvaluationRateResponse,
-    EvaluationSummaryResponse, FeatureGrowthResponse, SystemMetricsResponse,
+    EvaluationByFeatureResponse, EvaluationRateResponse, EvaluationSummaryResponse,
+    EvaluationsByFeatureResponse, FeatureGrowthResponse, SystemMetricsResponse,
 };
-use crate::rest::pagination::{normalize_pagination, PageMeta, PaginationQuery};
+use crate::rest::pagination::{PageMeta, PaginationQuery, normalize_pagination};
 use crate::rest::serde::deserialize_optional_string_or_vec;
 
 #[derive(Debug, Deserialize)]
@@ -80,11 +83,15 @@ impl StreamType {
             "evaluationDashboard" | "evaluation_dashboard" | "evaluation-dashboard" => {
                 Some(StreamType::EvaluationDashboard)
             }
-            "systemMetrics" | "system_metrics" | "system-metrics" => Some(StreamType::SystemMetrics),
+            "systemMetrics" | "system_metrics" | "system-metrics" => {
+                Some(StreamType::SystemMetrics)
+            }
             "recentActivities" | "recent_activities" | "recent-activities" => {
                 Some(StreamType::RecentActivities)
             }
-            "featureGrowth" | "feature_growth" | "feature-growth" => Some(StreamType::FeatureGrowth),
+            "featureGrowth" | "feature_growth" | "feature-growth" => {
+                Some(StreamType::FeatureGrowth)
+            }
             "approvalRequests" | "approval_requests" | "approval-requests" => {
                 Some(StreamType::ApprovalRequests)
             }
@@ -209,12 +216,10 @@ fn validate_feature_growth_interval(interval: &str) -> Result<(), String> {
 async fn send_json<T: Serialize>(session: &mut Session, payload: &T) -> bool {
     match serde_json::to_string(payload) {
         Ok(text) => session.text(text).await.is_ok(),
-        Err(_) => {
-            session
-                .text("{\"error\":\"internal\",\"message\":\"serialization error\"}")
-                .await
-                .is_ok()
-        }
+        Err(_) => session
+            .text("{\"error\":\"internal\",\"message\":\"serialization error\"}")
+            .await
+            .is_ok(),
     }
 }
 
@@ -223,63 +228,134 @@ async fn send_error(session: &mut Session, error: &str, message: impl Into<Strin
     let _ = send_json(session, &payload).await;
 }
 
+#[derive(Default)]
+struct ActivityEntityLookupCache {
+    feature_by_id: HashMap<Uuid, Option<crate::database::entity::Feature>>,
+    feature_id_by_stage_id: HashMap<Uuid, Option<Uuid>>,
+    feature_stages_by_feature_id:
+        HashMap<Uuid, Option<Vec<crate::database::entity::FeaturePipelineStage>>>,
+    environment_by_id: HashMap<Uuid, Option<crate::model::Environment>>,
+}
+
+impl ActivityEntityLookupCache {
+    async fn feature(
+        &mut self,
+        feature_id: Uuid,
+        feature_repo: &dyn FeatureRepository,
+    ) -> Option<crate::database::entity::Feature> {
+        if let Some(cached) = self.feature_by_id.get(&feature_id) {
+            return cached.clone();
+        }
+
+        let resolved = feature_repo.get_feature_by_id(feature_id).await.ok();
+        self.feature_by_id.insert(feature_id, resolved.clone());
+        resolved
+    }
+
+    async fn feature_id_for_stage(
+        &mut self,
+        stage_id: Uuid,
+        feature_repo: &dyn FeatureRepository,
+    ) -> Option<Uuid> {
+        if let Some(cached) = self.feature_id_by_stage_id.get(&stage_id) {
+            return *cached;
+        }
+
+        let resolved = feature_repo
+            .get_feature_id_by_stage_id(stage_id)
+            .await
+            .ok()
+            .flatten();
+        self.feature_id_by_stage_id.insert(stage_id, resolved);
+        resolved
+    }
+
+    async fn feature_stages(
+        &mut self,
+        feature_id: Uuid,
+        feature_repo: &dyn FeatureRepository,
+    ) -> Option<Vec<crate::database::entity::FeaturePipelineStage>> {
+        if let Some(cached) = self.feature_stages_by_feature_id.get(&feature_id) {
+            return cached.clone();
+        }
+
+        let resolved = feature_repo.get_feature_stages(feature_id).await.ok();
+        self.feature_stages_by_feature_id
+            .insert(feature_id, resolved.clone());
+        resolved
+    }
+
+    async fn environment(
+        &mut self,
+        environment_id: Uuid,
+        environment_logic: &dyn EnvironmentLogic,
+    ) -> Option<crate::model::Environment> {
+        if let Some(cached) = self.environment_by_id.get(&environment_id) {
+            return cached.clone();
+        }
+
+        let resolved = environment_logic
+            .get_environment_by_id(ID::from(environment_id))
+            .await
+            .ok();
+        self.environment_by_id
+            .insert(environment_id, resolved.clone());
+        resolved
+    }
+}
+
 async fn resolve_activity_entity_details(
     activity: &crate::database::activity_log::ActivityLogRow,
     feature_repo: &dyn FeatureRepository,
     environment_logic: &dyn EnvironmentLogic,
+    cache: &mut ActivityEntityLookupCache,
 ) -> Option<ActivityEntityDetailsResponse> {
     let entity_type = activity.entity_type.as_str();
     let entity_id = activity.entity_id.as_str();
 
     match entity_type {
         "stage" => {
-            if let Ok(stage_uuid) = Uuid::parse_str(entity_id) {
-                if let Ok(Some(feature_id)) =
-                    feature_repo.get_feature_id_by_stage_id(stage_uuid).await
-                {
-                    if let Ok(feature) = feature_repo.get_feature_by_id(feature_id).await {
-                        if let Ok(stages) = feature_repo.get_feature_stages(feature_id).await {
-                            if let Some(stage) = stages.iter().find(|s| s.id == stage_uuid) {
-                                let environment = environment_logic
-                                    .get_environment_by_id(ID::from(stage.environment_id))
-                                    .await
-                                    .ok();
+            if let Ok(stage_uuid) = Uuid::parse_str(entity_id)
+                && let Some(feature_id) = cache.feature_id_for_stage(stage_uuid, feature_repo).await
+                && let Some(feature) = cache.feature(feature_id, feature_repo).await
+                && let Some(stages) = cache.feature_stages(feature_id, feature_repo).await
+                && let Some(stage) = stages.iter().find(|s| s.id == stage_uuid)
+            {
+                let environment = cache
+                    .environment(stage.environment_id, environment_logic)
+                    .await;
 
-                                let environment_name = environment
-                                    .as_ref()
-                                    .map(|env| env.name.clone())
-                                    .unwrap_or_else(|| format!("Stage ({})", stage.status));
+                let environment_name = environment
+                    .as_ref()
+                    .map(|env| env.name.clone())
+                    .unwrap_or_else(|| format!("Stage ({})", stage.status));
 
-                                let stage_details = serde_json::json!({
-                                    "id": stage.id.to_string(),
-                                    "status": stage.status,
-                                    "order_index": stage.order_index,
-                                    "position": stage.position,
-                                    "environment": environment.as_ref().map(|env| serde_json::json!({
-                                        "id": env.id.to_string(),
-                                        "name": env.name,
-                                        "active": env.active,
-                                    }))
-                                });
+                let stage_details = serde_json::json!({
+                    "id": stage.id.to_string(),
+                    "status": stage.status,
+                    "order_index": stage.order_index,
+                    "position": stage.position,
+                    "environment": environment.as_ref().map(|env| serde_json::json!({
+                        "id": env.id.to_string(),
+                        "name": env.name,
+                        "active": env.active,
+                    }))
+                });
 
-                                return Some(ActivityEntityDetailsResponse {
-                                    id: entity_id.to_string(),
-                                    name: format!("{} - {}", feature.key, environment_name),
-                                    entity_type: entity_type.to_string(),
-                                    details: Some(serde_json::json!({
-                                        "feature_key": feature.key,
-                                        "feature_id": feature_id.to_string(),
-                                        "stage": stage_details,
-                                    })),
-                                });
-                            }
-                        }
-                    }
-                }
+                return Some(ActivityEntityDetailsResponse {
+                    id: entity_id.to_string(),
+                    name: format!("{} - {}", feature.key, environment_name),
+                    entity_type: entity_type.to_string(),
+                    details: Some(serde_json::json!({
+                        "feature_key": feature.key,
+                        "feature_id": feature_id.to_string(),
+                        "stage": stage_details,
+                    })),
+                });
             }
 
-            if let Some(meta) = activity.metadata.as_ref() {
-                if let (Some(feature_key), Some(status)) = (
+            if let Some(meta) = activity.metadata.as_ref()
+                && let (Some(feature_key), Some(status)) = (
                     meta.get("feature_key").and_then(|v| v.as_str()),
                     meta.get("status").and_then(|v| v.as_str()),
                 ) {
@@ -290,28 +366,27 @@ async fn resolve_activity_entity_details(
                         details: Some(meta.clone()),
                     });
                 }
-            }
 
             None
         }
         "feature" => {
-            if let Ok(feature_uuid) = Uuid::parse_str(entity_id) {
-                if let Ok(feature) = feature_repo.get_feature_by_id(feature_uuid).await {
-                    return Some(ActivityEntityDetailsResponse {
-                        id: entity_id.to_string(),
-                        name: feature.key.clone(),
-                        entity_type: entity_type.to_string(),
-                        details: Some(serde_json::json!({
-                            "feature_key": feature.key,
-                            "feature_id": feature_uuid.to_string(),
-                            "description": feature.description,
-                        })),
-                    });
-                }
+            if let Ok(feature_uuid) = Uuid::parse_str(entity_id)
+                && let Some(feature) = cache.feature(feature_uuid, feature_repo).await
+            {
+                return Some(ActivityEntityDetailsResponse {
+                    id: entity_id.to_string(),
+                    name: feature.key.clone(),
+                    entity_type: entity_type.to_string(),
+                    details: Some(serde_json::json!({
+                        "feature_key": feature.key,
+                        "feature_id": feature_uuid.to_string(),
+                        "description": feature.description,
+                    })),
+                });
             }
 
-            if let Some(meta) = activity.metadata.as_ref() {
-                if let Some(feature_key) = meta.get("feature_key").and_then(|v| v.as_str()) {
+            if let Some(meta) = activity.metadata.as_ref()
+                && let Some(feature_key) = meta.get("feature_key").and_then(|v| v.as_str()) {
                     return Some(ActivityEntityDetailsResponse {
                         id: entity_id.to_string(),
                         name: feature_key.to_string(),
@@ -319,7 +394,6 @@ async fn resolve_activity_entity_details(
                         details: Some(meta.clone()),
                     });
                 }
-            }
 
             None
         }
@@ -345,7 +419,9 @@ async fn resolve_activity_entity_details(
 fn parse_statuses(
     value: Option<&str>,
 ) -> Result<Option<Vec<crate::database::entity::ApprovalStatus>>, String> {
-    let Some(raw) = value else { return Ok(None); };
+    let Some(raw) = value else {
+        return Ok(None);
+    };
     if raw.trim().is_empty() {
         return Ok(None);
     }
@@ -410,8 +486,7 @@ async fn send_evaluation_summary(
             .as_deref()
             .ok_or_else(|| "period is required".to_string())?,
     )?;
-    let (from_time, to_time) =
-        crate::streaming::calculate_time_range(period, Utc::now());
+    let (from_time, to_time) = crate::streaming::calculate_time_range(period, Utc::now());
     let client_id = parse_opt_uuid(query.client_id.as_ref(), "clientId")?;
     let team_id = parse_opt_uuid(query.team_id.as_ref(), "teamId")?;
 
@@ -449,8 +524,7 @@ async fn send_evaluation_rates(
             .as_deref()
             .ok_or_else(|| "period is required".to_string())?,
     )?;
-    let (from_time, to_time) =
-        crate::streaming::calculate_time_range(period, Utc::now());
+    let (from_time, to_time) = crate::streaming::calculate_time_range(period, Utc::now());
     let client_id = parse_opt_uuid(query.client_id.as_ref(), "clientId")?;
     let team_id = parse_opt_uuid(query.team_id.as_ref(), "teamId")?;
 
@@ -467,7 +541,10 @@ async fn send_evaluation_rates(
         .await
         .map_err(|e| format!("Failed to load evaluation rates: {e}"))?;
 
-    let response = rates.into_iter().map(map_evaluation_rate).collect::<Vec<_>>();
+    let response = rates
+        .into_iter()
+        .map(map_evaluation_rate)
+        .collect::<Vec<_>>();
     if !send_json(session, &response).await {
         return Err("failed to send rates".to_string());
     }
@@ -560,10 +637,8 @@ async fn send_system_metrics(
         .unwrap()
         .and_utc();
     let yesterday_end = today_start;
-    let (from_7d, to_7d) = crate::streaming::calculate_time_range(
-        crate::streaming::TimePeriod::D7,
-        now,
-    );
+    let (from_7d, to_7d) =
+        crate::streaming::calculate_time_range(crate::streaming::TimePeriod::D7, now);
 
     let team_id_arg = team_id.map(ID::from);
 
@@ -578,14 +653,7 @@ async fn send_system_metrics(
         feature_logic.count_features(team_id_arg.clone()),
         client_logic.count_clients(team_id_arg.clone(), Some(true)),
         client_logic.count_clients(team_id_arg.clone(), None),
-        evaluation_logic.count_evaluations(
-            today_start,
-            today_end,
-            None,
-            None,
-            None,
-            team_id
-        ),
+        evaluation_logic.count_evaluations(today_start, today_end, None, None, None, team_id),
         evaluation_logic.count_evaluations(
             yesterday_start,
             yesterday_end,
@@ -594,28 +662,27 @@ async fn send_system_metrics(
             None,
             team_id
         ),
-        evaluation_logic.get_evaluation_summary(
-            None,
-            None,
-            None,
-            team_id,
-            from_7d,
-            to_7d
-        )
+        evaluation_logic.get_evaluation_summary(None, None, None, team_id, from_7d, to_7d)
     );
 
-    let (total_features, active_clients, total_clients, evaluations_today, evaluations_yesterday, summary_7d) =
-        match (
-            total_features_result,
-            active_clients_result,
-            total_clients_result,
-            evaluations_today_result,
-            evaluations_yesterday_result,
-            summary_7d_result,
-        ) {
-            (Ok(a), Ok(b), Ok(c), Ok(d), Ok(e), Ok(f)) => (a, b, c, d, e, f),
-            _ => return Err("Failed to fetch system metrics".to_string()),
-        };
+    let (
+        total_features,
+        active_clients,
+        total_clients,
+        evaluations_today,
+        evaluations_yesterday,
+        summary_7d,
+    ) = match (
+        total_features_result,
+        active_clients_result,
+        total_clients_result,
+        evaluations_today_result,
+        evaluations_yesterday_result,
+        summary_7d_result,
+    ) {
+        (Ok(a), Ok(b), Ok(c), Ok(d), Ok(e), Ok(f)) => (a, b, c, d, e, f),
+        _ => return Err("Failed to fetch system metrics".to_string()),
+    };
 
     let response = SystemMetricsResponse {
         total_features,
@@ -679,32 +746,36 @@ async fn send_recent_activities(
 
     let mut items = Vec::new();
     let mut filtered_count: i64 = 0;
+    let feature_repo_arc = std::sync::Arc::new(feature_repo.clone());
+    let feature_repo_ref = feature_repo.as_ref();
+    let environment_logic_ref = environment_logic.as_ref();
+    let client_logic_ref = client_logic.as_ref();
+    let pipeline_logic_ref = pipeline_logic.as_ref();
+    let mut team_cache = crate::streaming::ActivityTeamMatchCache::default();
+    let mut entity_cache = ActivityEntityLookupCache::default();
 
     for activity in activities.into_iter() {
-        if let Some(team_id) = team_id {
-            let feature_repo_arc = std::sync::Arc::new(feature_repo.clone());
-            let env_logic_box = environment_logic.clone();
-            let client_logic_box = client_logic.clone();
-            let pipeline_logic_box = pipeline_logic.clone();
-            if !crate::streaming::activity_matches_team(
+        if let Some(team_id) = team_id
+            && !crate::streaming::activity_matches_team_cached(
                 &activity,
                 team_id,
                 &feature_repo_arc,
-                &env_logic_box,
-                &client_logic_box,
-                &pipeline_logic_box,
+                environment_logic_ref,
+                client_logic_ref,
+                pipeline_logic_ref,
+                &mut team_cache,
             )
             .await
             {
                 continue;
             }
-        }
 
         filtered_count += 1;
         let entity_details = resolve_activity_entity_details(
             &activity,
-            feature_repo.as_ref(),
-            environment_logic.as_ref(),
+            feature_repo_ref,
+            environment_logic_ref,
+            &mut entity_cache,
         )
         .await;
 
@@ -727,7 +798,11 @@ async fn send_recent_activities(
         meta: PageMeta {
             offset,
             limit,
-            total: if team_id.is_some() { filtered_count } else { total },
+            total: if team_id.is_some() {
+                filtered_count
+            } else {
+                total
+            },
         },
     };
 
@@ -919,10 +994,8 @@ pub async fn stream_ws(
     let stream_type = match StreamType::parse(&query.stream) {
         Some(stream_type) => stream_type,
         None => {
-            let response = HttpResponse::BadRequest().json(ErrorResponse::new(
-                "invalid_input",
-                "Unknown stream type",
-            ));
+            let response = HttpResponse::BadRequest()
+                .json(ErrorResponse::new("invalid_input", "Unknown stream type"));
             return Ok(response);
         }
     };
@@ -945,9 +1018,15 @@ pub async fn stream_ws(
 
     actix_web::rt::spawn(async move {
         let mut interval = match stream_type {
-            StreamType::RecentActivities => Some(tokio::time::interval(tokio::time::Duration::from_secs(45))),
-            StreamType::FeatureGrowth => Some(tokio::time::interval(tokio::time::Duration::from_secs(60))),
-            StreamType::SystemMetrics => Some(tokio::time::interval(tokio::time::Duration::from_secs(30))),
+            StreamType::RecentActivities => {
+                Some(tokio::time::interval(tokio::time::Duration::from_secs(45)))
+            }
+            StreamType::FeatureGrowth => {
+                Some(tokio::time::interval(tokio::time::Duration::from_secs(60)))
+            }
+            StreamType::SystemMetrics => {
+                Some(tokio::time::interval(tokio::time::Duration::from_secs(30)))
+            }
             _ => None,
         };
 
@@ -956,26 +1035,49 @@ pub async fn stream_ws(
         }
 
         let send_result = match stream_type {
-            StreamType::EvaluationSummary => send_evaluation_summary(&mut session_clone, &evaluation_logic, &query).await,
-            StreamType::EvaluationRates => send_evaluation_rates(&mut session_clone, &evaluation_logic, &query).await,
-            StreamType::EvaluationsByFeature => send_evaluations_by_feature(&mut session_clone, &evaluation_logic, &query).await,
-            StreamType::EvaluationDashboard => send_evaluation_dashboard(&mut session_clone, &evaluation_logic, &query).await,
-            StreamType::SystemMetrics => {
-                let team_id = parse_opt_uuid(query.team_id.as_ref(), "teamId").ok().flatten();
-                send_system_metrics(&mut session_clone, &feature_logic, &client_logic, &evaluation_logic, team_id).await
+            StreamType::EvaluationSummary => {
+                send_evaluation_summary(&mut session_clone, &evaluation_logic, &query).await
             }
-            StreamType::RecentActivities => send_recent_activities(
-                &mut session_clone,
-                &activity_repo,
-                &feature_repo,
-                &environment_logic,
-                &client_logic,
-                &pipeline_logic,
-                &query,
-            )
-            .await,
-            StreamType::FeatureGrowth => send_feature_growth(&mut session_clone, &feature_repo, &query).await,
-            StreamType::ApprovalRequests => send_approval_requests(&mut session_clone, &approval_repo, &query).await,
+            StreamType::EvaluationRates => {
+                send_evaluation_rates(&mut session_clone, &evaluation_logic, &query).await
+            }
+            StreamType::EvaluationsByFeature => {
+                send_evaluations_by_feature(&mut session_clone, &evaluation_logic, &query).await
+            }
+            StreamType::EvaluationDashboard => {
+                send_evaluation_dashboard(&mut session_clone, &evaluation_logic, &query).await
+            }
+            StreamType::SystemMetrics => {
+                let team_id = parse_opt_uuid(query.team_id.as_ref(), "teamId")
+                    .ok()
+                    .flatten();
+                send_system_metrics(
+                    &mut session_clone,
+                    &feature_logic,
+                    &client_logic,
+                    &evaluation_logic,
+                    team_id,
+                )
+                .await
+            }
+            StreamType::RecentActivities => {
+                send_recent_activities(
+                    &mut session_clone,
+                    &activity_repo,
+                    &feature_repo,
+                    &environment_logic,
+                    &client_logic,
+                    &pipeline_logic,
+                    &query,
+                )
+                .await
+            }
+            StreamType::FeatureGrowth => {
+                send_feature_growth(&mut session_clone, &feature_repo, &query).await
+            }
+            StreamType::ApprovalRequests => {
+                send_approval_requests(&mut session_clone, &approval_repo, &query).await
+            }
         };
 
         if let Err(err) = send_result {

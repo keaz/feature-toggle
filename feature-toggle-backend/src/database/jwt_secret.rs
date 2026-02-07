@@ -148,7 +148,7 @@ fn generate_secure_secret() -> String {
     let mut rng = rand::rng();
     let mut secret_bytes = [0u8; 32]; // 256 bits
     rng.fill(&mut secret_bytes);
-    general_purpose::STANDARD.encode(&secret_bytes)
+    general_purpose::STANDARD.encode(secret_bytes)
 }
 
 pub fn jwt_secret_repository(pool: PgPool) -> Box<dyn JwtSecretRepository> {

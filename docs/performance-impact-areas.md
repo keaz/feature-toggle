@@ -2,6 +2,19 @@
 
 This document captures code paths that are likely to create measurable performance impact as data volume or request concurrency grows.
 
+## Implementation status (2026-02-07)
+
+- 1. N+1 feature dependency loading: Addressed with batched dependency hydration in `feature-toggle-backend/src/database/feature.rs`.
+- 2. N+1 client web-origin loading: Addressed with batched origin loading in `feature-toggle-backend/src/database/client.rs`.
+- 3. Per-activity sequential lookup amplification: Addressed with request-scope lookup caches in `feature-toggle-backend/src/streaming.rs`, `feature-toggle-backend/src/rest/metrics.rs`, and `feature-toggle-backend/src/rest/stream.rs`.
+- 4. `%term%` `ILIKE` scan risk: Deferred per request (no change made).
+- 5. Regex compilation in hot path: Addressed with regex compile cache in `evaluation-engine/src/lib.rs`.
+- 6. Re-sorting allocations on each evaluation: Addressed by skipping sort/copy when already sorted in `evaluation-engine/src/lib.rs`.
+- 7. Recursive dependency evaluation without memoization: Addressed with per-evaluation memoization in `evaluation-engine/src/lib.rs`.
+- 8. Extra cloning in pipeline row mapping: Addressed by removing clone-heavy mapping in `feature-toggle-backend/src/database/pipeline.rs`.
+- 9. Full-table deduper retain under lock: Addressed with incremental queue-based expiry cleanup in `feature-toggle-backend/src/cluster/mod.rs`.
+- 10. Count + data double query in paginated endpoints: Addressed with windowed/CTE single-query pagination in `feature-toggle-backend/src/database/client.rs`, `feature-toggle-backend/src/database/feature.rs`, and `feature-toggle-backend/src/database/pipeline.rs`.
+
 ## High impact
 
 ### 1. N+1 query pattern when loading feature dependencies
