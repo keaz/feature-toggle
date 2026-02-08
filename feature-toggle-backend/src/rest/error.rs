@@ -189,9 +189,10 @@ impl From<crate::Error> for RestError {
             crate::Error::NotFound(id) => {
                 RestError::not_found(format!("Record not found for id {id}"))
             }
-            crate::Error::DatabaseError(_) => RestError::internal("Database error"),
+            crate::Error::DatabaseError(_) => RestError::internal("Internal server error"),
             crate::Error::RecordAlreadyExists(msg) => RestError::conflict(msg),
             crate::Error::InvalidInput(msg) => RestError::invalid_input(msg),
+            crate::Error::Unauthorized(msg) => RestError::unauthorized(msg),
         }
     }
 }
@@ -213,7 +214,7 @@ impl From<crate::logic::metrics::MetricLogicError> for RestError {
                 RestError::forbidden(msg)
             }
             crate::logic::metrics::MetricLogicError::Database(_) => {
-                RestError::internal("Database error")
+                RestError::internal("Internal server error")
             }
         }
     }
@@ -229,7 +230,7 @@ impl From<crate::logic::feature_evaluation::FeatureEvaluationLogicError> for Res
                 RestError::not_found("Record not found")
             }
             crate::logic::feature_evaluation::FeatureEvaluationLogicError::DatabaseError(_) => {
-                RestError::internal("Database error")
+                RestError::internal("Internal server error")
             }
         }
     }

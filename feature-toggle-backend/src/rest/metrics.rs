@@ -1284,7 +1284,7 @@ pub(crate) async fn recent_activity(
     let (activities, total) = repo
         .get_activities_paginated(filter.clone())
         .await
-        .map_err(|e| RestError::internal(format!("Database error: {e}")))?;
+        .map_err(|_| RestError::internal("Failed to load recent activity"))?;
 
     let mut items = Vec::new();
     let mut filtered_count: i64 = 0;

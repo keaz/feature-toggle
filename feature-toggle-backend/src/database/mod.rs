@@ -35,6 +35,10 @@ pub async fn init_pg_pool() -> PgPool {
         .expect("Failed to connect to Postgres")
 }
 
+pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
+    sqlx::migrate!("./migrations").run(pool).await
+}
+
 pub fn handle_error<T>(id: Option<Uuid>, result: Result<T, sqlx::Error>) -> Result<T, Error> {
     if let Ok(record) = result {
         return Ok(record);

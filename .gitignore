@@ -23,3 +23,5 @@ dist/
 
 node_modules/
 .pnpm-store
+.jest-cache
+output*

@@ -134,6 +134,11 @@ impl RoleLogic for RoleLogicImpl {
         if trimmed_name.is_empty() {
             return Err(Error::InvalidInput("Role name cannot be empty".to_string()));
         }
+        if trimmed_name.len() > 50 {
+            return Err(Error::InvalidInput(
+                "Role name cannot exceed 50 characters".to_string(),
+            ));
+        }
 
         let trimmed_description = description.trim();
         if trimmed_description.is_empty() {

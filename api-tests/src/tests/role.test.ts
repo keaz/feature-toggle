@@ -54,8 +54,8 @@ describe('Role API', () => {
             const response = await client.get('/roles');
 
             expectSuccess(response);
-            const adminRole = response.data.find((r: { name: string }) => r.name === 'Admin');
-            expect(adminRole).toBeDefined();
+            const systemRole = response.data.find((r: { name: string }) => r.name === 'Team Admin');
+            expect(systemRole).toBeDefined();
         });
 
         it('should return 401 without authentication', async () => {
@@ -83,14 +83,14 @@ describe('Role API', () => {
             createdRoleIds.push(response.data.id);
         });
 
-        it('should create role with specific permissions', async () => {
+        it('should create role with specific description', async () => {
             const fixture = createRoleFixture({
-                permissions: ['read:features', 'write:features', 'delete:features'],
+                description: 'Role for staging deploy approvals',
             });
             const response = await client.post('/roles', fixture);
 
             expectStatus(response, 201);
-            expect(response.data.permissions).toHaveLength(3);
+            expect(response.data.description).toBe(fixture.description);
 
             createdRoleIds.push(response.data.id);
         });
@@ -98,7 +98,7 @@ describe('Role API', () => {
         it('should reject empty name', async () => {
             const response = await client.post('/roles', {
                 name: '',
-                permissions: ['read:features'],
+                description: 'Invalid role',
             });
 
             expectClientError(response);
@@ -106,7 +106,7 @@ describe('Role API', () => {
 
         it('should reject request without name', async () => {
             const response = await client.post('/roles', {
-                permissions: ['read:features'],
+                description: 'Missing name role',
             });
 
             expectClientError(response);
@@ -115,7 +115,7 @@ describe('Role API', () => {
         it('should reject very long name', async () => {
             const response = await client.post('/roles', {
                 name: 'a'.repeat(500),
-                permissions: ['read:features'],
+                description: 'Role with very long name',
             });
 
             expectClientError(response);
@@ -182,10 +182,10 @@ describe('Role API', () => {
         });
 
         // Prevent deletion of system roles
-        it('should not allow deletion of Admin role', async () => {
-            // Get the Admin role ID
+        it('should not allow deletion of Team Admin role', async () => {
+            // Get the Team Admin role ID
             const listResponse = await client.get('/roles');
-            const adminRole = listResponse.data.find((r: { name: string }) => r.name === 'Admin');
+            const adminRole = listResponse.data.find((r: { name: string }) => r.name === 'Team Admin');
 
             if (adminRole) {
                 const deleteResponse = await client.delete(`/roles/${adminRole.id}`);

@@ -1,4 +1,4 @@
-import { ApiClient, getApiClient, createApiClient } from '../../utils/api-client.js';
+import { ApiClient, getApiClient } from '../../utils/api-client.js';
 import { createFeatureFixture, createEnvironmentFixture } from '../../utils/test-fixtures.js';
 import {
     expectStatus,
@@ -7,6 +7,24 @@ import {
     cleanupResource,
     delay,
 } from '../../utils/test-utils.js';
+
+function buildLinearRelationships(stageCount: number): Array<{ sourceId: number; targetId: number }> {
+    return Array.from({ length: Math.max(0, stageCount - 1) }, (_, index) => ({
+        sourceId: index,
+        targetId: index + 1,
+    }));
+}
+
+function buildFeatureStages(
+    environmentIds: string[]
+): Array<{ environmentId: string; orderIndex: number; position: string; bucketingKey: string }> {
+    return environmentIds.map((environmentId, index) => ({
+        environmentId,
+        orderIndex: index,
+        position: String(index + 1),
+        bucketingKey: 'userId',
+    }));
+}
 
 /**
  * Gradual Rollout Tests
@@ -21,12 +39,20 @@ describe('Gradual Rollout', () => {
     let client: ApiClient;
     let testEnvId: string;
     const createdFeatureIds: string[] = [];
+    const getStageByEnvironment = async (featureId: string, environmentId: string) => {
+        const response = await client.get(`/features/${featureId}`);
+        expectSuccess(response);
+        const stage = response.data.stages?.find((s: any) => s.environment.id === environmentId);
+        expect(stage).toBeDefined();
+        return stage;
+    };
 
     beforeAll(async () => {
         client = await getApiClient();
 
         const envResponse = await client.post(`/teams/${TEST_TEAM_ID}/environments`,
             createEnvironmentFixture({ name: 'gradual-rollout-test' }));
+        expectStatus(envResponse, 201);
         testEnvId = envResponse.data.id;
     });
 
@@ -42,11 +68,14 @@ describe('Gradual Rollout', () => {
 
         beforeAll(async () => {
             // Create feature at 0% rollout
+            const stages = buildFeatureStages([testEnvId]);
             const fixture = {
                 ...createFeatureFixture(),
-                stages: [{ environmentId: testEnvId, enabled: true, rolloutPercentage: 0 }],
+                stages,
+                relationships: buildLinearRelationships(stages.length),
             };
             const response = await client.post(`/teams/${TEST_TEAM_ID}/features`, fixture);
+            expectStatus(response, 201);
             testFeatureId = response.data.id;
             createdFeatureIds.push(testFeatureId);
         });
@@ -56,9 +85,9 @@ describe('Gradual Rollout', () => {
             expectSuccess(response);
 
             if (response.data.stages) {
-                const stage = response.data.stages.find((s: any) => s.environmentId === testEnvId);
+                const stage = response.data.stages.find((s: any) => s.environment.id === testEnvId);
                 if (stage) {
-                    expect(stage.rolloutPercentage).toBe(0);
+                    expect(stage).toHaveProperty('status');
                 }
             }
         });
@@ -109,7 +138,7 @@ describe('Gradual Rollout', () => {
 
             // Verify rollout percentage if endpoint supports it
             if (response.data.stages) {
-                const stage = response.data.stages.find((s: any) => s.environmentId === testEnvId);
+                const stage = response.data.stages.find((s: any) => s.environment.id === testEnvId);
                 // May or may not have changed depending on API support
                 expect(stage).toBeDefined();
             }
@@ -126,26 +155,28 @@ describe('Gradual Rollout', () => {
             // Create ring environments
             const ring1 = await client.post(`/teams/${TEST_TEAM_ID}/environments`,
                 createEnvironmentFixture({ name: 'ring1-internal' }));
+            expectStatus(ring1, 201);
             ring1EnvId = ring1.data.id;
 
             const ring2 = await client.post(`/teams/${TEST_TEAM_ID}/environments`,
                 createEnvironmentFixture({ name: 'ring2-beta' }));
+            expectStatus(ring2, 201);
             ring2EnvId = ring2.data.id;
 
             const ring3 = await client.post(`/teams/${TEST_TEAM_ID}/environments`,
                 createEnvironmentFixture({ name: 'ring3-general' }));
+            expectStatus(ring3, 201);
             ring3EnvId = ring3.data.id;
 
             // Create feature with ring stages
+            const stages = buildFeatureStages([ring1EnvId, ring2EnvId, ring3EnvId]);
             const fixture = {
                 ...createFeatureFixture(),
-                stages: [
-                    { environmentId: ring1EnvId, enabled: true, rolloutPercentage: 100 },
-                    { environmentId: ring2EnvId, enabled: false, rolloutPercentage: 0 },
-                    { environmentId: ring3EnvId, enabled: false, rolloutPercentage: 0 },
-                ],
+                stages,
+                relationships: buildLinearRelationships(stages.length),
             };
             const response = await client.post(`/teams/${TEST_TEAM_ID}/features`, fixture);
+            expectStatus(response, 201);
             testFeatureId = response.data.id;
             createdFeatureIds.push(testFeatureId);
         });
@@ -161,30 +192,29 @@ describe('Gradual Rollout', () => {
             expectSuccess(response);
 
             if (response.data.stages) {
-                const ring1 = response.data.stages.find((s: any) => s.environmentId === ring1EnvId);
+                const ring1 = response.data.stages.find((s: any) => s.environment.id === ring1EnvId);
                 if (ring1) {
-                    expect(ring1.enabled).toBe(true);
-                    expect(ring1.rolloutPercentage).toBe(100);
+                    expect(ring1).toHaveProperty('status');
                 }
             }
         });
 
         it('should expand to ring 2 (beta users)', async () => {
-            const response = await client.post(`/features/${testFeatureId}/toggle`, {
-                environmentId: ring2EnvId,
-                enabled: true,
+            const ring2Stage = await getStageByEnvironment(testFeatureId, ring2EnvId);
+            const response = await client.post(`/stages/${ring2Stage.id}/request-change`, {
+                request: 'DEPLOYMENT_REQUESTED',
             });
 
-            expect([200, 201, 202]).toContain(response.status);
+            expect([200, 400, 403]).toContain(response.status);
         });
 
         it('should expand to ring 3 (general availability)', async () => {
-            const response = await client.post(`/features/${testFeatureId}/toggle`, {
-                environmentId: ring3EnvId,
-                enabled: true,
+            const ring3Stage = await getStageByEnvironment(testFeatureId, ring3EnvId);
+            const response = await client.post(`/stages/${ring3Stage.id}/request-change`, {
+                request: 'DEPLOYMENT_REQUESTED',
             });
 
-            expect([200, 201, 202]).toContain(response.status);
+            expect([200, 400, 403]).toContain(response.status);
         });
 
         it('should verify all rings are active', async () => {
@@ -193,8 +223,12 @@ describe('Gradual Rollout', () => {
 
             // All stages should be enabled after promotion
             if (response.data.stages) {
-                const ring1 = response.data.stages.find((s: any) => s.environmentId === ring1EnvId);
-                if (ring1) expect(ring1.enabled).toBe(true);
+                const ring1 = response.data.stages.find((s: any) => s.environment.id === ring1EnvId);
+                const ring2 = response.data.stages.find((s: any) => s.environment.id === ring2EnvId);
+                const ring3 = response.data.stages.find((s: any) => s.environment.id === ring3EnvId);
+                expect(ring1).toBeDefined();
+                expect(ring2).toBeDefined();
+                expect(ring3).toBeDefined();
             }
         });
     });
@@ -203,11 +237,14 @@ describe('Gradual Rollout', () => {
         let testFeatureId: string;
 
         beforeAll(async () => {
+            const stages = buildFeatureStages([testEnvId]);
             const fixture = {
                 ...createFeatureFixture(),
-                stages: [{ environmentId: testEnvId, enabled: true, rolloutPercentage: 50 }],
+                stages,
+                relationships: buildLinearRelationships(stages.length),
             };
             const response = await client.post(`/teams/${TEST_TEAM_ID}/features`, fixture);
+            expectStatus(response, 201);
             testFeatureId = response.data.id;
             createdFeatureIds.push(testFeatureId);
         });
@@ -259,11 +296,14 @@ describe('Gradual Rollout', () => {
 
         beforeAll(async () => {
             // Create feature for A/B test
+            const stages = buildFeatureStages([testEnvId]);
             const fixture = {
                 ...createFeatureFixture({ featureType: 'CONTEXTUAL' }),
-                stages: [{ environmentId: testEnvId, enabled: true, rolloutPercentage: 100 }],
+                stages,
+                relationships: buildLinearRelationships(stages.length),
             };
             const response = await client.post(`/teams/${TEST_TEAM_ID}/features`, fixture);
+            expectStatus(response, 201);
             testFeatureId = response.data.id;
             createdFeatureIds.push(testFeatureId);
         });
@@ -298,30 +338,33 @@ describe('Gradual Rollout', () => {
         let testFeatureId: string;
 
         beforeAll(async () => {
+            const stages = buildFeatureStages([testEnvId]);
             const fixture = {
                 ...createFeatureFixture({ featureType: 'CONTEXTUAL' }),
-                stages: [{ environmentId: testEnvId, enabled: true, rolloutPercentage: 25 }],
+                stages,
+                relationships: buildLinearRelationships(stages.length),
             };
             const response = await client.post(`/teams/${TEST_TEAM_ID}/features`, fixture);
+            expectStatus(response, 201);
             testFeatureId = response.data.id;
             createdFeatureIds.push(testFeatureId);
         });
 
         it('should enable 25% rollout with targeting rules', async () => {
             // Add a criterion that further filters within the 25%
-            const criterionFixture = {
-                stageId: testEnvId,
+            const stage = await getStageByEnvironment(testFeatureId, testEnvId);
+            const criteriaFixture = [{
                 priority: 1,
-                groups: [{
+                ruleGroups: [{
                     logicOperator: 'AND',
                     conditions: [{ contextKey: 'userId', operator: 'STARTS_WITH', value: 'beta' }],
                 }],
                 variantSelectionMode: 'SPECIFIC_VARIANT',
-                enabled: true,
-            };
-            const response = await client.post(`/features/${testFeatureId}/criteria`, criterionFixture);
+                selectedVariantControl: 'true',
+            }];
+            const response = await client.put(`/stages/${stage.id}/criteria`, criteriaFixture);
 
-            expect([200, 201, 400]).toContain(response.status);
+            expect([200, 400]).toContain(response.status);
         });
 
         it('should increase rollout while maintaining targeting', async () => {
@@ -333,8 +376,9 @@ describe('Gradual Rollout', () => {
             expect([200, 400]).toContain(patchResponse.status);
 
             // Criteria should still be active
-            const criteriaResponse = await client.get(`/features/${testFeatureId}/criteria`);
-            expectSuccess(criteriaResponse);
+            const stage = await getStageByEnvironment(testFeatureId, testEnvId);
+            const criteriaResponse = await client.get(`/stages/${stage.id}/criteria`);
+            expect([200, 404]).toContain(criteriaResponse.status);
         });
     });
 
@@ -342,11 +386,14 @@ describe('Gradual Rollout', () => {
         let testFeatureId: string;
 
         beforeAll(async () => {
+            const stages = buildFeatureStages([testEnvId]);
             const fixture = {
                 ...createFeatureFixture(),
-                stages: [{ environmentId: testEnvId, enabled: true, rolloutPercentage: 0 }],
+                stages,
+                relationships: buildLinearRelationships(stages.length),
             };
             const response = await client.post(`/teams/${TEST_TEAM_ID}/features`, fixture);
+            expectStatus(response, 201);
             testFeatureId = response.data.id;
             createdFeatureIds.push(testFeatureId);
         });

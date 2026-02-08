@@ -1,0 +1,52 @@
+name: feature-toggle-api-tests
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: root123
+      POSTGRES_DB: feature_toggle_api_tests
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d feature_toggle_api_tests"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - api_tests_postgres_data:/var/lib/postgresql/data
+
+  backend_seed:
+    build:
+      context: .
+      dockerfile: feature-toggle-backend/Dockerfile
+    environment:
+      DATABASE_URL: postgres://postgres:root123@postgres:5432/feature_toggle_api_tests
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint:
+      - /bin/sh
+      - -lc
+    command:
+      - |
+        sqlx migrate run --database-url "$$DATABASE_URL" --source /app/migrations &&
+        psql "$$DATABASE_URL" -v ON_ERROR_STOP=1 -f /app/init.sql
+    stdin_open: false
+    tty: false
+    restart: "no"
+
+  feature_toggle_backend:
+    build:
+      context: .
+      dockerfile: feature-toggle-backend/Dockerfile
+    environment:
+      DATABASE_URL: postgres://postgres:root123@postgres:5432/feature_toggle_api_tests
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "18080:8080"
+    restart: unless-stopped
+
+volumes:
+  api_tests_postgres_data:

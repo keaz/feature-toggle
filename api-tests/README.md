@@ -6,7 +6,7 @@ Comprehensive API automation tests for the FluxGate backend REST APIs.
 
 - Node.js >= 18.0.0
 - pnpm
-- FluxGate backend running at `http://localhost:8080`
+- Docker + Docker Compose plugin (`docker compose`)
 
 ## Installation
 
@@ -16,41 +16,67 @@ pnpm install
 
 ## Running Tests
 
-### Start the Backend
+### Recommended: Run Against Docker Compose Stack
 
-Before running tests, ensure the FluxGate backend is running:
+This runs API tests against an isolated Docker environment:
+- PostgreSQL in Docker
+- backend in Docker
+- migrations + `init.sql` seeding before tests
 
 ```bash
-# From project root
-make up
+pnpm --dir api-tests run test:docker
 ```
 
-### Run All Tests
+Useful variants:
 
 ```bash
-pnpm test
+# Keep stack running after tests (for debugging)
+pnpm --dir api-tests run test:docker:keep
+
+# Tear down stack manually
+pnpm --dir api-tests run docker:down
+```
+
+Manual Docker flow (when you want explicit control):
+
+```bash
+pnpm --dir api-tests run docker:up
+pnpm --dir api-tests run docker:seed
+pnpm --dir api-tests run docker:start-backend
+pnpm --dir api-tests test
+pnpm --dir api-tests run docker:down
+```
+
+`docker:seed` runs non-interactive (`-T --no-deps --rm`) so it exits automatically when seeding is complete.
+
+### Manual Local Backend (Optional)
+
+If you already run backend locally, run tests directly:
+
+```bash
+pnpm --dir api-tests test
 ```
 
 ### Run Specific Test Suites
 
 ```bash
-pnpm test:environment
-pnpm test:context
-pnpm test:team
-pnpm test:role
-pnpm test:user
-pnpm test:client
-pnpm test:feature
-pnpm test:pipeline
-pnpm test:criteria
-pnpm test:approval
-pnpm test:auth
+pnpm --dir api-tests test:environment
+pnpm --dir api-tests test:context
+pnpm --dir api-tests test:team
+pnpm --dir api-tests test:role
+pnpm --dir api-tests test:user
+pnpm --dir api-tests test:client
+pnpm --dir api-tests test:feature
+pnpm --dir api-tests test:pipeline
+pnpm --dir api-tests test:criteria
+pnpm --dir api-tests test:approval
+pnpm --dir api-tests test:auth
 ```
 
 ### Watch Mode
 
 ```bash
-pnpm test:watch
+pnpm --dir api-tests test:watch
 ```
 
 ## Configuration
@@ -59,9 +85,18 @@ Tests use the following environment variables (with defaults):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `API_BASE_URL` | `http://localhost:8080/api/v1` | Base URL for the API |
-| `API_USERNAME` | `admin` | Username for authentication |
+| `API_BASE_URL` | `http://127.0.0.1:18080/api/v1` | Base URL for the API |
+| `API_USERNAME` | `api-test-admin` | Username for authentication |
 | `API_PASSWORD` | `password123` | Password for authentication |
+
+For `test:docker`, the runner sets:
+- `API_BASE_URL=http://127.0.0.1:18080/api/v1`
+
+Runner controls:
+- `API_TEST_BACKEND_PORT` (default `18080`)
+- `API_TEST_WAIT_SECONDS` (default `180`)
+- `API_TEST_KEEP_STACK=1` (skip automatic teardown)
+- `API_TEST_COMPOSE_PROJECT` (default `feature-toggle-api-tests`)
 
 ## Test Structure
 

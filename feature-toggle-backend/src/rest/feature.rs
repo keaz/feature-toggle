@@ -814,7 +814,7 @@ async fn load_stage_data(
     for stage in stages.iter() {
         let env = environment_map
             .get(&stage.environment_id)
-            .ok_or_else(|| RestError::internal("Environment not found"))?;
+            .ok_or_else(|| RestError::not_found("Environment not found"))?;
         mapped_stages.push(FeatureStageResponse {
             id: stage.id.to_string(),
             environment: EnvironmentResponse::from(env.clone()),

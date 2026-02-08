@@ -37,6 +37,8 @@ pub enum Error {
     RecordAlreadyExists(String),
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+    #[error("Unauthorized: {0}")]
+    Unauthorized(String),
 }
 
 pub async fn run() -> std::io::Result<()> {
@@ -46,6 +48,9 @@ pub async fn run() -> std::io::Result<()> {
     let cfg = crate::config::Config::load();
 
     let db_pool = init_pg_pool().await;
+    database::run_migrations(&db_pool).await.map_err(|e| {
+        std::io::Error::other(format!("Failed to run database migrations: {e}"))
+    })?;
 
     // Initialize activity log repository (shared across all logic layers)
     let activity_log_repository = database::activity_log::activity_log_repository(db_pool.clone());

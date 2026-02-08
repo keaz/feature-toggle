@@ -1,3 +1,5 @@
+use feature_toggle_backend::database::entity::FeatureType;
+use feature_toggle_backend::database::feature::{CreateFeature, CreateFeatureStage};
 use feature_toggle_backend::database::{approval, feature, init_pg_pool, role};
 use feature_toggle_backend::grpc::pb::FeatureUpdate;
 use feature_toggle_backend::logic::approval::ApprovalRequestEvent;
@@ -7,6 +9,39 @@ use feature_toggle_backend::logic::{
 };
 use feature_toggle_backend::model::ID;
 use uuid::Uuid;
+
+const TEAM_ID: &str = "51ecc366-f1cd-4d3d-ab73-fa60bad98f27";
+const POLICY_ENVIRONMENT_ID: &str = "9f9f9f9f-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
+
+async fn create_isolated_feature_stage(
+    repository: &dyn feature::FeatureRepository,
+) -> (Uuid, Uuid) {
+    let team_id = Uuid::parse_str(TEAM_ID).unwrap();
+    let environment_id = Uuid::parse_str(POLICY_ENVIRONMENT_ID).unwrap();
+    let stage_id = Uuid::new_v4();
+
+    let feature_id = repository
+        .create_feature(CreateFeature {
+            team_id,
+            key: format!("approval-workflow-feature-{}", Uuid::new_v4()),
+            description: Some("Feature for isolated approval workflow tests".to_string()),
+            feature_type: FeatureType::Simple,
+            stages: vec![CreateFeatureStage {
+                id: stage_id,
+                environment_id,
+                order_index: 0,
+                parent_stage: None,
+                position: "{ \"x\": 640, \"y\": 240 }".to_string(),
+                enabled: true,
+            }],
+            dependencies: vec![],
+            variants: None,
+        })
+        .await
+        .expect("feature setup should succeed");
+
+    (feature_id, stage_id)
+}
 
 #[tokio::test]
 async fn test_stage_change_creates_approval_request_when_policy_exists() {
@@ -40,7 +75,7 @@ async fn test_stage_change_creates_approval_request_when_policy_exists() {
         Some(approval_logic.clone()),
     );
 
-    let stage_id = Uuid::parse_str("9f9f9f9f-cccc-4ccc-cccc-aaaaaaaaaaaa").unwrap();
+    let (feature_id, stage_id) = create_isolated_feature_stage(feature_repository.as_ref()).await;
     let requester = Uuid::parse_str("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb").unwrap();
 
     // Reset stage status to a pending state for deterministic transition
@@ -85,6 +120,11 @@ async fn test_stage_change_creates_approval_request_when_policy_exists() {
     assert_eq!(stored.approved_count, 0);
     assert_eq!(stored.rejected_count, 0);
     assert_eq!(stored.status.as_str(), "pending");
+
+    // Cleanup test feature/stage rows.
+    let _ = sqlx::query!("DELETE FROM features WHERE id = $1", feature_id)
+        .execute(&pool)
+        .await;
 }
 
 #[tokio::test]
@@ -119,7 +159,7 @@ async fn test_quorum_approvals_execute_stage_change() {
         Some(approval_logic.clone()),
     );
 
-    let stage_id = Uuid::parse_str("9f9f9f9f-cccc-4ccc-cccc-aaaaaaaaaaaa").unwrap();
+    let (feature_id, stage_id) = create_isolated_feature_stage(feature_repository.as_ref()).await;
     let requester = Uuid::parse_str("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb").unwrap();
     let approver_one = Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").unwrap();
     let approver_two = Uuid::parse_str("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb").unwrap();
@@ -168,4 +208,9 @@ async fn test_quorum_approvals_execute_stage_change() {
             .await
             .unwrap();
     assert_eq!(status, "DEPLOYMENT_APPROVED");
+
+    // Cleanup test feature/stage rows.
+    let _ = sqlx::query!("DELETE FROM features WHERE id = $1", feature_id)
+        .execute(&pool)
+        .await;
 }

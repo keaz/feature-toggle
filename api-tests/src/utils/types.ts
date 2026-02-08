@@ -35,7 +35,7 @@ export interface Team extends BaseEntity {
 
 export interface Role extends BaseEntity {
     name: string;
-    permissions?: string[];
+    description?: string;
 }
 
 export interface User extends BaseEntity {
@@ -102,10 +102,13 @@ export interface CriterionCondition {
 
 export interface ApprovalPolicy extends BaseEntity {
     name: string;
+    description?: string;
     requiredApprovers: number;
-    approverRoles: string[];
+    approverRoleIds: string[];
     appliesTo: string;
     environmentIds?: string[];
+    autoApproveAfterHours?: number;
+    enabled?: boolean;
 }
 
 export interface ApprovalRequest extends BaseEntity {

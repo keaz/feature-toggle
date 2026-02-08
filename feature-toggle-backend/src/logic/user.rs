@@ -270,12 +270,25 @@ impl UserLogic for UserLogicImpl {
         username: String,
         password: String,
     ) -> Result<ApiUser, Error> {
-        let u = self.repository.get_user_by_username(&username).await?;
+        let u = match self.repository.get_user_by_username(&username).await {
+            Ok(user) => user,
+            Err(err) => match err {
+                // Keep login errors non-enumerable and user-friendly.
+                Error::NotFound(_)
+                | Error::DatabaseError(sqlx::Error::RowNotFound)
+                | Error::InvalidInput(_) => {
+                    return Err(Error::Unauthorized(
+                        "Invalid username or password".to_string(),
+                    ));
+                }
+                other => return Err(other),
+            },
+        };
         let parsed_hash = PasswordHash::new(&u.password_hash)
             .map_err(|_| Error::InvalidInput("Stored password hash is invalid".to_string()))?;
         Argon2::default()
             .verify_password(password.as_bytes(), &parsed_hash)
-            .map_err(|_| Error::InvalidInput("Invalid username or password".to_string()))?;
+            .map_err(|_| Error::Unauthorized("Invalid username or password".to_string()))?;
         let now = Utc::now();
         let _ = self.repository.update_last_login(u.id, now).await?;
         let u = self.repository.get_user_by_id(u.id).await?; // reload to get updated last_login
@@ -897,7 +910,26 @@ mod tests {
             .err()
             .unwrap();
         match err {
-            Error::InvalidInput(msg) => assert!(msg.contains("Invalid username or password")),
+            Error::Unauthorized(msg) => assert!(msg.contains("Invalid username or password")),
+            _ => panic!("wrong error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_authenticate_user_missing_username_is_unauthorized() {
+        let mut mock = MockUserRepository::new();
+        mock.expect_get_user_by_username()
+            .returning(|_| Err(Error::DatabaseError(sqlx::Error::RowNotFound)));
+
+        let logic = user_logic(Box::new(mock), create_mock_activity_log());
+        let err = logic
+            .authenticate_user("missing-user".to_string(), "password".to_string())
+            .await
+            .err()
+            .unwrap();
+
+        match err {
+            Error::Unauthorized(msg) => assert!(msg.contains("Invalid username or password")),
             _ => panic!("wrong error"),
         }
     }

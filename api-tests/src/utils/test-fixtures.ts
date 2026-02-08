@@ -67,11 +67,11 @@ export function createTeamFixture(overrides: Partial<{
  */
 export function createRoleFixture(overrides: Partial<{
     name: string;
-    permissions: string[];
+    description: string;
 }> = {}) {
     return {
         name: overrides.name || uniqueName('role'),
-        permissions: overrides.permissions || ['read:features', 'write:features'],
+        description: overrides.description || 'Test role created by API automation',
     };
 }
 
@@ -181,15 +181,23 @@ export function createPipelineFixture(overrides: Partial<{
  */
 export function createApprovalPolicyFixture(overrides: Partial<{
     name: string;
+    description: string;
     requiredApprovers: number;
-    approverRoles: string[];
+    approverRoleIds: string[];
     appliesTo: 'all' | 'production_only' | 'specific_environments';
+    environmentIds: string[];
+    autoApproveAfterHours: number;
+    enabled: boolean;
 }> = {}) {
     return {
         name: overrides.name || uniqueName('policy'),
-        requiredApprovers: overrides.requiredApprovers || 1,
-        approverRoles: overrides.approverRoles || ['Admin'],
+        description: overrides.description || 'Test approval policy for API automation',
         appliesTo: overrides.appliesTo || 'all',
+        environmentIds: overrides.environmentIds,
+        requiredApprovers: overrides.requiredApprovers || 1,
+        approverRoleIds: overrides.approverRoleIds || ['00000000-0000-0000-0000-000000000003'],
+        autoApproveAfterHours: overrides.autoApproveAfterHours,
+        enabled: overrides.enabled ?? true,
     };
 }
 

@@ -165,16 +165,16 @@ impl UserRepository for UserRepositoryImpl {
     }
 
     async fn get_user_by_username(&self, username: &str) -> Result<User, Error> {
-        let result = sqlx::query!(
+        let row = sqlx::query!(
             r#"SELECT id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, enabled,
                        created_at, updated_at, last_login, is_temporary_password
                 FROM users WHERE username = $1"#,
             username
         )
-        .fetch_one(&self.pool)
-        .await;
-
-        let row = handle_error(None, result)?;
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Error::DatabaseError)?
+        .ok_or_else(|| Error::InvalidInput("User not found".to_string()))?;
         Ok(User {
             id: row.id,
             username: row.username,
@@ -193,16 +193,16 @@ impl UserRepository for UserRepositoryImpl {
     }
 
     async fn get_user_by_email(&self, email: &str) -> Result<User, Error> {
-        let result = sqlx::query!(
+        let row = sqlx::query!(
             r#"SELECT id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, enabled,
                        created_at, updated_at, last_login, is_temporary_password
                 FROM users WHERE email = $1"#,
             email
         )
-        .fetch_one(&self.pool)
-        .await;
-
-        let row = handle_error(None, result)?;
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Error::DatabaseError)?
+        .ok_or_else(|| Error::InvalidInput("User not found".to_string()))?;
         Ok(User {
             id: row.id,
             username: row.username,

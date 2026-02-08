@@ -358,7 +358,7 @@ describe('Extended Criteria', () => {
         it('should create criterion with multiple groups (AND between groups)', async () => {
             const fixture = {
                 priority: 1,
-                groups: [
+                ruleGroups: [
                     {
                         logicOperator: 'OR',
                         conditions: [{ contextKey: 'a', operator: 'EQUALS', value: '1' }]
@@ -382,7 +382,7 @@ describe('Extended Criteria', () => {
         it('should create complex nested rule logic', async () => {
             const fixture = {
                 priority: 1,
-                groups: [
+                ruleGroups: [
                     {
                         logicOperator: 'AND',
                         conditions: [

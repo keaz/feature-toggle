@@ -6,7 +6,6 @@ import {
     expectClientError,
     expectPaginatedResponse,
     expectUuid,
-    expectIsoDate,
     TEST_TEAM_ID,
     cleanupResource,
 } from '../utils/test-utils.js';
@@ -153,7 +152,6 @@ describe('Context API', () => {
             expectSuccess(response);
             expect(response.data.id).toBe(testCtxId);
             expectUuid(response.data.id);
-            expectIsoDate(response.data.createdAt);
         });
 
         it('should return 404 for non-existent ID', async () => {

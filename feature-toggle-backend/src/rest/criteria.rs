@@ -565,7 +565,7 @@ pub(crate) async fn set_stage_criteria(
     let mut tx = pool
         .begin()
         .await
-        .map_err(|e| RestError::internal(e.to_string()))?;
+        .map_err(|_| RestError::internal("Failed to start transaction"))?;
 
     let feature_repo_tx = crate::database::feature::feature_repository_tx(pool.get_ref().clone());
     let variant_repo_tx = crate::database::variant_allocations::variant_allocations_repository_tx(
@@ -588,7 +588,7 @@ pub(crate) async fn set_stage_criteria(
         Ok(updated) => {
             tx.commit()
                 .await
-                .map_err(|e| RestError::internal(e.to_string()))?;
+                .map_err(|_| RestError::internal("Failed to commit transaction"))?;
 
             if let Ok(Some(feature_id)) = feature_repo.get_feature_id_by_stage_id(stage_uuid).await
             {
@@ -656,7 +656,7 @@ pub(crate) async fn set_variant_allocations(
     let mut tx = db_pool
         .begin()
         .await
-        .map_err(|e| RestError::internal(e.to_string()))?;
+        .map_err(|_| RestError::internal("Failed to start transaction"))?;
 
     let result = repo_tx
         .set_allocations_tx(&mut tx, criteria_uuid, db_allocations)
@@ -666,7 +666,7 @@ pub(crate) async fn set_variant_allocations(
         Ok(saved) => {
             tx.commit()
                 .await
-                .map_err(|e| RestError::internal(e.to_string()))?;
+                .map_err(|_| RestError::internal("Failed to commit transaction"))?;
             let response: Vec<VariantAllocationResponse> = saved
                 .into_iter()
                 .map(|alloc| VariantAllocationResponse {
@@ -726,7 +726,7 @@ pub(crate) async fn create_rule_group(
     let mut tx = db_pool
         .begin()
         .await
-        .map_err(|e| RestError::internal(e.to_string()))?;
+        .map_err(|_| RestError::internal("Failed to start transaction"))?;
 
     let result = repo_tx.create_rule_group_tx(&mut tx, db_input).await;
 
@@ -734,7 +734,7 @@ pub(crate) async fn create_rule_group(
         Ok(group) => {
             tx.commit()
                 .await
-                .map_err(|e| RestError::internal(e.to_string()))?;
+                .map_err(|_| RestError::internal("Failed to commit transaction"))?;
             let conditions = repo_tx
                 .get_rule_conditions(group.id)
                 .await
@@ -796,7 +796,7 @@ pub(crate) async fn update_rule_group(
     let mut tx = db_pool
         .begin()
         .await
-        .map_err(|e| RestError::internal(e.to_string()))?;
+        .map_err(|_| RestError::internal("Failed to start transaction"))?;
 
     let result = repo_tx
         .update_rule_group_tx(&mut tx, group_uuid, db_input)
@@ -806,7 +806,7 @@ pub(crate) async fn update_rule_group(
         Ok(group) => {
             tx.commit()
                 .await
-                .map_err(|e| RestError::internal(e.to_string()))?;
+                .map_err(|_| RestError::internal("Failed to commit transaction"))?;
             let conditions = repo_tx
                 .get_rule_conditions(group.id)
                 .await
@@ -845,7 +845,7 @@ pub(crate) async fn delete_rule_group(
     let mut tx = db_pool
         .begin()
         .await
-        .map_err(|e| RestError::internal(e.to_string()))?;
+        .map_err(|_| RestError::internal("Failed to start transaction"))?;
 
     let result = repo_tx.delete_rule_group_tx(&mut tx, group_uuid).await;
 
@@ -853,7 +853,7 @@ pub(crate) async fn delete_rule_group(
         Ok(_) => {
             tx.commit()
                 .await
-                .map_err(|e| RestError::internal(e.to_string()))?;
+                .map_err(|_| RestError::internal("Failed to commit transaction"))?;
             Ok(HttpResponse::NoContent().finish())
         }
         Err(err) => {

@@ -5,7 +5,7 @@ COPY . .
 
 ENV DATABASE_URL=postgres://postgres:local123@postgres_server:5432/feature_toggle
 
-RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y pkg-config libssl-dev curl && rm -rf /var/lib/apt/lists/*
 #RUN apt-get update && apt-get install -y libssl-dev pkg-config
 RUN cargo install sqlx-cli --no-default-features --features postgres
 

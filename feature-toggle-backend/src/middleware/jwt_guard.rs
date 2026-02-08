@@ -16,6 +16,8 @@ pub struct Claims {
     pub roles: Vec<String>, // user role names
     pub exp: usize,         // expiration timestamp
     pub iat: usize,         // issued at timestamp
+    #[serde(default)]
+    pub jti: Option<String>, // unique token id
 }
 
 pub struct JwtGuard {
@@ -152,9 +154,11 @@ where
                             req.path()
                         );
                         // If we can't get the secret, reject the token
-                        let response = HttpResponse::Unauthorized().json(serde_json::json!({
-                            "error": "JWT secret unavailable",
-                            "details": "Database error retrieving secret"
+                        let response = HttpResponse::InternalServerError().json(serde_json::json!({
+                            "error": "internal",
+                            "message": "Authentication service is temporarily unavailable",
+                            "code": "auth_secret_unavailable",
+                            "details": null
                         }));
                         return Ok(req.into_response(response).map_into_right_body());
                     }
@@ -278,6 +282,7 @@ pub fn create_jwt_token(
         roles,
         exp: exp.timestamp() as usize,
         iat: now.timestamp() as usize,
+        jti: Some(Uuid::new_v4().to_string()),
     };
 
     let header = jsonwebtoken::Header::new(Algorithm::HS256);

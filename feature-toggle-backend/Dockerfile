@@ -22,7 +22,7 @@ RUN cargo chef prepare --recipe-path recipe.json --bin feature-toggle-backend
 FROM chef AS builder
 
 # Install dependencies once
-RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y pkg-config libssl-dev curl && rm -rf /var/lib/apt/lists/*
 
 # Install sqlx-cli for migrations
 RUN cargo install sqlx-cli --no-default-features --features postgres

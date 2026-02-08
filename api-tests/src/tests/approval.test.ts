@@ -14,10 +14,9 @@ import {
  * Approval API Tests
  * 
  * Endpoints:
- * - GET /api/v1/teams/{teamId}/approvals - List approval requests
- * - GET /api/v1/approvals/{id} - Get approval request by ID
- * - POST /api/v1/approvals/{id}/approve - Approve request
- * - POST /api/v1/approvals/{id}/reject - Reject request
+ * - GET /api/v1/teams/{teamId}/approval-requests - List approval requests
+ * - POST /api/v1/approval-requests/{id}/approve - Approve request
+ * - POST /api/v1/approval-requests/{id}/reject - Reject request
  * - GET /api/v1/teams/{teamId}/approval-policies - List approval policies
  * - GET /api/v1/approval-policies/{id} - Get approval policy
  * - POST /api/v1/teams/{teamId}/approval-policies - Create approval policy
@@ -25,6 +24,8 @@ import {
  * - DELETE /api/v1/approval-policies/{id} - Delete approval policy
  */
 describe('Approval API', () => {
+    const TEAM_ADMIN_ROLE_ID = '00000000-0000-0000-0000-000000000003';
+    const APPROVER_ROLE_ID = '00000000-0000-0000-0000-000000000001';
     let client: ApiClient;
     let testEnvironmentId: string;
     const createdPolicyIds: string[] = [];
@@ -49,17 +50,17 @@ describe('Approval API', () => {
         }
     });
 
-    describe('GET /teams/{teamId}/approvals', () => {
+    describe('GET /teams/{teamId}/approval-requests', () => {
         it('should list approval requests for a team', async () => {
-            const response = await client.get(`/teams/${TEST_TEAM_ID}/approvals`);
+            const response = await client.get(`/teams/${TEST_TEAM_ID}/approval-requests`);
 
             expectSuccess(response);
             expectPaginatedResponse(response);
         });
 
         it('should support pagination', async () => {
-            const response = await client.get(`/teams/${TEST_TEAM_ID}/approvals`, {
-                page: 1,
+            const response = await client.get(`/teams/${TEST_TEAM_ID}/approval-requests`, {
+                offset: 0,
                 limit: 5,
             });
 
@@ -68,27 +69,27 @@ describe('Approval API', () => {
         });
 
         it('should filter by status', async () => {
-            const response = await client.get(`/teams/${TEST_TEAM_ID}/approvals`, {
-                status: 'pending',
+            const response = await client.get(`/teams/${TEST_TEAM_ID}/approval-requests`, {
+                statuses: 'pending',
             });
 
             expectSuccess(response);
         });
 
         it('should return 401 without authentication', async () => {
-            const response = await client.getUnauthenticated(`/teams/${TEST_TEAM_ID}/approvals`);
+            const response = await client.getUnauthenticated(`/teams/${TEST_TEAM_ID}/approval-requests`);
 
             expectStatus(response, 401);
         });
 
         it('should return 401 with invalid token', async () => {
-            const response = await client.getWithInvalidToken(`/teams/${TEST_TEAM_ID}/approvals`);
+            const response = await client.getWithInvalidToken(`/teams/${TEST_TEAM_ID}/approval-requests`);
 
             expectStatus(response, 401);
         });
 
         it('should return 400 for invalid team ID', async () => {
-            const response = await client.get('/teams/invalid-uuid/approvals');
+            const response = await client.get('/teams/invalid-uuid/approval-requests');
 
             expectClientError(response);
         });
@@ -130,12 +131,9 @@ describe('Approval API', () => {
         it('should create policy with specific environments', async () => {
             const fixture = createApprovalPolicyFixture({
                 appliesTo: 'specific_environments',
-            });
-            const requestBody = {
-                ...fixture,
                 environmentIds: [testEnvironmentId],
-            };
-            const response = await client.post(`/teams/${TEST_TEAM_ID}/approval-policies`, requestBody);
+            });
+            const response = await client.post(`/teams/${TEST_TEAM_ID}/approval-policies`, fixture);
 
             expectStatus(response, 201);
             createdPolicyIds.push(response.data.id);
@@ -144,7 +142,7 @@ describe('Approval API', () => {
         it('should create policy requiring multiple approvers', async () => {
             const fixture = createApprovalPolicyFixture({
                 requiredApprovers: 2,
-                approverRoles: ['Admin', 'Reviewer'],
+                approverRoleIds: [TEAM_ADMIN_ROLE_ID, APPROVER_ROLE_ID],
             });
             const response = await client.post(`/teams/${TEST_TEAM_ID}/approval-policies`, fixture);
 
@@ -158,7 +156,7 @@ describe('Approval API', () => {
             const response = await client.post(`/teams/${TEST_TEAM_ID}/approval-policies`, {
                 name: '',
                 requiredApprovers: 1,
-                approverRoles: ['Admin'],
+                approverRoleIds: [TEAM_ADMIN_ROLE_ID],
                 appliesTo: 'all',
             });
 
@@ -169,7 +167,7 @@ describe('Approval API', () => {
             const response = await client.post(`/teams/${TEST_TEAM_ID}/approval-policies`, {
                 name: createApprovalPolicyFixture().name,
                 requiredApprovers: -1,
-                approverRoles: ['Admin'],
+                approverRoleIds: [TEAM_ADMIN_ROLE_ID],
                 appliesTo: 'all',
             });
 
@@ -180,7 +178,7 @@ describe('Approval API', () => {
             const response = await client.post(`/teams/${TEST_TEAM_ID}/approval-policies`, {
                 name: createApprovalPolicyFixture().name,
                 requiredApprovers: 1,
-                approverRoles: [],
+                approverRoleIds: [],
                 appliesTo: 'all',
             });
 
@@ -331,7 +329,7 @@ describe('Approval API', () => {
 
         it('should return 404 when approving non-existent request', async () => {
             const fakeId = '00000000-0000-0000-0000-000000000000';
-            const response = await client.post(`/approvals/${fakeId}/approve`, {
+            const response = await client.post(`/approval-requests/${fakeId}/approve`, {
                 comment: 'Approved',
             });
 
@@ -340,7 +338,7 @@ describe('Approval API', () => {
 
         it('should return 404 when rejecting non-existent request', async () => {
             const fakeId = '00000000-0000-0000-0000-000000000000';
-            const response = await client.post(`/approvals/${fakeId}/reject`, {
+            const response = await client.post(`/approval-requests/${fakeId}/reject`, {
                 comment: 'Rejected',
             });
 
@@ -349,7 +347,7 @@ describe('Approval API', () => {
 
         it('should return 401 when approving without authentication', async () => {
             const unauthClient = createApiClient();
-            const response = await unauthClient.post('/approvals/some-id/approve', {
+            const response = await unauthClient.post('/approval-requests/some-id/approve', {
                 comment: 'Approved',
             });
 

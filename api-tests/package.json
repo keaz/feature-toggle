@@ -6,6 +6,13 @@
     "scripts": {
         "test": "jest --runInBand",
         "test:watch": "jest --watch",
+        "test:docker": "../scripts/run-api-tests-docker.sh",
+        "test:docker:keep": "API_TEST_KEEP_STACK=1 ../scripts/run-api-tests-docker.sh",
+        "docker:up": "docker compose -p feature-toggle-api-tests -f ../docker-compose.api-tests.yml up -d --build postgres",
+        "docker:seed": "docker compose -p feature-toggle-api-tests -f ../docker-compose.api-tests.yml run -T --no-deps --rm backend_seed",
+        "docker:start-backend": "docker compose -p feature-toggle-api-tests -f ../docker-compose.api-tests.yml up -d --build feature_toggle_backend",
+        "docker:down": "docker compose -p feature-toggle-api-tests -f ../docker-compose.api-tests.yml down -v --remove-orphans",
+        "docker:logs": "docker compose -p feature-toggle-api-tests -f ../docker-compose.api-tests.yml logs -f feature_toggle_backend postgres",
         "test:environment": "jest environment.test.ts",
         "test:context": "jest context.test.ts",
         "test:team": "jest team.test.ts",

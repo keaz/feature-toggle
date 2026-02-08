@@ -1,5 +1,4 @@
 import { ApiClient, createApiClient } from '../utils/api-client.js';
-import { createUserFixture } from '../utils/test-fixtures.js';
 import {
     expectStatus,
     expectSuccess,
@@ -12,16 +11,18 @@ import {
  * 
  * Endpoints:
  * - POST /api/v1/auth/login - Login
- * - POST /api/v1/auth/logout - Logout  
- * - GET /api/v1/auth/status - Check auth status
- * - POST /api/v1/auth/reset-password - Request password reset
- * - POST /api/v1/auth/reset-password/{token} - Complete password reset
+ * - POST /api/v1/auth/logout - Logout
+ * - GET /api/v1/auth/status - Check admin bootstrap status
+ * - POST /api/v1/auth/reset-password - Reset current user password
  */
 describe('Auth API', () => {
     // Default admin credentials
+    const authUsername = process.env.API_USERNAME || 'api-test-admin';
+    const authPassword = process.env.API_PASSWORD || 'password123';
+
     const validCredentials = {
-        username: 'admin',
-        password: 'password123',
+        username: authUsername,
+        password: authPassword,
     };
 
     describe('POST /auth/login', () => {
@@ -47,7 +48,7 @@ describe('Auth API', () => {
         it('should reject invalid password', async () => {
             const client = createApiClient();
             const response = await client.post('/auth/login', {
-                username: 'admin',
+                username: authUsername,
                 password: 'wrong-password',
             });
 
@@ -77,7 +78,7 @@ describe('Auth API', () => {
         it('should reject empty password', async () => {
             const client = createApiClient();
             const response = await client.post('/auth/login', {
-                username: 'admin',
+                username: authUsername,
                 password: '',
             });
 
@@ -105,7 +106,7 @@ describe('Auth API', () => {
         it('should reject SQL injection attempt in password', async () => {
             const client = createApiClient();
             const response = await client.post('/auth/login', {
-                username: 'admin',
+                username: authUsername,
                 password: "' OR '1'='1",
             });
 
@@ -133,56 +134,65 @@ describe('Auth API', () => {
 
         it('should invalidate token after logout', async () => {
             const client = createApiClient();
-            await client.authenticate();
+            const loginResponse = await client.post('/auth/login', validCredentials);
+            const token = loginResponse.data.token;
+            const rawHttp = (client as any).client;
 
-            // Logout
-            await client.post('/auth/logout', {});
+            const logoutResponse = await rawHttp.post('/auth/logout', {}, {
+                headers: {
+                    Authorization: `Bearer ${token}`,
+                },
+                validateStatus: () => true,
+            });
+            expectSuccess(logoutResponse);
 
-            // Token should be invalidated - next authenticated request should fail
-            // Note: This depends on server-side token invalidation
-            const statusResponse = await client.get('/auth/status');
-            // May still work if token isn't server-side invalidated
-            expect([200, 401]).toContain(statusResponse.status);
+            // Use a protected endpoint; /auth/status is intentionally public.
+            const protectedResponse = await rawHttp.get('/roles', {
+                headers: {
+                    Authorization: `Bearer ${token}`,
+                },
+                validateStatus: () => true,
+            });
+            expectStatus(protectedResponse, 401);
         });
     });
 
     describe('GET /auth/status', () => {
-        it('should return user info for authenticated user', async () => {
+        it('should return adminConfigured flag', async () => {
             const client = createApiClient();
-            await client.authenticate();
-
             const response = await client.get('/auth/status');
 
             expectSuccess(response);
-            expect(response.data).toHaveProperty('id');
-            expect(response.data).toHaveProperty('username');
+            expect(response.data).toHaveProperty('adminConfigured');
+            expect(typeof response.data.adminConfigured).toBe('boolean');
         });
 
-        it('should return admin user details', async () => {
+        it('should return adminConfigured=true after admin bootstrap', async () => {
             const client = createApiClient();
-            await client.authenticate();
-
+            await client.ensureAdminExists();
             const response = await client.get('/auth/status');
 
             expectSuccess(response);
-            expect(response.data.username).toBe('admin');
+            expect(response.data.adminConfigured).toBe(true);
         });
 
-        it('should return 401 without authentication', async () => {
+        it('should be accessible without authentication', async () => {
             const client = createApiClient();
             const response = await client.getUnauthenticated('/auth/status');
 
-            expectStatus(response, 401);
+            expectStatus(response, 200);
+            expect(response.data).toHaveProperty('adminConfigured');
         });
 
-        it('should return 401 with invalid token', async () => {
+        it('should ignore invalid token and still return status', async () => {
             const client = createApiClient();
             const response = await client.getWithInvalidToken('/auth/status');
 
-            expectStatus(response, 401);
+            expectStatus(response, 200);
+            expect(response.data).toHaveProperty('adminConfigured');
         });
 
-        it('should return 401 with expired token', async () => {
+        it('should return status even with expired token header', async () => {
             // Using a token that looks valid but is expired
             const client = createApiClient();
             const expiredToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiZXhwIjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c';
@@ -194,10 +204,11 @@ describe('Auth API', () => {
                 validateStatus: () => true,
             });
 
-            expectStatus(response, 401);
+            expectStatus(response, 200);
+            expect(response.data).toHaveProperty('adminConfigured');
         });
 
-        it('should return 401 with malformed token', async () => {
+        it('should return status even with malformed token header', async () => {
             const client = createApiClient();
             const malformedToken = 'not.a.valid.jwt.token';
 
@@ -208,67 +219,52 @@ describe('Auth API', () => {
                 validateStatus: () => true,
             });
 
-            expectStatus(response, 401);
+            expectStatus(response, 200);
+            expect(response.data).toHaveProperty('adminConfigured');
         });
     });
 
     describe('Password Reset Flow', () => {
-        it('should handle password reset request for valid email', async () => {
-            const client = createApiClient();
-            // Use an email that exists - admin email
-            const response = await client.post('/auth/reset-password', {
-                email: 'admin@fluxgate.io',
-            });
-
-            // Should succeed even if it doesn't send email (to avoid enumeration)
-            expect([200, 202, 404]).toContain(response.status);
-        });
-
-        it('should not reveal if email exists', async () => {
-            const client = createApiClient();
-
-            // Request for existing email
-            const existingResponse = await client.post('/auth/reset-password', {
-                email: 'admin@fluxgate.io',
-            });
-
-            // Request for non-existing email
-            const nonExistingResponse = await client.post('/auth/reset-password', {
-                email: 'nonexistent@example.com',
-            });
-
-            // Both should return similar status to prevent email enumeration
-            // Ideally both should return 200/202
-            expect([existingResponse.status, nonExistingResponse.status]).toContain(
-                existingResponse.status
-            );
-        });
-
-        it('should reject empty email', async () => {
+        it('should require authentication to reset password', async () => {
             const client = createApiClient();
             const response = await client.post('/auth/reset-password', {
-                email: '',
-            });
-
-            expectClientError(response);
-        });
-
-        it('should reject invalid email format', async () => {
-            const client = createApiClient();
-            const response = await client.post('/auth/reset-password', {
-                email: 'not-an-email',
-            });
-
-            expectClientError(response);
-        });
-
-        it('should reject password reset with invalid token', async () => {
-            const client = createApiClient();
-            const response = await client.post('/auth/reset-password/invalid-token-12345', {
+                currentPassword: authPassword,
                 newPassword: 'NewPassword123!',
             });
 
-            // Invalid token should fail
+            expectStatus(response, 401);
+        });
+
+        it('should reject incorrect current password', async () => {
+            const client = createApiClient();
+            await client.authenticate();
+            const response = await client.post('/auth/reset-password', {
+                currentPassword: 'WrongPassword123!',
+                newPassword: 'NewPassword123!',
+            });
+
+            expectClientError(response);
+        });
+
+        it('should reject empty current password', async () => {
+            const client = createApiClient();
+            await client.authenticate();
+            const response = await client.post('/auth/reset-password', {
+                currentPassword: '',
+                newPassword: 'NewPassword123!',
+            });
+
+            expectClientError(response);
+        });
+
+        it('should reject empty new password', async () => {
+            const client = createApiClient();
+            await client.authenticate();
+            const response = await client.post('/auth/reset-password', {
+                currentPassword: 'WrongPassword123!',
+                newPassword: '',
+            });
+
             expectClientError(response);
         });
     });
@@ -281,7 +277,7 @@ describe('Auth API', () => {
             // Make multiple failed login attempts
             for (let i = 0; i < 10; i++) {
                 const response = await client.post('/auth/login', {
-                    username: 'admin',
+                    username: authUsername,
                     password: 'wrong-password',
                 });
                 responses.push(response.status);
@@ -321,7 +317,7 @@ describe('Auth API', () => {
             const token = loginResponse.data.token;
 
             // Try to use token without Bearer prefix
-            const response = await client['client'].get('/auth/status', {
+            const response = await client['client'].get('/roles', {
                 headers: {
                     Authorization: token, // Missing 'Bearer ' prefix
                 },
@@ -337,7 +333,7 @@ describe('Auth API', () => {
             const token = loginResponse.data.token;
 
             // Try to pass token as query parameter instead of header
-            const response = await client['client'].get('/auth/status', {
+            const response = await client['client'].get('/roles', {
                 params: { token },
                 validateStatus: () => true,
             });

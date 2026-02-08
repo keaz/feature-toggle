@@ -20,6 +20,15 @@ export function expectStatus(response: AxiosResponse, expectedStatus: number): v
  */
 export function expectSuccess(response: AxiosResponse): void {
     if (response.status < 200 || response.status >= 300) {
+        if (response.status >= 300 && response.status < 400) {
+            const location = (response.headers as Record<string, string | undefined>)?.location;
+            const method = response.config?.method?.toUpperCase() || 'REQUEST';
+            const reqPath = response.config?.url || '';
+            console.error(
+                `Redirect response: ${response.status} for ${method} ${reqPath}` +
+                `${location ? ` -> ${location}` : ''}`
+            );
+        }
         console.error('Response body:', JSON.stringify(response.data, null, 2));
     }
     expect(response.status).toBeGreaterThanOrEqual(200);

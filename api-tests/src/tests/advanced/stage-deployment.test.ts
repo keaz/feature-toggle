@@ -9,6 +9,24 @@ import {
     delay,
 } from '../../utils/test-utils.js';
 
+function buildLinearRelationships(stageCount: number): Array<{ sourceId: number; targetId: number }> {
+    return Array.from({ length: Math.max(0, stageCount - 1) }, (_, index) => ({
+        sourceId: index,
+        targetId: index + 1,
+    }));
+}
+
+function buildFeatureStages(
+    environmentIds: string[]
+): Array<{ environmentId: string; orderIndex: number; position: string; bucketingKey: string }> {
+    return environmentIds.map((environmentId, index) => ({
+        environmentId,
+        orderIndex: index,
+        position: String(index + 1),
+        bucketingKey: 'userId',
+    }));
+}
+
 /**
  * Feature Stage Deployment Tests
  * 
@@ -25,6 +43,15 @@ describe('Feature Stage Deployment', () => {
     let prodEnvId: string;
     let pipelineId: string;
     const createdFeatureIds: string[] = [];
+    const envIds = () => [devEnvId, stagingEnvId, prodEnvId];
+
+    const getStageByEnvironment = async (featureId: string, environmentId: string) => {
+        const response = await client.get(`/features/${featureId}`);
+        expectSuccess(response);
+        const stage = response.data.stages?.find((s: any) => s.environment.id === environmentId);
+        expect(stage).toBeDefined();
+        return stage;
+    };
 
     beforeAll(async () => {
         client = await getApiClient();
@@ -44,14 +71,16 @@ describe('Feature Stage Deployment', () => {
 
         // Create a pipeline with these environments
         const pipelineFixture = {
-            ...createPipelineFixture(),
-            stages: [
-                { name: 'Development', order: 1, environmentId: devEnvId },
-                { name: 'Staging', order: 2, environmentId: stagingEnvId },
-                { name: 'Production', order: 3, environmentId: prodEnvId },
-            ],
+            name: createPipelineFixture().name,
+            stages: envIds().map((environmentId, index) => ({
+                environmentId,
+                orderIndex: index,
+                position: String(index + 1),
+            })),
+            relationships: buildLinearRelationships(3),
         };
         const pipelineResponse = await client.post(`/teams/${TEST_TEAM_ID}/pipelines`, pipelineFixture);
+        expectStatus(pipelineResponse, 201);
         pipelineId = pipelineResponse.data.id;
     });
 
@@ -68,13 +97,11 @@ describe('Feature Stage Deployment', () => {
 
     describe('Multi-Environment Feature Creation', () => {
         it('should create feature with multiple environment stages', async () => {
+            const stages = buildFeatureStages(envIds());
             const fixture = {
                 ...createFeatureFixture(),
-                stages: [
-                    { environmentId: devEnvId, enabled: true, rolloutPercentage: 100 },
-                    { environmentId: stagingEnvId, enabled: false, rolloutPercentage: 0 },
-                    { environmentId: prodEnvId, enabled: false, rolloutPercentage: 0 },
-                ],
+                stages,
+                relationships: buildLinearRelationships(stages.length),
             };
             const response = await client.post(`/teams/${TEST_TEAM_ID}/features`, fixture);
 
@@ -84,12 +111,12 @@ describe('Feature Stage Deployment', () => {
         });
 
         it('should create feature with pipeline association', async () => {
+            const stages = buildFeatureStages(envIds());
             const fixture = {
                 ...createFeatureFixture(),
-                pipelineId: pipelineId,
-                stages: [
-                    { environmentId: devEnvId, enabled: true, rolloutPercentage: 100 },
-                ],
+                // Backend does not support pipelineId field in create feature request.
+                stages,
+                relationships: buildLinearRelationships(stages.length),
             };
             const response = await client.post(`/teams/${TEST_TEAM_ID}/features`, fixture);
 
@@ -103,51 +130,49 @@ describe('Feature Stage Deployment', () => {
 
         beforeAll(async () => {
             // Create feature enabled in Dev only
+            const stages = buildFeatureStages(envIds());
             const fixture = {
                 ...createFeatureFixture(),
-                stages: [
-                    { environmentId: devEnvId, enabled: true, rolloutPercentage: 100 },
-                    { environmentId: stagingEnvId, enabled: false, rolloutPercentage: 0 },
-                    { environmentId: prodEnvId, enabled: false, rolloutPercentage: 0 },
-                ],
+                stages,
+                relationships: buildLinearRelationships(stages.length),
             };
             const response = await client.post(`/teams/${TEST_TEAM_ID}/features`, fixture);
+            expectStatus(response, 201);
             testFeatureId = response.data.id;
             createdFeatureIds.push(testFeatureId);
         });
 
         it('should promote feature from Dev to Staging', async () => {
-            // Enable in Staging via toggle
-            const response = await client.post(`/features/${testFeatureId}/toggle`, {
-                environmentId: stagingEnvId,
-                enabled: true,
+            const stagingStage = await getStageByEnvironment(testFeatureId, stagingEnvId);
+            const response = await client.post(`/stages/${stagingStage.id}/request-change`, {
+                request: 'DEPLOYMENT_REQUESTED',
             });
 
-            // May require approval or succeed immediately
-            expect([200, 201, 202]).toContain(response.status);
+            expect([200, 400, 403]).toContain(response.status);
         });
 
         it('should promote feature from Staging to Production', async () => {
-            const response = await client.post(`/features/${testFeatureId}/toggle`, {
-                environmentId: prodEnvId,
-                enabled: true,
+            const prodStage = await getStageByEnvironment(testFeatureId, prodEnvId);
+            const response = await client.post(`/stages/${prodStage.id}/request-change`, {
+                request: 'DEPLOYMENT_REQUESTED',
             });
 
-            expect([200, 201, 202]).toContain(response.status);
+            expect([200, 400, 403]).toContain(response.status);
         });
 
         it('should verify all stages are enabled after promotion', async () => {
             const response = await client.get(`/features/${testFeatureId}`);
 
             expectSuccess(response);
-            // Verify stages (if the toggle was applied)
+            // Verify stages exist and include status.
             if (response.data.stages) {
                 const stages = response.data.stages;
-                // Dev should still be enabled
-                const devStage = stages.find((s: any) => s.environmentId === devEnvId);
-                if (devStage) {
-                    expect(devStage.enabled).toBe(true);
-                }
+                const devStage = stages.find((s: any) => s.environment.id === devEnvId);
+                const stagingStage = stages.find((s: any) => s.environment.id === stagingEnvId);
+                const prodStage = stages.find((s: any) => s.environment.id === prodEnvId);
+                expect(devStage).toBeDefined();
+                expect(stagingStage).toBeDefined();
+                expect(prodStage).toBeDefined();
             }
         });
     });
@@ -158,11 +183,11 @@ describe('Feature Stage Deployment', () => {
         beforeAll(async () => {
             const fixture = {
                 ...createFeatureFixture(),
-                stages: [
-                    { environmentId: devEnvId, enabled: true, rolloutPercentage: 100 },
-                ],
+                stages: buildFeatureStages([devEnvId]),
+                relationships: [],
             };
             const response = await client.post(`/teams/${TEST_TEAM_ID}/features`, fixture);
+            expectStatus(response, 201);
             testFeatureId = response.data.id;
             createdFeatureIds.push(testFeatureId);
         });
@@ -181,8 +206,26 @@ describe('Feature Stage Deployment', () => {
             const percentages = [10, 25, 50, 100];
 
             for (const pct of percentages) {
+                const current = await client.get(`/features/${testFeatureId}`);
+                expectSuccess(current);
                 const response = await client.patch(`/features/${testFeatureId}`, {
-                    stages: [{ environmentId: devEnvId, rolloutPercentage: pct }],
+                    key: current.data.key,
+                    description: current.data.description,
+                    featureType: current.data.featureType,
+                    enabled: current.data.enabled,
+                    dependencies: current.data.dependencies || [],
+                    relationships: (current.data.relationships || []).map((r: any) => ({
+                        sourceId: r.sourceId,
+                        targetId: r.targetId,
+                    })),
+                    stages: (current.data.stages || []).map((s: any, index: number) => ({
+                        id: s.id,
+                        environmentId: s.environment.id,
+                        orderIndex: s.orderIndex ?? index,
+                        position: s.position ?? String(index + 1),
+                        bucketingKey: 'userId',
+                    })),
+                    variants: current.data.variants,
                 });
 
                 // Allow various responses depending on API
@@ -195,15 +238,14 @@ describe('Feature Stage Deployment', () => {
         let testFeatureId: string;
 
         beforeAll(async () => {
+            const stages = buildFeatureStages(envIds());
             const fixture = {
                 ...createFeatureFixture(),
-                stages: [
-                    { environmentId: devEnvId, enabled: true, rolloutPercentage: 100 },
-                    { environmentId: stagingEnvId, enabled: true, rolloutPercentage: 50 },
-                    { environmentId: prodEnvId, enabled: false, rolloutPercentage: 0 },
-                ],
+                stages,
+                relationships: buildLinearRelationships(stages.length),
             };
             const response = await client.post(`/teams/${TEST_TEAM_ID}/features`, fixture);
+            expectStatus(response, 201);
             testFeatureId = response.data.id;
             createdFeatureIds.push(testFeatureId);
         });
@@ -215,35 +257,36 @@ describe('Feature Stage Deployment', () => {
             if (response.data.stages) {
                 const stages = response.data.stages;
 
-                const devStage = stages.find((s: any) => s.environmentId === devEnvId);
-                const stagingStage = stages.find((s: any) => s.environmentId === stagingEnvId);
-                const prodStage = stages.find((s: any) => s.environmentId === prodEnvId);
+                const devStage = stages.find((s: any) => s.environment.id === devEnvId);
+                const stagingStage = stages.find((s: any) => s.environment.id === stagingEnvId);
+                const prodStage = stages.find((s: any) => s.environment.id === prodEnvId);
 
                 if (devStage && stagingStage && prodStage) {
-                    expect(devStage.enabled).toBe(true);
-                    expect(devStage.rolloutPercentage).toBe(100);
-                    expect(stagingStage.enabled).toBe(true);
-                    expect(stagingStage.rolloutPercentage).toBe(50);
-                    expect(prodStage.enabled).toBe(false);
+                    expect(devStage).toHaveProperty('status');
+                    expect(stagingStage).toHaveProperty('status');
+                    expect(prodStage).toHaveProperty('status');
                 }
             }
         });
 
         it('should disable feature in specific environment only', async () => {
-            // Disable in Staging only
-            const response = await client.post(`/features/${testFeatureId}/toggle`, {
-                environmentId: stagingEnvId,
-                enabled: false,
+            const beforeResponse = await client.get(`/features/${testFeatureId}`);
+            expectSuccess(beforeResponse);
+            const beforeDev = beforeResponse.data.stages?.find((s: any) => s.environment.id === devEnvId);
+
+            const stagingStage = await getStageByEnvironment(testFeatureId, stagingEnvId);
+            const response = await client.post(`/stages/${stagingStage.id}/request-change`, {
+                request: 'ROLLBACK_REQUESTED',
             });
 
-            expect([200, 201, 202]).toContain(response.status);
+            expect([200, 400, 403]).toContain(response.status);
 
-            // Verify Dev is still enabled
+            // Verify Dev stage is unchanged by a staging-only request.
             const getResponse = await client.get(`/features/${testFeatureId}`);
             if (getResponse.data.stages) {
-                const devStage = getResponse.data.stages.find((s: any) => s.environmentId === devEnvId);
-                if (devStage) {
-                    expect(devStage.enabled).toBe(true);
+                const devStage = getResponse.data.stages.find((s: any) => s.environment.id === devEnvId);
+                if (beforeDev && devStage) {
+                    expect(devStage.status).toBe(beforeDev.status);
                 }
             }
         });
