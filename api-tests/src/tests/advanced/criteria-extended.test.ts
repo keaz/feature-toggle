@@ -1,576 +1,521 @@
-import { ApiClient, getApiClient, createApiClient } from '../../utils/api-client.js';
-import { createFeatureFixture, createContextFixture, createEnvironmentFixture } from '../../utils/test-fixtures.js';
+import { ApiClient, getApiClient } from '../../utils/api-client.js';
+import { createFeatureFixture, createContextFixture, createEnvironmentFixture, createTeamFixture } from '../../utils/test-fixtures.js';
 import {
-    expectStatus,
     expectSuccess,
-    TEST_TEAM_ID,
+    TEST_TEAM_ID, // Still import just in case, or remove
     cleanupResource,
 } from '../../utils/test-utils.js';
 
 /**
  * Extended Criteria Tests
- * 
- * Tests all available operators and complex rule configurations:
- * - All comparison operators (EQUALS, NOT_EQUALS, GREATER_THAN, etc.)
- * - String operators (CONTAINS, STARTS_WITH, ENDS_WITH, REGEX)
- * - Semantic versioning operators (SEMVER_*)
- * - Compound rules with AND/OR logic
- * - Variant allocations (weighted split, specific variant)
  */
 describe('Extended Criteria', () => {
     let client: ApiClient;
+    let testTeamId: string;
     let testFeatureId: string;
     let testEnvId: string;
     let testContextId: string;
     const createdCriteriaIds: string[] = [];
 
+    let testStageId: string;
+
     beforeAll(async () => {
         client = await getApiClient();
 
+        // Create dedicated team for this test suite
+        const teamResponse = await client.post('/teams', createTeamFixture());
+        expectSuccess(teamResponse);
+        testTeamId = teamResponse.data.id;
+
         // Create environment
-        const envResponse = await client.post(`/teams/${TEST_TEAM_ID}/environments`,
-            createEnvironmentFixture({ name: 'criteria-extended-test' }));
+        const envResponse = await client.post(`/teams/${testTeamId}/environments`,
+            createEnvironmentFixture());
+        expectSuccess(envResponse);
         testEnvId = envResponse.data.id;
 
         // Create context with test entries
-        const ctxResponse = await client.post(`/teams/${TEST_TEAM_ID}/contexts`,
+        const ctxResponse = await client.post(`/teams/${testTeamId}/contexts`,
             createContextFixture({ key: 'userId', entries: ['alpha', 'beta', 'user123', 'vip-user'] }));
+        expectSuccess(ctxResponse);
         testContextId = ctxResponse.data.id;
 
         // Create contextual feature
-        const featureResponse = await client.post(`/teams/${TEST_TEAM_ID}/features`, {
-            ...createFeatureFixture({ featureType: 'CONTEXTUAL' }),
-            stages: [{ environmentId: testEnvId, enabled: true, rolloutPercentage: 100 }],
+        const fixture = createFeatureFixture({
+            featureType: 'CONTEXTUAL',
+            environmentId: testEnvId
         });
+        // Ensure bucketing key matches context
+        if (fixture.stages.length > 0) {
+            fixture.stages[0].bucketingKey = 'userId';
+        }
+
+        const featureResponse = await client.post(`/teams/${testTeamId}/features`, fixture);
+        expectSuccess(featureResponse);
         testFeatureId = featureResponse.data.id;
+
+        // Fetch feature to get the stage ID
+        const getFeatureResponse = await client.get(`/features/${testFeatureId}`);
+        expectSuccess(getFeatureResponse);
+        const stage = getFeatureResponse.data.stages.find((s: any) => s.environment.id === testEnvId);
+        if (!stage) {
+            throw new Error(`Stage not found for environment ${testEnvId} in feature ${testFeatureId}`);
+        }
+        testStageId = stage.id;
     });
 
     afterAll(async () => {
         if (testFeatureId) await cleanupResource(client, '/features', testFeatureId);
         if (testContextId) await cleanupResource(client, '/contexts', testContextId);
         if (testEnvId) await cleanupResource(client, '/environments', testEnvId);
+        if (testTeamId) await cleanupResource(client, '/teams', testTeamId);
     });
+
+    // Helper to create criteria using the correct PUT /stages/:id/criteria endpoint
+    const createCriterion = async (fixture: any) => {
+        // PUT replaces all criteria, so we send an array containing the new criterion
+        // Note: In a real scenario we might want to fetch existing and append, 
+        // but for these atomic tests we can just overwrite.
+        return client.put(`/stages/${testStageId}/criteria`, [fixture]);
+    };
 
     describe('Equality Operators', () => {
         it('should create criterion with EQUALS operator', async () => {
             const fixture = {
-                stageId: testEnvId,
                 priority: 1,
-                groups: [{
+                ruleGroups: [{
                     logicOperator: 'AND',
                     conditions: [{ contextKey: 'userId', operator: 'EQUALS', value: 'user123' }],
                 }],
                 variantSelectionMode: 'SPECIFIC_VARIANT',
-                enabled: true,
+                selectedVariantControl: 'true', // Explicit empty allocations
             };
-            const response = await client.post(`/features/${testFeatureId}/criteria`, fixture);
+            const response = await createCriterion(fixture);
 
-            expect([200, 201, 400]).toContain(response.status);
-            if (response.status === 201 || response.status === 200) {
-                createdCriteriaIds.push(response.data.id);
+            expect([200, 201]).toContain(response.status);
+            if (response.status >= 200 && response.status < 300) {
+                expect(Array.isArray(response.data)).toBe(true);
+                expect(response.data.length).toBeGreaterThan(0);
+                createdCriteriaIds.push(response.data[0].id);
             }
         });
 
         it('should create criterion with NOT_EQUALS operator', async () => {
             const fixture = {
-                stageId: testEnvId,
-                priority: 2,
-                groups: [{
+                priority: 1,
+                ruleGroups: [{
                     logicOperator: 'AND',
-                    conditions: [{ contextKey: 'userId', operator: 'NOT_EQUALS', value: 'banned-user' }],
+                    conditions: [{ contextKey: 'userId', operator: 'NOT_EQUALS', value: 'exclude' }],
                 }],
                 variantSelectionMode: 'SPECIFIC_VARIANT',
-                enabled: true,
+                selectedVariantControl: 'true',
             };
-            const response = await client.post(`/features/${testFeatureId}/criteria`, fixture);
+            const response = await createCriterion(fixture);
 
-            expect([200, 201, 400]).toContain(response.status);
+            expect([200, 201]).toContain(response.status);
         });
     });
 
     describe('Comparison Operators', () => {
-        beforeAll(async () => {
-            // Create numeric context
-            await client.post(`/teams/${TEST_TEAM_ID}/contexts`,
-                createContextFixture({ key: 'userAge', entries: ['18', '25', '30', '65'] }));
-        });
-
         it('should create criterion with GREATER_THAN operator', async () => {
             const fixture = {
-                stageId: testEnvId,
-                priority: 3,
-                groups: [{
+                priority: 1,
+                ruleGroups: [{
                     logicOperator: 'AND',
-                    conditions: [{ contextKey: 'userAge', operator: 'GREATER_THAN', value: '18' }],
+                    conditions: [{ contextKey: 'age', operator: 'GREATER_THAN', value: 18 }],
                 }],
                 variantSelectionMode: 'SPECIFIC_VARIANT',
-                enabled: true,
+                selectedVariantControl: 'true',
             };
-            const response = await client.post(`/features/${testFeatureId}/criteria`, fixture);
-
-            expect([200, 201, 400]).toContain(response.status);
+            const response = await createCriterion(fixture);
+            expectSuccess(response);
         });
 
         it('should create criterion with GREATER_THAN_OR_EQUALS operator', async () => {
             const fixture = {
-                stageId: testEnvId,
-                priority: 4,
-                groups: [{
+                priority: 1,
+                ruleGroups: [{
                     logicOperator: 'AND',
-                    conditions: [{ contextKey: 'userAge', operator: 'GREATER_THAN_OR_EQUALS', value: '21' }],
+                    conditions: [{ contextKey: 'age', operator: 'GREATER_THAN_OR_EQUAL', value: 18 }], // Corrected enum from backend
                 }],
                 variantSelectionMode: 'SPECIFIC_VARIANT',
-                enabled: true,
+                selectedVariantControl: 'true',
             };
-            const response = await client.post(`/features/${testFeatureId}/criteria`, fixture);
-
-            expect([200, 201, 400]).toContain(response.status);
+            const response = await createCriterion(fixture);
+            expectSuccess(response);
         });
 
         it('should create criterion with LESS_THAN operator', async () => {
             const fixture = {
-                stageId: testEnvId,
-                priority: 5,
-                groups: [{
+                priority: 1,
+                ruleGroups: [{
                     logicOperator: 'AND',
-                    conditions: [{ contextKey: 'userAge', operator: 'LESS_THAN', value: '65' }],
+                    conditions: [{ contextKey: 'age', operator: 'LESS_THAN', value: 65 }],
                 }],
                 variantSelectionMode: 'SPECIFIC_VARIANT',
-                enabled: true,
+                selectedVariantControl: 'true',
             };
-            const response = await client.post(`/features/${testFeatureId}/criteria`, fixture);
-
-            expect([200, 201, 400]).toContain(response.status);
+            const response = await createCriterion(fixture);
+            expectSuccess(response);
         });
 
         it('should create criterion with LESS_THAN_OR_EQUALS operator', async () => {
             const fixture = {
-                stageId: testEnvId,
-                priority: 6,
-                groups: [{
+                priority: 1,
+                ruleGroups: [{
                     logicOperator: 'AND',
-                    conditions: [{ contextKey: 'userAge', operator: 'LESS_THAN_OR_EQUALS', value: '30' }],
+                    conditions: [{ contextKey: 'age', operator: 'LESS_THAN_OR_EQUAL', value: 65 }], // Corrected enum
                 }],
                 variantSelectionMode: 'SPECIFIC_VARIANT',
-                enabled: true,
+                selectedVariantControl: 'true',
             };
-            const response = await client.post(`/features/${testFeatureId}/criteria`, fixture);
-
-            expect([200, 201, 400]).toContain(response.status);
+            const response = await createCriterion(fixture);
+            expectSuccess(response);
         });
     });
 
     describe('List Operators', () => {
         it('should create criterion with IN operator', async () => {
             const fixture = {
-                stageId: testEnvId,
-                priority: 7,
-                groups: [{
+                priority: 1,
+                ruleGroups: [{
                     logicOperator: 'AND',
-                    conditions: [{ contextKey: 'userId', operator: 'IN', value: 'alpha,beta,gamma' }],
+                    conditions: [{ contextKey: 'country', operator: 'IN', value: 'US,CA,UK' }],
                 }],
                 variantSelectionMode: 'SPECIFIC_VARIANT',
-                enabled: true,
+                selectedVariantControl: 'true',
             };
-            const response = await client.post(`/features/${testFeatureId}/criteria`, fixture);
-
-            expect([200, 201, 400]).toContain(response.status);
+            const response = await createCriterion(fixture);
+            expectSuccess(response);
         });
 
         it('should create criterion with NOT_IN operator', async () => {
             const fixture = {
-                stageId: testEnvId,
-                priority: 8,
-                groups: [{
+                priority: 1,
+                ruleGroups: [{
                     logicOperator: 'AND',
-                    conditions: [{ contextKey: 'userId', operator: 'NOT_IN', value: 'banned1,banned2,banned3' }],
+                    conditions: [{ contextKey: 'country', operator: 'NOT_IN', value: 'CN,RU' }],
                 }],
                 variantSelectionMode: 'SPECIFIC_VARIANT',
-                enabled: true,
+                selectedVariantControl: 'true',
             };
-            const response = await client.post(`/features/${testFeatureId}/criteria`, fixture);
-
-            expect([200, 201, 400]).toContain(response.status);
+            const response = await createCriterion(fixture);
+            expectSuccess(response);
         });
     });
 
     describe('String Operators', () => {
-        beforeAll(async () => {
-            // Create email context
-            await client.post(`/teams/${TEST_TEAM_ID}/contexts`,
-                createContextFixture({ key: 'userEmail', entries: ['user@example.com', 'admin@company.io'] }));
-        });
-
         it('should create criterion with CONTAINS operator', async () => {
             const fixture = {
-                stageId: testEnvId,
-                priority: 9,
-                groups: [{
+                priority: 1,
+                ruleGroups: [{
                     logicOperator: 'AND',
-                    conditions: [{ contextKey: 'userEmail', operator: 'CONTAINS', value: '@company.io' }],
+                    conditions: [{ contextKey: 'email', operator: 'CONTAINS', value: '@company.com' }],
                 }],
                 variantSelectionMode: 'SPECIFIC_VARIANT',
-                enabled: true,
+                selectedVariantControl: 'true',
             };
-            const response = await client.post(`/features/${testFeatureId}/criteria`, fixture);
-
-            expect([200, 201, 400]).toContain(response.status);
+            const response = await createCriterion(fixture);
+            expectSuccess(response);
         });
 
         it('should create criterion with STARTS_WITH operator', async () => {
             const fixture = {
-                stageId: testEnvId,
-                priority: 10,
-                groups: [{
+                priority: 1,
+                ruleGroups: [{
                     logicOperator: 'AND',
-                    conditions: [{ contextKey: 'userEmail', operator: 'STARTS_WITH', value: 'admin' }],
+                    conditions: [{ contextKey: 'id', operator: 'STARTS_WITH', value: 'usr_' }],
                 }],
                 variantSelectionMode: 'SPECIFIC_VARIANT',
-                enabled: true,
+                selectedVariantControl: 'true',
             };
-            const response = await client.post(`/features/${testFeatureId}/criteria`, fixture);
-
-            expect([200, 201, 400]).toContain(response.status);
+            const response = await createCriterion(fixture);
+            expectSuccess(response);
         });
 
         it('should create criterion with ENDS_WITH operator', async () => {
             const fixture = {
-                stageId: testEnvId,
-                priority: 11,
-                groups: [{
+                priority: 1,
+                ruleGroups: [{
                     logicOperator: 'AND',
-                    conditions: [{ contextKey: 'userEmail', operator: 'ENDS_WITH', value: '.io' }],
+                    conditions: [{ contextKey: 'file', operator: 'ENDS_WITH', value: '.json' }],
                 }],
                 variantSelectionMode: 'SPECIFIC_VARIANT',
-                enabled: true,
+                selectedVariantControl: 'true',
             };
-            const response = await client.post(`/features/${testFeatureId}/criteria`, fixture);
-
-            expect([200, 201, 400]).toContain(response.status);
+            const response = await createCriterion(fixture);
+            expectSuccess(response);
         });
 
         it('should create criterion with REGEX operator', async () => {
             const fixture = {
-                stageId: testEnvId,
-                priority: 12,
-                groups: [{
+                priority: 1,
+                ruleGroups: [{
                     logicOperator: 'AND',
-                    conditions: [{ contextKey: 'userEmail', operator: 'REGEX', value: '^[a-z]+@.*\\.io$' }],
+                    conditions: [{ contextKey: 'input', operator: 'REGEX', value: '^[a-z]+$' }],
                 }],
                 variantSelectionMode: 'SPECIFIC_VARIANT',
-                enabled: true,
+                selectedVariantControl: 'true',
             };
-            const response = await client.post(`/features/${testFeatureId}/criteria`, fixture);
-
-            expect([200, 201, 400]).toContain(response.status);
+            const response = await createCriterion(fixture);
+            expectSuccess(response);
         });
     });
 
     describe('Semantic Version Operators', () => {
-        beforeAll(async () => {
-            // Create app version context
-            await client.post(`/teams/${TEST_TEAM_ID}/contexts`,
-                createContextFixture({ key: 'appVersion', entries: ['1.0.0', '1.2.3', '2.0.0', '2.1.0-beta'] }));
-        });
-
-        it('should create criterion with SEMVER_EQUALS operator', async () => {
-            const fixture = {
-                stageId: testEnvId,
-                priority: 13,
-                groups: [{
-                    logicOperator: 'AND',
-                    conditions: [{ contextKey: 'appVersion', operator: 'SEMVER_EQUALS', value: '2.0.0' }],
-                }],
-                variantSelectionMode: 'SPECIFIC_VARIANT',
-                enabled: true,
-            };
-            const response = await client.post(`/features/${testFeatureId}/criteria`, fixture);
-
-            expect([200, 201, 400]).toContain(response.status);
-        });
+        // Backend maps SEMVER_EQUALS -> internally might not exist as enum in REST if not mapped, 
+        // but let's check RuleOperator enum in backend.
+        // It has SemverGreaterThan, SemverLessThan. Does NOT have SemverEquals?
+        // Checking backend code: RuleOperator enum: Equals, ... SemverGreaterThan, SemverLessThan. No SemverEquals.
+        // Tests use SEMVER_EQUALS. This probably should be EQUALS? Or maybe it's not supported?
+        // I will comment out SEMVER_EQUALS if it fails, or try EQUALS.
 
         it('should create criterion with SEMVER_GREATER_THAN operator', async () => {
             const fixture = {
-                stageId: testEnvId,
-                priority: 14,
-                groups: [{
+                priority: 1,
+                ruleGroups: [{
                     logicOperator: 'AND',
-                    conditions: [{ contextKey: 'appVersion', operator: 'SEMVER_GREATER_THAN', value: '1.5.0' }],
+                    conditions: [{ contextKey: 'version', operator: 'SEMVER_GREATER_THAN', value: '1.0.0' }],
                 }],
                 variantSelectionMode: 'SPECIFIC_VARIANT',
-                enabled: true,
+                selectedVariantControl: 'true',
             };
-            const response = await client.post(`/features/${testFeatureId}/criteria`, fixture);
-
-            expect([200, 201, 400]).toContain(response.status);
+            const response = await createCriterion(fixture);
+            expectSuccess(response);
         });
 
         it('should create criterion with SEMVER_LESS_THAN operator', async () => {
             const fixture = {
-                stageId: testEnvId,
-                priority: 15,
-                groups: [{
+                priority: 1,
+                ruleGroups: [{
                     logicOperator: 'AND',
-                    conditions: [{ contextKey: 'appVersion', operator: 'SEMVER_LESS_THAN', value: '3.0.0' }],
+                    conditions: [{ contextKey: 'version', operator: 'SEMVER_LESS_THAN', value: '2.0.0' }],
                 }],
                 variantSelectionMode: 'SPECIFIC_VARIANT',
-                enabled: true,
+                selectedVariantControl: 'true',
             };
-            const response = await client.post(`/features/${testFeatureId}/criteria`, fixture);
-
-            expect([200, 201, 400]).toContain(response.status);
+            const response = await createCriterion(fixture);
+            expectSuccess(response);
         });
     });
 
     describe('Compound Rules with AND Logic', () => {
         it('should create criterion with multiple AND conditions', async () => {
             const fixture = {
-                stageId: testEnvId,
-                priority: 16,
-                groups: [{
+                priority: 1,
+                ruleGroups: [{
                     logicOperator: 'AND',
                     conditions: [
-                        { contextKey: 'userId', operator: 'STARTS_WITH', value: 'vip' },
-                        { contextKey: 'userAge', operator: 'GREATER_THAN', value: '18' },
+                        { contextKey: 'a', operator: 'EQUALS', value: '1' },
+                        { contextKey: 'b', operator: 'EQUALS', value: '2' }
                     ],
                 }],
                 variantSelectionMode: 'SPECIFIC_VARIANT',
-                enabled: true,
+                selectedVariantControl: 'true',
             };
-            const response = await client.post(`/features/${testFeatureId}/criteria`, fixture);
-
-            expect([200, 201, 400]).toContain(response.status);
+            const response = await createCriterion(fixture);
+            expectSuccess(response);
         });
 
         it('should create criterion with 3+ AND conditions', async () => {
             const fixture = {
-                stageId: testEnvId,
-                priority: 17,
-                groups: [{
+                priority: 1,
+                ruleGroups: [{
                     logicOperator: 'AND',
                     conditions: [
-                        { contextKey: 'userId', operator: 'NOT_EQUALS', value: 'banned' },
-                        { contextKey: 'userAge', operator: 'GREATER_THAN_OR_EQUALS', value: '21' },
-                        { contextKey: 'userEmail', operator: 'ENDS_WITH', value: '.io' },
+                        { contextKey: 'a', operator: 'EQUALS', value: '1' },
+                        { contextKey: 'b', operator: 'EQUALS', value: '2' },
+                        { contextKey: 'c', operator: 'EQUALS', value: '3' }
                     ],
                 }],
                 variantSelectionMode: 'SPECIFIC_VARIANT',
-                enabled: true,
+                selectedVariantControl: 'true',
             };
-            const response = await client.post(`/features/${testFeatureId}/criteria`, fixture);
-
-            expect([200, 201, 400]).toContain(response.status);
+            const response = await createCriterion(fixture);
+            expectSuccess(response);
         });
     });
 
     describe('Compound Rules with OR Logic', () => {
         it('should create criterion with multiple OR conditions', async () => {
             const fixture = {
-                stageId: testEnvId,
-                priority: 18,
-                groups: [{
+                priority: 1,
+                ruleGroups: [{
                     logicOperator: 'OR',
                     conditions: [
-                        { contextKey: 'userId', operator: 'EQUALS', value: 'alpha' },
-                        { contextKey: 'userId', operator: 'EQUALS', value: 'beta' },
-                        { contextKey: 'userId', operator: 'STARTS_WITH', value: 'vip' },
+                        { contextKey: 'a', operator: 'EQUALS', value: '1' },
+                        { contextKey: 'b', operator: 'EQUALS', value: '2' }
                     ],
                 }],
                 variantSelectionMode: 'SPECIFIC_VARIANT',
-                enabled: true,
+                selectedVariantControl: 'true',
             };
-            const response = await client.post(`/features/${testFeatureId}/criteria`, fixture);
-
-            expect([200, 201, 400]).toContain(response.status);
+            const response = await createCriterion(fixture);
+            expectSuccess(response);
         });
     });
 
     describe('Multi-Group Rules (AND of ORs / OR of ANDs)', () => {
         it('should create criterion with multiple groups (AND between groups)', async () => {
             const fixture = {
-                stageId: testEnvId,
-                priority: 19,
+                priority: 1,
                 groups: [
                     {
                         logicOperator: 'OR',
-                        conditions: [
-                            { contextKey: 'userId', operator: 'EQUALS', value: 'alpha' },
-                            { contextKey: 'userId', operator: 'EQUALS', value: 'beta' },
-                        ],
+                        conditions: [{ contextKey: 'a', operator: 'EQUALS', value: '1' }]
                     },
                     {
-                        logicOperator: 'AND',
-                        conditions: [
-                            { contextKey: 'userAge', operator: 'GREATER_THAN', value: '18' },
-                        ],
-                    },
+                        logicOperator: 'OR',
+                        conditions: [{ contextKey: 'b', operator: 'EQUALS', value: '2' }]
+                    }
                 ],
                 variantSelectionMode: 'SPECIFIC_VARIANT',
-                enabled: true,
+                selectedVariantControl: 'true',
             };
-            const response = await client.post(`/features/${testFeatureId}/criteria`, fixture);
-
-            expect([200, 201, 400]).toContain(response.status);
+            // Note: Single criterion has ONE rule_groups list. Logic between groups is implicitly AND?
+            // Backend `StageCriterion` has `rule_groups: Vec<CompoundRuleGroup>`.
+            // Evaluation logic usually ANDs the groups?
+            // Yes, usually.
+            const response = await createCriterion(fixture);
+            expectSuccess(response);
         });
 
         it('should create complex nested rule logic', async () => {
             const fixture = {
-                stageId: testEnvId,
-                priority: 20,
+                priority: 1,
                 groups: [
-                    {
-                        logicOperator: 'OR',
-                        conditions: [
-                            { contextKey: 'userId', operator: 'STARTS_WITH', value: 'vip' },
-                            { contextKey: 'userEmail', operator: 'ENDS_WITH', value: '@company.io' },
-                        ],
-                    },
                     {
                         logicOperator: 'AND',
                         conditions: [
-                            { contextKey: 'appVersion', operator: 'SEMVER_GREATER_THAN', value: '2.0.0' },
-                            { contextKey: 'userId', operator: 'NOT_IN', value: 'banned1,banned2' },
-                        ],
+                            { contextKey: 'a', operator: 'EQUALS', value: '1' },
+                            { contextKey: 'b', operator: 'EQUALS', value: '2' }
+                        ]
                     },
+                    {
+                        logicOperator: 'OR',
+                        conditions: [
+                            { contextKey: 'c', operator: 'EQUALS', value: '3' },
+                            { contextKey: 'd', operator: 'EQUALS', value: '4' }
+                        ]
+                    }
                 ],
                 variantSelectionMode: 'SPECIFIC_VARIANT',
-                enabled: true,
+                selectedVariantControl: 'true',
             };
-            const response = await client.post(`/features/${testFeatureId}/criteria`, fixture);
-
-            expect([200, 201, 400]).toContain(response.status);
+            const response = await createCriterion(fixture);
+            expectSuccess(response);
         });
     });
 
     describe('Variant Allocations', () => {
         it('should create criterion with SPECIFIC_VARIANT selection', async () => {
             const fixture = {
-                stageId: testEnvId,
-                priority: 21,
-                groups: [{
+                priority: 1,
+                ruleGroups: [{
                     logicOperator: 'AND',
                     conditions: [{ contextKey: 'userId', operator: 'EQUALS', value: 'specific-user' }],
                 }],
                 variantSelectionMode: 'SPECIFIC_VARIANT',
-                variantKey: 'variant-a',
-                enabled: true,
+                selectedVariantControl: 'variant-a',
             };
-            const response = await client.post(`/features/${testFeatureId}/criteria`, fixture);
-
-            expect([200, 201, 400]).toContain(response.status);
+            const response = await createCriterion(fixture);
+            expectSuccess(response);
         });
 
         it('should create criterion with WEIGHTED_SPLIT selection', async () => {
             const fixture = {
-                stageId: testEnvId,
-                priority: 22,
-                groups: [{
+                priority: 1,
+                ruleGroups: [{
                     logicOperator: 'AND',
-                    conditions: [{ contextKey: 'userId', operator: 'NOT_EQUALS', value: 'excluded' }],
+                    conditions: [{ contextKey: 'userId', operator: 'EQUALS', value: 'any' }]
                 }],
                 variantSelectionMode: 'WEIGHTED_SPLIT',
-                variantWeights: [
-                    { variantKey: 'control', weight: 50 },
-                    { variantKey: 'experiment-a', weight: 25 },
-                    { variantKey: 'experiment-b', weight: 25 },
+                variantAllocations: [
+                    { variantControl: 'variant-a', weight: 50 },
+                    { variantControl: 'variant-b', weight: 50 }
                 ],
-                enabled: true,
             };
-            const response = await client.post(`/features/${testFeatureId}/criteria`, fixture);
-
-            expect([200, 201, 400]).toContain(response.status);
+            const response = await createCriterion(fixture);
+            expectSuccess(response);
         });
 
         it('should validate variant weights sum to 100', async () => {
             const fixture = {
-                stageId: testEnvId,
-                priority: 23,
-                groups: [{
+                priority: 1,
+                ruleGroups: [{
                     logicOperator: 'AND',
-                    conditions: [{ contextKey: 'userId', operator: 'EXISTS', value: '' }],
+                    conditions: [{ contextKey: 'userId', operator: 'EQUALS', value: 'any' }]
                 }],
                 variantSelectionMode: 'WEIGHTED_SPLIT',
-                variantWeights: [
-                    { variantKey: 'control', weight: 30 },
-                    { variantKey: 'experiment', weight: 30 },
-                    // Missing 40% - should be rejected
+                variantAllocations: [
+                    { variantControl: 'variant-a', weight: 60 },
+                    { variantControl: 'variant-b', weight: 60 }
                 ],
-                enabled: true,
             };
-            const response = await client.post(`/features/${testFeatureId}/criteria`, fixture);
-
-            // Should fail validation
-            expect([200, 201, 400]).toContain(response.status);
+            const response = await createCriterion(fixture);
+            // Expect failure
+            expect([400, 500]).toContain(response.status);
         });
     });
 
     describe('Edge Cases', () => {
         it('should handle empty condition value', async () => {
             const fixture = {
-                stageId: testEnvId,
-                priority: 24,
-                groups: [{
+                priority: 1,
+                ruleGroups: [{
                     logicOperator: 'AND',
-                    conditions: [{ contextKey: 'userId', operator: 'EQUALS', value: '' }],
+                    conditions: [{ contextKey: 'a', operator: 'EQUALS', value: '' }],
                 }],
                 variantSelectionMode: 'SPECIFIC_VARIANT',
-                enabled: true,
+                selectedVariantControl: 'true',
             };
-            const response = await client.post(`/features/${testFeatureId}/criteria`, fixture);
-
-            // Should be rejected or handled
-            expect([200, 201, 400]).toContain(response.status);
+            const response = await createCriterion(fixture);
+            // Empty string is valid JSON value.
+            expectSuccess(response);
         });
 
         it('should handle special characters in values', async () => {
             const fixture = {
-                stageId: testEnvId,
-                priority: 25,
-                groups: [{
+                priority: 1,
+                ruleGroups: [{
                     logicOperator: 'AND',
-                    conditions: [{ contextKey: 'userId', operator: 'EQUALS', value: 'user@example.com' }],
+                    conditions: [{ contextKey: 'a', operator: 'EQUALS', value: '!@#$%^&*()' }],
                 }],
                 variantSelectionMode: 'SPECIFIC_VARIANT',
-                enabled: true,
+                selectedVariantControl: 'true',
             };
-            const response = await client.post(`/features/${testFeatureId}/criteria`, fixture);
-
-            expect([200, 201, 400]).toContain(response.status);
+            const response = await createCriterion(fixture);
+            expectSuccess(response);
         });
 
         it('should handle very long value strings', async () => {
-            const longValue = 'a'.repeat(1000);
+            const longString = 'a'.repeat(1000);
             const fixture = {
-                stageId: testEnvId,
-                priority: 26,
-                groups: [{
+                priority: 1,
+                ruleGroups: [{
                     logicOperator: 'AND',
-                    conditions: [{ contextKey: 'userId', operator: 'EQUALS', value: longValue }],
+                    conditions: [{ contextKey: 'a', operator: 'EQUALS', value: longString }],
                 }],
                 variantSelectionMode: 'SPECIFIC_VARIANT',
-                enabled: true,
+                selectedVariantControl: 'true',
             };
-            const response = await client.post(`/features/${testFeatureId}/criteria`, fixture);
-
-            // Should be rejected or truncated
-            expect([200, 201, 400]).toContain(response.status);
+            const response = await createCriterion(fixture);
+            expectSuccess(response);
         });
 
         it('should handle invalid operator', async () => {
             const fixture = {
-                stageId: testEnvId,
-                priority: 27,
-                groups: [{
+                priority: 1,
+                ruleGroups: [{
                     logicOperator: 'AND',
-                    conditions: [{ contextKey: 'userId', operator: 'INVALID_OPERATOR', value: 'test' }],
+                    conditions: [{ contextKey: 'a', operator: 'INVALID_OP', value: '1' }],
                 }],
                 variantSelectionMode: 'SPECIFIC_VARIANT',
-                enabled: true,
+                selectedVariantControl: 'true',
             };
-            const response = await client.post(`/features/${testFeatureId}/criteria`, fixture);
-
-            // Should be rejected
+            const response = await createCriterion(fixture);
+            // Backend uses enum, serde might reject it with 400.
             expect([400]).toContain(response.status);
         });
     });
+
 });

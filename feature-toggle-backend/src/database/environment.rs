@@ -260,12 +260,13 @@ impl EnvironmentRepository for EnvironmentRepositoryImpl {
             .get_environments(team_id, Some(input.name.clone()), None)
             .await;
         if let Ok(existing_environments) = existing_result
-            && !existing_environments.is_empty() {
-                return Err(Error::RecordAlreadyExists(format!(
-                    "Environment with name '{}' already exists for team {}",
-                    input.name, team_id
-                )));
-            }
+            && !existing_environments.is_empty()
+        {
+            return Err(Error::RecordAlreadyExists(format!(
+                "Environment with name '{}' already exists for team {}",
+                input.name, team_id
+            )));
+        }
         let id = Uuid::new_v4();
         let environment_type = input
             .environment_type
@@ -344,12 +345,13 @@ impl EnvironmentRepositoryTx for EnvironmentRepositoryImpl {
             .get_environments(team_id, Some(input.name.clone()), None)
             .await;
         if let Ok(existing_environments) = existing_result
-            && !existing_environments.is_empty() {
-                return Err(Error::RecordAlreadyExists(format!(
-                    "Environment with name '{}' already exists for team {}",
-                    input.name, team_id
-                )));
-            }
+            && !existing_environments.is_empty()
+        {
+            return Err(Error::RecordAlreadyExists(format!(
+                "Environment with name '{}' already exists for team {}",
+                input.name, team_id
+            )));
+        }
 
         let id = Uuid::new_v4();
         let environment_type = input

@@ -14,6 +14,7 @@ pub struct User {
     pub first_name: String,
     pub last_name: String,
     pub email: String,
+    pub mobile_number: Option<String>,
     pub is_admin: bool,
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
@@ -28,6 +29,7 @@ pub struct CreateUser {
     pub first_name: String,
     pub last_name: String,
     pub email: String,
+    pub mobile_number: Option<String>,
     pub is_admin: bool,
     pub is_temporary_password: bool,
 }
@@ -37,6 +39,7 @@ pub struct UpdateUser {
     pub first_name: Option<String>,
     pub last_name: Option<String>,
     pub email: Option<String>,
+    pub mobile_number: Option<String>,
     pub is_admin: Option<bool>,
     pub enabled: Option<bool>,
 }
@@ -135,7 +138,7 @@ impl UserRepositoryImpl {
 impl UserRepository for UserRepositoryImpl {
     async fn get_user_by_id(&self, id: Uuid) -> Result<User, Error> {
         let result = sqlx::query!(
-            r#"SELECT id, username, password_hash, first_name, last_name, email, is_admin, enabled,
+            r#"SELECT id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, enabled,
                        created_at, updated_at, last_login, is_temporary_password
                 FROM users WHERE id = $1"#,
             id
@@ -151,6 +154,7 @@ impl UserRepository for UserRepositoryImpl {
             first_name: row.first_name,
             last_name: row.last_name,
             email: row.email,
+            mobile_number: row.mobile_number,
             is_admin: row.is_admin,
             enabled: row.enabled,
             created_at: row.created_at,
@@ -162,7 +166,7 @@ impl UserRepository for UserRepositoryImpl {
 
     async fn get_user_by_username(&self, username: &str) -> Result<User, Error> {
         let result = sqlx::query!(
-            r#"SELECT id, username, password_hash, first_name, last_name, email, is_admin, enabled,
+            r#"SELECT id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, enabled,
                        created_at, updated_at, last_login, is_temporary_password
                 FROM users WHERE username = $1"#,
             username
@@ -178,6 +182,7 @@ impl UserRepository for UserRepositoryImpl {
             first_name: row.first_name,
             last_name: row.last_name,
             email: row.email,
+            mobile_number: row.mobile_number,
             is_admin: row.is_admin,
             enabled: row.enabled,
             created_at: row.created_at,
@@ -189,7 +194,7 @@ impl UserRepository for UserRepositoryImpl {
 
     async fn get_user_by_email(&self, email: &str) -> Result<User, Error> {
         let result = sqlx::query!(
-            r#"SELECT id, username, password_hash, first_name, last_name, email, is_admin, enabled,
+            r#"SELECT id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, enabled,
                        created_at, updated_at, last_login, is_temporary_password
                 FROM users WHERE email = $1"#,
             email
@@ -205,6 +210,7 @@ impl UserRepository for UserRepositoryImpl {
             first_name: row.first_name,
             last_name: row.last_name,
             email: row.email,
+            mobile_number: row.mobile_number,
             is_admin: row.is_admin,
             enabled: row.enabled,
             created_at: row.created_at,
@@ -217,15 +223,16 @@ impl UserRepository for UserRepositoryImpl {
     async fn create_user(&self, input: CreateUser) -> Result<User, Error> {
         let id = Uuid::new_v4();
         let result = sqlx::query!(
-            r#"INSERT INTO users (id, username, password_hash, first_name, last_name, email, is_admin, is_temporary_password)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-               RETURNING id, username, password_hash, first_name, last_name, email, is_admin, enabled, created_at, updated_at, last_login, is_temporary_password"#,
+            r#"INSERT INTO users (id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, is_temporary_password)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+               RETURNING id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, enabled, created_at, updated_at, last_login, is_temporary_password"#,
             id,
             input.username,
             input.password_hash,
             input.first_name,
             input.last_name,
             input.email,
+            input.mobile_number,
             input.is_admin,
             input.is_temporary_password
         )
@@ -240,6 +247,7 @@ impl UserRepository for UserRepositoryImpl {
             first_name: row.first_name,
             last_name: row.last_name,
             email: row.email,
+            mobile_number: row.mobile_number,
             is_admin: row.is_admin,
             enabled: row.enabled,
             created_at: row.created_at,
@@ -253,12 +261,13 @@ impl UserRepository for UserRepositoryImpl {
         let existing = self.get_user_by_id(input.id).await?;
         let result = sqlx::query!(
             r#"UPDATE users
-               SET first_name = $1, last_name = $2, email = $3, is_admin = $4, enabled = $5, updated_at = now()
-               WHERE id = $6
-               RETURNING id, username, password_hash, first_name, last_name, email, is_admin, enabled, created_at, updated_at, last_login, is_temporary_password"#,
+               SET first_name = $1, last_name = $2, email = $3, mobile_number = $4, is_admin = $5, enabled = $6, updated_at = now()
+               WHERE id = $7
+               RETURNING id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, enabled, created_at, updated_at, last_login, is_temporary_password"#,
             input.first_name.unwrap_or(existing.first_name),
             input.last_name.unwrap_or(existing.last_name),
             input.email.unwrap_or(existing.email),
+            input.mobile_number.or(existing.mobile_number),
             input.is_admin.unwrap_or(existing.is_admin),
             input.enabled.unwrap_or(existing.enabled),
             input.id
@@ -274,6 +283,7 @@ impl UserRepository for UserRepositoryImpl {
             first_name: row.first_name,
             last_name: row.last_name,
             email: row.email,
+            mobile_number: row.mobile_number,
             is_admin: row.is_admin,
             enabled: row.enabled,
             created_at: row.created_at,
@@ -379,9 +389,7 @@ impl UserRepository for UserRepositoryImpl {
                 .await,
             )?;
         }
-        tx.commit()
-            .await
-            .map_err(|e| Error::DatabaseError(e))?;
+        tx.commit().await.map_err(|e| Error::DatabaseError(e))?;
         Ok(())
     }
 
@@ -393,7 +401,7 @@ impl UserRepository for UserRepositoryImpl {
         page_size: i32,
     ) -> Result<(Vec<User>, i64), Error> {
         let mut base = QueryBuilder::<Postgres>::new(
-            "SELECT u.id, u.username, u.password_hash, u.first_name, u.last_name, u.email, u.is_admin, u.enabled, u.created_at, u.updated_at, u.last_login, u.is_temporary_password FROM users u",
+            "SELECT u.id, u.username, u.password_hash, u.first_name, u.last_name, u.email, u.mobile_number, u.is_admin, u.enabled, u.created_at, u.updated_at, u.last_login, u.is_temporary_password FROM users u",
         );
         if team_id.is_some() {
             base.push(" JOIN user_teams ut ON ut.user_id = u.id");
@@ -431,12 +439,13 @@ impl UserRepository for UserRepositoryImpl {
                 first_name: row.get::<String, _>(3),
                 last_name: row.get::<String, _>(4),
                 email: row.get::<String, _>(5),
-                is_admin: row.get::<bool, _>(6),
-                enabled: row.get::<bool, _>(7),
-                created_at: row.get::<DateTime<Utc>, _>(8),
-                updated_at: row.get::<DateTime<Utc>, _>(9),
-                last_login: row.try_get::<DateTime<Utc>, _>(10).ok(),
-                is_temporary_password: row.get::<bool, _>(11),
+                mobile_number: row.try_get::<String, _>(6).ok(),
+                is_admin: row.get::<bool, _>(7),
+                enabled: row.get::<bool, _>(8),
+                created_at: row.get::<DateTime<Utc>, _>(9),
+                updated_at: row.get::<DateTime<Utc>, _>(10),
+                last_login: row.try_get::<DateTime<Utc>, _>(11).ok(),
+                is_temporary_password: row.get::<bool, _>(12),
             });
         }
 
@@ -500,7 +509,7 @@ impl UserRepository for UserRepositoryImpl {
 impl UserRepositoryImpl {
     async fn get_user_by_id_internal(conn: &mut PgConnection, id: Uuid) -> Result<User, Error> {
         let result = sqlx::query!(
-            r#"SELECT id, username, password_hash, first_name, last_name, email, is_admin, enabled,
+            r#"SELECT id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, enabled,
                        created_at, updated_at, last_login, is_temporary_password
                 FROM users WHERE id = $1"#,
             id
@@ -516,6 +525,7 @@ impl UserRepositoryImpl {
             first_name: row.first_name,
             last_name: row.last_name,
             email: row.email,
+            mobile_number: row.mobile_number,
             is_admin: row.is_admin,
             enabled: row.enabled,
             created_at: row.created_at,
@@ -531,15 +541,16 @@ impl UserRepositoryImpl {
     ) -> Result<User, Error> {
         let id = Uuid::new_v4();
         let result = sqlx::query!(
-            r#"INSERT INTO users (id, username, password_hash, first_name, last_name, email, is_admin, is_temporary_password)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-               RETURNING id, username, password_hash, first_name, last_name, email, is_admin, enabled, created_at, updated_at, last_login, is_temporary_password"#,
+            r#"INSERT INTO users (id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, is_temporary_password)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+               RETURNING id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, enabled, created_at, updated_at, last_login, is_temporary_password"#,
             id,
             input.username,
             input.password_hash,
             input.first_name,
             input.last_name,
             input.email,
+            input.mobile_number,
             input.is_admin,
             input.is_temporary_password
         )
@@ -554,6 +565,7 @@ impl UserRepositoryImpl {
             first_name: row.first_name,
             last_name: row.last_name,
             email: row.email,
+            mobile_number: row.mobile_number,
             is_admin: row.is_admin,
             enabled: row.enabled,
             created_at: row.created_at,
@@ -570,12 +582,13 @@ impl UserRepositoryImpl {
     ) -> Result<User, Error> {
         let result = sqlx::query!(
             r#"UPDATE users
-               SET first_name = $1, last_name = $2, email = $3, is_admin = $4, enabled = $5, updated_at = now()
-               WHERE id = $6
-               RETURNING id, username, password_hash, first_name, last_name, email, is_admin, enabled, created_at, updated_at, last_login, is_temporary_password"#,
+               SET first_name = $1, last_name = $2, email = $3, mobile_number = $4, is_admin = $5, enabled = $6, updated_at = now()
+               WHERE id = $7
+               RETURNING id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, enabled, created_at, updated_at, last_login, is_temporary_password"#,
             input.first_name.unwrap_or(existing.first_name),
             input.last_name.unwrap_or(existing.last_name),
             input.email.unwrap_or(existing.email),
+            input.mobile_number.or(existing.mobile_number),
             input.is_admin.unwrap_or(existing.is_admin),
             input.enabled.unwrap_or(existing.enabled),
             input.id
@@ -591,6 +604,7 @@ impl UserRepositoryImpl {
             first_name: row.first_name,
             last_name: row.last_name,
             email: row.email,
+            mobile_number: row.mobile_number,
             is_admin: row.is_admin,
             enabled: row.enabled,
             created_at: row.created_at,
@@ -705,6 +719,7 @@ mod tests {
             first_name: "John".to_string(),
             last_name: "Doe".to_string(),
             email: "john@example.com".to_string(),
+            mobile_number: Some("+15550001111".to_string()),
             is_admin: false,
             enabled: true,
             created_at: Utc::now(),
@@ -721,6 +736,7 @@ mod tests {
             first_name: "New".to_string(),
             last_name: "User".to_string(),
             email: "new@example.com".to_string(),
+            mobile_number: Some("+15550002222".to_string()),
             is_admin: false,
             is_temporary_password: false,
         }
@@ -732,6 +748,7 @@ mod tests {
             first_name: Some("Updated".to_string()),
             last_name: Some("Name".to_string()),
             email: Some("updated@example.com".to_string()),
+            mobile_number: Some("+15550003333".to_string()),
             is_admin: Some(true),
             enabled: Some(false),
         }
@@ -767,6 +784,7 @@ mod tests {
         assert_eq!(update_user.first_name, Some("Updated".to_string()));
         assert_eq!(update_user.last_name, Some("Name".to_string()));
         assert_eq!(update_user.email, Some("updated@example.com".to_string()));
+        assert_eq!(update_user.mobile_number, Some("+15550003333".to_string()));
         assert_eq!(update_user.is_admin, Some(true));
         assert_eq!(update_user.enabled, Some(false));
     }

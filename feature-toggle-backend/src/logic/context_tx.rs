@@ -3,11 +3,11 @@ use crate::database::context::{
     ContextRepositoryTx, CreateContextInput as DbCreate, UpdateContextInput as DbUpdate,
 };
 use crate::database::entity;
+use crate::model::ID;
 use crate::model::{
     Context as ModelContext, ContextEntry as ModelContextEntry, CreateContextInput,
     UpdateContextInput,
 };
-use crate::model::ID;
 use sqlx::PgConnection;
 use uuid::Uuid;
 

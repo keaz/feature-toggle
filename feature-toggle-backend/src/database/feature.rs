@@ -960,12 +960,13 @@ impl FeatureRepositoryImpl {
             .await;
 
         if let Ok(existing_feature) = existing_feature
-            && !existing_feature.is_empty() {
-                return Err(Error::RecordAlreadyExists(format!(
-                    "Feature with key '{}' already exists",
-                    input.key
-                )));
-            }
+            && !existing_feature.is_empty()
+        {
+            return Err(Error::RecordAlreadyExists(format!(
+                "Feature with key '{}' already exists",
+                input.key
+            )));
+        }
         Ok(())
     }
 
@@ -1136,13 +1137,12 @@ impl FeatureRepository for FeatureRepositoryImpl {
 
             let allocations = handle_error(None, allocations)?;
             for alloc in allocations {
-                allocations_map
-                    .entry(alloc.criteria_id)
-                    .or_default()
-                    .push(crate::database::entity::VariantAllocationSimple {
+                allocations_map.entry(alloc.criteria_id).or_default().push(
+                    crate::database::entity::VariantAllocationSimple {
                         variant_control: alloc.variant_control,
                         weight: alloc.weight,
-                    });
+                    },
+                );
             }
         }
 
@@ -1175,9 +1175,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
             let rule_rows = handle_error(None, rule_rows)?;
 
             for row in rule_rows {
-                let by_group = rule_groups_by_criteria
-                    .entry(row.criteria_id)
-                    .or_default();
+                let by_group = rule_groups_by_criteria.entry(row.criteria_id).or_default();
 
                 let entry = by_group.entry(row.group_id).or_insert_with(|| {
                     let logic_operator = match row.logic_operator.to_uppercase().as_str() {
@@ -1196,14 +1194,15 @@ impl FeatureRepository for FeatureRepositoryImpl {
                     let mut value = row.value.unwrap_or(serde_json::Value::Null);
                     if operator.eq_ignore_ascii_case("IN")
                         && let Some(key_str) = value.as_str()
-                            && let Some(entries) = context_value_map.get(key_str) {
-                                value = serde_json::Value::Array(
-                                    entries
-                                        .iter()
-                                        .map(|v| serde_json::Value::String(v.clone()))
-                                        .collect(),
-                                );
-                            }
+                        && let Some(entries) = context_value_map.get(key_str)
+                    {
+                        value = serde_json::Value::Array(
+                            entries
+                                .iter()
+                                .map(|v| serde_json::Value::String(v.clone()))
+                                .collect(),
+                        );
+                    }
                     entry
                         .1
                         .push(crate::database::entity::CompoundRuleCondition {
@@ -1430,9 +1429,10 @@ impl FeatureRepository for FeatureRepositoryImpl {
 
         // Create variants if provided
         if let Some(variants) = input.variants
-            && !variants.is_empty() {
-                self.create_feature_variants(&mut tx, id, variants).await?;
-            }
+            && !variants.is_empty()
+        {
+            self.create_feature_variants(&mut tx, id, variants).await?;
+        }
 
         tx.commit().await.map_err(Error::DatabaseError)?;
         Ok(id)
@@ -1806,11 +1806,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
         let now = chrono::Utc::now();
 
         // Start a transaction to update both feature and stages atomically
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(Error::DatabaseError)?;
+        let mut tx = self.pool.begin().await.map_err(Error::DatabaseError)?;
 
         // Disable the feature (kill_switch_enabled = false means feature is disabled)
         let result = sqlx::query!(
@@ -2704,13 +2700,12 @@ impl FeatureRepositoryTx for FeatureRepositoryImpl {
 
             let allocations = handle_error(None, allocations)?;
             for alloc in allocations {
-                allocations_map
-                    .entry(alloc.criteria_id)
-                    .or_default()
-                    .push(crate::database::entity::VariantAllocationSimple {
+                allocations_map.entry(alloc.criteria_id).or_default().push(
+                    crate::database::entity::VariantAllocationSimple {
                         variant_control: alloc.variant_control,
                         weight: alloc.weight,
-                    });
+                    },
+                );
             }
         }
 
@@ -2743,9 +2738,7 @@ impl FeatureRepositoryTx for FeatureRepositoryImpl {
             let rule_rows = handle_error(None, rule_rows)?;
 
             for row in rule_rows {
-                let by_group = rule_groups_by_criteria
-                    .entry(row.criteria_id)
-                    .or_default();
+                let by_group = rule_groups_by_criteria.entry(row.criteria_id).or_default();
 
                 let entry = by_group.entry(row.group_id).or_insert_with(|| {
                     let logic_operator = match row.logic_operator.to_uppercase().as_str() {
@@ -2764,14 +2757,15 @@ impl FeatureRepositoryTx for FeatureRepositoryImpl {
                     let mut value = row.value.unwrap_or(serde_json::Value::Null);
                     if operator.eq_ignore_ascii_case("IN")
                         && let Some(key_str) = value.as_str()
-                            && let Some(entries) = context_value_map.get(key_str) {
-                                value = serde_json::Value::Array(
-                                    entries
-                                        .iter()
-                                        .map(|v| serde_json::Value::String(v.clone()))
-                                        .collect(),
-                                );
-                            }
+                        && let Some(entries) = context_value_map.get(key_str)
+                    {
+                        value = serde_json::Value::Array(
+                            entries
+                                .iter()
+                                .map(|v| serde_json::Value::String(v.clone()))
+                                .collect(),
+                        );
+                    }
                     entry
                         .1
                         .push(crate::database::entity::CompoundRuleCondition {
@@ -3350,13 +3344,12 @@ impl FeatureRepositoryImpl {
 
             let allocations = handle_error(None, allocations)?;
             for alloc in allocations {
-                allocations_map
-                    .entry(alloc.criteria_id)
-                    .or_default()
-                    .push(crate::database::entity::VariantAllocationSimple {
+                allocations_map.entry(alloc.criteria_id).or_default().push(
+                    crate::database::entity::VariantAllocationSimple {
                         variant_control: alloc.variant_control,
                         weight: alloc.weight,
-                    });
+                    },
+                );
             }
         }
 
@@ -3389,9 +3382,7 @@ impl FeatureRepositoryImpl {
             let rule_rows = handle_error(None, rule_rows)?;
 
             for row in rule_rows {
-                let by_group = rule_groups_by_criteria
-                    .entry(row.criteria_id)
-                    .or_default();
+                let by_group = rule_groups_by_criteria.entry(row.criteria_id).or_default();
 
                 let entry = by_group.entry(row.group_id).or_insert_with(|| {
                     let logic_operator = match row.logic_operator.to_uppercase().as_str() {
@@ -3410,14 +3401,15 @@ impl FeatureRepositoryImpl {
                     let mut value = row.value.unwrap_or(serde_json::Value::Null);
                     if operator.eq_ignore_ascii_case("IN")
                         && let Some(key_str) = value.as_str()
-                            && let Some(entries) = context_value_map.get(key_str) {
-                                value = serde_json::Value::Array(
-                                    entries
-                                        .iter()
-                                        .map(|v| serde_json::Value::String(v.clone()))
-                                        .collect(),
-                                );
-                            }
+                        && let Some(entries) = context_value_map.get(key_str)
+                    {
+                        value = serde_json::Value::Array(
+                            entries
+                                .iter()
+                                .map(|v| serde_json::Value::String(v.clone()))
+                                .collect(),
+                        );
+                    }
                     entry
                         .1
                         .push(crate::database::entity::CompoundRuleCondition {

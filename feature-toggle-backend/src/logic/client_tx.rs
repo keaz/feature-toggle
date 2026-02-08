@@ -8,10 +8,10 @@ use crate::Error;
 use crate::database::activity_log::{ActivityLogRepository, CreateActivityLog};
 use crate::database::client::{ClientRepositoryTx, CreateClient, UpdateClient};
 use crate::database::entity::ClientType as EntityClientType;
-use crate::model::{ClientType as ModelClientType, CreateClientInput, UpdateClientInput};
 use crate::logic::ActorContext;
-use crate::utils::activity_logger::activity_types;
 use crate::model::ID;
+use crate::model::{ClientType as ModelClientType, CreateClientInput, UpdateClientInput};
+use crate::utils::activity_logger::activity_types;
 use sqlx::PgConnection;
 use uuid::Uuid;
 
@@ -47,8 +47,8 @@ where
     R: ClientRepositoryTx,
 {
     let team_uuid = Uuid::try_from(team_id).map_err(|e| Error::InvalidInput(e.to_string()))?;
-    let environment_uuid =
-        Uuid::try_from(input.environment_id.clone()).map_err(|e| Error::InvalidInput(e.to_string()))?;
+    let environment_uuid = Uuid::try_from(input.environment_id.clone())
+        .map_err(|e| Error::InvalidInput(e.to_string()))?;
     let client_name = input.name.clone();
 
     let db_input = CreateClient {

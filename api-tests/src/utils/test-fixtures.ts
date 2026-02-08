@@ -118,16 +118,41 @@ export function createClientFixture(overrides: Partial<{
  * Feature fixture data
  */
 export function createFeatureFixture(overrides: Partial<{
-    name: string;
+    key: string;
     description: string;
     featureType: 'SIMPLE' | 'CONTEXTUAL';
-    defaultValue: boolean;
+    enabled: boolean;
+    environmentId: string;
 }> = {}) {
     return {
-        name: overrides.name || uniqueName('feature'),
+        key: overrides.key || uniqueName('feature'),
         description: overrides.description || 'Test feature for API automation',
         featureType: overrides.featureType || 'SIMPLE',
-        defaultValue: overrides.defaultValue ?? false,
+        enabled: overrides.enabled ?? false,
+        dependencies: [],
+        relationships: [],
+        stages: overrides.environmentId ? [
+            {
+                environmentId: overrides.environmentId,
+                orderIndex: 0,
+                position: '1',
+                bucketingKey: 'user_id'
+            }
+        ] : [],
+        variants: overrides.featureType === 'CONTEXTUAL' ? [
+            {
+                control: 'false',
+                value: false,
+                valueType: 'BOOLEAN',
+                description: 'Default disabled variant'
+            },
+            {
+                control: 'true',
+                value: true,
+                valueType: 'BOOLEAN',
+                description: 'Enabled variant'
+            }
+        ] : [],
     };
 }
 

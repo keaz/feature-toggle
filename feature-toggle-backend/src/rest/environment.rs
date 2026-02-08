@@ -1,16 +1,16 @@
-use actix_web::{delete, get, patch, post, web, HttpMessage, HttpRequest, HttpResponse, Responder};
 use crate::model::ID;
+use actix_web::{HttpMessage, HttpRequest, HttpResponse, Responder, delete, get, patch, post, web};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::database::activity_log::ActivityLogRepository;
-use crate::database::environment::{environment_repository_tx, EnvironmentRepository};
-use crate::logic::environment::EnvironmentLogic;
-use crate::logic::ActorContext;
-use crate::rest::error::RestError;
-use crate::rest::pagination::{normalize_pagination, PageMeta};
 use crate::JwtUser;
+use crate::database::activity_log::ActivityLogRepository;
+use crate::database::environment::{EnvironmentRepository, environment_repository_tx};
+use crate::logic::ActorContext;
+use crate::logic::environment::EnvironmentLogic;
+use crate::rest::error::RestError;
+use crate::rest::pagination::{PageMeta, normalize_pagination};
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct EnvironmentListQuery {
@@ -149,13 +149,7 @@ pub(crate) async fn list_environments(
         .map(|value| value.to_string());
 
     let (items, total) = logic
-        .get_environments_with_offset(
-            ID::from(team_uuid),
-            name,
-            query.active,
-            offset,
-            limit,
-        )
+        .get_environments_with_offset(ID::from(team_uuid), name, query.active, offset, limit)
         .await
         .map_err(RestError::from)?;
 
@@ -249,9 +243,9 @@ pub(crate) async fn create_environment(
 
     match result {
         Ok(environment) => {
-            tx.commit().await.map_err(|e| {
-                RestError::internal(format!("Failed to commit transaction: {e}"))
-            })?;
+            tx.commit()
+                .await
+                .map_err(|e| RestError::internal(format!("Failed to commit transaction: {e}")))?;
             Ok(HttpResponse::Created().json(EnvironmentResponse::from(environment)))
         }
         Err(err) => {
@@ -328,9 +322,9 @@ pub(crate) async fn update_environment(
 
     match result {
         Ok(environment) => {
-            tx.commit().await.map_err(|e| {
-                RestError::internal(format!("Failed to commit transaction: {e}"))
-            })?;
+            tx.commit()
+                .await
+                .map_err(|e| RestError::internal(format!("Failed to commit transaction: {e}")))?;
             Ok(HttpResponse::Ok().json(EnvironmentResponse::from(environment)))
         }
         Err(err) => {
@@ -386,9 +380,9 @@ pub(crate) async fn delete_environment(
 
     match result {
         Ok(_) => {
-            tx.commit().await.map_err(|e| {
-                RestError::internal(format!("Failed to commit transaction: {e}"))
-            })?;
+            tx.commit()
+                .await
+                .map_err(|e| RestError::internal(format!("Failed to commit transaction: {e}")))?;
             Ok(HttpResponse::NoContent().finish())
         }
         Err(err) => {
@@ -495,9 +489,8 @@ mod tests {
         )
         .await;
 
-        let uri = format!(
-            "/api/v1/teams/{team_id}/environments?offset=5&limit=10&name=prod&active=true"
-        );
+        let uri =
+            format!("/api/v1/teams/{team_id}/environments?offset=5&limit=10&name=prod&active=true");
         let req = test::TestRequest::get().uri(&uri).to_request();
         let resp = test::call_service(&app, req).await;
 
@@ -636,7 +629,10 @@ mod tests {
         let body = test::read_body(resp).await;
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["error"], "conflict");
-        assert_eq!(json["message"], "Environment with name 'New Env' already exists");
+        assert_eq!(
+            json["message"],
+            "Environment with name 'New Env' already exists"
+        );
     }
 
     #[actix_web::test]
@@ -703,7 +699,10 @@ mod tests {
         let body = test::read_body(resp).await;
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["error"], "conflict");
-        assert_eq!(json["message"], "Environment with name 'Updated Env' already exists");
+        assert_eq!(
+            json["message"],
+            "Environment with name 'Updated Env' already exists"
+        );
     }
 
     #[actix_web::test]

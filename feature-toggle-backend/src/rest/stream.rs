@@ -358,14 +358,15 @@ async fn resolve_activity_entity_details(
                 && let (Some(feature_key), Some(status)) = (
                     meta.get("feature_key").and_then(|v| v.as_str()),
                     meta.get("status").and_then(|v| v.as_str()),
-                ) {
-                    return Some(ActivityEntityDetailsResponse {
-                        id: entity_id.to_string(),
-                        name: format!("{} ({})", feature_key, status),
-                        entity_type: entity_type.to_string(),
-                        details: Some(meta.clone()),
-                    });
-                }
+                )
+            {
+                return Some(ActivityEntityDetailsResponse {
+                    id: entity_id.to_string(),
+                    name: format!("{} ({})", feature_key, status),
+                    entity_type: entity_type.to_string(),
+                    details: Some(meta.clone()),
+                });
+            }
 
             None
         }
@@ -386,14 +387,15 @@ async fn resolve_activity_entity_details(
             }
 
             if let Some(meta) = activity.metadata.as_ref()
-                && let Some(feature_key) = meta.get("feature_key").and_then(|v| v.as_str()) {
-                    return Some(ActivityEntityDetailsResponse {
-                        id: entity_id.to_string(),
-                        name: feature_key.to_string(),
-                        entity_type: entity_type.to_string(),
-                        details: Some(meta.clone()),
-                    });
-                }
+                && let Some(feature_key) = meta.get("feature_key").and_then(|v| v.as_str())
+            {
+                return Some(ActivityEntityDetailsResponse {
+                    id: entity_id.to_string(),
+                    name: feature_key.to_string(),
+                    entity_type: entity_type.to_string(),
+                    details: Some(meta.clone()),
+                });
+            }
 
             None
         }
@@ -766,9 +768,9 @@ async fn send_recent_activities(
                 &mut team_cache,
             )
             .await
-            {
-                continue;
-            }
+        {
+            continue;
+        }
 
         filtered_count += 1;
         let entity_details = resolve_activity_entity_details(

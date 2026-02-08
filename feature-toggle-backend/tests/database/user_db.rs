@@ -64,6 +64,7 @@ async fn create_and_update_user_and_last_login() {
             first_name: "Charlie".into(),
             last_name: "Chaplin".into(),
             email: email.clone(),
+            mobile_number: Some("+15550123456".into()),
             is_admin: false,
             is_temporary_password: false,
         })
@@ -81,6 +82,7 @@ async fn create_and_update_user_and_last_login() {
             first_name: Some("Charles".into()),
             last_name: None,
             email: Some(updated_email.clone()),
+            mobile_number: Some("+15550654321".into()),
             is_admin: Some(true),
             enabled: Some(true),
         })
@@ -109,6 +111,7 @@ async fn unique_violation_is_mapped() {
             first_name: "Other".into(),
             last_name: "User".into(),
             email: "other@example.com".into(),
+            mobile_number: None,
             is_admin: false,
             is_temporary_password: false,
         })
@@ -129,6 +132,7 @@ async fn unique_violation_is_mapped() {
             first_name: "Any".into(),
             last_name: "Body".into(),
             email: "admin@example.com".into(),
+            mobile_number: None,
             is_admin: false,
             is_temporary_password: false,
         })

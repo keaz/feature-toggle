@@ -1,6 +1,6 @@
 use chrono::Utc;
 use feature_toggle_backend::database::feature_evaluation::{
-    feature_evaluation_repository, CreateFeatureEvaluation, FeatureEvaluationFilter,
+    CreateFeatureEvaluation, FeatureEvaluationFilter, feature_evaluation_repository,
 };
 use feature_toggle_backend::database::init_pg_pool;
 use serde_json::json;

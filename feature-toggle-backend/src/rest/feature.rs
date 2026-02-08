@@ -1,42 +1,47 @@
-use actix_web::{get, patch, post, web, HttpMessage, HttpRequest, HttpResponse, Responder};
 use crate::model::ID;
+use actix_web::{HttpMessage, HttpRequest, HttpResponse, Responder, get, patch, post, web};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use crate::JwtUser;
+use crate::broadcast::map_db_feature_to_full_for_broadcast;
+use crate::database::activity_log::ActivityLogRepository;
 use crate::database::approval::{
-    approval_repository_tx, ApprovalRepository, ApprovalRepositoryTx, CreateApprovalRequestInput,
+    ApprovalRepository, ApprovalRepositoryTx, CreateApprovalRequestInput, approval_repository_tx,
 };
 use crate::database::entity::{
     ApprovalPolicy, DBStage, FeaturePipelineStage, VariantValueType as DbVariantValueType,
 };
-use crate::database::activity_log::ActivityLogRepository;
-use crate::database::feature::{feature_repository_tx, FeatureRepository};
 use crate::database::feature::FeatureRepositoryTx;
-use crate::broadcast::map_db_feature_to_full_for_broadcast;
+use crate::database::feature::{FeatureRepository, feature_repository_tx};
+use crate::logic::approval::{policy_applies, status_requires_interception};
+use crate::logic::authorization::RoleAuthorizer;
+use crate::logic::environment::EnvironmentLogic;
+use crate::logic::feature::{FeatureLogic, StageChangeRequestType};
+use crate::logic::feature_tx;
+use crate::logic::notification::{
+    NOTIFICATION_TYPE_FEATURE_DEPLOYED, NOTIFICATION_TYPE_FEATURE_ROLLED_BACK,
+    NOTIFICATION_TYPE_STAGE_CHANGE_REQUESTED, NotificationEvent, dispatch_notification_event,
+};
+use crate::logic::pipeline::PipelineLogic;
+use crate::logic::user::UserLogic;
+use crate::logic::{ActorContext, create_relationships, get_environment_map};
 use crate::model::{
     CreateFeatureInput, CreateFeatureStageInput, CreateFeatureVariantInput,
     CreateRelationshipInput, Feature as ModelFeature, FeatureType as ModelFeatureType,
     LifecycleStage as ModelLifecycleStage, UpdateFeatureInput,
     VariantValueType as ModelVariantValueType,
 };
+use crate::rest::environment::EnvironmentResponse;
+use crate::rest::error::RestError;
+use crate::rest::pagination::{PageMeta, PaginationQuery, normalize_pagination};
+use crate::rest::pipeline::CreateRelationshipRequest;
 use crate::validation::{
     validate_duplicate_environment_and_index, validate_relationships_and_stages,
     validate_stage_transition,
 };
-use crate::logic::approval::{policy_applies, status_requires_interception};
-use crate::logic::authorization::RoleAuthorizer;
-use crate::logic::environment::EnvironmentLogic;
-use crate::logic::feature::{FeatureLogic, StageChangeRequestType};
-use crate::logic::feature_tx;
-use crate::logic::pipeline::PipelineLogic;
-use crate::logic::{create_relationships, get_environment_map, ActorContext};
-use crate::rest::environment::EnvironmentResponse;
-use crate::rest::error::RestError;
-use crate::rest::pagination::{normalize_pagination, PageMeta, PaginationQuery};
-use crate::rest::pipeline::CreateRelationshipRequest;
-use crate::JwtUser;
 use feature_toggle_shared::constants::StageStatus;
 
 #[derive(Debug, Serialize, Deserialize, ToSchema, Clone, Copy, PartialEq, Eq)]
@@ -352,9 +357,7 @@ async fn find_applicable_policy(
 
     let mut applicable: Vec<ApprovalPolicy> = policies
         .into_iter()
-        .filter(|policy| {
-            policy_applies(policy, environment_id, env.environment_type.as_str())
-        })
+        .filter(|policy| policy_applies(policy, environment_id, env.environment_type.as_str()))
         .collect();
 
     if applicable.is_empty() {
@@ -370,6 +373,204 @@ async fn find_applicable_policy(
     }
 
     Ok(applicable.pop())
+}
+
+fn preferred_user_name(first_name: &str, last_name: &str, username: &str) -> Option<String> {
+    let full_name = format!("{} {}", first_name.trim(), last_name.trim())
+        .trim()
+        .to_string();
+    if !full_name.is_empty() {
+        return Some(full_name);
+    }
+
+    let username = username.trim();
+    if !username.is_empty() {
+        return Some(username.to_string());
+    }
+
+    None
+}
+
+async fn resolve_actor_display_name(
+    user_logic: &dyn UserLogic,
+    jwt_user: &JwtUser,
+) -> Option<String> {
+    if let Ok(user) = user_logic.get_user_by_id(ID::from(jwt_user.id)).await
+        && let Some(name) = preferred_user_name(&user.first_name, &user.last_name, &user.username)
+    {
+        return Some(name);
+    }
+
+    let username = jwt_user.username.trim();
+    if !username.is_empty() {
+        return Some(username.to_string());
+    }
+
+    None
+}
+
+async fn resolve_environment_name(
+    env_logic: &dyn EnvironmentLogic,
+    environment_id: Uuid,
+) -> Option<String> {
+    env_logic
+        .get_environment_by_id(ID::from(environment_id))
+        .await
+        .ok()
+        .map(|env| env.name)
+}
+
+fn build_stage_change_notification_event(
+    request_type: StageChangeRequestType,
+    feature: &crate::database::entity::Feature,
+    stage: &FeaturePipelineStage,
+    next_status: &str,
+    actor_id: Uuid,
+    actor_display_name: Option<&str>,
+    environment_name: Option<&str>,
+) -> Option<NotificationEvent> {
+    let actor_display_name = actor_display_name.map(|value| value.to_string());
+    let environment_name = environment_name.map(|value| value.to_string());
+
+    match request_type {
+        StageChangeRequestType::DeploymentRequested | StageChangeRequestType::RollbackRequested => {
+            let request_label =
+                if matches!(request_type, StageChangeRequestType::DeploymentRequested) {
+                    "deployment"
+                } else {
+                    "rollback"
+                };
+            let subject = match environment_name.as_deref() {
+                Some(environment_name) => format!(
+                    "Feature {request_label} request for {environment_name}: {}",
+                    feature.key
+                ),
+                None => format!("Feature {request_label} request: {}", feature.key),
+            };
+            let message = match (actor_display_name.as_deref(), environment_name.as_deref()) {
+                (Some(actor_name), Some(environment_name)) => format!(
+                    "{actor_name} requested a {request_label} for feature '{}' in environment '{}'.",
+                    feature.key, environment_name
+                ),
+                (Some(actor_name), None) => format!(
+                    "{actor_name} requested a {request_label} for feature '{}'.",
+                    feature.key
+                ),
+                (None, Some(environment_name)) => format!(
+                    "A {request_label} request was created for feature '{}' in environment '{}'.",
+                    feature.key, environment_name
+                ),
+                (None, None) => {
+                    format!(
+                        "A {request_label} request was created for feature '{}'.",
+                        feature.key
+                    )
+                }
+            };
+
+            Some(NotificationEvent {
+                notification_type: NOTIFICATION_TYPE_STAGE_CHANGE_REQUESTED.to_string(),
+                team_id: Some(feature.team_id),
+                actor_id: Some(actor_id),
+                subject,
+                message,
+                metadata: Some(serde_json::json!({
+                    "feature_id": feature.id.to_string(),
+                    "feature_key": feature.key.clone(),
+                    "stage_id": stage.id.to_string(),
+                    "status": next_status,
+                    "team_id": feature.team_id.to_string(),
+                    "environment_id": stage.environment_id.to_string(),
+                    "environment_name": environment_name,
+                    "requested_by": actor_display_name,
+                })),
+            })
+        }
+        StageChangeRequestType::Deployed => {
+            let subject = match environment_name.as_deref() {
+                Some(environment_name) => {
+                    format!("Feature deployed to {environment_name}: {}", feature.key)
+                }
+                None => format!("Feature deployed: {}", feature.key),
+            };
+            let message = match (actor_display_name.as_deref(), environment_name.as_deref()) {
+                (Some(actor_name), Some(environment_name)) => format!(
+                    "{actor_name} deployed feature '{}' to environment '{}'.",
+                    feature.key, environment_name
+                ),
+                (Some(actor_name), None) => {
+                    format!("{actor_name} deployed feature '{}'.", feature.key)
+                }
+                (None, Some(environment_name)) => format!(
+                    "Feature '{}' was deployed to environment '{}'.",
+                    feature.key, environment_name
+                ),
+                (None, None) => format!("Feature '{}' was deployed.", feature.key),
+            };
+
+            Some(NotificationEvent {
+                notification_type: NOTIFICATION_TYPE_FEATURE_DEPLOYED.to_string(),
+                team_id: Some(feature.team_id),
+                actor_id: Some(actor_id),
+                subject,
+                message,
+                metadata: Some(serde_json::json!({
+                    "feature_id": feature.id.to_string(),
+                    "feature_key": feature.key.clone(),
+                    "stage_id": stage.id.to_string(),
+                    "team_id": feature.team_id.to_string(),
+                    "environment_id": stage.environment_id.to_string(),
+                    "environment_name": environment_name,
+                    "deployed_by": actor_display_name,
+                })),
+            })
+        }
+        StageChangeRequestType::Rollbacked => {
+            let subject = match environment_name.as_deref() {
+                Some(environment_name) => {
+                    format!(
+                        "Feature rolled back from {environment_name}: {}",
+                        feature.key
+                    )
+                }
+                None => format!("Feature rolled back: {}", feature.key),
+            };
+            let message = match (actor_display_name.as_deref(), environment_name.as_deref()) {
+                (Some(actor_name), Some(environment_name)) => format!(
+                    "{actor_name} rolled back feature '{}' from environment '{}'.",
+                    feature.key, environment_name
+                ),
+                (Some(actor_name), None) => {
+                    format!("{actor_name} rolled back feature '{}'.", feature.key)
+                }
+                (None, Some(environment_name)) => format!(
+                    "Feature '{}' was rolled back from environment '{}'.",
+                    feature.key, environment_name
+                ),
+                (None, None) => format!("Feature '{}' was rolled back.", feature.key),
+            };
+
+            Some(NotificationEvent {
+                notification_type: NOTIFICATION_TYPE_FEATURE_ROLLED_BACK.to_string(),
+                team_id: Some(feature.team_id),
+                actor_id: Some(actor_id),
+                subject,
+                message,
+                metadata: Some(serde_json::json!({
+                    "feature_id": feature.id.to_string(),
+                    "feature_key": feature.key.clone(),
+                    "stage_id": stage.id.to_string(),
+                    "team_id": feature.team_id.to_string(),
+                    "environment_id": stage.environment_id.to_string(),
+                    "environment_name": environment_name,
+                    "rolled_back_by": actor_display_name,
+                })),
+            })
+        }
+        StageChangeRequestType::DeploymentRejected | StageChangeRequestType::RollbackRejected => {
+            None
+        }
+    }
 }
 
 fn validate_feature_key_create(key: &str) -> Result<(), RestError> {
@@ -404,7 +605,9 @@ fn validate_description_create(description: &Option<String>) -> Result<(), RestE
     Ok(())
 }
 
-fn validate_variant_requests(variants: &Option<Vec<CreateFeatureVariantRequest>>) -> Result<(), RestError> {
+fn validate_variant_requests(
+    variants: &Option<Vec<CreateFeatureVariantRequest>>,
+) -> Result<(), RestError> {
     if let Some(list) = variants {
         for variant in list {
             let control_len = variant.control.trim().len();
@@ -414,11 +617,12 @@ fn validate_variant_requests(variants: &Option<Vec<CreateFeatureVariantRequest>>
                 ));
             }
             if let Some(desc) = variant.description.as_deref()
-                && desc.trim().len() > 500 {
-                    return Err(RestError::invalid_input(
-                        "Variant description must be at most 500 characters",
-                    ));
-                }
+                && desc.trim().len() > 500
+            {
+                return Err(RestError::invalid_input(
+                    "Variant description must be at most 500 characters",
+                ));
+            }
         }
     }
     Ok(())
@@ -490,10 +694,8 @@ fn validate_feature_structure(
     stages: &[CreateFeatureStageInput],
     relationships: &[CreateRelationshipInput],
 ) -> Result<(), RestError> {
-    validate_relationships_and_stages(stages, relationships)
-        .map_err(RestError::invalid_input)?;
-    validate_duplicate_environment_and_index(stages)
-        .map_err(RestError::invalid_input)?;
+    validate_relationships_and_stages(stages, relationships).map_err(RestError::invalid_input)?;
+    validate_duplicate_environment_and_index(stages).map_err(RestError::invalid_input)?;
     Ok(())
 }
 
@@ -538,9 +740,7 @@ async fn ensure_feature_key_unique_for_update(
         .await
         .map_err(RestError::from)?;
 
-    let has_conflict = existing
-        .iter()
-        .any(|item| item.id != *feature_id);
+    let has_conflict = existing.iter().any(|item| item.id != *feature_id);
 
     if has_conflict {
         return Err(RestError::conflict(format!(
@@ -693,15 +893,16 @@ async fn broadcast_feature_update(
     feature_id: Uuid,
 ) {
     if let Ok(db_feature) = feature_repo.get_feature_by_id(feature_id).await
-        && let Ok(full) = map_db_feature_to_full_for_broadcast(feature_repo, db_feature).await {
-            let _ = updates_tx.send(crate::grpc::pb::FeatureUpdate {
-                message_id: uuid::Uuid::new_v4().to_string(),
-                action: crate::grpc::pb::feature_update::Action::Upsert as i32,
-                feature: Some(full),
-                feature_key: String::new(),
-                error: String::new(),
-            });
-        }
+        && let Ok(full) = map_db_feature_to_full_for_broadcast(feature_repo, db_feature).await
+    {
+        let _ = updates_tx.send(crate::grpc::pb::FeatureUpdate {
+            message_id: uuid::Uuid::new_v4().to_string(),
+            action: crate::grpc::pb::feature_update::Action::Upsert as i32,
+            feature: Some(full),
+            feature_key: String::new(),
+            error: String::new(),
+        });
+    }
 }
 
 #[utoipa::path(
@@ -843,28 +1044,26 @@ pub(crate) async fn create_feature(
     validate_feature_structure(&stages, &relationships)?;
 
     let dependencies = map_dependencies(&payload.dependencies)?;
-    let variants = payload
-        .variants
-        .as_ref()
-        .map(|list| {
-            list.iter()
-                .cloned()
-                .map(|variant| CreateFeatureVariantInput {
-                    control: variant.control,
-                    value: variant.value,
-                    value_type: ModelVariantValueType::from(variant.value_type),
-                    description: variant.description,
-                })
-                .collect::<Vec<_>>()
-        });
+    let variants = payload.variants.as_ref().map(|list| {
+        list.iter()
+            .cloned()
+            .map(|variant| CreateFeatureVariantInput {
+                control: variant.control,
+                value: variant.value,
+                value_type: ModelVariantValueType::from(variant.value_type),
+                description: variant.description,
+            })
+            .collect::<Vec<_>>()
+    });
 
     if payload.feature_type == FeatureType::Simple
         && let Some(ref list) = variants
-            && !list.is_empty() {
-                return Err(RestError::invalid_input(
-                    "Variants can only be defined for Contextual features, not Simple features",
-                ));
-            }
+        && !list.is_empty()
+    {
+        return Err(RestError::invalid_input(
+            "Variants can only be defined for Contextual features, not Simple features",
+        ));
+    }
 
     let input = CreateFeatureInput {
         key: payload.key.clone(),
@@ -896,9 +1095,9 @@ pub(crate) async fn create_feature(
 
     let feature_id = match result {
         Ok(feature_id) => {
-            tx.commit().await.map_err(|e| {
-                RestError::internal(format!("Failed to commit transaction: {e}"))
-            })?;
+            tx.commit()
+                .await
+                .map_err(|e| RestError::internal(format!("Failed to commit transaction: {e}")))?;
             feature_id
         }
         Err(err) => {
@@ -957,37 +1156,38 @@ pub(crate) async fn update_feature(
     validate_variant_requests(&payload.variants)?;
 
     let feature_uuid = parse_uuid(&feature_id, "feature id")?;
-    let existing_feature =
-        ensure_feature_key_unique_for_update(feature_logic.as_ref().as_ref(), &ID::from(feature_uuid), &payload.key)
-            .await?;
+    let existing_feature = ensure_feature_key_unique_for_update(
+        feature_logic.as_ref().as_ref(),
+        &ID::from(feature_uuid),
+        &payload.key,
+    )
+    .await?;
 
     let stages = map_stage_requests(&payload.stages)?;
     let relationships = map_relationship_requests(&payload.relationships)?;
     validate_feature_structure(&stages, &relationships)?;
 
     let dependencies = map_dependencies(&payload.dependencies)?;
-    let variants = payload
-        .variants
-        .as_ref()
-        .map(|list| {
-            list.iter()
-                .cloned()
-                .map(|variant| CreateFeatureVariantInput {
-                    control: variant.control,
-                    value: variant.value,
-                    value_type: ModelVariantValueType::from(variant.value_type),
-                    description: variant.description,
-                })
-                .collect::<Vec<_>>()
-        });
+    let variants = payload.variants.as_ref().map(|list| {
+        list.iter()
+            .cloned()
+            .map(|variant| CreateFeatureVariantInput {
+                control: variant.control,
+                value: variant.value,
+                value_type: ModelVariantValueType::from(variant.value_type),
+                description: variant.description,
+            })
+            .collect::<Vec<_>>()
+    });
 
     if payload.feature_type == FeatureType::Simple
         && let Some(ref list) = variants
-            && !list.is_empty() {
-                return Err(RestError::invalid_input(
-                    "Variants can only be defined for Contextual features, not Simple features",
-                ));
-            }
+        && !list.is_empty()
+    {
+        return Err(RestError::invalid_input(
+            "Variants can only be defined for Contextual features, not Simple features",
+        ));
+    }
 
     let input = UpdateFeatureInput {
         key: payload.key.clone(),
@@ -1019,9 +1219,9 @@ pub(crate) async fn update_feature(
 
     let updated = match result {
         Ok(feature) => {
-            tx.commit().await.map_err(|e| {
-                RestError::internal(format!("Failed to commit transaction: {e}"))
-            })?;
+            tx.commit()
+                .await
+                .map_err(|e| RestError::internal(format!("Failed to commit transaction: {e}")))?;
             feature
         }
         Err(err) => {
@@ -1105,7 +1305,12 @@ pub(crate) async fn emergency_disable_feature(
         }
     };
 
-    broadcast_feature_update(feature_repo.as_ref().as_ref(), updates_tx.get_ref(), feature_uuid).await;
+    broadcast_feature_update(
+        feature_repo.as_ref().as_ref(),
+        updates_tx.get_ref(),
+        feature_uuid,
+    )
+    .await;
 
     let response = build_feature_response(
         &feature,
@@ -1175,7 +1380,12 @@ pub(crate) async fn emergency_enable_feature(
         }
     };
 
-    broadcast_feature_update(feature_repo.as_ref().as_ref(), updates_tx.get_ref(), feature_uuid).await;
+    broadcast_feature_update(
+        feature_repo.as_ref().as_ref(),
+        updates_tx.get_ref(),
+        feature_uuid,
+    )
+    .await;
 
     let response = build_feature_response(
         &feature,
@@ -1212,6 +1422,7 @@ pub(crate) async fn request_stage_change(
     approval_repo: web::Data<Box<dyn ApprovalRepository>>,
     req: HttpRequest,
     feature_logic: web::Data<Box<dyn FeatureLogic>>,
+    user_logic: web::Data<Box<dyn UserLogic>>,
     feature_repo: web::Data<Box<dyn FeatureRepository>>,
     env_logic: web::Data<Box<dyn EnvironmentLogic>>,
     updates_tx: web::Data<tokio::sync::broadcast::Sender<crate::grpc::pb::FeatureUpdate>>,
@@ -1249,6 +1460,11 @@ pub(crate) async fn request_stage_change(
         .await
         .map_err(RestError::from)?;
 
+    let actor_display_name =
+        resolve_actor_display_name(user_logic.as_ref().as_ref(), &jwt_user).await;
+    let environment_name =
+        resolve_environment_name(env_logic.as_ref().as_ref(), stage.environment_id).await;
+
     let mut approval_request_id: Option<Uuid> = None;
 
     if status_requires_interception(next_status)
@@ -1259,90 +1475,89 @@ pub(crate) async fn request_stage_change(
             stage.environment_id,
         )
         .await?
+    {
+        let pending_status = match next_status {
+            "DEPLOYED" | "DEPLOYMENT_REJECTED" => StageStatus::DeploymentRequested.as_str(),
+            "ROLLBACKED" | "ROLLBACK_REJECTED" => StageStatus::RollbackRequested.as_str(),
+            other => other,
+        };
+
+        validate_stage_transition(&stage.status, pending_status)
+            .map_err(RestError::invalid_input)?;
+
+        let approval_target_status = match next_status {
+            "DEPLOYMENT_REQUESTED" => StageStatus::DeploymentApproved.as_str(),
+            "ROLLBACK_REQUESTED" => StageStatus::RollbackApproved.as_str(),
+            other => other,
+        };
+        let rejection_target_status = match next_status {
+            "DEPLOYMENT_REQUESTED" => StageStatus::DeploymentRejected.as_str(),
+            "ROLLBACK_REQUESTED" => StageStatus::RollbackRejected.as_str(),
+            other => other,
+        };
+        let after_status = approval_target_status;
+
+        let change_payload = serde_json::json!({
+            "stage_id": stage.id.to_string(),
+            "next_status": next_status,
+            "approval_target_status": approval_target_status,
+            "rejection_target_status": rejection_target_status,
+            "previous_status": stage.status,
+            "feature_id": db_feature.id.to_string(),
+            "environment_id": stage.environment_id.to_string(),
+            "before": { "status": stage.status },
+            "after": { "status": after_status },
+        });
+
+        let mut tx = db_pool
+            .begin()
+            .await
+            .map_err(|e| RestError::internal(format!("Failed to begin transaction: {e}")))?;
+        let approval_repo_tx = approval_repository_tx(db_pool.get_ref().clone());
+        let feature_repo_tx = feature_repository_tx(db_pool.get_ref().clone());
+
+        let request = approval_repo_tx
+            .create_request_tx(
+                &mut tx,
+                CreateApprovalRequestInput {
+                    policy_id: policy.id,
+                    feature_id: db_feature.id,
+                    environment_id: Some(stage.environment_id),
+                    change_type: "stage_change".into(),
+                    change_payload,
+                    change_description: Some(format!(
+                        "Stage {} -> {} for feature {}",
+                        stage.status, next_status, db_feature.key
+                    )),
+                    requested_by: jwt_user.id,
+                },
+            )
+            .await
+            .map_err(RestError::from)?;
+
+        if pending_status == StageStatus::DeploymentRequested.as_str()
+            || pending_status == StageStatus::RollbackRequested.as_str()
         {
-            let pending_status = match next_status {
-                "DEPLOYED" | "DEPLOYMENT_REJECTED" => StageStatus::DeploymentRequested.as_str(),
-                "ROLLBACKED" | "ROLLBACK_REJECTED" => StageStatus::RollbackRequested.as_str(),
-                other => other,
-            };
-
-            validate_stage_transition(&stage.status, pending_status)
-                .map_err(RestError::invalid_input)?;
-
-            let approval_target_status = match next_status {
-                "DEPLOYMENT_REQUESTED" => StageStatus::DeploymentApproved.as_str(),
-                "ROLLBACK_REQUESTED" => StageStatus::RollbackApproved.as_str(),
-                other => other,
-            };
-            let rejection_target_status = match next_status {
-                "DEPLOYMENT_REQUESTED" => StageStatus::DeploymentRejected.as_str(),
-                "ROLLBACK_REQUESTED" => StageStatus::RollbackRejected.as_str(),
-                other => other,
-            };
-            let after_status = approval_target_status;
-
-            let change_payload = serde_json::json!({
-                "stage_id": stage.id.to_string(),
-                "next_status": next_status,
-                "approval_target_status": approval_target_status,
-                "rejection_target_status": rejection_target_status,
-                "previous_status": stage.status,
-                "feature_id": db_feature.id.to_string(),
-                "environment_id": stage.environment_id.to_string(),
-                "before": { "status": stage.status },
-                "after": { "status": after_status },
-            });
-
-            let mut tx = db_pool
-                .begin()
-                .await
-                .map_err(|e| RestError::internal(format!("Failed to begin transaction: {e}")))?;
-            let approval_repo_tx = approval_repository_tx(db_pool.get_ref().clone());
-            let feature_repo_tx = feature_repository_tx(db_pool.get_ref().clone());
-
-            let request = approval_repo_tx
-                .create_request_tx(
-                    &mut tx,
-                    CreateApprovalRequestInput {
-                        policy_id: policy.id,
-                        feature_id: db_feature.id,
-                        environment_id: Some(stage.environment_id),
-                        change_type: "stage_change".into(),
-                        change_payload,
-                        change_description: Some(format!(
-                            "Stage {} -> {} for feature {}",
-                            stage.status, next_status, db_feature.key
-                        )),
-                        requested_by: jwt_user.id,
-                    },
-                )
+            let now = chrono::Utc::now();
+            let updated = feature_repo_tx
+                .request_stage_change_tx(&mut tx, stage_uuid, pending_status, jwt_user.id, now)
                 .await
                 .map_err(RestError::from)?;
-
-            if pending_status == StageStatus::DeploymentRequested.as_str()
-                || pending_status == StageStatus::RollbackRequested.as_str()
-            {
-                let now = chrono::Utc::now();
-                let updated = feature_repo_tx
-                    .request_stage_change_tx(&mut tx, stage_uuid, pending_status, jwt_user.id, now)
-                    .await
-                    .map_err(RestError::from)?;
-                if !updated {
-                    let _ = tx.rollback().await;
-                    return Err(RestError::not_found("Stage not found"));
-                }
+            if !updated {
+                let _ = tx.rollback().await;
+                return Err(RestError::not_found("Stage not found"));
             }
-
-            tx.commit()
-                .await
-                .map_err(|e| RestError::internal(format!("Failed to commit transaction: {e}")))?;
-
-            approval_request_id = Some(request.id);
         }
 
+        tx.commit()
+            .await
+            .map_err(|e| RestError::internal(format!("Failed to commit transaction: {e}")))?;
+
+        approval_request_id = Some(request.id);
+    }
+
     if approval_request_id.is_none() {
-        validate_stage_transition(&stage.status, next_status)
-            .map_err(RestError::invalid_input)?;
+        validate_stage_transition(&stage.status, next_status).map_err(RestError::invalid_input)?;
 
         let mut tx = db_pool
             .begin()
@@ -1351,7 +1566,8 @@ pub(crate) async fn request_stage_change(
         let feature_repo_tx = feature_repository_tx(db_pool.get_ref().clone());
 
         let updated = match request_type {
-            StageChangeRequestType::DeploymentRequested | StageChangeRequestType::RollbackRequested => {
+            StageChangeRequestType::DeploymentRequested
+            | StageChangeRequestType::RollbackRequested => {
                 let now = chrono::Utc::now();
                 feature_repo_tx
                     .request_stage_change_tx(&mut tx, stage_uuid, next_status, jwt_user.id, now)
@@ -1372,6 +1588,18 @@ pub(crate) async fn request_stage_change(
         tx.commit()
             .await
             .map_err(|e| RestError::internal(format!("Failed to commit transaction: {e}")))?;
+    }
+
+    if let Some(event) = build_stage_change_notification_event(
+        request_type,
+        &db_feature,
+        &stage,
+        next_status,
+        jwt_user.id,
+        actor_display_name.as_deref(),
+        environment_name.as_deref(),
+    ) {
+        dispatch_notification_event(event).await;
     }
 
     let mut feature = feature_logic
@@ -1579,18 +1807,18 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use actix_web::{test, App, http::StatusCode};
     use crate::database::activity_log::PgActivityLogRepository;
     use crate::database::environment::environment_repository;
-    use crate::database::feature::{feature_repository, MockFeatureRepository};
+    use crate::database::feature::{MockFeatureRepository, feature_repository};
     use crate::database::user::user_repository;
+    use crate::logic::environment::{MockEnvironmentLogic, environment_logic};
+    use crate::logic::feature::{MockFeatureLogic, feature_logic};
+    use crate::logic::pipeline::MockPipelineLogic;
     use crate::model::{
         Feature as ModelFeature, FeatureType as ModelFeatureType,
         LifecycleStage as ModelLifecycleStage,
     };
-    use crate::logic::environment::{environment_logic, MockEnvironmentLogic};
-    use crate::logic::feature::{feature_logic, MockFeatureLogic};
-    use crate::logic::pipeline::MockPipelineLogic;
+    use actix_web::{App, http::StatusCode, test};
     use sqlx::postgres::PgPoolOptions;
     use uuid::Uuid;
 
@@ -1615,6 +1843,79 @@ mod tests {
             team_id: ID::from(team_id),
             pending_approval_request_id: None,
         }
+    }
+
+    fn sample_db_feature_and_stage() -> (crate::database::entity::Feature, FeaturePipelineStage) {
+        let feature_id = Uuid::new_v4();
+        let team_id = Uuid::new_v4();
+        let stage = FeaturePipelineStage {
+            id: Uuid::new_v4(),
+            feature_id,
+            environment_id: Uuid::new_v4(),
+            order_index: 0,
+            parent_stage_id: None,
+            position: "{\"x\":0,\"y\":0}".to_string(),
+            enabled: true,
+            status: StageStatus::RollbackApproved.as_str().to_string(),
+        };
+
+        let feature = crate::database::entity::Feature {
+            id: feature_id,
+            key: "checkout".to_string(),
+            description: Some("Test feature".to_string()),
+            feature_type: crate::database::entity::FeatureType::Simple,
+            team_id,
+            active: true,
+            created_at: chrono::Utc::now(),
+            kill_switch_enabled: false,
+            kill_switch_activated_at: None,
+            rollback_scheduled_at: None,
+            lifecycle_stage: "active".to_string(),
+            deprecated_at: None,
+            deprecation_notice: None,
+            last_evaluated_at: None,
+            evaluation_count_7d: 0,
+            evaluation_count_30d: 0,
+            evaluation_count_90d: 0,
+            dependencies: vec![],
+        };
+
+        (feature, stage)
+    }
+
+    #[actix_web::test]
+    async fn build_stage_change_notification_event_for_rollback_includes_context() {
+        let (feature, stage) = sample_db_feature_and_stage();
+        let actor_id = Uuid::new_v4();
+
+        let event = build_stage_change_notification_event(
+            StageChangeRequestType::Rollbacked,
+            &feature,
+            &stage,
+            StageStatus::Rollbacked.as_str(),
+            actor_id,
+            Some("Jane Doe"),
+            Some("Production"),
+        )
+        .expect("rollbacked request should emit notification event");
+
+        assert_eq!(
+            event.notification_type,
+            NOTIFICATION_TYPE_FEATURE_ROLLED_BACK.to_string()
+        );
+        assert!(
+            event
+                .subject
+                .contains("Feature rolled back from Production")
+        );
+        assert!(event.message.contains("Jane Doe rolled back feature"));
+        assert_eq!(event.team_id, Some(feature.team_id));
+        assert_eq!(event.actor_id, Some(actor_id));
+
+        let metadata = event.metadata.expect("metadata should be present");
+        assert_eq!(metadata["feature_id"], feature.id.to_string());
+        assert_eq!(metadata["environment_name"], "Production");
+        assert_eq!(metadata["rolled_back_by"], "Jane Doe");
     }
 
     async fn test_pool() -> sqlx::PgPool {
@@ -1680,14 +1981,14 @@ mod tests {
 
         let app = test::init_service(
             App::new()
-                .app_data(web::Data::new(
-                    Box::new(mock_logic) as Box<dyn FeatureLogic>
-                ))
+                .app_data(web::Data::new(Box::new(mock_logic) as Box<dyn FeatureLogic>))
                 .service(web::scope("/api/v1").configure(super::configure)),
         )
         .await;
 
-        let uri = format!("/api/v1/teams/{team_id}/features?offset=10&limit=5&name=check&featureType=SIMPLE");
+        let uri = format!(
+            "/api/v1/teams/{team_id}/features?offset=10&limit=5&name=check&featureType=SIMPLE"
+        );
         let req = test::TestRequest::get().uri(&uri).to_request();
         let resp = test::call_service(&app, req).await;
 

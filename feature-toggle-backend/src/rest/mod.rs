@@ -1,85 +1,91 @@
-pub mod error;
-pub mod environment;
-pub mod context;
-pub mod pipeline;
-pub mod client;
-pub mod feature;
-pub mod criteria;
 pub mod approval;
-pub mod role;
-pub mod team;
-pub mod user;
 pub mod auth;
+pub mod client;
+pub mod context;
+pub mod criteria;
+pub mod environment;
+pub mod error;
+pub mod feature;
 pub mod jwt_secret;
-pub mod stream;
-pub mod pagination;
-pub mod serde;
-pub mod types;
 pub mod metrics;
+pub mod notification;
+pub mod pagination;
+pub mod pipeline;
+pub mod role;
+pub mod serde;
+pub mod stream;
+pub mod team;
+pub mod types;
+pub mod user;
 
-use actix_web::{get, web, HttpResponse, Responder};
+use actix_web::{HttpResponse, Responder, get, web};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
-use crate::rest::error::ErrorResponse;
+use crate::rest::approval::{
+    AppliesTo, ApprovalActionRequest, ApprovalPolicyResponse, ApprovalRequestListQuery,
+    ApprovalRequestResponse, ApprovalRequestStatus, ApprovalRequestsResponse, ApprovalVoteResponse,
+    CreateApprovalPolicyRequest, UpdateApprovalPolicyRequest,
+};
+use crate::rest::auth::{
+    AuthStatusResponse, LoginRequest, LoginResponse, ResetPasswordRequest,
+    SetTemporaryPasswordRequest,
+};
+use crate::rest::client::{
+    ClientListQuery, ClientResponse, ClientType, ClientsResponse, CreateClientRequest,
+    UpdateClientRequest,
+};
+use crate::rest::context::{
+    ContextEntryResponse, ContextListQuery, ContextResponse, ContextsResponse,
+    CreateContextRequest, UpdateContextRequest,
+};
+use crate::rest::criteria::{
+    CompoundRuleConditionResponse, CompoundRuleGroupResponse, CreateRuleConditionRequest,
+    CreateRuleGroupRequest, CreateStageCriterionRequest, CreateVariantAllocationRequest,
+    InlineRuleGroupRequest, LogicOperator, RuleOperator, SetVariantAllocationsRequest,
+    StageCriterionResponse, UpdateRuleGroupRequest, VariantAllocationResponse,
+    VariantSelectionMode,
+};
 use crate::rest::environment::{
     CreateEnvironmentRequest, EnvironmentListQuery, EnvironmentResponse, EnvironmentsResponse,
     UpdateEnvironmentRequest,
 };
-use crate::rest::context::{
-    ContextListQuery, ContextResponse, ContextsResponse, ContextEntryResponse, CreateContextRequest,
-    UpdateContextRequest,
+use crate::rest::error::ErrorResponse;
+use crate::rest::feature::{
+    CreateFeatureRequest, CreateFeatureStageRequest, CreateFeatureVariantRequest,
+    EmergencyDisableRequest, FeatureListQuery, FeatureRelationshipResponse, FeatureResponse,
+    FeatureRolloutQuery, FeatureStageResponse, FeatureType, FeatureVariantResponse,
+    FeaturesResponse, LifecycleStage, RolloutMetricsQuery, RolloutMetricsResponse,
+    StageChangeRequest, StageChangeRequestBody, UpdateFeatureRequest, VariantValueType,
 };
-use crate::rest::client::{
-    ClientListQuery, ClientResponse, ClientsResponse, CreateClientRequest, UpdateClientRequest,
-    ClientType,
+use crate::rest::jwt_secret::JwtSecretResponse;
+use crate::rest::metrics::{
+    ActivityEntityDetailsResponse, ActivityLogPageResponse, ActivityLogResponse,
+    ActivityRecentQuery, CreateMetricRequest, EvaluationByFeatureResponse, EvaluationCountQuery,
+    EvaluationRateResponse, EvaluationRatesQuery, EvaluationSummaryQuery,
+    EvaluationSummaryResponse, EvaluationsByFeatureQuery, EvaluationsByFeatureResponse,
+    ExperimentAnalysisResponse, ExperimentResultsQuery, FeatureGrowthQuery, FeatureGrowthResponse,
+    MetricAnalysisResponse, MetricResponse, MetricResultResponse, MetricsByFeatureQuery,
+    MetricsResponse, SystemMetricsResponse, TrackMetricEventRequest, TrackMetricsRequest,
+    TrackMetricsResponse,
 };
+use crate::rest::notification::{
+    NotificationChannelConfigResponse, NotificationPreferenceResponse,
+    NotificationSettingsResponse, UpdateNotificationChannelConfigRequest,
+    UpdateNotificationPreferenceRequest,
+};
+use crate::rest::pagination::{PageMeta, PaginationQuery};
 use crate::rest::pipeline::{
     CreatePipelineRequest, CreateRelationshipRequest, CreateStageRequest, PipelineListQuery,
     PipelineRelationshipResponse, PipelineResponse, PipelineStageResponse, PipelinesResponse,
     UpdatePipelineRequest,
 };
-use crate::rest::feature::{
-    FeatureListQuery, FeatureRolloutQuery, RolloutMetricsQuery, FeatureResponse, FeaturesResponse,
-    FeatureRelationshipResponse, FeatureStageResponse, FeatureVariantResponse, CreateFeatureRequest,
-    UpdateFeatureRequest, CreateFeatureStageRequest, CreateFeatureVariantRequest,
-    EmergencyDisableRequest, StageChangeRequestBody, StageChangeRequest, FeatureType,
-    LifecycleStage, VariantValueType, RolloutMetricsResponse,
-};
-use crate::rest::criteria::{
-    CreateRuleConditionRequest, CreateRuleGroupRequest, CreateStageCriterionRequest,
-    CreateVariantAllocationRequest, InlineRuleGroupRequest, LogicOperator, RuleOperator,
-    SetVariantAllocationsRequest, StageCriterionResponse, VariantAllocationResponse,
-    CompoundRuleConditionResponse, CompoundRuleGroupResponse, UpdateRuleGroupRequest,
-    VariantSelectionMode,
-};
-use crate::rest::approval::{
-    ApprovalActionRequest, ApprovalPolicyResponse, ApprovalRequestListQuery,
-    ApprovalRequestResponse, ApprovalRequestStatus, ApprovalRequestsResponse, ApprovalVoteResponse,
-    AppliesTo, CreateApprovalPolicyRequest, UpdateApprovalPolicyRequest,
-};
 use crate::rest::role::{CreateRoleRequest, RoleResponse};
-use crate::rest::team::{TeamResponse, CreateTeamRequest, UpdateTeamRequest};
-use crate::rest::user::{
-    UserListQuery, UserResponse, UsersResponse, CreateUserRequest, UpdateUserRequest,
-    AssignUserTeamsRequest, AssignUserRolesRequest,
-};
-use crate::rest::auth::{
-    LoginRequest, LoginResponse, ResetPasswordRequest, SetTemporaryPasswordRequest,
-    AuthStatusResponse,
-};
-use crate::rest::jwt_secret::JwtSecretResponse;
-use crate::rest::pagination::{PageMeta, PaginationQuery};
+use crate::rest::team::{CreateTeamRequest, TeamResponse, UpdateTeamRequest};
 use crate::rest::types::HealthResponse;
-use crate::rest::metrics::{
-    MetricsByFeatureQuery, ExperimentResultsQuery, EvaluationSummaryQuery, EvaluationRatesQuery,
-    EvaluationsByFeatureQuery, EvaluationCountQuery, FeatureGrowthQuery, ActivityRecentQuery,
-    MetricResponse, MetricsResponse, CreateMetricRequest, MetricResultResponse,
-    MetricAnalysisResponse, ExperimentAnalysisResponse, EvaluationRateResponse,
-    EvaluationSummaryResponse, EvaluationByFeatureResponse, EvaluationsByFeatureResponse,
-    FeatureGrowthResponse, ActivityEntityDetailsResponse, ActivityLogResponse,
-    ActivityLogPageResponse, SystemMetricsResponse, TrackMetricsResponse,
-    TrackMetricEventRequest, TrackMetricsRequest,
+use crate::rest::user::{
+    AssignUserRolesRequest, AssignUserTeamsRequest, CreateUserRequest, UpdateUserRequest,
+    UserListQuery, UserResponse, UsersResponse,
 };
 
 #[utoipa::path(
@@ -176,7 +182,10 @@ async fn health() -> impl Responder {
         metrics::feature_growth,
         metrics::recent_activity,
         metrics::system_metrics,
-        metrics::track_metrics
+        metrics::track_metrics,
+        notification::get_notification_settings,
+        notification::update_notification_channel,
+        notification::update_notification_preference
     ),
     components(schemas(
         HealthResponse,
@@ -296,7 +305,12 @@ async fn health() -> impl Responder {
         SystemMetricsResponse,
         TrackMetricsResponse,
         TrackMetricEventRequest,
-        TrackMetricsRequest
+        TrackMetricsRequest,
+        NotificationChannelConfigResponse,
+        NotificationPreferenceResponse,
+        NotificationSettingsResponse,
+        UpdateNotificationChannelConfigRequest,
+        UpdateNotificationPreferenceRequest
     )),
     tags(
         (name = "System", description = "System health and metadata"),
@@ -312,15 +326,21 @@ async fn health() -> impl Responder {
         (name = "Users", description = "User management"),
         (name = "Auth", description = "Authentication"),
         (name = "Metrics", description = "Metrics and analytics"),
-        (name = "Activity", description = "Activity logs")
+        (name = "Activity", description = "Activity logs"),
+        (name = "Notifications", description = "Notification settings and delivery preferences")
     )
 )]
 pub struct ApiDoc;
+
+async fn get_openapi() -> impl Responder {
+    HttpResponse::Ok().json(ApiDoc::openapi())
+}
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/api/v1")
             .service(health)
+            .route("/openapi.json", web::get().to(get_openapi))
             .configure(environment::configure)
             .configure(context::configure)
             .configure(client::configure)
@@ -334,6 +354,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .configure(user::configure)
             .configure(auth::configure)
             .configure(jwt_secret::configure)
+            .configure(notification::configure)
             .configure(stream::configure),
     );
 }

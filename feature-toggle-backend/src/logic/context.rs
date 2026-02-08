@@ -4,12 +4,12 @@ use crate::database::context::{
 };
 use crate::database::entity;
 use crate::database::feature::FeatureRepository;
+use crate::logic::stage_builder::id_to_uuid;
+use crate::model::ID;
 use crate::model::{
     Context as ModelContext, ContextEntry as ModelContextEntry, CreateContextInput,
     UpdateContextInput,
 };
-use crate::logic::stage_builder::id_to_uuid;
-use crate::model::ID;
 use mockall::automock;
 use uuid::Uuid;
 
@@ -325,15 +325,15 @@ impl ContextLogic for ContextLogicImpl {
                 if let Ok(db_feature) = self.feature_repo.get_feature_by_id(fid).await
                     && let Ok(full) =
                         map_db_feature_to_full_for_broadcast(&*self.feature_repo, db_feature).await
-                    {
-                        let _ = self.updates_tx.send(crate::grpc::pb::FeatureUpdate {
-                            message_id: uuid::Uuid::new_v4().to_string(),
-                            action: crate::grpc::pb::feature_update::Action::Upsert as i32,
-                            feature: Some(full),
-                            feature_key: String::new(),
-                            error: String::new(),
-                        });
-                    }
+                {
+                    let _ = self.updates_tx.send(crate::grpc::pb::FeatureUpdate {
+                        message_id: uuid::Uuid::new_v4().to_string(),
+                        action: crate::grpc::pb::feature_update::Action::Upsert as i32,
+                        feature: Some(full),
+                        feature_key: String::new(),
+                        error: String::new(),
+                    });
+                }
             }
         }
 

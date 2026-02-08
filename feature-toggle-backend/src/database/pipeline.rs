@@ -464,12 +464,13 @@ impl PipelineRepository for PipelineRepositoryImpl {
             .await;
 
         if let Ok(existing_pipeline) = existing_pipeline
-            && !existing_pipeline.is_empty() {
-                return Err(Error::RecordAlreadyExists(format!(
-                    "Pipeline with name '{}' already exists",
-                    input.name
-                )));
-            }
+            && !existing_pipeline.is_empty()
+        {
+            return Err(Error::RecordAlreadyExists(format!(
+                "Pipeline with name '{}' already exists",
+                input.name
+            )));
+        }
 
         let mut tx: Transaction<'_, Postgres> =
             self.pool.begin().await.map_err(Error::DatabaseError)?;
@@ -543,12 +544,13 @@ impl PipelineRepositoryTx for PipelineRepositoryImpl {
             .await;
 
         if let Ok(existing_pipeline) = existing_pipeline
-            && !existing_pipeline.is_empty() {
-                return Err(Error::RecordAlreadyExists(format!(
-                    "Pipeline with name '{}' already exists",
-                    input.name
-                )));
-            }
+            && !existing_pipeline.is_empty()
+        {
+            return Err(Error::RecordAlreadyExists(format!(
+                "Pipeline with name '{}' already exists",
+                input.name
+            )));
+        }
 
         let id = Uuid::new_v4();
         let result = sqlx::query!(

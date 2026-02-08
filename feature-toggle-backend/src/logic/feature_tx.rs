@@ -9,15 +9,15 @@ use crate::database::feature::{
 use crate::database::variant_allocations::{
     CreateVariantAllocationInput, VariantAllocationsRepositoryTx,
 };
+use crate::logic::ActorContext;
+use crate::logic::stage_builder::build_stage_relationships;
+use crate::model::ID;
 use crate::model::{
     Context as ModelContext, ContextEntry as ModelContextEntry, CreateFeatureInput,
     CreateStageCriterionInput, Feature as ModelFeature, FeatureType as ModelFeatureType,
     RuleOperator, StageCriterion as ModelStageCriterion, UpdateFeatureInput,
     VariantValueType as ModelVariantValueType,
 };
-use crate::logic::ActorContext;
-use crate::logic::stage_builder::build_stage_relationships;
-use crate::model::ID;
 use sqlx::PgConnection;
 use uuid::Uuid;
 

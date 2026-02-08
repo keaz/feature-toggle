@@ -185,21 +185,22 @@ where
                                             crate::database::user::user_repository(pool.clone());
                                         if let Ok(user) =
                                             user_repo.get_user_by_id(user_id_uuid).await
-                                            && user.is_temporary_password {
-                                                // User has temporary password, redirect to password reset
-                                                let target = format!(
-                                                    "{}/reset-password",
-                                                    ui_origin.trim_end_matches('/')
-                                                );
-                                                let res = HttpResponse::Unauthorized()
+                                            && user.is_temporary_password
+                                        {
+                                            // User has temporary password, redirect to password reset
+                                            let target = format!(
+                                                "{}/reset-password",
+                                                ui_origin.trim_end_matches('/')
+                                            );
+                                            let res = HttpResponse::Unauthorized()
                                                     .json(serde_json::json!({
                                                         "error": "temporary_password_reset_required",
                                                         "message": "You must reset your temporary password before continuing",
                                                         "redirect": target
                                                     }))
                                                     .map_into_right_body();
-                                                return Ok(req.into_response(res));
-                                            }
+                                            return Ok(req.into_response(res));
+                                        }
                                     }
 
                                     // Token is valid and user doesn't have temporary password (or this is resetPassword), inject user data

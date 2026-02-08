@@ -1,10 +1,10 @@
 use crate::Error;
 use crate::database::client::{ClientRepository, CreateClient, UpdateClient};
 use crate::database::entity::ClientType as EntityClientType;
+use crate::model::ID;
 use crate::model::{
     Client as ModelClient, ClientType as ModelClientType, CreateClientInput, UpdateClientInput,
 };
-use crate::model::ID;
 use uuid::Uuid;
 
 #[cfg(test)]
@@ -345,9 +345,7 @@ impl ClientLogic for ClientLogicImpl {
             name: input.name,
             description: input.description,
             enabled: input.enabled,
-            client_type: input
-                .client_type
-                .map(|t| self.map_api_to_entity_type(t)),
+            client_type: input.client_type.map(|t| self.map_api_to_entity_type(t)),
             web_origins: input.web_origins,
         };
         let c = self.repository.update_client(id, update).await?;

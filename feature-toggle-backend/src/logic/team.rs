@@ -1,7 +1,7 @@
 use crate::Error;
 use crate::database::team::TeamRepository;
-use crate::model::{CreateTeamInput, Team, UpdateTeamInput};
 use crate::model::ID;
+use crate::model::{CreateTeamInput, Team, UpdateTeamInput};
 use uuid::Uuid;
 
 #[cfg(test)]
@@ -113,12 +113,52 @@ impl TeamLogic for TeamLogicImpl {
             crate::utils::activity_logger::activity_types::TEAM_CREATED,
             &team.id.to_string(),
             actor_id,
-            actor_name,
+            actor_name.clone(),
             format!("Created team '{}'", team.name),
             Some(serde_json::json!({
                 "team_id": team.id.to_string(),
                 "team_name": team.name.clone(),
             })),
+        )
+        .await;
+
+        let created_by = actor_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(|name| name.to_string());
+        let description_suffix = if team.description.trim().is_empty() {
+            String::new()
+        } else {
+            format!(" Description: {}.", team.description)
+        };
+        let message = if let Some(created_by) = created_by.as_deref() {
+            format!(
+                "{created_by} created team '{}'.{}",
+                team.name, description_suffix
+            )
+        } else {
+            format!(
+                "A new team '{}' was created.{}",
+                team.name, description_suffix
+            )
+        };
+
+        crate::logic::notification::dispatch_notification_event(
+            crate::logic::notification::NotificationEvent {
+                notification_type: crate::logic::notification::NOTIFICATION_TYPE_TEAM_CREATED
+                    .to_string(),
+                team_id: None,
+                actor_id,
+                subject: format!("Team created: {}", team.name),
+                message,
+                metadata: Some(serde_json::json!({
+                    "team_id": team.id.to_string(),
+                    "team_name": team.name.clone(),
+                    "team_description": team.description.clone(),
+                    "created_by": created_by,
+                })),
+            },
         )
         .await;
 

@@ -1,15 +1,15 @@
+use crate::Error;
 use crate::database::approval::{
-    approval_repository_tx, ApprovalRepository, ApprovalRepositoryTx, CreateApprovalRequestInput,
-    CreateApprovalVoteInput,
+    ApprovalRepository, ApprovalRepositoryTx, CreateApprovalRequestInput, CreateApprovalVoteInput,
+    approval_repository_tx,
 };
 use crate::database::entity::{
     ApprovalPolicy, ApprovalRequest, ApprovalStatus, ApprovalVote, ApprovalVoteValue,
     Feature as DbFeature, FeaturePipelineStage, SENTINEL_UUID,
 };
-use crate::database::feature::{feature_repository_tx, FeatureRepository, FeatureRepositoryTx};
+use crate::database::feature::{FeatureRepository, FeatureRepositoryTx, feature_repository_tx};
 use crate::database::role::RoleRepository;
 use crate::logic::environment::EnvironmentLogic;
-use crate::Error;
 use crate::model::ID;
 use chrono::Utc;
 use feature_toggle_shared::constants::StageStatus;
@@ -160,17 +160,17 @@ impl ApprovalLogicImpl {
                 db_feature,
             )
             .await
-            {
-                let _ = self
-                    .feature_updates_tx
-                    .send(crate::grpc::pb::FeatureUpdate {
-                        message_id: uuid::Uuid::new_v4().to_string(),
-                        action: crate::grpc::pb::feature_update::Action::Upsert as i32,
-                        feature: Some(full),
-                        feature_key: String::new(),
-                        error: String::new(),
-                    });
-            }
+        {
+            let _ = self
+                .feature_updates_tx
+                .send(crate::grpc::pb::FeatureUpdate {
+                    message_id: uuid::Uuid::new_v4().to_string(),
+                    action: crate::grpc::pb::feature_update::Action::Upsert as i32,
+                    feature: Some(full),
+                    feature_key: String::new(),
+                    error: String::new(),
+                });
+        }
     }
 
     async fn get_applicable_policy(
@@ -233,6 +233,144 @@ impl ApprovalLogicImpl {
             .await?
             .ok_or(Error::NotFound(policy_id))?;
         Ok(policy.team_id)
+    }
+
+    fn stage_change_request_kind(request: &ApprovalRequest) -> Option<&'static str> {
+        if request.change_type != "stage_change" {
+            return None;
+        }
+
+        let next_status = request
+            .change_payload
+            .get("next_status")
+            .and_then(|value| value.as_str())?;
+
+        match next_status {
+            "DEPLOYMENT_REQUESTED" => Some("deployment"),
+            "ROLLBACK_REQUESTED" => Some("rollback"),
+            _ => None,
+        }
+    }
+
+    fn request_environment_id(request: &ApprovalRequest) -> Option<Uuid> {
+        request.environment_id.or_else(|| {
+            request
+                .change_payload
+                .get("environment_id")
+                .and_then(|value| value.as_str())
+                .and_then(|value| Uuid::parse_str(value).ok())
+        })
+    }
+
+    async fn resolve_environment_name(&self, request: &ApprovalRequest) -> Option<String> {
+        let environment_id = Self::request_environment_id(request)?;
+        self.environment_logic
+            .get_environment_by_id(ID::from(environment_id))
+            .await
+            .ok()
+            .map(|environment| environment.name)
+    }
+
+    async fn resolve_approver_name(&self, actor_id: Option<Uuid>) -> Option<String> {
+        let approver_id = actor_id?;
+
+        if let Some(pool) = &self.db_pool {
+            let user_repo = crate::database::user::user_repository(pool.clone());
+            if let Ok(user) = user_repo.get_user_by_id(approver_id).await {
+                let full_name = format!("{} {}", user.first_name.trim(), user.last_name.trim())
+                    .trim()
+                    .to_string();
+                if !full_name.is_empty() {
+                    return Some(full_name);
+                }
+                if !user.username.trim().is_empty() {
+                    return Some(user.username);
+                }
+            }
+        }
+
+        Some(approver_id.to_string())
+    }
+
+    async fn dispatch_stage_change_approved_notification(
+        &self,
+        request: &ApprovalRequest,
+        team_id: Uuid,
+        actor_id: Option<Uuid>,
+    ) {
+        let Some(kind) = Self::stage_change_request_kind(request) else {
+            return;
+        };
+
+        let feature_key = self
+            .feature_repository
+            .get_feature_by_id(request.feature_id)
+            .await
+            .map(|feature| feature.key)
+            .unwrap_or_else(|_| request.feature_id.to_string());
+
+        let approver_name = self.resolve_approver_name(actor_id).await;
+        let environment_id = Self::request_environment_id(request);
+        let environment_name = self.resolve_environment_name(request).await;
+        let was_auto_approved = matches!(request.status, ApprovalStatus::AutoApproved);
+        let approval_verb = if was_auto_approved {
+            "auto-approved"
+        } else {
+            "approved"
+        };
+
+        let subject = match environment_name.as_deref() {
+            Some(environment_name) => {
+                format!(
+                    "Feature {kind} request {approval_verb} in {environment_name}: {feature_key}"
+                )
+            }
+            None => format!("Feature {kind} request {approval_verb}: {feature_key}"),
+        };
+
+        let message = match (approver_name.as_deref(), environment_name.as_deref()) {
+            (Some(approver_name), Some(environment_name)) => format!(
+                "{approver_name} approved the {kind} request for feature '{feature_key}' in environment '{environment_name}'."
+            ),
+            (Some(approver_name), None) => {
+                format!("{approver_name} approved the {kind} request for feature '{feature_key}'.")
+            }
+            (None, Some(environment_name)) if was_auto_approved => format!(
+                "The {kind} request for feature '{feature_key}' was auto-approved in environment '{environment_name}'."
+            ),
+            (None, None) if was_auto_approved => {
+                format!("The {kind} request for feature '{feature_key}' was auto-approved.")
+            }
+            (None, Some(environment_name)) => format!(
+                "A {kind} request was approved for feature '{feature_key}' in environment '{environment_name}'."
+            ),
+            (None, None) => {
+                format!("A {kind} request was approved for feature '{feature_key}'.")
+            }
+        };
+
+        crate::logic::notification::dispatch_notification_event(
+            crate::logic::notification::NotificationEvent {
+                notification_type:
+                    crate::logic::notification::NOTIFICATION_TYPE_STAGE_CHANGE_APPROVED.to_string(),
+                team_id: Some(team_id),
+                actor_id,
+                subject,
+                message,
+                metadata: Some(serde_json::json!({
+                    "approval_request_id": request.id.to_string(),
+                    "feature_id": request.feature_id.to_string(),
+                    "feature_key": feature_key,
+                    "team_id": team_id.to_string(),
+                    "environment_id": environment_id.map(|id| id.to_string()),
+                    "environment_name": environment_name,
+                    "approved_by": approver_name,
+                    "auto_approved": was_auto_approved,
+                    "status": format!("{:?}", request.status),
+                })),
+            },
+        )
+        .await;
     }
 
     async fn apply_vote(
@@ -321,6 +459,13 @@ impl ApprovalLogicImpl {
 
             // Notify edge servers about the feature update after approval
             self.notify_edge_servers(updated.feature_id).await;
+
+            self.dispatch_stage_change_approved_notification(
+                &final_request,
+                team_id,
+                Some(approver_id),
+            )
+            .await;
 
             return Ok(final_request);
         }
@@ -433,13 +578,25 @@ impl ApprovalLogicImpl {
             }
 
             let final_request = approval_repo_tx
-                .update_request_status_tx(&mut tx, request_id, ApprovalStatus::Approved, Some(Utc::now()))
+                .update_request_status_tx(
+                    &mut tx,
+                    request_id,
+                    ApprovalStatus::Approved,
+                    Some(Utc::now()),
+                )
                 .await?;
             tx.commit().await.map_err(Error::DatabaseError)?;
 
             self.publish_event(&updated, team_id).await?;
             self.publish_event(&final_request, team_id).await?;
             self.notify_edge_servers(updated.feature_id).await;
+
+            self.dispatch_stage_change_approved_notification(
+                &final_request,
+                team_id,
+                Some(approver_id),
+            )
+            .await;
 
             return Ok(final_request);
         }
@@ -797,6 +954,9 @@ impl ApprovalLogic for ApprovalLogicImpl {
             self.publish_event(&updated, team_id).await?;
             self.notify_edge_servers(request.feature_id).await;
 
+            self.dispatch_stage_change_approved_notification(&updated, team_id, None)
+                .await;
+
             return Ok(updated);
         }
 
@@ -810,6 +970,9 @@ impl ApprovalLogic for ApprovalLogicImpl {
 
         // Notify edge servers about the feature update after auto-approval
         self.notify_edge_servers(request.feature_id).await;
+
+        self.dispatch_stage_change_approved_notification(&updated, team_id, None)
+            .await;
 
         Ok(updated)
     }
@@ -826,8 +989,8 @@ mod tests {
     use crate::database::entity::{FeatureType, Role};
     use crate::database::feature::MockFeatureRepository;
     use crate::database::role::MockRoleRepository;
-    use crate::model::Environment;
     use crate::logic::environment::MockEnvironmentLogic;
+    use crate::model::Environment;
     use chrono::Utc;
 
     #[tokio::test]

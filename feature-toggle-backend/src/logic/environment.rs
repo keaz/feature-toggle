@@ -1,7 +1,7 @@
 use crate::Error;
 use crate::database::environment::EnvironmentRepository;
-use crate::model::{CreateEnvironmentInput, Environment, UpdateEnvironmentInput};
 use crate::model::ID;
+use crate::model::{CreateEnvironmentInput, Environment, UpdateEnvironmentInput};
 use mockall::automock;
 use uuid::Uuid;
 

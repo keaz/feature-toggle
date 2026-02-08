@@ -231,7 +231,9 @@ impl ContextRepository for ContextRepositoryImpl {
         offset: i64,
         limit: i64,
     ) -> Result<(Vec<Context>, i64), Error> {
-        debug!("DB: get_contexts_with_offset team={team_id} key={key:?} offset={offset} limit={limit}");
+        debug!(
+            "DB: get_contexts_with_offset team={team_id} key={key:?} offset={offset} limit={limit}"
+        );
 
         let offset = offset.max(0);
         let limit = limit.max(1);

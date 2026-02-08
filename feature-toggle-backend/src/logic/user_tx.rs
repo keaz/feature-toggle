@@ -9,12 +9,12 @@ use crate::database::activity_log::{ActivityLogRepository, CreateActivityLog};
 use crate::database::user::{CreateUser, UpdateUser, UserRepositoryTx};
 use crate::logic::ActorContext;
 use crate::logic::user::{ApiUser, RegisterUserInput, UpdateUserInput};
+use crate::model::ID;
 use crate::utils::activity_logger::activity_types;
 use argon2::{
     Argon2,
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
 };
-use crate::model::ID;
 use sqlx::PgConnection;
 use uuid::Uuid;
 
@@ -66,6 +66,7 @@ where
                 first_name: input.first_name.clone(),
                 last_name: input.last_name.clone(),
                 email: input.email,
+                mobile_number: input.mobile_number.clone(),
                 is_admin: input.is_admin,
                 is_temporary_password: input.is_temporary_password,
             },
@@ -104,6 +105,7 @@ where
         first_name: created.first_name,
         last_name: created.last_name,
         email: created.email,
+        mobile_number: created.mobile_number,
         is_admin: created.is_admin,
         created_at: created.created_at,
         updated_at: created.updated_at,
@@ -131,9 +133,10 @@ where
 
     // If updating email, validate uniqueness (allow unchanged or same owner)
     if let Some(ref new_email) = input.email
-        && repo.user_exists_by_email(new_email, Some(user_id)).await? {
-            return Err(Error::RecordAlreadyExists("email".to_string()));
-        }
+        && repo.user_exists_by_email(new_email, Some(user_id)).await?
+    {
+        return Err(Error::RecordAlreadyExists("email".to_string()));
+    }
 
     // Update user within transaction
     let updated = repo
@@ -144,6 +147,7 @@ where
                 first_name: input.first_name,
                 last_name: input.last_name,
                 email: input.email,
+                mobile_number: input.mobile_number,
                 is_admin: input.is_admin,
                 enabled: input.enabled,
             },
@@ -181,6 +185,7 @@ where
         first_name: updated.first_name,
         last_name: updated.last_name,
         email: updated.email,
+        mobile_number: updated.mobile_number,
         is_admin: updated.is_admin,
         created_at: updated.created_at,
         updated_at: updated.updated_at,

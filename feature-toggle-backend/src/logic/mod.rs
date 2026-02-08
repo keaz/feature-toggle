@@ -1,8 +1,8 @@
 use crate::Error;
 use crate::database::entity::DBStage;
-use crate::model::{Environment, Relationship, Stage};
 use crate::logic::environment::EnvironmentLogic;
 use crate::model::ID;
+use crate::model::{Environment, Relationship, Stage};
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -39,6 +39,7 @@ pub mod jwt_secret;
 pub mod jwt_token;
 pub mod metrics;
 pub mod metrics_tx;
+pub mod notification;
 pub mod pipeline;
 pub mod pipeline_tx;
 pub mod role;

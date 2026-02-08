@@ -1,24 +1,24 @@
-use actix_web::{get, patch, post, web, HttpMessage, HttpRequest, HttpResponse, Responder};
 use crate::model::ID;
+use actix_web::{HttpMessage, HttpRequest, HttpResponse, Responder, get, patch, post, web};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use crate::JwtUser;
+use crate::database::activity_log::ActivityLogRepository;
+use crate::database::pipeline::{PipelineRepository, pipeline_repository_tx};
+use crate::logic::ActorContext;
+use crate::logic::pipeline::PipelineLogic;
 use crate::model::{
     CreatePipelineInput, CreateRelationshipInput, CreateStageInput, Pipeline, PipelineRelationship,
     PipelineStage, UpdatePipelineInput,
 };
+use crate::rest::environment::EnvironmentResponse;
+use crate::rest::error::RestError;
+use crate::rest::pagination::{PageMeta, PaginationQuery, normalize_pagination};
 use crate::validation::{
     validate_duplicate_environment_and_index, validate_relationships_and_stages,
 };
-use crate::database::activity_log::ActivityLogRepository;
-use crate::database::pipeline::{pipeline_repository_tx, PipelineRepository};
-use crate::logic::pipeline::PipelineLogic;
-use crate::logic::ActorContext;
-use crate::rest::environment::EnvironmentResponse;
-use crate::rest::error::RestError;
-use crate::rest::pagination::{normalize_pagination, PageMeta, PaginationQuery};
-use crate::JwtUser;
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct PipelineListQuery {
@@ -212,10 +212,8 @@ fn validate_pipeline_structure(
     stages: &[CreateStageInput],
     relationships: &[CreateRelationshipInput],
 ) -> Result<(), RestError> {
-    validate_relationships_and_stages(stages, relationships)
-        .map_err(RestError::invalid_input)?;
-    validate_duplicate_environment_and_index(stages)
-        .map_err(RestError::invalid_input)?;
+    validate_relationships_and_stages(stages, relationships).map_err(RestError::invalid_input)?;
+    validate_duplicate_environment_and_index(stages).map_err(RestError::invalid_input)?;
     Ok(())
 }
 
@@ -226,8 +224,7 @@ async fn ensure_pipeline_name_unique(
     active: Option<bool>,
     exclude_id: Option<ID>,
 ) -> Result<(), RestError> {
-    let team_uuid =
-        Uuid::try_from(team_id).map_err(|e| RestError::invalid_input(e.to_string()))?;
+    let team_uuid = Uuid::try_from(team_id).map_err(|e| RestError::invalid_input(e.to_string()))?;
     let pipelines = repo
         .get_pipelines(team_uuid, Some(name.to_string()), active)
         .await
@@ -407,9 +404,9 @@ pub(crate) async fn create_pipeline(
 
     match result {
         Ok(pipeline_id) => {
-            tx.commit().await.map_err(|e| {
-                RestError::internal(format!("Failed to commit transaction: {e}"))
-            })?;
+            tx.commit()
+                .await
+                .map_err(|e| RestError::internal(format!("Failed to commit transaction: {e}")))?;
             let pipeline = logic
                 .get_pipeline_by_id(pipeline_id)
                 .await
@@ -496,9 +493,9 @@ pub(crate) async fn update_pipeline(
 
     match result {
         Ok(_) => {
-            tx.commit().await.map_err(|e| {
-                RestError::internal(format!("Failed to commit transaction: {e}"))
-            })?;
+            tx.commit()
+                .await
+                .map_err(|e| RestError::internal(format!("Failed to commit transaction: {e}")))?;
             let pipeline = logic
                 .get_pipeline_by_id(ID::from(pipeline_uuid))
                 .await
@@ -522,9 +519,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use actix_web::{http::StatusCode, test, App};
     use crate::database::activity_log::PgActivityLogRepository;
     use crate::logic::pipeline::MockPipelineLogic;
+    use actix_web::{App, http::StatusCode, test};
     use sqlx::postgres::PgPoolOptions;
 
     fn sample_env(env_id: Uuid, team_id: Uuid) -> crate::model::Environment {
@@ -595,12 +592,7 @@ mod tests {
         env_id
     }
 
-    async fn insert_pipeline(
-        pool: &sqlx::PgPool,
-        team_id: Uuid,
-        env_id: Uuid,
-        name: &str,
-    ) -> Uuid {
+    async fn insert_pipeline(pool: &sqlx::PgPool, team_id: Uuid, env_id: Uuid, name: &str) -> Uuid {
         let pipeline_id = Uuid::new_v4();
         sqlx::query!(
             r#"INSERT INTO pipelines (id, name, active, team_id) VALUES ($1, $2, $3, $4)"#,
@@ -660,9 +652,8 @@ mod tests {
         )
         .await;
 
-        let uri = format!(
-            "/api/v1/teams/{team_id}/pipelines?offset=5&limit=10&name=release&active=true"
-        );
+        let uri =
+            format!("/api/v1/teams/{team_id}/pipelines?offset=5&limit=10&name=release&active=true");
         let req = test::TestRequest::get().uri(&uri).to_request();
         let resp = test::call_service(&app, req).await;
 
@@ -856,8 +847,7 @@ mod tests {
         let team_id = insert_team(&pool).await;
         let env_id = insert_environment(&pool, team_id).await;
         let pipeline_id = insert_pipeline(&pool, team_id, env_id, "Primary Pipeline").await;
-        let _other_pipeline_id =
-            insert_pipeline(&pool, team_id, env_id, "Updated Pipeline").await;
+        let _other_pipeline_id = insert_pipeline(&pool, team_id, env_id, "Updated Pipeline").await;
         let activity_repo = PgActivityLogRepository::new(pool.clone());
 
         let app = test::init_service(

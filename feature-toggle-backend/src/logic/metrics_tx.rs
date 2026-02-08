@@ -47,9 +47,7 @@ where
         name: name_trimmed.to_string(),
         description,
         metric_type,
-        unit: unit
-            .map(|u| u.trim().to_string())
-            .filter(|u| !u.is_empty()),
+        unit: unit.map(|u| u.trim().to_string()).filter(|u| !u.is_empty()),
         success_criteria,
     };
 

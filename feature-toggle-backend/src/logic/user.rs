@@ -1,13 +1,14 @@
 use crate::Error;
 use crate::database::user::{CreateUser, UpdateUser, UserRepository};
+use crate::model::ID;
 use crate::model::Team;
 use argon2::{
     Argon2,
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
 };
-use crate::model::ID;
 use chrono::{DateTime, Utc};
 use mockall::automock;
+use std::collections::HashMap;
 use uuid::Uuid;
 
 #[derive(Clone, Debug)]
@@ -17,6 +18,7 @@ pub struct ApiUser {
     pub first_name: String,
     pub last_name: String,
     pub email: String,
+    pub mobile_number: Option<String>,
     pub is_admin: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -110,6 +112,7 @@ pub struct RegisterUserInput {
     pub first_name: String,
     pub last_name: String,
     pub email: String,
+    pub mobile_number: Option<String>,
     pub is_admin: bool,
     pub is_temporary_password: bool,
 }
@@ -119,8 +122,25 @@ pub struct UpdateUserInput {
     pub first_name: Option<String>,
     pub last_name: Option<String>,
     pub email: Option<String>,
+    pub mobile_number: Option<String>,
     pub is_admin: Option<bool>,
     pub enabled: Option<bool>,
+}
+
+fn user_display_name(first_name: &str, last_name: &str, username: &str, fallback: &str) -> String {
+    let full_name = format!("{} {}", first_name.trim(), last_name.trim())
+        .trim()
+        .to_string();
+    if !full_name.is_empty() {
+        return full_name;
+    }
+
+    let trimmed_username = username.trim();
+    if !trimmed_username.is_empty() {
+        return trimmed_username.to_string();
+    }
+
+    fallback.to_string()
 }
 
 #[async_trait::async_trait]
@@ -134,6 +154,7 @@ impl UserLogic for UserLogicImpl {
             first_name: u.first_name,
             last_name: u.last_name,
             email: u.email,
+            mobile_number: u.mobile_number,
             is_admin: u.is_admin,
             created_at: u.created_at,
             updated_at: u.updated_at,
@@ -150,6 +171,7 @@ impl UserLogic for UserLogicImpl {
             first_name: u.first_name,
             last_name: u.last_name,
             email: u.email,
+            mobile_number: u.mobile_number,
             is_admin: u.is_admin,
             created_at: u.created_at,
             updated_at: u.updated_at,
@@ -200,6 +222,7 @@ impl UserLogic for UserLogicImpl {
                 first_name: input.first_name.clone(),
                 last_name: input.last_name.clone(),
                 email: input.email,
+                mobile_number: input.mobile_number.clone(),
                 is_admin: input.is_admin,
                 is_temporary_password: input.is_temporary_password,
             })
@@ -233,6 +256,7 @@ impl UserLogic for UserLogicImpl {
             first_name: created.first_name,
             last_name: created.last_name,
             email: created.email,
+            mobile_number: created.mobile_number,
             is_admin: created.is_admin,
             created_at: created.created_at,
             updated_at: created.updated_at,
@@ -261,6 +285,7 @@ impl UserLogic for UserLogicImpl {
             first_name: u.first_name,
             last_name: u.last_name,
             email: u.email,
+            mobile_number: u.mobile_number,
             is_admin: u.is_admin,
             created_at: u.created_at,
             updated_at: u.updated_at,
@@ -294,6 +319,7 @@ impl UserLogic for UserLogicImpl {
                 first_name: input.first_name,
                 last_name: input.last_name,
                 email: input.email,
+                mobile_number: input.mobile_number,
                 is_admin: input.is_admin,
                 enabled: input.enabled,
             })
@@ -326,6 +352,7 @@ impl UserLogic for UserLogicImpl {
             first_name: updated.first_name,
             last_name: updated.last_name,
             email: updated.email,
+            mobile_number: updated.mobile_number,
             is_admin: updated.is_admin,
             created_at: updated.created_at,
             updated_at: updated.updated_at,
@@ -462,6 +489,29 @@ impl UserLogic for UserLogicImpl {
             .set_user_teams(user_id, team_ids_uuid.clone())
             .await?;
 
+        let assigned_user_name = self
+            .repository
+            .get_user_by_id(user_id)
+            .await
+            .map(|user| {
+                user_display_name(
+                    &user.first_name,
+                    &user.last_name,
+                    &user.username,
+                    &user_id.to_string(),
+                )
+            })
+            .unwrap_or_else(|_| user_id.to_string());
+
+        let team_name_by_id: HashMap<Uuid, String> = self
+            .repository
+            .get_user_teams(user_id)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|team| (team.id, team.name))
+            .collect();
+
         // Extract actor information
         let (actor_id, actor_name) = actor
             .as_ref()
@@ -470,6 +520,21 @@ impl UserLogic for UserLogicImpl {
 
         // Log activity for each team assignment (ignore errors to not fail the operation)
         for team_id in &team_ids_uuid {
+            let team_name = team_name_by_id
+                .get(team_id)
+                .cloned()
+                .unwrap_or_else(|| team_id.to_string());
+            let added_by = actor_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(|name| name.to_string());
+            let message = if let Some(added_by) = added_by.as_deref() {
+                format!("User {assigned_user_name} was added to team '{team_name}' by {added_by}.")
+            } else {
+                format!("User {assigned_user_name} was added to team '{team_name}'.")
+            };
+
             let _ = crate::utils::activity_logger::log_team_activity(
                 &self.activity_log_repository,
                 crate::utils::activity_logger::activity_types::USER_ADDED_TO_TEAM,
@@ -481,6 +546,26 @@ impl UserLogic for UserLogicImpl {
                     "user_id": id.to_string(),
                     "team_id": team_id.to_string(),
                 })),
+            )
+            .await;
+
+            crate::logic::notification::dispatch_notification_event(
+                crate::logic::notification::NotificationEvent {
+                    notification_type:
+                        crate::logic::notification::NOTIFICATION_TYPE_USER_ADDED_TO_TEAM
+                            .to_string(),
+                    team_id: Some(*team_id),
+                    actor_id,
+                    subject: format!("User added to team: {team_name}"),
+                    message,
+                    metadata: Some(serde_json::json!({
+                        "team_id": team_id.to_string(),
+                        "team_name": team_name.clone(),
+                        "user_id": user_id.to_string(),
+                        "user_display_name": assigned_user_name.clone(),
+                        "added_by": added_by,
+                    })),
+                },
             )
             .await;
         }
@@ -522,6 +607,7 @@ impl UserLogic for UserLogicImpl {
                 first_name: u.first_name,
                 last_name: u.last_name,
                 email: u.email,
+                mobile_number: u.mobile_number,
                 is_admin: u.is_admin,
                 created_at: u.created_at,
                 updated_at: u.updated_at,
@@ -577,6 +663,7 @@ mod tests {
             first_name: "John".to_string(),
             last_name: "Doe".to_string(),
             email: "john@example.com".to_string(),
+            mobile_number: None,
             is_admin: false,
             enabled: true,
             created_at: Utc::now(),
@@ -637,6 +724,7 @@ mod tests {
                 first_name: input.first_name,
                 last_name: input.last_name,
                 email: input.email,
+                mobile_number: input.mobile_number,
                 is_admin: input.is_admin,
                 enabled: true,
                 created_at: Utc::now(),
@@ -655,6 +743,7 @@ mod tests {
                     first_name: "New".to_string(),
                     last_name: "User".to_string(),
                     email: "new@example.com".to_string(),
+                    mobile_number: None,
                     is_admin: true,
                     is_temporary_password: false,
                 },
@@ -679,6 +768,7 @@ mod tests {
                     first_name: "A".to_string(),
                     last_name: "B".to_string(),
                     email: "a@b.c".to_string(),
+                    mobile_number: None,
                     is_admin: false,
                     is_temporary_password: false,
                 },
@@ -708,6 +798,7 @@ mod tests {
                     first_name: "A".to_string(),
                     last_name: "B".to_string(),
                     email: "x@y.z".to_string(),
+                    mobile_number: None,
                     is_admin: false,
                     is_temporary_password: false,
                 },
@@ -738,6 +829,7 @@ mod tests {
                     first_name: "A".to_string(),
                     last_name: "B".to_string(),
                     email: "dup@e.com".to_string(),
+                    mobile_number: None,
                     is_admin: false,
                     is_temporary_password: false,
                 },
@@ -829,6 +921,7 @@ mod tests {
                 first_name: input.first_name.unwrap_or("John".to_string()),
                 last_name: input.last_name.unwrap_or("Doe".to_string()),
                 email: input.email.unwrap_or("john@example.com".to_string()),
+                mobile_number: input.mobile_number,
                 is_admin: input.is_admin.unwrap_or(false),
                 enabled: input.enabled.unwrap_or(true),
                 created_at: Utc::now(),
@@ -845,6 +938,7 @@ mod tests {
                     first_name: Some("Jane".to_string()),
                     last_name: None,
                     email: Some("new@example.com".to_string()),
+                    mobile_number: None,
                     is_admin: Some(true),
                     enabled: Some(true),
                 },
@@ -873,6 +967,7 @@ mod tests {
                     first_name: None,
                     last_name: None,
                     email: Some("dup@example.com".to_string()),
+                    mobile_number: None,
                     is_admin: None,
                     enabled: None,
                 },
@@ -901,6 +996,43 @@ mod tests {
                 }),
             )
             .return_once(|_, _| Ok(()));
+        mock.expect_get_user_by_id()
+            .with(eq(id))
+            .times(1)
+            .returning(move |_| {
+                Ok(User {
+                    id,
+                    username: "jdoe".to_string(),
+                    password_hash: "hash".to_string(),
+                    first_name: "Jane".to_string(),
+                    last_name: "Doe".to_string(),
+                    email: "jane@example.com".to_string(),
+                    mobile_number: None,
+                    is_admin: false,
+                    enabled: true,
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                    last_login: None,
+                    is_temporary_password: false,
+                })
+            });
+        mock.expect_get_user_teams()
+            .with(eq(id))
+            .times(1)
+            .returning(move |_| {
+                Ok(vec![
+                    crate::database::entity::Team {
+                        id: t1,
+                        name: "E-Commerce".to_string(),
+                        description: "Team one".to_string(),
+                    },
+                    crate::database::entity::Team {
+                        id: t2,
+                        name: "Checkout".to_string(),
+                        description: "Team two".to_string(),
+                    },
+                ])
+            });
         let logic = user_logic(Box::new(mock), create_mock_activity_log());
         let ok = logic
             .assign_user_teams(ID::from(id), vec![ID::from(t1), ID::from(t2)], None)

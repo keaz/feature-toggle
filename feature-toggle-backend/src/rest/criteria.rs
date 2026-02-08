@@ -1,22 +1,26 @@
-use actix_web::{delete, get, patch, post, put, web, HttpResponse, Responder};
 use crate::model::ID;
+use actix_web::{HttpResponse, Responder, delete, get, patch, post, put, web};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::database::compound_rules::{
-    compound_rules_repository_tx, CompoundRulesRepository, CompoundRulesRepositoryTx,
+    CompoundRulesRepository, CompoundRulesRepositoryTx,
     CreateRuleConditionInput as DbCreateRuleConditionInput,
     CreateRuleGroupInput as DbCreateRuleGroupInput, UpdateRuleGroupInput as DbUpdateRuleGroupInput,
+    compound_rules_repository_tx,
 };
 use crate::database::entity::LogicOperator as DbLogicOperator;
 use crate::database::feature::FeatureRepository;
 use crate::database::variant_allocations::{
-    variant_allocations_repository_tx,
     CreateVariantAllocationInput as DbCreateVariantAllocationInput, VariantAllocationsRepositoryTx,
+    variant_allocations_repository_tx,
 };
+use crate::logic::feature::FeatureLogic;
+use crate::logic::feature_tx;
 use crate::model::{
-    CompoundRuleCondition as ModelCompoundRuleCondition, CompoundRuleGroup as ModelCompoundRuleGroup,
+    CompoundRuleCondition as ModelCompoundRuleCondition,
+    CompoundRuleGroup as ModelCompoundRuleGroup,
     CreateRuleConditionInput as ModelCreateRuleConditionInput,
     CreateStageCriterionInput as ModelCreateStageCriterionInput,
     CreateVariantAllocationInput as ModelCreateVariantAllocationInput,
@@ -24,8 +28,6 @@ use crate::model::{
     RuleOperator as ModelRuleOperator, StageCriterion as ModelStageCriterion,
     VariantAllocation as ModelVariantAllocation, VariantSelectionMode as ModelVariantSelectionMode,
 };
-use crate::logic::feature::FeatureLogic;
-use crate::logic::feature_tx;
 use crate::rest::error::RestError;
 
 #[derive(Debug, Serialize, Deserialize, ToSchema, Clone, Copy, PartialEq, Eq)]
@@ -379,9 +381,7 @@ fn validate_variant_control(value: &str) -> Result<(), RestError> {
 
 fn validate_weight(weight: i32) -> Result<(), RestError> {
     if !(0..=100).contains(&weight) {
-        return Err(RestError::invalid_input(
-            "weight must be between 0 and 100",
-        ));
+        return Err(RestError::invalid_input("weight must be between 0 and 100"));
     }
     Ok(())
 }
@@ -400,9 +400,7 @@ fn validate_rule_groups(groups: &[InlineRuleGroupRequest]) -> Result<(), RestErr
     Ok(())
 }
 
-fn validate_allocations(
-    allocations: &[CreateVariantAllocationRequest],
-) -> Result<(), RestError> {
+fn validate_allocations(allocations: &[CreateVariantAllocationRequest]) -> Result<(), RestError> {
     for alloc in allocations {
         validate_variant_control(&alloc.variant_control)?;
         validate_weight(alloc.weight)?;
@@ -410,9 +408,7 @@ fn validate_allocations(
     Ok(())
 }
 
-fn validate_stage_criteria(
-    criteria: &[CreateStageCriterionRequest],
-) -> Result<(), RestError> {
+fn validate_stage_criteria(criteria: &[CreateStageCriterionRequest]) -> Result<(), RestError> {
     for criterion in criteria {
         if let Some(allocs) = &criterion.variant_allocations {
             validate_allocations(allocs)?;
@@ -479,9 +475,7 @@ fn map_create_stage_criterion(
                 })
                 .collect()
         }),
-        variant_selection_mode: criterion
-            .variant_selection_mode
-            .map(|mode| mode.into()),
+        variant_selection_mode: criterion.variant_selection_mode.map(|mode| mode.into()),
         selected_variant_control: criterion.selected_variant_control.clone(),
     }
 }
@@ -494,15 +488,15 @@ async fn broadcast_feature_update(
     if let Ok(db_feature) = feature_repo.get_feature_by_id(feature_id).await
         && let Ok(full) =
             crate::broadcast::map_db_feature_to_full_for_broadcast(feature_repo, db_feature).await
-        {
-            let _ = updates_tx.send(crate::grpc::pb::FeatureUpdate {
-                message_id: uuid::Uuid::new_v4().to_string(),
-                action: crate::grpc::pb::feature_update::Action::Upsert as i32,
-                feature: Some(full),
-                feature_key: String::new(),
-                error: String::new(),
-            });
-        }
+    {
+        let _ = updates_tx.send(crate::grpc::pb::FeatureUpdate {
+            message_id: uuid::Uuid::new_v4().to_string(),
+            action: crate::grpc::pb::feature_update::Action::Upsert as i32,
+            feature: Some(full),
+            feature_key: String::new(),
+            error: String::new(),
+        });
+    }
 }
 
 #[utoipa::path(
@@ -565,10 +559,8 @@ pub(crate) async fn set_stage_criteria(
 
     validate_stage_criteria(&criteria)?;
 
-    let model_criteria: Vec<ModelCreateStageCriterionInput> = criteria
-        .iter()
-        .map(map_create_stage_criterion)
-        .collect();
+    let model_criteria: Vec<ModelCreateStageCriterionInput> =
+        criteria.iter().map(map_create_stage_criterion).collect();
 
     let mut tx = pool
         .begin()
@@ -576,13 +568,11 @@ pub(crate) async fn set_stage_criteria(
         .map_err(|e| RestError::internal(e.to_string()))?;
 
     let feature_repo_tx = crate::database::feature::feature_repository_tx(pool.get_ref().clone());
-    let variant_repo_tx =
-        crate::database::variant_allocations::variant_allocations_repository_tx(
-            pool.get_ref().clone(),
-        );
-    let rules_repo_tx = crate::database::compound_rules::compound_rules_repository_tx(
+    let variant_repo_tx = crate::database::variant_allocations::variant_allocations_repository_tx(
         pool.get_ref().clone(),
     );
+    let rules_repo_tx =
+        crate::database::compound_rules::compound_rules_repository_tx(pool.get_ref().clone());
 
     let result = feature_tx::set_stage_criteria_in_tx(
         &mut tx,
@@ -808,7 +798,9 @@ pub(crate) async fn update_rule_group(
         .await
         .map_err(|e| RestError::internal(e.to_string()))?;
 
-    let result = repo_tx.update_rule_group_tx(&mut tx, group_uuid, db_input).await;
+    let result = repo_tx
+        .update_rule_group_tx(&mut tx, group_uuid, db_input)
+        .await;
 
     match result {
         Ok(group) => {
@@ -883,7 +875,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use actix_web::{http::StatusCode, test, App};
+    use actix_web::{App, http::StatusCode, test};
 
     use crate::logic::feature::MockFeatureLogic;
     use sqlx::postgres::PgPoolOptions;
@@ -938,9 +930,7 @@ mod tests {
 
         let app = test::init_service(
             App::new()
-                .app_data(web::Data::new(
-                    Box::new(mock_logic) as Box<dyn FeatureLogic>
-                ))
+                .app_data(web::Data::new(Box::new(mock_logic) as Box<dyn FeatureLogic>))
                 .service(web::scope("/api/v1").configure(super::configure)),
         )
         .await;
@@ -992,8 +982,7 @@ mod tests {
 
     #[actix_web::test]
     async fn create_rule_group_returns_group() {
-        let criteria_id =
-            Uuid::parse_str("55555555-5555-4555-8555-555555555555").unwrap();
+        let criteria_id = Uuid::parse_str("55555555-5555-4555-8555-555555555555").unwrap();
         let pool = test_pool().await;
 
         let app = test::init_service(

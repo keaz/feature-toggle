@@ -1,8 +1,8 @@
 use crate::Error;
 use crate::database::entity::Role;
 use crate::database::role::RoleRepository;
-use crate::utils::activity_logger;
 use crate::model::ID;
+use crate::utils::activity_logger;
 use mockall::automock;
 use uuid::Uuid;
 

@@ -1,11 +1,11 @@
-use actix_web::{get, post, web, HttpMessage, HttpRequest, HttpResponse, Responder};
+use actix_web::{HttpMessage, HttpRequest, HttpResponse, Responder, get, post, web};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use utoipa::ToSchema;
 
+use crate::JwtUser;
 use crate::logic::jwt_secret::JwtSecretLogic;
 use crate::rest::error::RestError;
-use crate::JwtUser;
 
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]

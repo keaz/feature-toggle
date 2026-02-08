@@ -1,17 +1,17 @@
-use actix_web::{delete, get, patch, post, web, HttpResponse, Responder};
 use crate::model::ID;
+use actix_web::{HttpResponse, Responder, delete, get, patch, post, web};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use crate::database::context::context_repository_tx;
+use crate::logic::context::ContextLogic;
 use crate::model::{
     Context as ModelContext, ContextEntry as ModelContextEntry, CreateContextInput,
     UpdateContextInput,
 };
-use crate::database::context::context_repository_tx;
-use crate::logic::context::ContextLogic;
 use crate::rest::error::RestError;
-use crate::rest::pagination::{normalize_pagination, PageMeta, PaginationQuery};
+use crate::rest::pagination::{PageMeta, PaginationQuery, normalize_pagination};
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct ContextListQuery {
@@ -223,9 +223,9 @@ pub(crate) async fn create_context(
 
     match result {
         Ok(context) => {
-            tx.commit().await.map_err(|e| {
-                RestError::internal(format!("Failed to commit transaction: {e}"))
-            })?;
+            tx.commit()
+                .await
+                .map_err(|e| RestError::internal(format!("Failed to commit transaction: {e}")))?;
             Ok(HttpResponse::Created().json(ContextResponse::from(context)))
         }
         Err(err) => {
@@ -284,9 +284,9 @@ pub(crate) async fn update_context(
 
     match result {
         Ok(context) => {
-            tx.commit().await.map_err(|e| {
-                RestError::internal(format!("Failed to commit transaction: {e}"))
-            })?;
+            tx.commit()
+                .await
+                .map_err(|e| RestError::internal(format!("Failed to commit transaction: {e}")))?;
             Ok(HttpResponse::Ok().json(ContextResponse::from(context)))
         }
         Err(err) => {
@@ -327,9 +327,9 @@ pub(crate) async fn delete_context(
 
     match result {
         Ok(_) => {
-            tx.commit().await.map_err(|e| {
-                RestError::internal(format!("Failed to commit transaction: {e}"))
-            })?;
+            tx.commit()
+                .await
+                .map_err(|e| RestError::internal(format!("Failed to commit transaction: {e}")))?;
             Ok(HttpResponse::NoContent().finish())
         }
         Err(err) => {
@@ -350,7 +350,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use actix_web::{http::StatusCode, test, App};
+    use actix_web::{App, http::StatusCode, test};
 
     use crate::logic::context::MockContextLogic;
     use sqlx::postgres::PgPoolOptions;
@@ -437,9 +437,7 @@ mod tests {
 
         let app = test::init_service(
             App::new()
-                .app_data(web::Data::new(
-                    Box::new(mock_logic) as Box<dyn ContextLogic>
-                ))
+                .app_data(web::Data::new(Box::new(mock_logic) as Box<dyn ContextLogic>))
                 .service(web::scope("/api/v1").configure(super::configure)),
         )
         .await;
@@ -473,9 +471,7 @@ mod tests {
 
         let app = test::init_service(
             App::new()
-                .app_data(web::Data::new(
-                    Box::new(mock_logic) as Box<dyn ContextLogic>
-                ))
+                .app_data(web::Data::new(Box::new(mock_logic) as Box<dyn ContextLogic>))
                 .service(web::scope("/api/v1").configure(super::configure)),
         )
         .await;

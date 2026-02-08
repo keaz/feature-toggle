@@ -9,8 +9,8 @@ use crate::database::activity_log::{ActivityLogRepository, CreateActivityLog};
 use crate::database::role::RoleRepositoryTx;
 use crate::logic::ActorContext;
 use crate::logic::role::{ApiRole, SYSTEM_ROLE_NAMES};
-use crate::utils::activity_logger::activity_types;
 use crate::model::ID;
+use crate::utils::activity_logger::activity_types;
 use sqlx::PgConnection;
 use uuid::Uuid;
 

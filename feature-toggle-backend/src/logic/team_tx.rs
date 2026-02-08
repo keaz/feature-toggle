@@ -7,10 +7,10 @@
 use crate::Error;
 use crate::database::activity_log::{ActivityLogRepository, CreateActivityLog};
 use crate::database::team::{CreateTeam, TeamRepositoryTx, UpdateTeam};
-use crate::model::{CreateTeamInput, Team, UpdateTeamInput};
 use crate::logic::ActorContext;
-use crate::utils::activity_logger::activity_types;
 use crate::model::ID;
+use crate::model::{CreateTeamInput, Team, UpdateTeamInput};
+use crate::utils::activity_logger::activity_types;
 use sqlx::PgConnection;
 use uuid::Uuid;
 

@@ -1,4 +1,3 @@
-use feature_toggle_backend::model::ID;
 use feature_toggle_backend::database::{approval, feature, init_pg_pool, role};
 use feature_toggle_backend::grpc::pb::FeatureUpdate;
 use feature_toggle_backend::logic::approval::ApprovalRequestEvent;
@@ -6,6 +5,7 @@ use feature_toggle_backend::logic::feature::StageChangeRequestType;
 use feature_toggle_backend::logic::{
     approval as approval_logic, environment, feature as feature_logic,
 };
+use feature_toggle_backend::model::ID;
 use uuid::Uuid;
 
 #[tokio::test]
@@ -48,9 +48,9 @@ async fn test_stage_change_creates_approval_request_when_policy_exists() {
         "UPDATE features_pipeline_stages SET status = 'NOT_DEPLOYED' WHERE id = $1",
         stage_id
     )
-        .execute(&pool)
-        .await
-        .unwrap();
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let feature = feature_logic
         .request_stage_change(
@@ -128,9 +128,9 @@ async fn test_quorum_approvals_execute_stage_change() {
         "UPDATE features_pipeline_stages SET status = 'NOT_DEPLOYED' WHERE id = $1",
         stage_id
     )
-        .execute(&pool)
-        .await
-        .unwrap();
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let feature = feature_logic
         .request_stage_change(

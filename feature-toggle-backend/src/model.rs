@@ -105,7 +105,6 @@ pub enum RuleOperator {
     SemverLessThan,
 }
 
-
 impl RuleOperator {
     pub fn to_db_string(&self) -> String {
         match self {
@@ -137,7 +136,6 @@ pub enum LifecycleStage {
     Archived,
     Permanent,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Feature {
@@ -317,7 +315,6 @@ pub enum VariantSelectionMode {
     WeightedSplit,
     SpecificVariant,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VariantAllocation {

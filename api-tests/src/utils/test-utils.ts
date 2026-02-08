@@ -140,3 +140,48 @@ export function expectIsoDate(value: string): void {
     expect(() => new Date(value)).not.toThrow();
     expect(new Date(value).toISOString()).toBeTruthy();
 }
+
+/**
+ * Helper to update a feature by fetching current state, merging updates, and sending full payload
+ * Handles the mapping between FeatureResponse and UpdateFeatureRequest structures
+ */
+export async function updateFeature(
+    client: ApiClient,
+    featureId: string,
+    updates: Record<string, any>
+): Promise<AxiosResponse> {
+    // 1. Get current feature
+    const current = await client.get(`/features/${featureId}`);
+    expectSuccess(current);
+
+    // 2. Map response to request structure
+    const feature = current.data;
+    const payload = {
+        key: feature.key,
+        description: feature.description,
+        featureType: feature.featureType,
+        enabled: feature.enabled,
+        dependencies: feature.dependencies || [],
+        relationships: feature.relationships ? feature.relationships.map((r: any) => ({
+            sourceId: r.sourceId,
+            targetId: r.targetId
+        })) : [],
+        stages: feature.stages ? feature.stages.map((s: any) => ({
+            environmentId: s.environment.id,
+            orderIndex: s.orderIndex,
+            position: s.position,
+            bucketingKey: s.bucketingKey
+        })) : [],
+        variants: feature.variants ? feature.variants.map((v: any) => ({
+            control: v.control,
+            value: v.value,
+            valueType: v.valueType,
+            description: v.description
+        })) : undefined,
+
+        ...updates
+    };
+
+    // 3. Send update
+    return client.patch(`/features/${featureId}`, payload);
+}

@@ -785,10 +785,11 @@ fn decode_cluster_message(bytes: &WireMessage) -> Result<pb::ClusterMessage, pro
 fn should_skip_peer(self_addr: Option<SocketAddr>, peer: &str) -> bool {
     if let Some(self_addr) = self_addr
         && let Ok(peer_addr) = peer.parse::<SocketAddr>()
-            && self_addr.port() == peer_addr.port()
-                && (self_addr.ip().is_unspecified() || self_addr.ip() == peer_addr.ip()) {
-                    return true;
-                }
+        && self_addr.port() == peer_addr.port()
+        && (self_addr.ip().is_unspecified() || self_addr.ip() == peer_addr.ip())
+    {
+        return true;
+    }
     false
 }
 

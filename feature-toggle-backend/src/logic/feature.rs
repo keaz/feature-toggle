@@ -524,6 +524,54 @@ impl FeatureLogicImpl {
             _ => LifecycleStage::Active,
         }
     }
+
+    fn preferred_user_name(first_name: &str, last_name: &str, username: &str) -> Option<String> {
+        let full_name = format!("{} {}", first_name.trim(), last_name.trim())
+            .trim()
+            .to_string();
+        if !full_name.is_empty() {
+            return Some(full_name);
+        }
+
+        let username = username.trim();
+        if !username.is_empty() {
+            return Some(username.to_string());
+        }
+
+        None
+    }
+
+    async fn resolve_user_display_name(
+        &self,
+        user_id: Option<Uuid>,
+        fallback_name: Option<String>,
+    ) -> Option<String> {
+        let fallback_name = fallback_name
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty());
+        if fallback_name.is_some() {
+            return fallback_name;
+        }
+
+        if let Some(user_id) = user_id
+            && let Ok(user) = self.user_repository.get_user_by_id(user_id).await
+            && let Some(name) =
+                Self::preferred_user_name(&user.first_name, &user.last_name, &user.username)
+        {
+            return Some(name);
+        }
+
+        None
+    }
+
+    async fn resolve_environment_name(&self, environment_id: Option<Uuid>) -> Option<String> {
+        let environment_id = environment_id?;
+        self.environment_logic
+            .get_environment_by_id(ID::from(environment_id))
+            .await
+            .ok()
+            .map(|env| env.name)
+    }
 }
 
 #[async_trait::async_trait]
@@ -623,13 +671,41 @@ impl FeatureCrudLogic for FeatureLogicImpl {
             crate::utils::activity_logger::activity_types::FEATURE_CREATED,
             &feature_id.to_string(),
             actor_id,
-            actor_name,
+            actor_name.clone(),
             format!("Created feature '{}'", feature_key),
             Some(serde_json::json!({
                 "feature_id": feature_id.to_string(),
                 "feature_key": feature_key,
                 "team_id": team_id.to_string(),
             })),
+        )
+        .await;
+
+        let notification_actor_name = self
+            .resolve_user_display_name(actor_id, actor_name.clone())
+            .await;
+        let team_id_str = team_id.to_string();
+        let message = if let Some(actor_name) = notification_actor_name.as_deref() {
+            format!("{actor_name} created feature '{feature_key}' for team '{team_id_str}'.")
+        } else {
+            format!("Feature '{feature_key}' was created for team '{team_id_str}'.")
+        };
+
+        crate::logic::notification::dispatch_notification_event(
+            crate::logic::notification::NotificationEvent {
+                notification_type: crate::logic::notification::NOTIFICATION_TYPE_FEATURE_CREATED
+                    .to_string(),
+                team_id: Some(team_id),
+                actor_id,
+                subject: format!("Feature created: {feature_key}"),
+                message,
+                metadata: Some(serde_json::json!({
+                    "feature_id": feature_id.to_string(),
+                    "feature_key": feature_key,
+                    "team_id": team_id_str,
+                    "created_by": notification_actor_name,
+                })),
+            },
         )
         .await;
 
@@ -869,13 +945,69 @@ impl FeatureCrudLogic for FeatureLogicImpl {
             crate::utils::activity_logger::activity_types::KILL_SWITCH_ACTIVATED,
             &feature.id.to_string(),
             actor_id,
-            actor_name,
+            actor_name.clone(),
             log_message,
             Some(serde_json::json!({
                 "feature_id": feature.id.to_string(),
                 "feature_key": feature.key.clone(),
                 "rollback_in_minutes": rollback_in_minutes,
             })),
+        )
+        .await;
+
+        let actor_display_name = self
+            .resolve_user_display_name(actor_id, actor_name.clone())
+            .await;
+        let scheduled_at = feature
+            .rollback_scheduled_at
+            .map(|value| value.to_rfc3339());
+        let message = match (
+            rollback_in_minutes.filter(|minutes| *minutes > 0),
+            scheduled_at.as_deref(),
+            actor_display_name.as_deref(),
+        ) {
+            (Some(minutes), Some(scheduled_at), Some(actor_name)) => format!(
+                "{actor_name} activated the kill switch for feature '{}' and scheduled automatic rollback in {minutes} minutes (at {scheduled_at}).",
+                feature.key
+            ),
+            (Some(minutes), Some(scheduled_at), None) => format!(
+                "Kill switch was activated for feature '{}' with automatic rollback in {minutes} minutes (at {scheduled_at}).",
+                feature.key
+            ),
+            (Some(minutes), None, Some(actor_name)) => format!(
+                "{actor_name} activated the kill switch for feature '{}' and scheduled automatic rollback in {minutes} minutes.",
+                feature.key
+            ),
+            (Some(minutes), None, None) => format!(
+                "Kill switch was activated for feature '{}' with automatic rollback in {minutes} minutes.",
+                feature.key
+            ),
+            (None, _, Some(actor_name)) => format!(
+                "{actor_name} activated the kill switch for feature '{}'.",
+                feature.key
+            ),
+            (None, _, None) => {
+                format!("Kill switch was activated for feature '{}'.", feature.key)
+            }
+        };
+
+        crate::logic::notification::dispatch_notification_event(
+            crate::logic::notification::NotificationEvent {
+                notification_type:
+                    crate::logic::notification::NOTIFICATION_TYPE_KILL_SWITCH_ACTIVATED.to_string(),
+                team_id: Some(feature.team_id),
+                actor_id,
+                subject: format!("Kill switch activated: {}", feature.key),
+                message,
+                metadata: Some(serde_json::json!({
+                    "feature_id": feature.id.to_string(),
+                    "feature_key": feature.key.clone(),
+                    "team_id": feature.team_id.to_string(),
+                    "rollback_in_minutes": rollback_in_minutes,
+                    "rollback_scheduled_at": scheduled_at,
+                    "activated_by": actor_display_name,
+                })),
+            },
         )
         .await;
 
@@ -948,7 +1080,7 @@ impl FeatureCrudLogic for FeatureLogicImpl {
             crate::utils::activity_logger::activity_types::KILL_SWITCH_ACTIVATED,
             &feature.id.to_string(),
             actor_id,
-            actor_name,
+            actor_name.clone(),
             format!(
                 "Scheduled kill switch executed for feature '{}' (auto-disabled)",
                 feature.key
@@ -958,6 +1090,40 @@ impl FeatureCrudLogic for FeatureLogicImpl {
                 "feature_key": feature.key.clone(),
                 "scheduled_execution": true,
             })),
+        )
+        .await;
+
+        let actor_display_name = self
+            .resolve_user_display_name(actor_id, actor_name.clone())
+            .await;
+        let message = if let Some(actor_name) = actor_display_name.as_deref() {
+            format!(
+                "{actor_name} executed the scheduled kill switch for feature '{}'.",
+                feature.key
+            )
+        } else {
+            format!(
+                "Scheduled kill switch executed for feature '{}'.",
+                feature.key
+            )
+        };
+
+        crate::logic::notification::dispatch_notification_event(
+            crate::logic::notification::NotificationEvent {
+                notification_type:
+                    crate::logic::notification::NOTIFICATION_TYPE_KILL_SWITCH_ACTIVATED.to_string(),
+                team_id: Some(feature.team_id),
+                actor_id,
+                subject: format!("Scheduled kill switch executed: {}", feature.key),
+                message,
+                metadata: Some(serde_json::json!({
+                    "feature_id": feature.id.to_string(),
+                    "feature_key": feature.key.clone(),
+                    "team_id": feature.team_id.to_string(),
+                    "scheduled_execution": true,
+                    "executed_by": actor_display_name,
+                })),
+            },
         )
         .await;
 
@@ -1061,62 +1227,135 @@ impl DeploymentLogic for FeatureLogicImpl {
         // If no approval gating, validate transition immediately to fail fast before any DB side effects.
         if self.approval_logic.is_none()
             && let Err(e) = crate::validation::validate_stage_transition(&stage.status, next_status)
-            {
-                return Err(Error::InvalidInput(e));
-            }
+        {
+            return Err(Error::InvalidInput(e));
+        }
 
         let mut feature_id_for_stage: Option<Uuid> = None;
 
         // If an approval policy applies, create a pending approval request instead of executing immediately.
         if let Some(approval_logic) = &self.approval_logic
-            && crate::logic::approval::status_requires_interception(next_status) {
-                // Set a pending status to indicate a gated action while approvals are collected.
-                let pending_status = match next_status {
-                    "DEPLOYED" | "DEPLOYMENT_REJECTED" => StageStatus::DeploymentRequested.as_str(),
-                    "ROLLBACKED" | "ROLLBACK_REJECTED" => StageStatus::RollbackRequested.as_str(),
-                    other => other,
-                };
+            && crate::logic::approval::status_requires_interception(next_status)
+        {
+            // Set a pending status to indicate a gated action while approvals are collected.
+            let pending_status = match next_status {
+                "DEPLOYED" | "DEPLOYMENT_REJECTED" => StageStatus::DeploymentRequested.as_str(),
+                "ROLLBACKED" | "ROLLBACK_REJECTED" => StageStatus::RollbackRequested.as_str(),
+                other => other,
+            };
 
-                // Validate the transition to the pending state before further DB work.
-                if let Err(e) =
-                    crate::validation::validate_stage_transition(&stage.status, pending_status)
-                {
-                    return Err(Error::InvalidInput(e));
-                }
-
-                feature_id_for_stage = Some(
-                    self.repository
-                        .get_feature_id_by_stage_id(stage_uuid)
-                        .await?
-                        .ok_or(Error::NotFound(stage_uuid))?,
-                );
-
-                let db_feature = self
-                    .repository
-                    .get_feature_by_id(feature_id_for_stage.unwrap())
-                    .await?;
-
-                if let Some(request) = approval_logic
-                    .maybe_create_stage_change_request(&db_feature, &stage, next_status, user_id)
-                    .await?
-                {
-                    if pending_status == "DEPLOYMENT_REQUESTED"
-                        || pending_status == "ROLLBACK_REQUESTED"
-                    {
-                        let now = chrono::Utc::now();
-                        let updated = self
-                            .repository
-                            .request_stage_change(stage_uuid, pending_status, user_id, now)
-                            .await?;
-                        if !updated {
-                            return Err(Error::NotFound(stage_uuid));
-                        }
-                    }
-                    let mut api_feature = FeatureLogicImpl::map_entity_to_api_feature(db_feature);
-                    api_feature.pending_approval_request_id = Some(ID::from(request.id));
-                    return Ok(api_feature);
-                }
+            // Validate the transition to the pending state before further DB work.
+            if let Err(e) =
+                crate::validation::validate_stage_transition(&stage.status, pending_status)
+            {
+                return Err(Error::InvalidInput(e));
             }
+
+            feature_id_for_stage = Some(
+                self.repository
+                    .get_feature_id_by_stage_id(stage_uuid)
+                    .await?
+                    .ok_or(Error::NotFound(stage_uuid))?,
+            );
+
+            let db_feature = self
+                .repository
+                .get_feature_by_id(feature_id_for_stage.unwrap())
+                .await?;
+
+            if let Some(request) = approval_logic
+                .maybe_create_stage_change_request(&db_feature, &stage, next_status, user_id)
+                .await?
+            {
+                if pending_status == "DEPLOYMENT_REQUESTED"
+                    || pending_status == "ROLLBACK_REQUESTED"
+                {
+                    let now = chrono::Utc::now();
+                    let updated = self
+                        .repository
+                        .request_stage_change(stage_uuid, pending_status, user_id, now)
+                        .await?;
+                    if !updated {
+                        return Err(Error::NotFound(stage_uuid));
+                    }
+                }
+                let notification_feature_id = db_feature.id;
+                let notification_feature_key = db_feature.key.clone();
+                let notification_team_id = db_feature.team_id;
+                let mut api_feature = FeatureLogicImpl::map_entity_to_api_feature(db_feature);
+                api_feature.pending_approval_request_id = Some(ID::from(request.id));
+
+                if request.change_type == "stage_change"
+                    && matches!(next_status, "DEPLOYMENT_REQUESTED" | "ROLLBACK_REQUESTED")
+                {
+                    let request_label = if next_status == "DEPLOYMENT_REQUESTED" {
+                        "deployment"
+                    } else {
+                        "rollback"
+                    };
+                    let requester_name = self
+                        .resolve_user_display_name(Some(user_id), Some(user_id.to_string()))
+                        .await;
+                    let environment_id = stage.environment_id;
+                    let environment_name =
+                        self.resolve_environment_name(Some(environment_id)).await;
+                    let subject = match environment_name.as_deref() {
+                        Some(environment_name) => format!(
+                            "Feature {request_label} request for {environment_name}: {}",
+                            notification_feature_key
+                        ),
+                        None => format!(
+                            "Feature {request_label} request: {}",
+                            notification_feature_key
+                        ),
+                    };
+                    let message = match (requester_name.as_deref(), environment_name.as_deref()) {
+                        (Some(requester_name), Some(environment_name)) => format!(
+                            "{requester_name} requested a {request_label} for feature '{}' in environment '{}'.",
+                            notification_feature_key, environment_name
+                        ),
+                        (Some(requester_name), None) => format!(
+                            "{requester_name} requested a {request_label} for feature '{}'.",
+                            notification_feature_key
+                        ),
+                        (None, Some(environment_name)) => format!(
+                            "A {request_label} request was created for feature '{}' in environment '{}'.",
+                            notification_feature_key, environment_name
+                        ),
+                        (None, None) => format!(
+                            "A {request_label} request was created for feature '{}'.",
+                            notification_feature_key
+                        ),
+                    };
+
+                    crate::logic::notification::dispatch_notification_event(
+                        crate::logic::notification::NotificationEvent {
+                            notification_type:
+                                crate::logic::notification::NOTIFICATION_TYPE_STAGE_CHANGE_REQUESTED
+                                    .to_string(),
+                            team_id: Some(notification_team_id),
+                            actor_id: Some(user_id),
+                            subject,
+                            message,
+                            metadata: Some(serde_json::json!({
+                                "feature_id": notification_feature_id.to_string(),
+                                "feature_key": notification_feature_key,
+                                "stage_id": stage_id.to_string(),
+                                "status": next_status,
+                                "team_id": notification_team_id.to_string(),
+                                "environment_id": environment_id.to_string(),
+                                "environment_name": environment_name,
+                                "requested_by": requester_name,
+                                "approval_request_id": request.id.to_string(),
+                            })),
+                        },
+                    )
+                    .await;
+                }
+
+                return Ok(api_feature);
+            }
+        }
 
         // No approval gating: validate and apply directly.
         if let Err(e) = crate::validation::validate_stage_transition(&stage.status, next_status) {
@@ -1160,25 +1399,12 @@ impl DeploymentLogic for FeatureLogicImpl {
             .await?;
 
         // Find the stage to get environment information
-        let stages = self
-            .repository
-            .get_feature_stages(db_feature.id)
-            .await?;
+        let stages = self.repository.get_feature_stages(db_feature.id).await?;
         let stage = stages.iter().find(|s| s.id == stage_uuid);
+        let environment_id = stage.map(|stage| stage.environment_id);
 
         // Get environment name if stage is found
-        let environment_name = if let Some(stage) = stage {
-            match self
-                .environment_logic
-                .get_environment_by_id(ID::from(stage.environment_id))
-                .await
-            {
-                Ok(env) => Some(env.name),
-                Err(_) => None,
-            }
-        } else {
-            None
-        };
+        let environment_name = self.resolve_environment_name(environment_id).await;
 
         // Log activity based on request type (ignore errors to not fail the operation)
         let (activity_type, description) = match request {
@@ -1191,8 +1417,7 @@ impl DeploymentLogic for FeatureLogicImpl {
                 } else {
                     format!(
                         "Deployed feature '{}' to stage '{}'",
-                        db_feature.key,
-                        stage_id
+                        db_feature.key, stage_id
                     )
                 };
                 (
@@ -1210,8 +1435,7 @@ impl DeploymentLogic for FeatureLogicImpl {
                 } else {
                     format!(
                         "Rejected change request for feature '{}' stage '{}'",
-                        db_feature.key,
-                        stage_id
+                        db_feature.key, stage_id
                     )
                 };
                 (
@@ -1228,8 +1452,7 @@ impl DeploymentLogic for FeatureLogicImpl {
                 } else {
                     format!(
                         "Rolled back feature '{}' from stage '{}'",
-                        db_feature.key,
-                        stage_id
+                        db_feature.key, stage_id
                     )
                 };
                 (
@@ -1246,9 +1469,7 @@ impl DeploymentLogic for FeatureLogicImpl {
                 } else {
                     format!(
                         "Requested {} for feature '{}' stage '{}'",
-                        next_status,
-                        db_feature.key,
-                        stage_id
+                        next_status, db_feature.key, stage_id
                     )
                 };
                 ("stage_change_requested", desc)
@@ -1265,12 +1486,12 @@ impl DeploymentLogic for FeatureLogicImpl {
         });
 
         // Add environment name to metadata if available
-        if let Some(env_name) = environment_name {
+        if let Some(ref env_name) = environment_name {
             metadata["environment_name"] = serde_json::json!(env_name);
         }
         // Capture environment identifier to support team scoping of activity feeds
-        if let Some(stage) = stage {
-            metadata["environment_id"] = serde_json::json!(stage.environment_id.to_string());
+        if let Some(environment_id) = environment_id {
+            metadata["environment_id"] = serde_json::json!(environment_id.to_string());
         }
 
         let _ = crate::utils::activity_logger::log_activity(
@@ -1284,6 +1505,158 @@ impl DeploymentLogic for FeatureLogicImpl {
             Some(metadata),
         )
         .await;
+
+        let actor_display_name = self
+            .resolve_user_display_name(Some(user_id), Some(user_id.to_string()))
+            .await;
+
+        if matches!(
+            request,
+            StageChangeRequestType::DeploymentRequested | StageChangeRequestType::RollbackRequested
+        ) {
+            let request_label = if matches!(request, StageChangeRequestType::DeploymentRequested) {
+                "deployment"
+            } else {
+                "rollback"
+            };
+            let subject = match environment_name.as_deref() {
+                Some(environment_name) => format!(
+                    "Feature {request_label} request for {environment_name}: {}",
+                    db_feature.key
+                ),
+                None => format!("Feature {request_label} request: {}", db_feature.key),
+            };
+            let message = match (actor_display_name.as_deref(), environment_name.as_deref()) {
+                (Some(actor_name), Some(environment_name)) => format!(
+                    "{actor_name} requested a {request_label} for feature '{}' in environment '{}'.",
+                    db_feature.key, environment_name
+                ),
+                (Some(actor_name), None) => format!(
+                    "{actor_name} requested a {request_label} for feature '{}'.",
+                    db_feature.key
+                ),
+                (None, Some(environment_name)) => format!(
+                    "A {request_label} request was created for feature '{}' in environment '{}'.",
+                    db_feature.key, environment_name
+                ),
+                (None, None) => format!(
+                    "A {request_label} request was created for feature '{}'.",
+                    db_feature.key
+                ),
+            };
+            crate::logic::notification::dispatch_notification_event(
+                crate::logic::notification::NotificationEvent {
+                    notification_type:
+                        crate::logic::notification::NOTIFICATION_TYPE_STAGE_CHANGE_REQUESTED
+                            .to_string(),
+                    team_id: Some(db_feature.team_id),
+                    actor_id: Some(user_id),
+                    subject,
+                    message,
+                    metadata: Some(serde_json::json!({
+                        "feature_id": db_feature.id.to_string(),
+                        "feature_key": db_feature.key.clone(),
+                        "stage_id": stage_id.to_string(),
+                        "status": next_status,
+                        "team_id": db_feature.team_id.to_string(),
+                        "environment_id": environment_id.map(|id| id.to_string()),
+                        "environment_name": environment_name.clone(),
+                        "requested_by": actor_display_name.clone(),
+                    })),
+                },
+            )
+            .await;
+        }
+
+        if matches!(request, StageChangeRequestType::Deployed) {
+            let subject = match environment_name.as_deref() {
+                Some(environment_name) => {
+                    format!("Feature deployed to {environment_name}: {}", db_feature.key)
+                }
+                None => format!("Feature deployed: {}", db_feature.key),
+            };
+            let message = match (actor_display_name.as_deref(), environment_name.as_deref()) {
+                (Some(actor_name), Some(environment_name)) => format!(
+                    "{actor_name} deployed feature '{}' to environment '{}'.",
+                    db_feature.key, environment_name
+                ),
+                (Some(actor_name), None) => {
+                    format!("{actor_name} deployed feature '{}'.", db_feature.key)
+                }
+                (None, Some(environment_name)) => format!(
+                    "Feature '{}' was deployed to environment '{}'.",
+                    db_feature.key, environment_name
+                ),
+                (None, None) => format!("Feature '{}' was deployed.", db_feature.key),
+            };
+            crate::logic::notification::dispatch_notification_event(
+                crate::logic::notification::NotificationEvent {
+                    notification_type:
+                        crate::logic::notification::NOTIFICATION_TYPE_FEATURE_DEPLOYED.to_string(),
+                    team_id: Some(db_feature.team_id),
+                    actor_id: Some(user_id),
+                    subject,
+                    message,
+                    metadata: Some(serde_json::json!({
+                        "feature_id": db_feature.id.to_string(),
+                        "feature_key": db_feature.key.clone(),
+                        "stage_id": stage_id.to_string(),
+                        "team_id": db_feature.team_id.to_string(),
+                        "environment_id": environment_id.map(|id| id.to_string()),
+                        "environment_name": environment_name.clone(),
+                        "deployed_by": actor_display_name.clone(),
+                    })),
+                },
+            )
+            .await;
+        }
+
+        if matches!(request, StageChangeRequestType::Rollbacked) {
+            let subject = match environment_name.as_deref() {
+                Some(environment_name) => {
+                    format!(
+                        "Feature rolled back from {environment_name}: {}",
+                        db_feature.key
+                    )
+                }
+                None => format!("Feature rolled back: {}", db_feature.key),
+            };
+            let message = match (actor_display_name.as_deref(), environment_name.as_deref()) {
+                (Some(actor_name), Some(environment_name)) => format!(
+                    "{actor_name} rolled back feature '{}' from environment '{}'.",
+                    db_feature.key, environment_name
+                ),
+                (Some(actor_name), None) => {
+                    format!("{actor_name} rolled back feature '{}'.", db_feature.key)
+                }
+                (None, Some(environment_name)) => format!(
+                    "Feature '{}' was rolled back from environment '{}'.",
+                    db_feature.key, environment_name
+                ),
+                (None, None) => format!("Feature '{}' was rolled back.", db_feature.key),
+            };
+            crate::logic::notification::dispatch_notification_event(
+                crate::logic::notification::NotificationEvent {
+                    notification_type:
+                        crate::logic::notification::NOTIFICATION_TYPE_FEATURE_ROLLED_BACK
+                            .to_string(),
+                    team_id: Some(db_feature.team_id),
+                    actor_id: Some(user_id),
+                    subject,
+                    message,
+                    metadata: Some(serde_json::json!({
+                        "feature_id": db_feature.id.to_string(),
+                        "feature_key": db_feature.key.clone(),
+                        "stage_id": stage_id.to_string(),
+                        "team_id": db_feature.team_id.to_string(),
+                        "environment_id": environment_id.map(|id| id.to_string()),
+                        "environment_name": environment_name.clone(),
+                        "rolled_back_by": actor_display_name.clone(),
+                    })),
+                },
+            )
+            .await;
+        }
 
         Ok(FeatureLogicImpl::map_entity_to_api_feature(db_feature))
     }
@@ -1441,6 +1814,7 @@ mod test {
                 first_name: "Test".to_string(),
                 last_name: "User".to_string(),
                 email: "test@example.com".to_string(),
+                mobile_number: None,
                 is_admin: false,
                 enabled: true,
                 created_at: chrono::Utc::now(),

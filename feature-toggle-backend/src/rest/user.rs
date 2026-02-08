@@ -1,21 +1,22 @@
-use actix_web::{get, patch, post, web, HttpMessage, HttpRequest, HttpResponse, Responder};
 use crate::model::ID;
+use actix_web::{HttpMessage, HttpRequest, HttpResponse, Responder, get, patch, post, web};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use crate::JwtUser;
 use crate::database::activity_log::ActivityLogRepository;
 use crate::database::role::role_repository_tx;
 use crate::database::user::user_repository_tx;
+use crate::logic::ActorContext;
 use crate::logic::role::RoleLogic;
 use crate::logic::user::{RegisterUserInput, UpdateUserInput, UserLogic};
-use crate::logic::ActorContext;
 use crate::middleware::admin_guard::AdminState;
 use crate::rest::error::RestError;
-use crate::rest::pagination::{normalize_pagination, PageMeta, PaginationQuery};
+use crate::rest::pagination::{PageMeta, PaginationQuery, normalize_pagination};
 use crate::rest::role::RoleResponse;
 use crate::rest::team::TeamResponse;
-use crate::JwtUser;
 
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -34,6 +35,7 @@ pub struct UserResponse {
     pub first_name: String,
     pub last_name: String,
     pub email: String,
+    pub mobile_number: Option<String>,
     pub is_admin: bool,
     pub created_at: String,
     pub updated_at: String,
@@ -57,6 +59,7 @@ pub struct CreateUserRequest {
     pub first_name: String,
     pub last_name: String,
     pub email: String,
+    pub mobile_number: Option<String>,
     pub is_admin: Option<bool>,
     pub is_temporary_password: Option<bool>,
 }
@@ -67,6 +70,7 @@ pub struct UpdateUserRequest {
     pub first_name: Option<String>,
     pub last_name: Option<String>,
     pub email: Option<String>,
+    pub mobile_number: Option<String>,
     pub is_admin: Option<bool>,
     pub enabled: Option<bool>,
 }
@@ -91,6 +95,7 @@ impl UserResponse {
             first_name: user.first_name,
             last_name: user.last_name,
             email: user.email,
+            mobile_number: user.mobile_number,
             is_admin: user.is_admin,
             created_at: user.created_at.to_rfc3339(),
             updated_at: user.updated_at.to_rfc3339(),
@@ -125,6 +130,22 @@ fn jwt_user(req: &HttpRequest) -> Result<JwtUser, RestError> {
         .ok_or_else(|| RestError::unauthorized("User authentication not found"))
 }
 
+fn user_display_name(first_name: &str, last_name: &str, username: &str, fallback: &str) -> String {
+    let full_name = format!("{} {}", first_name.trim(), last_name.trim())
+        .trim()
+        .to_string();
+    if !full_name.is_empty() {
+        return full_name;
+    }
+
+    let trimmed_username = username.trim();
+    if !trimmed_username.is_empty() {
+        return trimmed_username.to_string();
+    }
+
+    fallback.to_string()
+}
+
 fn validate_email(value: &str) -> Result<(), RestError> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -141,6 +162,38 @@ fn validate_email(value: &str) -> Result<(), RestError> {
 
     if !domain.contains('.') || domain.starts_with('.') || domain.ends_with('.') {
         return Err(RestError::invalid_input("invalid email"));
+    }
+
+    Ok(())
+}
+
+fn validate_mobile_number(value: &str) -> Result<(), RestError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+
+    let mut digit_count = 0usize;
+    for (idx, ch) in trimmed.chars().enumerate() {
+        if ch.is_ascii_digit() {
+            digit_count += 1;
+            continue;
+        }
+
+        let allowed_separator = matches!(ch, ' ' | '-' | '(' | ')');
+        if allowed_separator {
+            continue;
+        }
+
+        if ch == '+' && idx == 0 {
+            continue;
+        }
+
+        return Err(RestError::invalid_input("invalid mobile number"));
+    }
+
+    if !(7..=15).contains(&digit_count) {
+        return Err(RestError::invalid_input("invalid mobile number"));
     }
 
     Ok(())
@@ -266,6 +319,9 @@ pub(crate) async fn create_user(
     payload: web::Json<CreateUserRequest>,
 ) -> Result<impl Responder, RestError> {
     validate_email(&payload.email)?;
+    if let Some(mobile_number) = payload.mobile_number.as_deref() {
+        validate_mobile_number(mobile_number)?;
+    }
 
     let actor = actor_from_request(&req);
     let input = RegisterUserInput {
@@ -274,6 +330,11 @@ pub(crate) async fn create_user(
         first_name: payload.first_name.trim().to_string(),
         last_name: payload.last_name.trim().to_string(),
         email: payload.email.trim().to_string(),
+        mobile_number: payload
+            .mobile_number
+            .as_ref()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
         is_admin: payload.is_admin.unwrap_or(false),
         is_temporary_password: payload.is_temporary_password.unwrap_or(true),
     };
@@ -295,9 +356,9 @@ pub(crate) async fn create_user(
 
     match result {
         Ok(created) => {
-            tx.commit().await.map_err(|e| {
-                RestError::internal(format!("Failed to commit transaction: {e}"))
-            })?;
+            tx.commit()
+                .await
+                .map_err(|e| RestError::internal(format!("Failed to commit transaction: {e}")))?;
             Ok(HttpResponse::Created().json(UserResponse::from(created)))
         }
         Err(err) => {
@@ -327,6 +388,9 @@ pub(crate) async fn create_admin(
     payload: web::Json<CreateUserRequest>,
 ) -> Result<impl Responder, RestError> {
     validate_email(&payload.email)?;
+    if let Some(mobile_number) = payload.mobile_number.as_deref() {
+        validate_mobile_number(mobile_number)?;
+    }
 
     let actor = actor_from_request(&req);
     let input = RegisterUserInput {
@@ -335,6 +399,11 @@ pub(crate) async fn create_admin(
         first_name: payload.first_name.trim().to_string(),
         last_name: payload.last_name.trim().to_string(),
         email: payload.email.trim().to_string(),
+        mobile_number: payload
+            .mobile_number
+            .as_ref()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
         is_admin: true,
         is_temporary_password: false,
     };
@@ -356,9 +425,9 @@ pub(crate) async fn create_admin(
 
     match result {
         Ok(created) => {
-            tx.commit().await.map_err(|e| {
-                RestError::internal(format!("Failed to commit transaction: {e}"))
-            })?;
+            tx.commit()
+                .await
+                .map_err(|e| RestError::internal(format!("Failed to commit transaction: {e}")))?;
 
             if created.is_admin {
                 admin_state.set_exists(true);
@@ -401,12 +470,26 @@ pub(crate) async fn update_user(
     if let Some(email) = payload.email.as_deref() {
         validate_email(email)?;
     }
+    if let Some(mobile_number) = payload.mobile_number.as_deref() {
+        validate_mobile_number(mobile_number)?;
+    }
 
     let actor = actor_from_request(&req);
     let input = UpdateUserInput {
-        first_name: payload.first_name.as_ref().map(|value| value.trim().to_string()),
-        last_name: payload.last_name.as_ref().map(|value| value.trim().to_string()),
+        first_name: payload
+            .first_name
+            .as_ref()
+            .map(|value| value.trim().to_string()),
+        last_name: payload
+            .last_name
+            .as_ref()
+            .map(|value| value.trim().to_string()),
         email: payload.email.as_ref().map(|value| value.trim().to_string()),
+        mobile_number: payload
+            .mobile_number
+            .as_ref()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
         is_admin: payload.is_admin,
         enabled: payload.enabled,
     };
@@ -429,9 +512,9 @@ pub(crate) async fn update_user(
 
     match result {
         Ok(updated) => {
-            tx.commit().await.map_err(|e| {
-                RestError::internal(format!("Failed to commit transaction: {e}"))
-            })?;
+            tx.commit()
+                .await
+                .map_err(|e| RestError::internal(format!("Failed to commit transaction: {e}")))?;
             Ok(HttpResponse::Ok().json(UserResponse::from(updated)))
         }
         Err(err) => {
@@ -471,8 +554,14 @@ pub(crate) async fn assign_user_teams(
         .iter()
         .map(|value| parse_uuid(value, "team_id"))
         .collect::<Result<Vec<_>, _>>()?;
+    let team_ids_for_notification = team_ids.clone();
 
     let actor = actor_from_request(&req);
+    let actor_id = actor.as_ref().map(|a| a.id);
+    let actor_name_for_notification = actor
+        .as_ref()
+        .map(|actor| actor.name.trim().to_string())
+        .filter(|name| !name.is_empty());
     let repo = user_repository_tx(db_pool.get_ref().clone());
     let mut tx = db_pool
         .begin()
@@ -491,9 +580,66 @@ pub(crate) async fn assign_user_teams(
 
     match result {
         Ok(_) => {
-            tx.commit().await.map_err(|e| {
-                RestError::internal(format!("Failed to commit transaction: {e}"))
-            })?;
+            tx.commit()
+                .await
+                .map_err(|e| RestError::internal(format!("Failed to commit transaction: {e}")))?;
+
+            let assigned_user = logic.get_user_by_id(ID::from(user_uuid)).await.ok();
+            let assigned_user_name = assigned_user
+                .as_ref()
+                .map(|user| {
+                    user_display_name(
+                        &user.first_name,
+                        &user.last_name,
+                        &user.username,
+                        &user_uuid.to_string(),
+                    )
+                })
+                .unwrap_or_else(|| user_uuid.to_string());
+
+            let team_names: HashMap<String, String> = logic
+                .get_user_teams(ID::from(user_uuid))
+                .await
+                .ok()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|team| (team.id.to_string(), team.name))
+                .collect();
+
+            for team_id in &team_ids_for_notification {
+                let team_id_str = team_id.to_string();
+                let team_name = team_names
+                    .get(&team_id_str)
+                    .cloned()
+                    .unwrap_or_else(|| team_id_str.clone());
+                let message = if let Some(added_by) = actor_name_for_notification.as_deref() {
+                    format!(
+                        "User {assigned_user_name} was added to team '{team_name}' by {added_by}."
+                    )
+                } else {
+                    format!("User {assigned_user_name} was added to team '{team_name}'.")
+                };
+
+                crate::logic::notification::dispatch_notification_event(
+                    crate::logic::notification::NotificationEvent {
+                        notification_type:
+                            crate::logic::notification::NOTIFICATION_TYPE_USER_ADDED_TO_TEAM
+                                .to_string(),
+                        team_id: Some(*team_id),
+                        actor_id,
+                        subject: format!("User added to team: {team_name}"),
+                        message,
+                        metadata: Some(serde_json::json!({
+                            "team_id": team_id_str,
+                            "team_name": team_name.clone(),
+                            "user_id": user_uuid.to_string(),
+                            "user_display_name": assigned_user_name.clone(),
+                            "added_by": actor_name_for_notification.clone(),
+                        })),
+                    },
+                )
+                .await;
+            }
         }
         Err(err) => {
             let _ = tx.rollback().await;
@@ -507,7 +653,10 @@ pub(crate) async fn assign_user_teams(
         .map_err(RestError::from)?;
 
     Ok(HttpResponse::Ok().json(
-        teams.into_iter().map(TeamResponse::from).collect::<Vec<_>>(),
+        teams
+            .into_iter()
+            .map(TeamResponse::from)
+            .collect::<Vec<_>>(),
     ))
 }
 
@@ -537,7 +686,10 @@ pub(crate) async fn get_user_roles(
         .map_err(RestError::from)?;
 
     Ok(HttpResponse::Ok().json(
-        roles.into_iter().map(RoleResponse::from).collect::<Vec<_>>(),
+        roles
+            .into_iter()
+            .map(RoleResponse::from)
+            .collect::<Vec<_>>(),
     ))
 }
 
@@ -591,11 +743,14 @@ pub(crate) async fn assign_user_roles(
 
     match result {
         Ok(roles) => {
-            tx.commit().await.map_err(|e| {
-                RestError::internal(format!("Failed to commit transaction: {e}"))
-            })?;
+            tx.commit()
+                .await
+                .map_err(|e| RestError::internal(format!("Failed to commit transaction: {e}")))?;
             Ok(HttpResponse::Ok().json(
-                roles.into_iter().map(RoleResponse::from).collect::<Vec<_>>(),
+                roles
+                    .into_iter()
+                    .map(RoleResponse::from)
+                    .collect::<Vec<_>>(),
             ))
         }
         Err(err) => {
@@ -619,10 +774,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use actix_web::{App, http::StatusCode, test, web};
     use crate::database::activity_log::PgActivityLogRepository;
     use crate::logic::role::MockRoleLogic;
     use crate::logic::user::MockUserLogic;
+    use actix_web::{App, http::StatusCode, test, web};
     use sqlx::postgres::PgPoolOptions;
 
     fn sample_user(user_id: Uuid) -> crate::logic::user::ApiUser {
@@ -632,6 +787,7 @@ mod tests {
             first_name: "Jane".to_string(),
             last_name: "Doe".to_string(),
             email: "jane@example.com".to_string(),
+            mobile_number: None,
             is_admin: false,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
@@ -701,6 +857,7 @@ mod tests {
                 first_name: "Jane".to_string(),
                 last_name: "Doe".to_string(),
                 email: "not-an-email".to_string(),
+                mobile_number: None,
                 is_admin: None,
                 is_temporary_password: None,
             })

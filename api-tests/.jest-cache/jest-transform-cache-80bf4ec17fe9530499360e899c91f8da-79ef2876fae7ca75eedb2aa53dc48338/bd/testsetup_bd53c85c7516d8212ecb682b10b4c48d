@@ -1,0 +1,20 @@
+5a03920326ce751cb689f666941caa0a
+/**
+ * Test Setup - runs before all tests
+ */
+// Increase Jest timeout for API tests
+jest.setTimeout(30000);
+// Suppress console output during tests (optional, remove if debugging)
+// global.console = {
+//   ...console,
+//   log: jest.fn(),
+//   debug: jest.fn(),
+//   info: jest.fn(),
+// };
+beforeAll(() => {
+    console.log('🚀 Starting FluxGate API Tests');
+});
+afterAll(() => {
+    console.log('✅ FluxGate API Tests Complete');
+});
+//# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJmaWxlIjoiL1VzZXJzL2thc3VucmFuYXNpbmdoZS9Qcm9qZWN0cy9GZWF0dXJlVG9nZ2xlL2ZlYXR1cmUtdG9nZ2xlL2FwaS10ZXN0cy9zcmMvdXRpbHMvdGVzdC1zZXR1cC50cyIsIm1hcHBpbmdzIjoiQUFBQTs7R0FFRztBQUVILHNDQUFzQztBQUN0QyxJQUFJLENBQUMsVUFBVSxDQUFDLEtBQUssQ0FBQyxDQUFDO0FBRXZCLHVFQUF1RTtBQUN2RSxxQkFBcUI7QUFDckIsZ0JBQWdCO0FBQ2hCLG9CQUFvQjtBQUNwQixzQkFBc0I7QUFDdEIscUJBQXFCO0FBQ3JCLEtBQUs7QUFFTCxTQUFTLENBQUMsR0FBRyxFQUFFO0lBQ1gsT0FBTyxDQUFDLEdBQUcsQ0FBQyxnQ0FBZ0MsQ0FBQyxDQUFDO0FBQ2xELENBQUMsQ0FBQyxDQUFDO0FBRUgsUUFBUSxDQUFDLEdBQUcsRUFBRTtJQUNWLE9BQU8sQ0FBQyxHQUFHLENBQUMsK0JBQStCLENBQUMsQ0FBQztBQUNqRCxDQUFDLENBQUMsQ0FBQyIsIm5hbWVzIjpbXSwic291cmNlcyI6WyIvVXNlcnMva2FzdW5yYW5hc2luZ2hlL1Byb2plY3RzL0ZlYXR1cmVUb2dnbGUvZmVhdHVyZS10b2dnbGUvYXBpLXRlc3RzL3NyYy91dGlscy90ZXN0LXNldHVwLnRzIl0sInNvdXJjZXNDb250ZW50IjpbIi8qKlxuICogVGVzdCBTZXR1cCAtIHJ1bnMgYmVmb3JlIGFsbCB0ZXN0c1xuICovXG5cbi8vIEluY3JlYXNlIEplc3QgdGltZW91dCBmb3IgQVBJIHRlc3RzXG5qZXN0LnNldFRpbWVvdXQoMzAwMDApO1xuXG4vLyBTdXBwcmVzcyBjb25zb2xlIG91dHB1dCBkdXJpbmcgdGVzdHMgKG9wdGlvbmFsLCByZW1vdmUgaWYgZGVidWdnaW5nKVxuLy8gZ2xvYmFsLmNvbnNvbGUgPSB7XG4vLyAgIC4uLmNvbnNvbGUsXG4vLyAgIGxvZzogamVzdC5mbigpLFxuLy8gICBkZWJ1ZzogamVzdC5mbigpLFxuLy8gICBpbmZvOiBqZXN0LmZuKCksXG4vLyB9O1xuXG5iZWZvcmVBbGwoKCkgPT4ge1xuICAgIGNvbnNvbGUubG9nKCfwn5qAIFN0YXJ0aW5nIEZsdXhHYXRlIEFQSSBUZXN0cycpO1xufSk7XG5cbmFmdGVyQWxsKCgpID0+IHtcbiAgICBjb25zb2xlLmxvZygn4pyFIEZsdXhHYXRlIEFQSSBUZXN0cyBDb21wbGV0ZScpO1xufSk7XG4iXSwidmVyc2lvbiI6M30=

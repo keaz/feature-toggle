@@ -1,20 +1,10 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 use sqlx::{PgConnection, PgPool};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Serialize,
-    Deserialize,
-    PartialEq,
-    Eq,
-    sqlx::Type,
-    ToSchema,
-)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, sqlx::Type, ToSchema)]
 #[sqlx(type_name = "varchar", rename_all = "lowercase")]
 pub enum MetricType {
     Conversion,

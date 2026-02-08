@@ -7,10 +7,10 @@
 use crate::Error;
 use crate::database::activity_log::{ActivityLogRepository, CreateActivityLog};
 use crate::database::environment::{CreateEnvironment, EnvironmentRepositoryTx, UpdateEnvironment};
-use crate::model::{CreateEnvironmentInput, UpdateEnvironmentInput};
 use crate::logic::ActorContext;
-use crate::utils::activity_logger::activity_types;
 use crate::model::ID;
+use crate::model::{CreateEnvironmentInput, UpdateEnvironmentInput};
+use crate::utils::activity_logger::activity_types;
 use sqlx::PgConnection;
 use uuid::Uuid;
 

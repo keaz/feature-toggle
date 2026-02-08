@@ -361,8 +361,11 @@ pub trait CompoundRulesRepositoryTx: CompoundRulesRepository {
         group_id: Uuid,
         input: UpdateRuleGroupInput,
     ) -> Result<RuleGroup, Error>;
-    async fn delete_rule_group_tx(&self, conn: &mut PgConnection, group_id: Uuid)
-    -> Result<(), Error>;
+    async fn delete_rule_group_tx(
+        &self,
+        conn: &mut PgConnection,
+        group_id: Uuid,
+    ) -> Result<(), Error>;
     async fn set_rule_groups_tx(
         &self,
         conn: &mut sqlx::PgConnection,
@@ -430,12 +433,9 @@ impl CompoundRulesRepositoryTx for CompoundRulesRepositoryImpl {
         input: UpdateRuleGroupInput,
     ) -> Result<RuleGroup, Error> {
         // Ensure group exists
-        let _existing = sqlx::query!(
-            r#"SELECT id FROM rule_groups WHERE id = $1"#,
-            group_id
-        )
-        .fetch_one(&mut *conn)
-        .await;
+        let _existing = sqlx::query!(r#"SELECT id FROM rule_groups WHERE id = $1"#, group_id)
+            .fetch_one(&mut *conn)
+            .await;
         let _ = handle_error(Some(group_id), _existing)?;
 
         if let Some(logic_operator) = input.logic_operator {
@@ -512,9 +512,12 @@ impl CompoundRulesRepositoryTx for CompoundRulesRepositoryImpl {
     ) -> Result<(), Error> {
         let _ = handle_error(
             Some(group_id),
-            sqlx::query!(r#"DELETE FROM rule_conditions WHERE group_id = $1"#, group_id)
-                .execute(&mut *conn)
-                .await,
+            sqlx::query!(
+                r#"DELETE FROM rule_conditions WHERE group_id = $1"#,
+                group_id
+            )
+            .execute(&mut *conn)
+            .await,
         )?;
 
         let _ = handle_error(

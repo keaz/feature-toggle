@@ -109,11 +109,12 @@ fn validate_team_name(name: &str) -> Result<(), RestError> {
 
 fn validate_team_description(description: &Option<String>) -> Result<(), RestError> {
     if let Some(value) = description
-        && value.trim().len() > 200 {
-            return Err(RestError::invalid_input(
-                "Team description must be 200 characters or fewer",
-            ));
-        }
+        && value.trim().len() > 200
+    {
+        return Err(RestError::invalid_input(
+            "Team description must be 200 characters or fewer",
+        ));
+    }
     Ok(())
 }
 
@@ -176,6 +177,7 @@ pub(crate) async fn create_team(
     ensure_team_name_unique(&repo, &payload.name, None).await?;
 
     let actor = actor_from_request(&req);
+    let actor_for_notification = actor.clone();
     let description = payload
         .description
         .as_ref()
@@ -205,6 +207,46 @@ pub(crate) async fn create_team(
             tx.commit()
                 .await
                 .map_err(|e| RestError::internal(format!("Failed to commit transaction: {e}")))?;
+
+            let created_by = actor_for_notification
+                .as_ref()
+                .map(|actor| actor.name.trim().to_string())
+                .filter(|name| !name.is_empty());
+            let description_suffix = if team.description.trim().is_empty() {
+                String::new()
+            } else {
+                format!(" Description: {}.", team.description)
+            };
+            let message = if let Some(created_by) = created_by.as_deref() {
+                format!(
+                    "{created_by} created team '{}'.{}",
+                    team.name, description_suffix
+                )
+            } else {
+                format!(
+                    "A new team '{}' was created.{}",
+                    team.name, description_suffix
+                )
+            };
+
+            crate::logic::notification::dispatch_notification_event(
+                crate::logic::notification::NotificationEvent {
+                    notification_type: crate::logic::notification::NOTIFICATION_TYPE_TEAM_CREATED
+                        .to_string(),
+                    team_id: None,
+                    actor_id: actor_for_notification.as_ref().map(|actor| actor.id),
+                    subject: format!("Team created: {}", team.name),
+                    message,
+                    metadata: Some(serde_json::json!({
+                        "team_id": team.id.to_string(),
+                        "team_name": team.name.clone(),
+                        "team_description": team.description.clone(),
+                        "created_by": created_by,
+                    })),
+                },
+            )
+            .await;
+
             Ok(HttpResponse::Created().json(TeamResponse::from(team)))
         }
         Err(err) => {

@@ -1,19 +1,19 @@
-use actix_web::{get, patch, post, web, HttpMessage, HttpRequest, HttpResponse, Responder};
 use crate::model::ID;
+use actix_web::{HttpMessage, HttpRequest, HttpResponse, Responder, get, patch, post, web};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use crate::JwtUser;
+use crate::database::activity_log::ActivityLogRepository;
+use crate::database::client::client_repository_tx;
+use crate::logic::ActorContext;
+use crate::logic::client::ClientLogic;
 use crate::model::{
     Client as ModelClient, ClientType as ModelClientType, CreateClientInput, UpdateClientInput,
 };
-use crate::database::activity_log::ActivityLogRepository;
-use crate::database::client::client_repository_tx;
-use crate::logic::client::ClientLogic;
-use crate::logic::ActorContext;
 use crate::rest::error::RestError;
-use crate::rest::pagination::{normalize_pagination, PageMeta, PaginationQuery};
-use crate::JwtUser;
+use crate::rest::pagination::{PageMeta, PaginationQuery, normalize_pagination};
 
 #[derive(Debug, Serialize, Deserialize, ToSchema, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -129,11 +129,12 @@ fn validate_client_name(name: &str) -> Result<(), RestError> {
 
 fn validate_client_description(description: &Option<String>) -> Result<(), RestError> {
     if let Some(desc) = description
-        && desc.len() > 500 {
-            return Err(RestError::invalid_input(
-                "Client description must be 500 characters or fewer",
-            ));
-        }
+        && desc.len() > 500
+    {
+        return Err(RestError::invalid_input(
+            "Client description must be 500 characters or fewer",
+        ));
+    }
     Ok(())
 }
 
@@ -231,7 +232,14 @@ pub(crate) async fn list_clients(
     let client_type = query.client_type.map(ModelClientType::from);
 
     let (items, total) = logic
-        .get_clients_with_offset(ID::from(team_uuid), name, query.enabled, client_type, offset, limit)
+        .get_clients_with_offset(
+            ID::from(team_uuid),
+            name,
+            query.enabled,
+            client_type,
+            offset,
+            limit,
+        )
         .await
         .map_err(RestError::from)?;
 
@@ -333,9 +341,9 @@ pub(crate) async fn create_client(
 
     match result {
         Ok(client) => {
-            tx.commit().await.map_err(|e| {
-                RestError::internal(format!("Failed to commit transaction: {e}"))
-            })?;
+            tx.commit()
+                .await
+                .map_err(|e| RestError::internal(format!("Failed to commit transaction: {e}")))?;
             Ok(HttpResponse::Created().json(ClientResponse::from(client)))
         }
         Err(err) => {
@@ -403,9 +411,9 @@ pub(crate) async fn update_client(
 
     match result {
         Ok(client) => {
-            tx.commit().await.map_err(|e| {
-                RestError::internal(format!("Failed to commit transaction: {e}"))
-            })?;
+            tx.commit()
+                .await
+                .map_err(|e| RestError::internal(format!("Failed to commit transaction: {e}")))?;
             Ok(HttpResponse::Ok().json(ClientResponse::from(client)))
         }
         Err(err) => {
@@ -425,7 +433,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use actix_web::{http::StatusCode, test, App};
+    use actix_web::{App, http::StatusCode, test};
 
     use crate::database::activity_log::PgActivityLogRepository;
     use crate::logic::client::MockClientLogic;
@@ -535,9 +543,7 @@ mod tests {
 
         let app = test::init_service(
             App::new()
-                .app_data(web::Data::new(
-                    Box::new(mock_logic) as Box<dyn ClientLogic>
-                ))
+                .app_data(web::Data::new(Box::new(mock_logic) as Box<dyn ClientLogic>))
                 .service(web::scope("/api/v1").configure(super::configure)),
         )
         .await;
@@ -573,9 +579,7 @@ mod tests {
 
         let app = test::init_service(
             App::new()
-                .app_data(web::Data::new(
-                    Box::new(mock_logic) as Box<dyn ClientLogic>
-                ))
+                .app_data(web::Data::new(Box::new(mock_logic) as Box<dyn ClientLogic>))
                 .service(web::scope("/api/v1").configure(super::configure)),
         )
         .await;
@@ -662,7 +666,10 @@ mod tests {
         let body = test::read_body(resp).await;
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["error"], "invalid_input");
-        assert_eq!(json["message"], "Web client must specify at least one web origin");
+        assert_eq!(
+            json["message"],
+            "Web client must specify at least one web origin"
+        );
     }
 
     #[actix_web::test]

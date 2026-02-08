@@ -7,6 +7,7 @@ mod environment_test;
 mod feature_evaluation_test;
 mod feature_test;
 mod metrics_test;
+mod notification_test;
 mod pipeline_test;
 mod stage_contexts_test;
 mod team_test;

@@ -232,9 +232,7 @@ impl RoleRepository for RoleRepositoryImpl {
             )?;
         }
 
-        tx.commit()
-            .await
-            .map_err(|e| Error::DatabaseError(e))?;
+        tx.commit().await.map_err(|e| Error::DatabaseError(e))?;
         Ok(())
     }
 

@@ -64,6 +64,33 @@ export class ApiClient {
     }
 
     /**
+     * Create admin user if it doesn't exist.
+     * This is used as a prerequisite step before authentication.
+     * Handles 409 Conflict gracefully (admin already exists).
+     */
+    async ensureAdminExists(): Promise<void> {
+        console.log('🔧 Ensuring admin user exists...');
+
+        const adminPayload = {
+            username: this.config.username,
+            password: this.config.password,
+            firstName: 'Test',
+            lastName: 'Admin',
+            email: `${this.config.username}@test.local`,
+        };
+
+        const response = await this.client.post('/admins', adminPayload);
+
+        if (response.status === 201) {
+            console.log(`✅ Admin user '${this.config.username}' created successfully`);
+        } else if (response.status === 409) {
+            console.log(`ℹ️ Admin user '${this.config.username}' already exists`);
+        } else {
+            throw new Error(`Failed to create admin user: ${response.status} - ${JSON.stringify(response.data)}`);
+        }
+    }
+
+    /**
      * Clear authentication (for testing unauthenticated requests)
      */
     clearAuth(): void {
@@ -157,6 +184,7 @@ let sharedClient: ApiClient | null = null;
 export async function getApiClient(): Promise<ApiClient> {
     if (!sharedClient) {
         sharedClient = new ApiClient();
+        await sharedClient.ensureAdminExists();
         await sharedClient.authenticate();
     }
     return sharedClient;

@@ -1,18 +1,18 @@
-use actix_web::{get, post, web, HttpMessage, HttpRequest, HttpResponse, Responder};
 use crate::model::ID;
+use actix_web::{HttpMessage, HttpRequest, HttpResponse, Responder, get, post, web};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use crate::JwtUser;
 use crate::database::activity_log::ActivityLogRepository;
 use crate::database::user::user_repository_tx;
+use crate::logic::ActorContext;
 use crate::logic::jwt_token::JwtTokenLogic;
 use crate::logic::user::UserLogic;
 use crate::logic::user_tx;
-use crate::logic::ActorContext;
 use crate::rest::error::RestError;
 use crate::rest::user::UserResponse;
-use crate::JwtUser;
 
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -165,7 +165,6 @@ pub(crate) async fn reset_password(
             Err(RestError::from(e))
         }
     }
-
 }
 
 #[utoipa::path(
@@ -250,8 +249,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use actix_web::{App, http::StatusCode, test, web};
     use crate::logic::user::MockUserLogic;
+    use actix_web::{App, http::StatusCode, test, web};
     use chrono::{DateTime, Utc};
 
     #[derive(Clone)]
@@ -317,6 +316,7 @@ mod tests {
             first_name: "Admin".to_string(),
             last_name: "User".to_string(),
             email: "admin@example.com".to_string(),
+            mobile_number: None,
             is_admin: true,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
@@ -366,9 +366,7 @@ mod tests {
 
         let app = test::init_service(
             App::new()
-                .app_data(web::Data::new(
-                    Box::new(mock_logic) as Box<dyn UserLogic>
-                ))
+                .app_data(web::Data::new(Box::new(mock_logic) as Box<dyn UserLogic>))
                 .service(web::scope("/api/v1").configure(super::configure)),
         )
         .await;

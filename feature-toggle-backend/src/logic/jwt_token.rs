@@ -167,6 +167,7 @@ mod tests {
             first_name: "Test".to_string(),
             last_name: "User".to_string(),
             email: "test@example.com".to_string(),
+            mobile_number: None,
             is_admin: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),

@@ -19,10 +19,6 @@ pub struct PageMeta {
 
 pub fn normalize_pagination(query: &PaginationQuery) -> (i64, i64) {
     let offset = query.offset.unwrap_or(0).max(0);
-    let limit = query
-        .limit
-        .unwrap_or(DEFAULT_LIMIT)
-        .max(1)
-        .min(MAX_LIMIT);
+    let limit = query.limit.unwrap_or(DEFAULT_LIMIT).max(1).min(MAX_LIMIT);
     (offset, limit)
 }

@@ -500,19 +500,20 @@ impl ClientRepository for ClientRepositoryImpl {
 
         // Insert web origins if needed
         if matches!(input.client_type, ClientType::Web)
-            && let Some(origins) = input.web_origins.clone() {
-                for origin in origins {
-                    sqlx::query!(
-                        r#"INSERT INTO client_web_origins (id, client_id, origin) VALUES ($1, $2, $3)"#,
-                        Uuid::new_v4(),
-                        row.id,
-                        origin
-                    )
-                    .execute(&self.pool)
-                    .await
-                    .map_err(Error::DatabaseError)?;
-                }
+            && let Some(origins) = input.web_origins.clone()
+        {
+            for origin in origins {
+                sqlx::query!(
+                    r#"INSERT INTO client_web_origins (id, client_id, origin) VALUES ($1, $2, $3)"#,
+                    Uuid::new_v4(),
+                    row.id,
+                    origin
+                )
+                .execute(&self.pool)
+                .await
+                .map_err(Error::DatabaseError)?;
             }
+        }
 
         let web_origins = if matches!(input.client_type, ClientType::Web) {
             Some(self.load_web_origins(row.id).await?)
@@ -711,19 +712,20 @@ impl ClientRepositoryTx for ClientRepositoryImpl {
 
         // Insert web origins if needed (within transaction)
         if matches!(input.client_type, ClientType::Web)
-            && let Some(origins) = input.web_origins.clone() {
-                for origin in origins {
-                    sqlx::query!(
-                        r#"INSERT INTO client_web_origins (id, client_id, origin) VALUES ($1, $2, $3)"#,
-                        Uuid::new_v4(),
-                        row.id,
-                        origin
-                    )
-                    .execute(&mut *conn)
-                    .await
-                    .map_err(Error::DatabaseError)?;
-                }
+            && let Some(origins) = input.web_origins.clone()
+        {
+            for origin in origins {
+                sqlx::query!(
+                    r#"INSERT INTO client_web_origins (id, client_id, origin) VALUES ($1, $2, $3)"#,
+                    Uuid::new_v4(),
+                    row.id,
+                    origin
+                )
+                .execute(&mut *conn)
+                .await
+                .map_err(Error::DatabaseError)?;
             }
+        }
 
         let web_origins = if matches!(input.client_type, ClientType::Web) {
             Some(self.load_web_origins(row.id).await?)

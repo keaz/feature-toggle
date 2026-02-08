@@ -67,6 +67,10 @@ pub async fn run() -> std::io::Result<()> {
     );
     let approval_repository = database::approval::approval_repository(db_pool.clone());
     let role_repository = database::role::role_repository(db_pool.clone());
+    let notification_repository = database::notification::notification_repository(db_pool.clone());
+    let notification_logic =
+        logic::notification::notification_logic(notification_repository.clone_box());
+    logic::notification::install_global_notification_logic(notification_logic.clone_box());
     let (approval_events_tx, _approval_events_rx) =
         tokio::sync::broadcast::channel::<logic::approval::ApprovalRequestEvent>(128);
 
@@ -247,6 +251,7 @@ pub async fn run() -> std::io::Result<()> {
             .app_data(web::Data::new(activity_log_repository.clone_box()))
             .app_data(web::Data::new(role_logic.clone()))
             .app_data(web::Data::new(user_logic.clone()))
+            .app_data(web::Data::new(notification_logic.clone_box()))
             .app_data(web::Data::new(jwt_token_logic_for_server.clone()))
             .app_data(web::Data::new(jwt_secret_logic_for_server.clone()))
             .app_data(web::Data::new(evaluation_events_tx.clone()))

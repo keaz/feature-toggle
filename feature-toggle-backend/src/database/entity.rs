@@ -102,7 +102,6 @@ pub enum VariantSelectionMode {
     SpecificVariant,
 }
 
-
 // Feature variant entity
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
 pub struct FeatureVariant {
