@@ -367,17 +367,28 @@ where
             .collect::<Vec<_>>()
     });
 
+    let dependencies = input
+        .dependencies
+        .into_iter()
+        .map(id_to_uuid)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    crate::logic::dependency_graph::validate_dependency_graph_update(
+        feature_repo,
+        team_uuid,
+        Uuid::new_v4(),
+        input.key.as_str(),
+        &dependencies,
+    )
+    .await?;
+
     let db_input = CreateFeature {
         team_id: team_uuid,
         key: input.key,
         description: input.description,
         feature_type: map_api_to_entity_feature_type(input.feature_type),
         stages,
-        dependencies: input
-            .dependencies
-            .into_iter()
-            .map(id_to_uuid)
-            .collect::<Result<Vec<_>, _>>()?,
+        dependencies,
         variants,
     };
 
@@ -454,6 +465,16 @@ where
         .into_iter()
         .map(id_to_uuid)
         .collect::<Result<Vec<_>, _>>()?;
+
+    let existing_feature = feature_repo.get_feature_by_id(feature_uuid).await?;
+    crate::logic::dependency_graph::validate_dependency_graph_update(
+        feature_repo,
+        existing_feature.team_id,
+        feature_uuid,
+        input.key.as_str(),
+        &dependencies,
+    )
+    .await?;
 
     let variants = input.variants.map(|v| {
         v.into_iter()

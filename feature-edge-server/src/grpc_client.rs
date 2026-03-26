@@ -23,7 +23,7 @@ pub async fn fetch_feature_via_grpc(
     feature_key: &str,
     client_id: &str,
     client_secret: &str,
-) -> Option<pb::FeatureFull> {
+) -> Result<Option<pb::FeatureFull>, tonic::Status> {
     use tokio_retry::strategy::ExponentialBackoff;
 
     // Retry with exponential backoff using config values
@@ -51,14 +51,20 @@ pub async fn fetch_feature_via_grpc(
             if feature.is_some() {
                 info!("Successfully fetched feature: {}", feature_key);
             }
-            feature
+            Ok(feature)
         }
-        Err(e) => {
+        Err(status) if status.code() == tonic::Code::NotFound => {
+            info!("Feature '{}' not found in backend", feature_key);
+            Ok(None)
+        }
+        Err(status) => {
             error!(
-                "gRPC GetFeatureByKey error after retries for feature '{}': {}",
-                feature_key, e
+                "gRPC GetFeatureByKey error after retries for feature '{}': code={:?} msg={}",
+                feature_key,
+                status.code(),
+                status.message()
             );
-            None
+            Err(status)
         }
     }
 }
@@ -111,8 +117,12 @@ pub async fn get_or_fetch_client_info(
     client_id: &str,
     client_secret: &str,
 ) -> Option<pb::GetClientInfoResponse> {
+    // Cache entries are scoped by both ID and secret so rotated credentials
+    // cannot reuse stale authorization results.
+    let cache_key = format!("{client_id}:{client_secret}");
+
     // Check cache first
-    if let Some(cached) = app.client_info_cache.get(client_id).await {
+    if let Some(cached) = app.client_info_cache.get(&cache_key).await {
         return Some(cached);
     }
 
@@ -121,7 +131,7 @@ pub async fn get_or_fetch_client_info(
 
     // Store in cache for future requests
     app.client_info_cache
-        .insert(client_id.to_string(), client_info.clone())
+        .insert(cache_key, client_info.clone())
         .await;
 
     Some(client_info)
@@ -225,16 +235,23 @@ async fn open_streaming_call(
 }
 
 /// Handle a feature update message from the stream
-async fn handle_feature_update(app: &AppState, update: pb::FeatureUpdate) {
+async fn handle_feature_update(app: &AppState, update: pb::FeatureUpdate) -> bool {
     use pb::feature_update::Action;
     match update.action {
         x if x == Action::Upsert as i32 || x == Action::Snapshot as i32 => {
             if let Some(f) = update.feature {
                 let feature_id = f.id.clone();
+                let dependency_ids = f
+                    .dependencies
+                    .iter()
+                    .map(|dependency| dependency.depends_on_id.clone())
+                    .collect::<Vec<_>>();
 
                 // Map protobuf to engine format and cache
                 let engine_feature = std::sync::Arc::new(crate::handlers::map_proto_to_engine(&f));
-                app.mapped_cache.insert(engine_feature).await;
+                app.mapped_cache
+                    .insert_with_dependencies(engine_feature, dependency_ids)
+                    .await;
 
                 // Purge assignments for feature on every feature update
                 app.purge_assignments_for_feature(&feature_id).await;
@@ -247,8 +264,18 @@ async fn handle_feature_update(app: &AppState, update: pb::FeatureUpdate) {
                 app.purge_assignments_for_feature(&feature_id).await;
             }
         }
+        x if x == Action::Error as i32 => {
+            if update.error == "lagged" {
+                warn!("Received lagged marker from backend stream; forcing reconnect");
+                return true;
+            }
+            if !update.error.is_empty() {
+                warn!("Received backend stream error marker: {}", update.error);
+            }
+        }
         _ => {}
     }
+    false
 }
 
 /// Background task to maintain streaming connection with backend
@@ -300,7 +327,11 @@ pub async fn run_stream_task(app: AppState, grpc_addr: String) {
                 // Process updates
                 while let Some(msg) = inbound.next().await {
                     match msg {
-                        Ok(update) => handle_feature_update(&app, update).await,
+                        Ok(update) => {
+                            if handle_feature_update(&app, update).await {
+                                break;
+                            }
+                        }
                         Err(e) => {
                             error!("Stream error: {}", e);
                             break;
@@ -360,12 +391,13 @@ pub async fn run_flush_task(app: AppState) {
             }
 
             total_drained += drained;
-            let assignment_count = dedup.len();
+            let assignments: Vec<UserAssignment> = dedup.into_values().collect();
+            let assignment_count = assignments.len();
 
             let client_id = app.client_id.clone();
             let client_secret = app.client_secret.clone();
-            let stream =
-                tokio_stream::iter(dedup.into_values().enumerate().map(move |(idx, a)| {
+            let stream = tokio_stream::iter(assignments.clone().into_iter().enumerate().map(
+                move |(idx, a)| {
                     pb::UserFlagAssignment {
                         user_id: a.user_id,
                         feature_id: a.feature_id,
@@ -384,7 +416,8 @@ pub async fn run_flush_task(app: AppState) {
                         },
                         variant: a.variant.unwrap_or_default(),
                     }
-                }));
+                },
+            ));
 
             // Use a cloned client to avoid holding the lock
             let mut client = {
@@ -404,6 +437,9 @@ pub async fn run_flush_task(app: AppState) {
                         "Will retry on next flush cycle ({}s)",
                         app.flush_interval.as_secs()
                     );
+                    for assignment in assignments {
+                        app.pending_assignments.push(assignment);
+                    }
                     failed = true;
                     break;
                 }

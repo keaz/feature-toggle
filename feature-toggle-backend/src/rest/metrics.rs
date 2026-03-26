@@ -1,4 +1,4 @@
-use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
+use actix_web::{HttpRequest, HttpResponse, Responder, get, post, put, web};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -8,6 +8,7 @@ use uuid::Uuid;
 use crate::database::activity_log::ActivityLogRepository;
 use crate::database::feature::FeatureRepository;
 use crate::database::metrics::{MetricType as DbMetricType, metric_repository_tx};
+use crate::logic::canary::{CanaryDirection as LogicCanaryDirection, CanaryGateInput, CanaryLogic};
 use crate::logic::client::ClientLogic;
 use crate::logic::environment::EnvironmentLogic;
 use crate::logic::feature::FeatureLogic;
@@ -322,6 +323,152 @@ pub struct TrackMetricsRequest {
     #[serde(alias = "client_secret")]
     pub client_secret: String,
     pub events: Vec<TrackMetricEventRequest>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum CanaryDirection {
+    HigherIsBetter,
+    LowerIsBetter,
+}
+
+impl From<CanaryDirection> for LogicCanaryDirection {
+    fn from(value: CanaryDirection) -> Self {
+        match value {
+            CanaryDirection::HigherIsBetter => LogicCanaryDirection::HigherIsBetter,
+            CanaryDirection::LowerIsBetter => LogicCanaryDirection::LowerIsBetter,
+        }
+    }
+}
+
+impl From<LogicCanaryDirection> for CanaryDirection {
+    fn from(value: LogicCanaryDirection) -> Self {
+        match value {
+            LogicCanaryDirection::HigherIsBetter => CanaryDirection::HigherIsBetter,
+            LogicCanaryDirection::LowerIsBetter => CanaryDirection::LowerIsBetter,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CanaryGateConfigRequest {
+    pub metric_key: String,
+    pub baseline_variant: String,
+    pub canary_variant: String,
+    pub direction: CanaryDirection,
+    pub threshold_pct: f64,
+    pub min_sample_size: i64,
+    pub window_minutes: i32,
+    pub auto_rollback_on_fail: bool,
+    pub rollback_in_minutes: Option<i32>,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SetCanaryGatesRequest {
+    pub gates: Vec<CanaryGateConfigRequest>,
+}
+
+#[derive(Debug, Serialize, ToSchema, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CanaryGateResponse {
+    pub id: String,
+    pub stage_id: String,
+    pub feature_id: String,
+    pub environment_id: String,
+    pub metric_key: String,
+    pub baseline_variant: String,
+    pub canary_variant: String,
+    pub direction: CanaryDirection,
+    pub threshold_pct: f64,
+    pub min_sample_size: i64,
+    pub window_minutes: i32,
+    pub auto_rollback_on_fail: bool,
+    pub rollback_in_minutes: Option<i32>,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyzeCanaryGateRequest {
+    pub force_rollback: Option<bool>,
+}
+
+#[derive(Debug, Serialize, ToSchema, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CanaryVariantSnapshotResponse {
+    pub variant: String,
+    pub sample_size: i64,
+    pub value: Option<f64>,
+}
+
+#[derive(Debug, Serialize, ToSchema, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CanaryAnalysisResponse {
+    pub gate_id: String,
+    pub feature_id: String,
+    pub metric_key: String,
+    pub passed: bool,
+    pub reason: String,
+    pub baseline: CanaryVariantSnapshotResponse,
+    pub canary: CanaryVariantSnapshotResponse,
+    pub regression_pct: Option<f64>,
+    pub threshold_pct: f64,
+    pub rollback_triggered: bool,
+    pub rollback_error: Option<String>,
+    pub evaluated_at: DateTime<Utc>,
+}
+
+fn map_canary_gate_response(gate: crate::logic::canary::CanaryGate) -> CanaryGateResponse {
+    CanaryGateResponse {
+        id: gate.id.to_string(),
+        stage_id: gate.stage_id.to_string(),
+        feature_id: gate.feature_id.to_string(),
+        environment_id: gate.environment_id.to_string(),
+        metric_key: gate.metric_key,
+        baseline_variant: gate.baseline_variant,
+        canary_variant: gate.canary_variant,
+        direction: gate.direction.into(),
+        threshold_pct: gate.threshold_pct,
+        min_sample_size: gate.min_sample_size,
+        window_minutes: gate.window_minutes,
+        auto_rollback_on_fail: gate.auto_rollback_on_fail,
+        rollback_in_minutes: gate.rollback_in_minutes,
+        enabled: gate.enabled,
+        created_at: gate.created_at,
+        updated_at: gate.updated_at,
+    }
+}
+
+fn map_canary_analysis_response(
+    result: crate::logic::canary::CanaryAnalysisResult,
+) -> CanaryAnalysisResponse {
+    CanaryAnalysisResponse {
+        gate_id: result.gate_id.to_string(),
+        feature_id: result.feature_id.to_string(),
+        metric_key: result.metric_key,
+        passed: result.passed,
+        reason: result.reason,
+        baseline: CanaryVariantSnapshotResponse {
+            variant: result.baseline.variant,
+            sample_size: result.baseline.sample_size,
+            value: result.baseline.value,
+        },
+        canary: CanaryVariantSnapshotResponse {
+            variant: result.canary.variant,
+            sample_size: result.canary.sample_size,
+            value: result.canary.value,
+        },
+        regression_pct: result.regression_pct,
+        threshold_pct: result.threshold_pct,
+        rollback_triggered: result.rollback_triggered,
+        rollback_error: result.rollback_error,
+        evaluated_at: result.evaluated_at,
+    }
 }
 
 fn parse_uuid(value: &str, field: &str) -> Result<Uuid, RestError> {
@@ -1433,6 +1580,7 @@ pub(crate) async fn system_metrics(
         (status = 401, description = "Unauthorized", body = crate::rest::error::ErrorResponse),
         (status = 403, description = "Forbidden", body = crate::rest::error::ErrorResponse)
     ),
+    security(()),
     tag = "Metrics"
 )]
 #[post("/metrics/track")]
@@ -1480,6 +1628,122 @@ pub(crate) async fn track_metrics(
     Ok(HttpResponse::Ok().json(TrackMetricsResponse { processed }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/stages/{stage_id}/canary-gates",
+    params(
+        ("stage_id" = String, Path, description = "Stage ID")
+    ),
+    responses(
+        (status = 200, description = "Canary gates for stage", body = [CanaryGateResponse]),
+        (status = 400, description = "Invalid input", body = crate::rest::error::ErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::rest::error::ErrorResponse),
+        (status = 404, description = "Not found", body = crate::rest::error::ErrorResponse)
+    ),
+    tag = "Metrics"
+)]
+#[get("/stages/{stage_id}/canary-gates")]
+pub(crate) async fn list_canary_gates(
+    canary_logic: web::Data<Box<dyn CanaryLogic>>,
+    stage_id: web::Path<String>,
+) -> Result<impl Responder, RestError> {
+    let stage_uuid = parse_uuid(&stage_id, "stage_id")?;
+    let gates = canary_logic
+        .list_stage_gates(stage_uuid)
+        .await
+        .map_err(RestError::from)?;
+
+    Ok(HttpResponse::Ok().json(
+        gates
+            .into_iter()
+            .map(map_canary_gate_response)
+            .collect::<Vec<_>>(),
+    ))
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/v1/stages/{stage_id}/canary-gates",
+    request_body = SetCanaryGatesRequest,
+    params(
+        ("stage_id" = String, Path, description = "Stage ID")
+    ),
+    responses(
+        (status = 200, description = "Canary gates replaced for stage", body = [CanaryGateResponse]),
+        (status = 400, description = "Invalid input", body = crate::rest::error::ErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::rest::error::ErrorResponse),
+        (status = 404, description = "Not found", body = crate::rest::error::ErrorResponse)
+    ),
+    tag = "Metrics"
+)]
+#[put("/stages/{stage_id}/canary-gates")]
+pub(crate) async fn replace_canary_gates(
+    canary_logic: web::Data<Box<dyn CanaryLogic>>,
+    stage_id: web::Path<String>,
+    body: web::Json<SetCanaryGatesRequest>,
+) -> Result<impl Responder, RestError> {
+    let stage_uuid = parse_uuid(&stage_id, "stage_id")?;
+    let gates = body
+        .into_inner()
+        .gates
+        .into_iter()
+        .map(|gate| CanaryGateInput {
+            metric_key: gate.metric_key,
+            baseline_variant: gate.baseline_variant,
+            canary_variant: gate.canary_variant,
+            direction: gate.direction.into(),
+            threshold_pct: gate.threshold_pct,
+            min_sample_size: gate.min_sample_size,
+            window_minutes: gate.window_minutes,
+            auto_rollback_on_fail: gate.auto_rollback_on_fail,
+            rollback_in_minutes: gate.rollback_in_minutes,
+            enabled: gate.enabled,
+        })
+        .collect::<Vec<_>>();
+
+    let updated = canary_logic
+        .replace_stage_gates(stage_uuid, gates)
+        .await
+        .map_err(RestError::from)?;
+
+    Ok(HttpResponse::Ok().json(
+        updated
+            .into_iter()
+            .map(map_canary_gate_response)
+            .collect::<Vec<_>>(),
+    ))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/canary-gates/{gate_id}/analyze",
+    request_body = AnalyzeCanaryGateRequest,
+    params(
+        ("gate_id" = String, Path, description = "Canary gate ID")
+    ),
+    responses(
+        (status = 200, description = "Canary analysis result", body = CanaryAnalysisResponse),
+        (status = 400, description = "Invalid input", body = crate::rest::error::ErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::rest::error::ErrorResponse),
+        (status = 404, description = "Not found", body = crate::rest::error::ErrorResponse)
+    ),
+    tag = "Metrics"
+)]
+#[post("/canary-gates/{gate_id}/analyze")]
+pub(crate) async fn analyze_canary_gate(
+    canary_logic: web::Data<Box<dyn CanaryLogic>>,
+    gate_id: web::Path<String>,
+    body: web::Json<AnalyzeCanaryGateRequest>,
+) -> Result<impl Responder, RestError> {
+    let gate_uuid = parse_uuid(&gate_id, "gate_id")?;
+    let analysis = canary_logic
+        .analyze_gate(gate_uuid, body.force_rollback)
+        .await
+        .map_err(RestError::from)?;
+
+    Ok(HttpResponse::Ok().json(map_canary_analysis_response(analysis)))
+}
+
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(list_metrics)
         .service(create_metric)
@@ -1490,6 +1754,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .service(evaluations_by_feature)
         .service(evaluation_count)
         .service(feature_growth)
+        .service(list_canary_gates)
+        .service(replace_canary_gates)
+        .service(analyze_canary_gate)
         .service(recent_activity)
         .service(system_metrics)
         .service(track_metrics);

@@ -260,6 +260,19 @@ pub struct Client {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemClient {
+    pub id: ID,
+    pub team_id: ID,
+    pub name: String,
+    pub description: Option<String>,
+    pub enabled: bool,
+    pub expires_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextEntry {
     pub id: ID,
     pub value: String,
@@ -492,6 +505,22 @@ pub struct UpdateClientInput {
     pub enabled: Option<bool>,
     pub client_type: Option<ClientType>,
     pub web_origins: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateSystemClientInput {
+    pub name: String,
+    pub description: Option<String>,
+    pub enabled: Option<bool>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateSystemClientInput {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub enabled: Option<bool>,
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

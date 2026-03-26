@@ -1,0 +1,13 @@
+{
+  "manifest_version": 1,
+  "openapi": {
+    "file": "openapi.json",
+    "sha256": "a2ef3aa24f9b39dc91eef5542b9d30f042863b08a5fb2c2a8e460be95042b523"
+  },
+  "protobuf": {
+    "proto_file": "proto/evaluation.proto",
+    "proto_sha256": "dc1b2bc033a286141a5c95c2ddbcb1b7eb45fdad2451b7504414311163fa2d8c",
+    "descriptor_file": "proto/evaluation_descriptor.pb",
+    "descriptor_sha256": "67cc114e3145defbc5b8bb796ce4302c1c6b59c685f0970850b542c644f1f9ac"
+  }
+}

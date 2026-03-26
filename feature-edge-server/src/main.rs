@@ -108,6 +108,8 @@ pub struct MappedFeatureCache {
     by_key: moka::future::Cache<String, Arc<evaluation_engine::Feature>>,
     // Secondary index: feature_id -> feature_key
     by_id: moka::future::Cache<String, String>,
+    // Dependency edges: feature_id -> depends_on_feature_ids
+    dependency_ids: moka::future::Cache<String, Vec<String>>,
     // Negative cache: feature_key -> () for features that don't exist
     // TTL of 60 seconds so we periodically recheck if feature was created
     negative_cache: moka::future::Cache<String, ()>,
@@ -122,6 +124,7 @@ impl MappedFeatureCache {
         Self {
             by_key: moka::future::Cache::new(max_capacity),
             by_id: moka::future::Cache::new(max_capacity),
+            dependency_ids: moka::future::Cache::new(max_capacity),
             negative_cache: moka::future::Cache::builder()
                 .time_to_live(std::time::Duration::from_secs(60))
                 .max_capacity(10000)
@@ -184,11 +187,36 @@ impl MappedFeatureCache {
 
     /// Insert feature into cache (updates both indices)
     pub async fn insert(&self, feature: Arc<evaluation_engine::Feature>) {
+        self.insert_with_dependencies(feature, Vec::new()).await;
+    }
+
+    /// Insert feature into cache and store dependency edges (updates all indices)
+    pub async fn insert_with_dependencies(
+        &self,
+        feature: Arc<evaluation_engine::Feature>,
+        dependency_ids: Vec<String>,
+    ) {
         let key = feature.key.clone();
         let id = feature.id.clone();
 
         self.by_key.insert(key.clone(), feature).await;
-        self.by_id.insert(id, key).await;
+        self.by_id.insert(id.clone(), key).await;
+        self.dependency_ids.insert(id, dependency_ids).await;
+    }
+
+    /// Persist dependency IDs for an already cached feature.
+    pub async fn set_dependency_ids(&self, feature_id: &str, dependency_ids: Vec<String>) {
+        self.dependency_ids
+            .insert(feature_id.to_string(), dependency_ids)
+            .await;
+    }
+
+    /// Get dependency IDs for a feature. Returns empty when no dependencies are recorded.
+    pub async fn get_dependency_ids(&self, feature_id: &str) -> Vec<String> {
+        self.dependency_ids
+            .get(feature_id)
+            .await
+            .unwrap_or_default()
     }
 
     /// Invalidate feature by key
@@ -196,6 +224,7 @@ impl MappedFeatureCache {
         // Get the feature to find its ID before invalidating
         if let Some(feature) = self.by_key.get(key).await {
             self.by_id.invalidate(&feature.id).await;
+            self.dependency_ids.invalidate(&feature.id).await;
         }
         self.by_key.invalidate(key).await;
     }
@@ -207,6 +236,7 @@ impl MappedFeatureCache {
 
         self.by_key.invalidate(key).await;
         self.by_id.invalidate(&id).await;
+        self.dependency_ids.invalidate(&id).await;
 
         Some(id)
     }
@@ -225,6 +255,7 @@ impl MappedFeatureCache {
     pub async fn run_pending_tasks(&self) {
         self.by_key.run_pending_tasks().await;
         self.by_id.run_pending_tasks().await;
+        self.dependency_ids.run_pending_tasks().await;
     }
 }
 

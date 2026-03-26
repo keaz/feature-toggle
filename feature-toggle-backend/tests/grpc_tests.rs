@@ -51,6 +51,16 @@ fn valid_env_id() -> String {
     "51ecc366-f1cd-4d3d-ab73-fa60bad98f27".to_string()
 }
 
+async fn recv_update_with_timeout(
+    stream: &mut tonic::Streaming<pb::FeatureUpdate>,
+    timeout: Duration,
+) -> Option<pb::FeatureUpdate> {
+    match tokio::time::timeout(timeout, stream.message()).await {
+        Ok(Ok(Some(update))) => Some(update),
+        _ => None,
+    }
+}
+
 #[tokio::test]
 async fn evaluate_validation_errors() {
     use chrono::{Duration as ChronoDuration, Utc};
@@ -357,8 +367,8 @@ async fn evaluate_auth_and_success() {
 #[tokio::test]
 async fn get_feature_by_key_and_stream_branches() {
     use chrono::{Duration as ChronoDuration, Utc};
-    // Create a tiny buffer to induce lag
-    let (updates_tx, _updates_rx) = broadcast::channel::<pb::FeatureUpdate>(1);
+    // Keep this small enough to induce lag later, but large enough for normal assertions.
+    let (updates_tx, _updates_rx) = broadcast::channel::<pb::FeatureUpdate>(8);
 
     // Build mocks
     let (cid, sec) = client_ids();
@@ -655,7 +665,7 @@ async fn get_feature_by_key_and_stream_branches() {
     assert!(res.is_err());
     assert_eq!(res.unwrap_err().code(), tonic::Code::Unauthenticated);
 
-    // Subscribe success: should emit snapshot for previously requested key
+    // Subscribe success with explicit key: should emit snapshot for that key
     let mut raw = FeatureEvaluationClient::connect(endpoint.clone())
         .await
         .unwrap();
@@ -666,7 +676,7 @@ async fn get_feature_by_key_and_stream_branches() {
                 pb::SubscribeRequest {
                     client_id: cid.clone(),
                     client_secret: sec.clone(),
-                    feature_keys: vec![],
+                    feature_keys: vec!["Test Feature".into()],
                     environment_id: String::new(),
                 },
             )),
@@ -693,7 +703,8 @@ async fn get_feature_by_key_and_stream_branches() {
     });
 
     for _ in 0..5 {
-        if let Some(Ok(update)) = stream.message().await.transpose()
+        if let Some(update) =
+            recv_update_with_timeout(&mut stream, Duration::from_millis(500)).await
             && update.action == (pb::feature_update::Action::Snapshot as i32)
         {
             assert!(update.feature.as_ref().map(|f| f.key.as_str()) == Some("Test Feature"));
@@ -706,7 +717,8 @@ async fn get_feature_by_key_and_stream_branches() {
     // Now expect a heartbeat update at some point
     let mut got_heartbeat = false;
     for _ in 0..10 {
-        if let Some(Ok(update)) = stream.message().await.transpose()
+        if let Some(update) =
+            recv_update_with_timeout(&mut stream, Duration::from_millis(500)).await
             && update.action == (pb::feature_update::Action::Heartbeat as i32)
         {
             got_heartbeat = true;
@@ -767,7 +779,8 @@ async fn get_feature_by_key_and_stream_branches() {
     // Expect to receive the matching update soon, and not necessarily the other one
     let mut got_matching = false;
     for _ in 0..10 {
-        if let Some(Ok(update)) = stream.message().await.transpose()
+        if let Some(update) =
+            recv_update_with_timeout(&mut stream, Duration::from_millis(500)).await
             && update.action == (pb::feature_update::Action::Upsert as i32)
             && update.feature.as_ref().map(|f| f.key.as_str()) == Some("Test Feature")
         {
@@ -807,16 +820,360 @@ async fn get_feature_by_key_and_stream_branches() {
     // Now read until we see an ERROR with "lagged"
     let mut saw_lag_error = false;
     for _ in 0..50 {
-        if let Some(Ok(update)) = stream.message().await.transpose() {
+        if let Some(update) =
+            recv_update_with_timeout(&mut stream, Duration::from_millis(250)).await
+        {
             if update.action == (pb::feature_update::Action::Error as i32)
                 && update.error == "lagged"
             {
                 saw_lag_error = true;
                 break;
             }
-        } else {
-            break;
         }
     }
     assert!(saw_lag_error, "did not receive lagged error update");
+}
+
+#[tokio::test]
+async fn stream_empty_subscription_sends_full_snapshot() {
+    use chrono::{Duration as ChronoDuration, Utc};
+
+    let (updates_tx, _updates_rx) = broadcast::channel::<pb::FeatureUpdate>(8);
+    let (cid, sec) = client_ids();
+    let valid_client_id = Uuid::parse_str(&cid).unwrap();
+    let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+    let env_id = team_id;
+
+    let mut client_mock = MockClientRepository::new();
+    let sec_clone = sec.clone();
+    client_mock.expect_get_client_by_id().returning(move |id| {
+        if id == valid_client_id {
+            Ok(db::Client {
+                id,
+                team_id,
+                environment_id: env_id,
+                name: "Client".into(),
+                description: None,
+                enabled: true,
+                client_type: db::ClientType::Web,
+                api_key: sec_clone.clone(),
+                web_origins: None,
+            })
+        } else {
+            Err(Error::NotFound(id))
+        }
+    });
+
+    let mut feature_mock = MockFeatureRepository::new();
+    let feature_a_id = Uuid::new_v4();
+    let feature_b_id = Uuid::new_v4();
+    feature_mock
+        .expect_get_feature_stages()
+        .returning(|_fid| Ok(Vec::new()));
+    feature_mock
+        .expect_get_features()
+        .returning(move |_team, key, _ftype| {
+            let build_feature = |id: Uuid, key: &str| db::Feature {
+                id,
+                key: key.to_string(),
+                description: Some(String::new()),
+                feature_type: db::FeatureType::Simple,
+                team_id,
+                active: true,
+                created_at: Utc::now(),
+                kill_switch_enabled: true,
+                kill_switch_activated_at: None,
+                rollback_scheduled_at: Some(Utc::now() + ChronoDuration::minutes(10)),
+                lifecycle_stage: "active".to_string(),
+                deprecated_at: None,
+                deprecation_notice: None,
+                last_evaluated_at: None,
+                evaluation_count_7d: 0,
+                evaluation_count_30d: 0,
+                evaluation_count_90d: 0,
+                dependencies: vec![],
+            };
+
+            match key.as_deref() {
+                None => Ok(vec![
+                    build_feature(feature_a_id, "feature-A"),
+                    build_feature(feature_b_id, "feature-B"),
+                ]),
+                Some("feature-A") => Ok(vec![build_feature(feature_a_id, "feature-A")]),
+                Some("feature-B") => Ok(vec![build_feature(feature_b_id, "feature-B")]),
+                _ => Ok(vec![]),
+            }
+        });
+    feature_mock
+        .expect_get_stage_criteria()
+        .returning(|_sid| Ok(Vec::new()));
+
+    let (addr, _server) =
+        start_server_with_repos(Box::new(feature_mock), Box::new(client_mock), updates_tx).await;
+    let endpoint = format!("http://{}", addr);
+
+    let mut raw = FeatureEvaluationClient::connect(endpoint).await.unwrap();
+    let (tx, rx) = tokio::sync::mpsc::channel::<pb::StreamRequest>(16);
+    tx.send(StreamRequest {
+        payload: Some(pb::stream_request::Payload::Subscribe(
+            pb::SubscribeRequest {
+                client_id: cid,
+                client_secret: sec,
+                feature_keys: vec![],
+                environment_id: String::new(),
+            },
+        )),
+    })
+    .await
+    .unwrap();
+
+    let mut stream = raw
+        .stream_updates(ReceiverStream::new(rx))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let mut keys = std::collections::HashSet::new();
+    for _ in 0..10 {
+        if let Some(update) =
+            recv_update_with_timeout(&mut stream, Duration::from_millis(400)).await
+            && update.action == (pb::feature_update::Action::Snapshot as i32)
+            && let Some(feature) = update.feature
+        {
+            keys.insert(feature.key);
+            if keys.contains("feature-A") && keys.contains("feature-B") {
+                break;
+            }
+        }
+    }
+
+    assert!(
+        keys.contains("feature-A"),
+        "missing feature-A from snapshot"
+    );
+    assert!(
+        keys.contains("feature-B"),
+        "missing feature-B from snapshot"
+    );
+}
+
+#[tokio::test]
+async fn stream_subscriptions_are_connection_scoped() {
+    use chrono::{Duration as ChronoDuration, Utc};
+
+    let (updates_tx, _updates_rx) = broadcast::channel::<pb::FeatureUpdate>(16);
+    let (cid, sec) = client_ids();
+    let valid_client_id = Uuid::parse_str(&cid).unwrap();
+    let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+    let env_id = team_id;
+
+    let mut client_mock = MockClientRepository::new();
+    let sec_clone = sec.clone();
+    client_mock.expect_get_client_by_id().returning(move |id| {
+        if id == valid_client_id {
+            Ok(db::Client {
+                id,
+                team_id,
+                environment_id: env_id,
+                name: "Client".into(),
+                description: None,
+                enabled: true,
+                client_type: db::ClientType::Web,
+                api_key: sec_clone.clone(),
+                web_origins: None,
+            })
+        } else {
+            Err(Error::NotFound(id))
+        }
+    });
+
+    let mut feature_mock = MockFeatureRepository::new();
+    let feature_a_id = Uuid::new_v4();
+    let feature_b_id = Uuid::new_v4();
+    feature_mock
+        .expect_get_feature_stages()
+        .returning(|_fid| Ok(Vec::new()));
+    feature_mock
+        .expect_get_features()
+        .returning(move |_team, key, _ftype| match key.as_deref() {
+            Some("feature-A") => Ok(vec![db::Feature {
+                id: feature_a_id,
+                key: "feature-A".into(),
+                description: Some(String::new()),
+                feature_type: db::FeatureType::Simple,
+                team_id,
+                active: true,
+                created_at: Utc::now(),
+                kill_switch_enabled: true,
+                kill_switch_activated_at: None,
+                rollback_scheduled_at: Some(Utc::now() + ChronoDuration::minutes(10)),
+                lifecycle_stage: "active".to_string(),
+                deprecated_at: None,
+                deprecation_notice: None,
+                last_evaluated_at: None,
+                evaluation_count_7d: 0,
+                evaluation_count_30d: 0,
+                evaluation_count_90d: 0,
+                dependencies: vec![],
+            }]),
+            Some("feature-B") => Ok(vec![db::Feature {
+                id: feature_b_id,
+                key: "feature-B".into(),
+                description: Some(String::new()),
+                feature_type: db::FeatureType::Simple,
+                team_id,
+                active: true,
+                created_at: Utc::now(),
+                kill_switch_enabled: true,
+                kill_switch_activated_at: None,
+                rollback_scheduled_at: Some(Utc::now() + ChronoDuration::minutes(10)),
+                lifecycle_stage: "active".to_string(),
+                deprecated_at: None,
+                deprecation_notice: None,
+                last_evaluated_at: None,
+                evaluation_count_7d: 0,
+                evaluation_count_30d: 0,
+                evaluation_count_90d: 0,
+                dependencies: vec![],
+            }]),
+            _ => Ok(vec![]),
+        });
+    feature_mock
+        .expect_get_stage_criteria()
+        .returning(|_sid| Ok(Vec::new()));
+
+    let (addr, _server) = start_server_with_repos(
+        Box::new(feature_mock),
+        Box::new(client_mock),
+        updates_tx.clone(),
+    )
+    .await;
+    let endpoint = format!("http://{}", addr);
+
+    // First stream subscribes to feature-A and then disconnects.
+    let mut raw_a = FeatureEvaluationClient::connect(endpoint.clone())
+        .await
+        .unwrap();
+    let (tx_a, rx_a) = tokio::sync::mpsc::channel::<pb::StreamRequest>(16);
+    tx_a.send(StreamRequest {
+        payload: Some(pb::stream_request::Payload::Subscribe(
+            pb::SubscribeRequest {
+                client_id: cid.clone(),
+                client_secret: sec.clone(),
+                feature_keys: vec!["feature-A".into()],
+                environment_id: String::new(),
+            },
+        )),
+    })
+    .await
+    .unwrap();
+    let mut stream_a = raw_a
+        .stream_updates(ReceiverStream::new(rx_a))
+        .await
+        .unwrap()
+        .into_inner();
+    let _ = tokio::time::timeout(Duration::from_millis(250), stream_a.message()).await;
+    drop(stream_a);
+    drop(tx_a);
+    sleep(Duration::from_millis(50)).await;
+
+    // Second stream for the same client subscribes only to feature-B.
+    let mut raw_b = FeatureEvaluationClient::connect(endpoint).await.unwrap();
+    let (tx_b, rx_b) = tokio::sync::mpsc::channel::<pb::StreamRequest>(16);
+    tx_b.send(StreamRequest {
+        payload: Some(pb::stream_request::Payload::Subscribe(
+            pb::SubscribeRequest {
+                client_id: cid,
+                client_secret: sec,
+                feature_keys: vec!["feature-B".into()],
+                environment_id: String::new(),
+            },
+        )),
+    })
+    .await
+    .unwrap();
+    let mut stream_b = raw_b
+        .stream_updates(ReceiverStream::new(rx_b))
+        .await
+        .unwrap()
+        .into_inner();
+    let _ = tokio::time::timeout(Duration::from_millis(250), stream_b.message()).await;
+
+    // Update for feature-A should not leak into second stream.
+    updates_tx
+        .send(pb::FeatureUpdate {
+            message_id: Uuid::new_v4().to_string(),
+            action: pb::feature_update::Action::Upsert as i32,
+            feature: Some(pb::FeatureFull {
+                id: Uuid::new_v4().to_string(),
+                key: "feature-A".into(),
+                description: String::new(),
+                feature_type: "Simple".into(),
+                team_id: team_id.to_string(),
+                created_at: Utc::now().to_rfc3339(),
+                active: true,
+                kill_switch_enabled: true,
+                kill_switch_activated_at: String::new(),
+                rollback_scheduled_at: Utc::now().to_rfc3339(),
+                stages: vec![],
+                dependencies: vec![],
+                variants: vec![],
+            }),
+            feature_key: String::new(),
+            error: String::new(),
+        })
+        .unwrap();
+
+    let mut leaked_a = false;
+    for _ in 0..3 {
+        if let Ok(Ok(Some(update))) =
+            tokio::time::timeout(Duration::from_millis(150), stream_b.message()).await
+            && update.action == (pb::feature_update::Action::Upsert as i32)
+            && update.feature.as_ref().map(|f| f.key.as_str()) == Some("feature-A")
+        {
+            leaked_a = true;
+            break;
+        }
+    }
+    assert!(
+        !leaked_a,
+        "feature-A update leaked into stream subscribed only to feature-B"
+    );
+
+    updates_tx
+        .send(pb::FeatureUpdate {
+            message_id: Uuid::new_v4().to_string(),
+            action: pb::feature_update::Action::Upsert as i32,
+            feature: Some(pb::FeatureFull {
+                id: Uuid::new_v4().to_string(),
+                key: "feature-B".into(),
+                description: String::new(),
+                feature_type: "Simple".into(),
+                team_id: team_id.to_string(),
+                created_at: Utc::now().to_rfc3339(),
+                active: true,
+                kill_switch_enabled: true,
+                kill_switch_activated_at: String::new(),
+                rollback_scheduled_at: Utc::now().to_rfc3339(),
+                stages: vec![],
+                dependencies: vec![],
+                variants: vec![],
+            }),
+            feature_key: String::new(),
+            error: String::new(),
+        })
+        .unwrap();
+
+    let mut got_b = false;
+    for _ in 0..5 {
+        if let Ok(Ok(Some(update))) =
+            tokio::time::timeout(Duration::from_millis(200), stream_b.message()).await
+            && update.action == (pb::feature_update::Action::Upsert as i32)
+            && update.feature.as_ref().map(|f| f.key.as_str()) == Some("feature-B")
+        {
+            got_b = true;
+            break;
+        }
+    }
+    assert!(got_b, "did not receive feature-B update");
 }

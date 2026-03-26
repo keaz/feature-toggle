@@ -1,5 +1,6 @@
 pub mod activity_log;
 pub mod approval;
+pub mod canary;
 pub mod client;
 pub mod compound_rules;
 pub mod context;
@@ -13,6 +14,8 @@ pub mod metrics;
 pub mod notification;
 pub mod pipeline;
 pub mod role;
+pub mod system_client;
+pub mod system_client_token;
 pub mod team;
 pub mod transaction;
 pub mod user;

@@ -302,7 +302,7 @@ impl ContextLogic for ContextLogicImpl {
                 }
             }
         }
-        let id_uuid = Uuid::try_from(id.clone()).unwrap();
+        let id_uuid = Uuid::try_from(id).map_err(|e| Error::InvalidInput(e.to_string()))?;
         let updated = self
             .repository
             .update_context(
@@ -341,7 +341,7 @@ impl ContextLogic for ContextLogicImpl {
     }
 
     async fn delete_context(&self, id: ID) -> Result<(), Error> {
-        let id = Uuid::try_from(id).unwrap();
+        let id = Uuid::try_from(id).map_err(|e| Error::InvalidInput(e.to_string()))?;
         self.repository.delete_context(id).await
     }
 

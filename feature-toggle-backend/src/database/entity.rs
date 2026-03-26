@@ -257,6 +257,30 @@ pub struct Client {
     pub web_origins: Option<Vec<String>>, // Populated when loading with joins
 }
 
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
+pub struct SystemClient {
+    pub id: Uuid,
+    pub team_id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub enabled: bool,
+    pub expires_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
+pub struct SystemClientToken {
+    pub id: Uuid,
+    pub system_client_id: Uuid,
+    pub token_hash: String,
+    pub expires_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+    pub revoked_at: Option<DateTime<Utc>>,
+    pub is_revoked: bool,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub enum ApprovalStatus {
     Pending,

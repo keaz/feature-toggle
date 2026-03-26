@@ -1460,6 +1460,16 @@ pub(crate) async fn request_stage_change(
         .await
         .map_err(RestError::from)?;
 
+    if matches!(next_status, "DEPLOYMENT_REQUESTED" | "DEPLOYED") {
+        crate::logic::dependency_graph::ensure_rollout_dependencies_safe(
+            feature_repo.as_ref().as_ref(),
+            db_feature.id,
+            stage.environment_id,
+        )
+        .await
+        .map_err(RestError::from)?;
+    }
+
     let actor_display_name =
         resolve_actor_display_name(user_logic.as_ref().as_ref(), &jwt_user).await;
     let environment_name =

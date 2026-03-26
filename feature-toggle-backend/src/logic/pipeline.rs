@@ -100,8 +100,8 @@ impl Clone for PipelineLogicImpl {
 }
 
 impl PipelineLogicImpl {
-    fn map_to_update_pipeline(id: ID, input: UpdatePipelineInput) -> UpdatePipeline {
-        let id = Uuid::try_from(id).unwrap();
+    fn map_to_update_pipeline(id: ID, input: UpdatePipelineInput) -> Result<UpdatePipeline, Error> {
+        let id = Uuid::try_from(id).map_err(|e| Error::InvalidInput(e.to_string()))?;
         let mut update = UpdatePipeline {
             id,
             name: input.name,
@@ -109,15 +109,15 @@ impl PipelineLogicImpl {
             stages: vec![],
         };
 
-        update.stages = get_stages_to_create(input.stages, input.relationships);
-        update
+        update.stages = get_stages_to_create(input.stages, input.relationships)?;
+        Ok(update)
     }
 }
 
 #[async_trait::async_trait]
 impl PipelineLogic for PipelineLogicImpl {
     async fn get_pipeline_by_id(&self, env_id: ID) -> Result<Pipeline, Error> {
-        let pipeline_id = Uuid::try_from(env_id).unwrap();
+        let pipeline_id = Uuid::try_from(env_id).map_err(|e| Error::InvalidInput(e.to_string()))?;
         let pipeline = self.repository.get_pipeline_by_id(pipeline_id).await?;
         let pipelines = [pipeline.clone()]; // Wrap in a vector to reuse the same logic
 
@@ -154,7 +154,7 @@ impl PipelineLogic for PipelineLogicImpl {
         active: Option<bool>,
         fields: Vec<String>,
     ) -> Result<Vec<Pipeline>, Error> {
-        let team_id = Uuid::try_from(team_id).unwrap();
+        let team_id = Uuid::try_from(team_id).map_err(|e| Error::InvalidInput(e.to_string()))?;
         let pipelines = self.repository.get_pipelines(team_id, name, active).await?;
         let has_stage = fields.contains(&"stages".to_string());
 
@@ -293,9 +293,9 @@ impl PipelineLogic for PipelineLogicImpl {
         input: CreatePipelineInput,
         actor: Option<crate::logic::ActorContext>,
     ) -> Result<ID, Error> {
-        let team_id = Uuid::try_from(team_id).unwrap();
+        let team_id = Uuid::try_from(team_id).map_err(|e| Error::InvalidInput(e.to_string()))?;
         let pipeline_name = input.name.clone();
-        let input_mapped = map_to_create_pipeline(team_id, input);
+        let input_mapped = map_to_create_pipeline(team_id, input)?;
         let pipeline = self.repository.create_pipeline(input_mapped).await?;
 
         // Extract actor information
@@ -329,8 +329,17 @@ impl PipelineLogic for PipelineLogicImpl {
         input: UpdatePipelineInput,
         actor: Option<crate::logic::ActorContext>,
     ) -> Result<Pipeline, Error> {
-        let input_mapped = Self::map_to_update_pipeline(id, input);
+        let input_mapped = Self::map_to_update_pipeline(id, input)?;
         let pipeline = self.repository.update_pipeline(input_mapped).await?;
+        let db_stages = pipeline
+            .stages
+            .iter()
+            .map(|stage| Box::new(stage.clone()) as Box<dyn DBStage>)
+            .collect::<Vec<_>>();
+        let environment_map =
+            get_environment_map(&*self.environment_logic, &db_stages, true).await?;
+        let stages = map_stages(true, &environment_map, &db_stages, stage_factory);
+        let relationships = create_relationships(true, db_stages, relationship_factory);
 
         // Extract actor information
         let (actor_id, actor_name) = actor
@@ -359,8 +368,8 @@ impl PipelineLogic for PipelineLogicImpl {
             name: pipeline.name,
             active: pipeline.active,
             team_id: pipeline.team_id.into(),
-            stages: vec![],        //#FIXME: Stages are not included in this mapping
-            relationships: vec![], //#FIXME: Relationships are not included in this mapping
+            stages,
+            relationships,
         })
     }
 
@@ -369,7 +378,7 @@ impl PipelineLogic for PipelineLogicImpl {
         id: ID,
         actor: Option<crate::logic::ActorContext>,
     ) -> Result<(), Error> {
-        let pipeline_id = Uuid::try_from(id).unwrap();
+        let pipeline_id = Uuid::try_from(id).map_err(|e| Error::InvalidInput(e.to_string()))?;
 
         // Get pipeline name before deletion for activity log
         let pipeline = self.repository.get_pipeline_by_id(pipeline_id).await?;
@@ -426,37 +435,40 @@ fn stage_factory(
     }
 }
 
-fn map_to_create_pipeline(team_id: Uuid, input: CreatePipelineInput) -> CreatePipeline {
+fn map_to_create_pipeline(
+    team_id: Uuid,
+    input: CreatePipelineInput,
+) -> Result<CreatePipeline, Error> {
     let mut pipeline = CreatePipeline {
         team_id,
         name: input.name.clone(),
         stages: vec![],
     };
 
-    let stages = get_stages_to_create(input.stages, input.relationships);
+    let stages = get_stages_to_create(input.stages, input.relationships)?;
     pipeline.stages = stages;
-    pipeline
+    Ok(pipeline)
 }
 
 fn get_stages_to_create(
     stages: Vec<CreateStageInput>,
     relationships: Vec<CreateRelationshipInput>,
-) -> Vec<CreateStage> {
+) -> Result<Vec<CreateStage>, Error> {
     let stages = stages
         .into_iter()
-        .map(|stage| {
-            CreateStage::new(
+        .map(|stage| -> Result<CreateStage, Error> {
+            Ok(CreateStage::new(
                 Uuid::new_v4(),
-                id_to_uuid(stage.environment_id).unwrap(),
+                id_to_uuid(stage.environment_id)?,
                 stage.order_index,
                 None,
                 stage.position,
-            )
+            ))
         })
-        .collect::<Vec<CreateStage>>();
+        .collect::<Result<Vec<CreateStage>, Error>>()?;
 
     // Use shared relationship building logic
-    build_stage_relationships(stages, relationships)
+    Ok(build_stage_relationships(stages, relationships))
 }
 
 #[cfg(test)]
@@ -500,7 +512,7 @@ mod test {
             }],
             relationships: vec![],
         };
-        let create_pipeline = map_to_create_pipeline(team_id, input);
+        let create_pipeline = map_to_create_pipeline(team_id, input).unwrap();
         assert_eq!(create_pipeline.name, "Test Pipeline");
         assert_eq!(create_pipeline.team_id, team_id);
         assert_eq!(create_pipeline.stages.len(), 1);
@@ -559,7 +571,7 @@ mod test {
             ],
             relationships,
         };
-        let create_pipeline = map_to_create_pipeline(team_id, input);
+        let create_pipeline = map_to_create_pipeline(team_id, input).unwrap();
         assert_eq!(create_pipeline.name, "Test Pipeline");
         assert_eq!(create_pipeline.team_id, team_id);
         let stages = create_pipeline.stages;
@@ -694,13 +706,14 @@ mod test {
     #[tokio::test]
     async fn test_update_pipeline() {
         let mut repository = MockPipelineRepository::new();
-        let environment_repo = MockEnvironmentLogic::new();
+        let mut environment_repo = MockEnvironmentLogic::new();
 
         const ID: &str = "3eef17bc-9e06-411d-b5f4-7a786e68bb96";
         const NAME: &str = "Updated Pipeline";
+        let env_uuid = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
 
         let stages = vec![CreateStageInput {
-            environment_id: ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"),
+            environment_id: ID::from(env_uuid.to_string()),
             order_index: 0,
             position: "".to_string(),
         }];
@@ -723,16 +736,27 @@ mod test {
                     id: Uuid::parse_str(ID).unwrap(),
                     name: "Updated Pipeline".to_string(),
                     active: true,
-                    team_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
+                    team_id: env_uuid,
                     stages: vec![crate::database::entity::PipelineStage {
                         id: Uuid::parse_str(ID).unwrap(),
                         pipeline_id: Uuid::parse_str(ID).unwrap(),
-                        environment_id: Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27")
-                            .unwrap(),
+                        environment_id: env_uuid,
                         order_index: 0,
                         parent_stage_id: None,
                         position: "".to_string(),
                     }],
+                })
+            });
+        environment_repo
+            .expect_get_environment_by_id()
+            .times(1)
+            .returning(move |_| {
+                Ok(crate::model::Environment {
+                    id: ID::from(env_uuid.to_string()),
+                    name: "Test Environment".to_string(),
+                    team_id: ID::from(env_uuid.to_string()),
+                    active: true,
+                    environment_type: "DEV".to_string(),
                 })
             });
 
@@ -747,6 +771,8 @@ mod test {
         let pipeline = result.unwrap();
         assert_eq!(pipeline.name, "Updated Pipeline");
         assert!(pipeline.active);
+        assert_eq!(pipeline.stages.len(), 1);
+        assert_eq!(pipeline.relationships.len(), 0);
     }
 
     #[tokio::test]

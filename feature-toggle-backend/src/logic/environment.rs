@@ -88,10 +88,8 @@ impl Clone for EnvironmentLogicImpl {
 #[async_trait::async_trait]
 impl EnvironmentLogic for EnvironmentLogicImpl {
     async fn get_environment_by_id(&self, env_id: ID) -> Result<Environment, Error> {
-        let environment = self
-            .repository
-            .get_environment_by_id(Uuid::try_from(env_id).unwrap())
-            .await?;
+        let env_id = Uuid::try_from(env_id).map_err(|e| Error::InvalidInput(e.to_string()))?;
+        let environment = self.repository.get_environment_by_id(env_id).await?;
         let id = ID::from(environment.id);
         Ok(Environment {
             id,
@@ -108,7 +106,7 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
         name: Option<String>,
         active: Option<bool>,
     ) -> Result<Vec<Environment>, Error> {
-        let team_id = Uuid::try_from(team_id).unwrap();
+        let team_id = Uuid::try_from(team_id).map_err(|e| Error::InvalidInput(e.to_string()))?;
         let environments = self
             .repository
             .get_environments(team_id, name, active)
@@ -195,7 +193,7 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
             ));
         }
 
-        let team_id = Uuid::try_from(team_id).unwrap();
+        let team_id = Uuid::try_from(team_id).map_err(|e| Error::InvalidInput(e.to_string()))?;
         let environment = self.repository.create_environment(team_id, input).await?;
 
         // Extract actor information
@@ -243,7 +241,7 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
             environment_type: input.environment_type,
         };
 
-        let id = Uuid::try_from(id).unwrap();
+        let id = Uuid::try_from(id).map_err(|e| Error::InvalidInput(e.to_string()))?;
         let environment = self.repository.update_environment(id, input).await?;
 
         // Extract actor information
@@ -283,7 +281,7 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
         id: ID,
         actor: Option<crate::logic::ActorContext>,
     ) -> Result<(), Error> {
-        let id = Uuid::try_from(id).unwrap();
+        let id = Uuid::try_from(id).map_err(|e| Error::InvalidInput(e.to_string()))?;
 
         // Get environment name before deletion for activity log
         let environment = self.repository.get_environment_by_id(id).await?;

@@ -9,6 +9,7 @@ use evaluation_engine as engine;
 use futures_util::StreamExt;
 use pb::feature_evaluation_server::{FeatureEvaluation, FeatureEvaluationServer};
 use pb::{EvaluateRequest, EvaluateResponse};
+use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::codec::CompressionEncoding;
@@ -120,6 +121,259 @@ impl crate::logic::metrics::MetricLogic for NoopMetricLogic {
 
 // Message type for async database writer
 type EvaluationBatch = Vec<crate::database::feature_evaluation::CreateFeatureEvaluation>;
+const EVALUATION_WRITER_QUEUE_CAPACITY: usize = 2048;
+const PUSH_EVALUATION_DEDUP_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+const PUSH_EVALUATION_DEDUP_MAX_ENTRIES: usize = 4096;
+type RequestedKeyMap = std::collections::HashMap<Uuid, std::collections::HashSet<String>>;
+type ActiveSubscriptionMap =
+    std::collections::HashMap<Uuid, std::collections::HashMap<Uuid, SubscriptionFilter>>;
+
+#[derive(Clone)]
+enum PushEvaluationRequestContext {
+    Empty,
+    Values(std::collections::BTreeMap<String, String>),
+}
+
+impl PushEvaluationRequestContext {
+    fn from_proto(context: &[pb::Context]) -> Self {
+        if context.is_empty() {
+            return Self::Empty;
+        }
+
+        // Canonicalize by key so the fingerprint is stable even when the wire order changes.
+        Self::Values(
+            context
+                .iter()
+                .map(|entry| (entry.key.clone(), entry.value.clone()))
+                .collect(),
+        )
+    }
+
+    fn to_json_value(&self) -> Option<serde_json::Value> {
+        match self {
+            Self::Empty => None,
+            Self::Values(entries) => {
+                Some(serde_json::to_value(entries).unwrap_or(serde_json::Value::Null))
+            }
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct PushEvaluationRequestFingerprintEvent {
+    feature_key: String,
+    environment_id: String,
+    client_id: String,
+    client_secret: String,
+    evaluation_result: bool,
+    evaluation_context: std::collections::BTreeMap<String, String>,
+    user_context: String,
+    evaluated_at_unix_ms: i64,
+    prior_assignment: bool,
+    variant: String,
+    variant_value: String,
+}
+
+fn push_evaluation_request_fingerprint(
+    request: &pb::PushEvaluationEventsRequest,
+) -> Result<String, serde_json::Error> {
+    let events = request
+        .events
+        .iter()
+        .map(|event| PushEvaluationRequestFingerprintEvent {
+            feature_key: event.feature_key.clone(),
+            environment_id: event.environment_id.clone(),
+            client_id: event.client_id.clone(),
+            client_secret: event.client_secret.clone(),
+            evaluation_result: event.evaluation_result,
+            evaluation_context: match PushEvaluationRequestContext::from_proto(
+                &event.evaluation_context,
+            ) {
+                PushEvaluationRequestContext::Empty => std::collections::BTreeMap::new(),
+                PushEvaluationRequestContext::Values(entries) => entries,
+            },
+            user_context: event.user_context.clone(),
+            evaluated_at_unix_ms: event.evaluated_at_unix_ms,
+            prior_assignment: event.prior_assignment,
+            variant: event.variant.clone(),
+            variant_value: event.variant_value.clone(),
+        })
+        .collect::<Vec<_>>();
+    let encoded = serde_json::to_vec(&events)?;
+    let mut hasher = Sha256::new();
+    hasher.update(encoded);
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+struct PushEvaluationDedupeEntries {
+    by_fingerprint: std::collections::HashMap<String, std::time::Instant>,
+    order: std::collections::VecDeque<(String, std::time::Instant)>,
+}
+
+impl PushEvaluationDedupeEntries {
+    fn new() -> Self {
+        Self {
+            by_fingerprint: std::collections::HashMap::new(),
+            order: std::collections::VecDeque::new(),
+        }
+    }
+
+    fn prune_expired(&mut self, now: std::time::Instant, ttl: std::time::Duration) {
+        loop {
+            let Some((fingerprint, seen_at)) = self.order.front() else {
+                break;
+            };
+
+            let is_current = matches!(self.by_fingerprint.get(fingerprint), Some(current) if *current == *seen_at);
+            if !is_current {
+                self.order.pop_front();
+                continue;
+            }
+
+            if now.saturating_duration_since(*seen_at) < ttl {
+                break;
+            }
+
+            let stale_fingerprint = fingerprint.clone();
+            self.by_fingerprint.remove(&stale_fingerprint);
+            self.order.pop_front();
+        }
+    }
+
+    fn enforce_bound(&mut self, max_entries: usize) {
+        while self.by_fingerprint.len() > max_entries {
+            let Some((fingerprint, seen_at)) = self.order.pop_front() else {
+                break;
+            };
+            let is_current = matches!(self.by_fingerprint.get(&fingerprint), Some(current) if *current == seen_at);
+            if is_current {
+                self.by_fingerprint.remove(&fingerprint);
+            }
+        }
+    }
+}
+
+/// Dedupes accepted evaluation push payloads for a short TTL window.
+struct PushEvaluationRequestDeduper {
+    ttl: std::time::Duration,
+    max_entries: usize,
+    entries: tokio::sync::Mutex<PushEvaluationDedupeEntries>,
+}
+
+impl PushEvaluationRequestDeduper {
+    fn new(ttl: std::time::Duration, max_entries: usize) -> Self {
+        Self {
+            ttl,
+            max_entries,
+            entries: tokio::sync::Mutex::new(PushEvaluationDedupeEntries::new()),
+        }
+    }
+
+    async fn contains_recent(&self, fingerprint: &str) -> bool {
+        let mut guard = self.entries.lock().await;
+        let now = std::time::Instant::now();
+        guard.prune_expired(now, self.ttl);
+        guard.by_fingerprint.contains_key(fingerprint)
+    }
+
+    async fn remember(&self, fingerprint: String) {
+        let mut guard = self.entries.lock().await;
+        let now = std::time::Instant::now();
+        guard.prune_expired(now, self.ttl);
+        guard.by_fingerprint.insert(fingerprint.clone(), now);
+        guard.order.push_back((fingerprint, now));
+        guard.enforce_bound(self.max_entries);
+    }
+}
+
+#[derive(Clone, Debug)]
+enum SubscriptionFilter {
+    /// The stream receives all feature updates for the authenticated team.
+    AllFeatures,
+    /// The stream receives updates only for a concrete key set.
+    Keys(std::collections::HashSet<String>),
+}
+
+impl SubscriptionFilter {
+    fn from_feature_keys(feature_keys: Vec<String>) -> Self {
+        if feature_keys.is_empty() {
+            Self::AllFeatures
+        } else {
+            Self::Keys(feature_keys.into_iter().collect())
+        }
+    }
+
+    fn matches(&self, feature_key: &str) -> bool {
+        match self {
+            Self::AllFeatures => true,
+            Self::Keys(keys) => keys.contains(feature_key),
+        }
+    }
+
+    fn snapshot_keys(
+        &self,
+        requested_keys: &std::collections::HashSet<String>,
+    ) -> Option<std::collections::HashSet<String>> {
+        match self {
+            Self::AllFeatures => None,
+            Self::Keys(keys) => {
+                let mut combined = keys.clone();
+                combined.extend(requested_keys.iter().cloned());
+                Some(combined)
+            }
+        }
+    }
+}
+
+async fn unregister_stream_subscription(
+    subscriptions: &std::sync::Arc<tokio::sync::RwLock<ActiveSubscriptionMap>>,
+    client_id: Uuid,
+    stream_id: Uuid,
+) {
+    let mut map = subscriptions.write().await;
+    if let Some(per_client) = map.get_mut(&client_id) {
+        per_client.remove(&stream_id);
+        if per_client.is_empty() {
+            map.remove(&client_id);
+        }
+    }
+}
+
+async fn stream_allows_feature(
+    requested_keys: &std::sync::Arc<tokio::sync::RwLock<RequestedKeyMap>>,
+    subscriptions: &std::sync::Arc<tokio::sync::RwLock<ActiveSubscriptionMap>>,
+    client_id: Uuid,
+    stream_id: Uuid,
+    feature_key: &str,
+) -> bool {
+    let requested_hit = {
+        let map = requested_keys.read().await;
+        map.get(&client_id)
+            .map(|keys| keys.contains(feature_key))
+            .unwrap_or(false)
+    };
+    if requested_hit {
+        return true;
+    }
+
+    let map = subscriptions.read().await;
+    map.get(&client_id)
+        .and_then(|per_client| per_client.get(&stream_id))
+        .map(|filter| filter.matches(feature_key))
+        .unwrap_or(false)
+}
+
+#[derive(Clone)]
+struct EngineFeatureBase {
+    id: String,
+    key: String,
+    feature_type: String,
+    active: bool,
+    enabled: bool,
+    dependency_ids: Vec<Uuid>,
+    stages: Vec<engine::FeatureStage>,
+    variants: Vec<engine::FeatureVariant>,
+}
 
 pub struct FeatureEvaluationSvc {
     pool: sqlx::PgPool,
@@ -131,13 +385,13 @@ pub struct FeatureEvaluationSvc {
     metric_logic: Box<dyn MetricLogic>,
     updates_tx: tokio::sync::broadcast::Sender<pb::FeatureUpdate>,
     // Async database writer channel - sends evaluation batches to background task
-    evaluation_writer_tx: tokio::sync::mpsc::UnboundedSender<EvaluationBatch>,
-    // Tracks, per client_id, the set of feature keys that the client explicitly requested via GetFeatureByKeyRequest
-    requested_keys: std::sync::Arc<
-        tokio::sync::RwLock<
-            std::collections::HashMap<uuid::Uuid, std::collections::HashSet<String>>,
-        >,
-    >,
+    evaluation_writer_tx: tokio::sync::mpsc::Sender<EvaluationBatch>,
+    // Short-lived payload dedupe for retry-safe evaluation ingestion.
+    push_evaluation_deduper: std::sync::Arc<PushEvaluationRequestDeduper>,
+    // Tracks, per client_id, keys explicitly requested via GetFeatureByKeyRequest.
+    requested_keys: std::sync::Arc<tokio::sync::RwLock<RequestedKeyMap>>,
+    // Tracks active stream subscriptions per (client_id, stream_id).
+    active_subscriptions: std::sync::Arc<tokio::sync::RwLock<ActiveSubscriptionMap>>,
 }
 
 impl Clone for FeatureEvaluationSvc {
@@ -152,7 +406,9 @@ impl Clone for FeatureEvaluationSvc {
             metric_logic: self.metric_logic.clone_box(),
             updates_tx: self.updates_tx.clone(),
             evaluation_writer_tx: self.evaluation_writer_tx.clone(),
+            push_evaluation_deduper: self.push_evaluation_deduper.clone(),
             requested_keys: self.requested_keys.clone(),
+            active_subscriptions: self.active_subscriptions.clone(),
         }
     }
 }
@@ -196,7 +452,7 @@ impl FeatureEvaluationSvc {
 
         // Create mpsc channel for async database writes
         let (evaluation_writer_tx, evaluation_writer_rx) =
-            tokio::sync::mpsc::unbounded_channel::<EvaluationBatch>();
+            tokio::sync::mpsc::channel::<EvaluationBatch>(EVALUATION_WRITER_QUEUE_CAPACITY);
 
         // Spawn background task to handle database writes
         let logic_clone = feature_evaluation_logic.clone_box();
@@ -214,7 +470,14 @@ impl FeatureEvaluationSvc {
             metric_logic,
             updates_tx,
             evaluation_writer_tx,
+            push_evaluation_deduper: std::sync::Arc::new(PushEvaluationRequestDeduper::new(
+                PUSH_EVALUATION_DEDUP_TTL,
+                PUSH_EVALUATION_DEDUP_MAX_ENTRIES,
+            )),
             requested_keys: std::sync::Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
+            active_subscriptions: std::sync::Arc::new(tokio::sync::RwLock::new(
                 std::collections::HashMap::new(),
             )),
         }
@@ -224,7 +487,7 @@ impl FeatureEvaluationSvc {
     /// This prevents database writes from blocking the gRPC stream
     async fn run_evaluation_writer(
         logic: Box<dyn crate::logic::feature_evaluation::FeatureEvaluationLogic>,
-        mut rx: tokio::sync::mpsc::UnboundedReceiver<EvaluationBatch>,
+        mut rx: tokio::sync::mpsc::Receiver<EvaluationBatch>,
     ) {
         log::info!("Starting async evaluation writer task");
         while let Some(evaluations) = rx.recv().await {
@@ -275,7 +538,7 @@ impl FeatureEvaluationSvc {
 
         // Create mpsc channel for async database writes (test mode)
         let (evaluation_writer_tx, evaluation_writer_rx) =
-            tokio::sync::mpsc::unbounded_channel::<EvaluationBatch>();
+            tokio::sync::mpsc::channel::<EvaluationBatch>(EVALUATION_WRITER_QUEUE_CAPACITY);
 
         // Spawn background task to handle database writes
         let logic_clone = feature_evaluation_logic.clone_box();
@@ -293,39 +556,106 @@ impl FeatureEvaluationSvc {
             metric_logic,
             updates_tx,
             evaluation_writer_tx,
+            push_evaluation_deduper: std::sync::Arc::new(PushEvaluationRequestDeduper::new(
+                PUSH_EVALUATION_DEDUP_TTL,
+                PUSH_EVALUATION_DEDUP_MAX_ENTRIES,
+            )),
             requested_keys: std::sync::Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
+            active_subscriptions: std::sync::Arc::new(tokio::sync::RwLock::new(
                 std::collections::HashMap::new(),
             )),
         }
     }
 
-    async fn map_db_feature_to_engine(&self, f: db::Feature) -> Result<engine::Feature, Status> {
+    async fn map_db_feature_to_engine(&self, root: db::Feature) -> Result<engine::Feature, Status> {
         let repo = &self.feature_repo;
-        let db::Feature {
-            kill_switch_enabled: _kill_switch_enabled,
-            rollback_scheduled_at: _rollback_scheduled_at,
-            ..
-        } = f;
+        let root_id = root.id;
 
-        let db_stages = repo.get_feature_stages(f.id).await;
-        if db_stages.is_err() {
-            return Err(Status::internal(format!(
-                "db error: {}",
-                db_stages.err().unwrap()
-            )));
-        }
-        let db_stages = db_stages.unwrap();
-        let mut stages = Vec::with_capacity(db_stages.len());
-        for s in db_stages.into_iter() {
-            // Load stage criterias
-            let crits = repo
-                .get_stage_criteria(s.id)
+        let mut feature_graph: std::collections::HashMap<Uuid, db::Feature> =
+            std::collections::HashMap::new();
+        let mut queue: std::collections::VecDeque<Uuid> = root
+            .dependencies
+            .iter()
+            .map(|dependency| dependency.depends_on_id)
+            .collect();
+
+        feature_graph.insert(root.id, root);
+
+        while let Some(feature_id) = queue.pop_front() {
+            if feature_graph.contains_key(&feature_id) {
+                continue;
+            }
+
+            let dependency_feature = repo
+                .get_feature_by_id(feature_id)
                 .await
                 .map_err(|e| Status::internal(format!("db error: {}", e)))?;
-            let mapped_criteria = crits
+
+            for nested_dependency in &dependency_feature.dependencies {
+                if !feature_graph.contains_key(&nested_dependency.depends_on_id) {
+                    queue.push_back(nested_dependency.depends_on_id);
+                }
+            }
+
+            feature_graph.insert(dependency_feature.id, dependency_feature);
+        }
+
+        let mut base_map: std::collections::HashMap<Uuid, EngineFeatureBase> =
+            std::collections::HashMap::new();
+        for feature in feature_graph.values() {
+            let (stages, variants) = self.map_db_feature_payload_to_engine(feature).await?;
+            base_map.insert(
+                feature.id,
+                EngineFeatureBase {
+                    id: feature.id.to_string(),
+                    key: feature.key.clone(),
+                    feature_type: format!("{:?}", feature.feature_type),
+                    active: feature.active,
+                    enabled: feature.active,
+                    dependency_ids: feature
+                        .dependencies
+                        .iter()
+                        .map(|dependency| dependency.depends_on_id)
+                        .collect(),
+                    stages,
+                    variants,
+                },
+            );
+        }
+
+        let mut memo = std::collections::HashMap::new();
+        let mut visiting = std::collections::HashSet::new();
+        Ok(Self::build_engine_dependency_graph(
+            root_id,
+            &base_map,
+            &mut memo,
+            &mut visiting,
+        ))
+    }
+
+    async fn map_db_feature_payload_to_engine(
+        &self,
+        feature: &db::Feature,
+    ) -> Result<(Vec<engine::FeatureStage>, Vec<engine::FeatureVariant>), Status> {
+        let repo = &self.feature_repo;
+
+        let db_stages = repo
+            .get_feature_stages(feature.id)
+            .await
+            .map_err(|e| Status::internal(format!("db error: {}", e)))?;
+        let mut stages = Vec::with_capacity(db_stages.len());
+        for stage in db_stages {
+            let criterias = repo
+                .get_stage_criteria(stage.id)
+                .await
+                .map_err(|e| Status::internal(format!("db error: {}", e)))?;
+
+            let mapped_criteria = criterias
                 .into_iter()
-                .map(|c| {
-                    let rule_groups = c
+                .map(|criterion| {
+                    let rule_groups = criterion
                         .rule_groups
                         .into_iter()
                         .map(|group| engine::RuleGroup {
@@ -340,8 +670,8 @@ impl FeatureEvaluationSvc {
                             conditions: group
                                 .conditions
                                 .into_iter()
-                                .map(|cond| {
-                                    let cond_operator = match cond.operator.to_uppercase().as_str()
+                                .map(|condition| {
+                                    let operator = match condition.operator.to_uppercase().as_str()
                                     {
                                         "EQUALS" => engine::Operator::Equals,
                                         "NOTEQUALS" | "NOT_EQUALS" => engine::Operator::NotEquals,
@@ -371,10 +701,11 @@ impl FeatureEvaluationSvc {
                                         }
                                         _ => engine::Operator::In,
                                     };
+
                                     engine::RuleCondition {
-                                        context_key: cond.context_key,
-                                        operator: cond_operator,
-                                        value: cond.value,
+                                        context_key: condition.context_key,
+                                        operator,
+                                        value: condition.value,
                                     }
                                 })
                                 .collect(),
@@ -382,17 +713,17 @@ impl FeatureEvaluationSvc {
                         .collect();
 
                     engine::StageCriterion {
-                        priority: c.priority,
+                        priority: criterion.priority,
                         rule_groups,
-                        variant_allocations: c
+                        variant_allocations: criterion
                             .variant_allocations
                             .into_iter()
-                            .map(|alloc| engine::VariantAllocation {
-                                variant_control: alloc.variant_control,
-                                weight: alloc.weight,
+                            .map(|allocation| engine::VariantAllocation {
+                                variant_control: allocation.variant_control,
+                                weight: allocation.weight,
                             })
                             .collect(),
-                        variant_selection_mode: match c.variant_selection_mode {
+                        variant_selection_mode: match criterion.variant_selection_mode {
                             crate::database::entity::VariantSelectionMode::SpecificVariant => {
                                 engine::VariantSelectionMode::SpecificVariant
                             }
@@ -400,48 +731,93 @@ impl FeatureEvaluationSvc {
                                 engine::VariantSelectionMode::WeightedSplit
                             }
                         },
-                        selected_variant_control: c.selected_variant_control,
+                        selected_variant_control: criterion.selected_variant_control,
                     }
                 })
                 .collect::<Vec<_>>();
+
             stages.push(engine::FeatureStage {
-                environment_id: s.environment_id.to_string(),
-                enabled: s.enabled,
+                environment_id: stage.environment_id.to_string(),
+                enabled: stage.enabled,
                 criterias: mapped_criteria,
             });
         }
 
-        // Dependencies: load only as empty for now (requires recursive fetch if needed)
-        let deps: Vec<engine::Feature> = vec![];
-
-        // Load variants from database only for Contextual features
-        let variants = if matches!(f.feature_type, db::FeatureType::Contextual) {
-            let db_variants = repo
-                .get_feature_variants(f.id)
+        let variants = if matches!(feature.feature_type, db::FeatureType::Contextual) {
+            repo.get_feature_variants(feature.id)
                 .await
-                .map_err(|e| Status::internal(format!("db error: {}", e)))?;
-
-            db_variants
+                .map_err(|e| Status::internal(format!("db error: {}", e)))?
                 .into_iter()
-                .map(|v| engine::FeatureVariant {
-                    control: v.control,
-                    value: v.value,
+                .map(|variant| engine::FeatureVariant {
+                    control: variant.control,
+                    value: variant.value,
                 })
                 .collect()
         } else {
             vec![]
         };
 
-        Ok(engine::Feature {
-            id: f.id.to_string(),
-            key: f.key,
-            feature_type: format!("{:?}", f.feature_type),
-            active: f.active,
-            enabled: f.active,
-            dependencies: deps,
-            stages,
-            variants,
-        })
+        Ok((stages, variants))
+    }
+
+    fn build_engine_dependency_graph(
+        feature_id: Uuid,
+        base_map: &std::collections::HashMap<Uuid, EngineFeatureBase>,
+        memo: &mut std::collections::HashMap<Uuid, engine::Feature>,
+        visiting: &mut std::collections::HashSet<Uuid>,
+    ) -> engine::Feature {
+        if let Some(cached) = memo.get(&feature_id) {
+            return cached.clone();
+        }
+
+        let Some(base) = base_map.get(&feature_id) else {
+            return engine::Feature {
+                id: feature_id.to_string(),
+                key: feature_id.to_string(),
+                feature_type: "Simple".to_string(),
+                active: false,
+                enabled: false,
+                dependencies: vec![],
+                stages: vec![],
+                variants: vec![],
+            };
+        };
+
+        if !visiting.insert(feature_id) {
+            return engine::Feature {
+                id: base.id.clone(),
+                key: base.key.clone(),
+                feature_type: base.feature_type.clone(),
+                active: false,
+                enabled: false,
+                dependencies: vec![],
+                stages: base.stages.clone(),
+                variants: base.variants.clone(),
+            };
+        }
+
+        let dependencies = base
+            .dependency_ids
+            .iter()
+            .map(|dependency_id| {
+                Self::build_engine_dependency_graph(*dependency_id, base_map, memo, visiting)
+            })
+            .collect::<Vec<_>>();
+
+        visiting.remove(&feature_id);
+
+        let feature = engine::Feature {
+            id: base.id.clone(),
+            key: base.key.clone(),
+            feature_type: base.feature_type.clone(),
+            active: base.active,
+            enabled: base.enabled,
+            dependencies,
+            stages: base.stages.clone(),
+            variants: base.variants.clone(),
+        };
+        memo.insert(feature_id, feature.clone());
+        feature
     }
 
     async fn map_db_feature_to_full(&self, f: db::Feature) -> Result<pb::FeatureFull, Status> {
@@ -1004,55 +1380,55 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
         // Prepare outgoing channel
         let (out_tx, out_rx) = mpsc::channel::<Result<pb::FeatureUpdate, Status>>(64);
 
-        // Determine which keys to track for this subscription:
-        // - If subscribe.feature_keys is non-empty, use those specific keys
-        // - If subscribe.feature_keys is empty, subscribe to ALL features for this client
-        //   (useful for edge servers that want to receive all updates)
-
-        // Merge subscription keys with previously requested keys from GetFeatureByKeyRequest
-        let mut subscription_keys: std::collections::HashSet<String> =
-            subscribe.feature_keys.iter().cloned().collect();
-
-        // Add any keys that were previously requested via GetFeatureByKeyRequest
+        let stream_id = Uuid::new_v4();
+        let subscription_filter = SubscriptionFilter::from_feature_keys(subscribe.feature_keys);
         {
-            let map = self.requested_keys.read().await;
-            if let Some(prev_keys) = map.get(&client_id) {
-                subscription_keys.extend(prev_keys.iter().cloned());
-            }
+            let mut map = self.active_subscriptions.write().await;
+            let per_client = map.entry(client_id).or_default();
+            per_client.insert(stream_id, subscription_filter.clone());
         }
 
-        let mut map = self.requested_keys.write().await;
-        let entry = map.entry(client_id).or_default();
-        entry.extend(subscription_keys.iter().cloned());
-        log::info!(
-            "gRPC: Updated requested_keys for client {} with {} feature keys",
-            client_id,
-            subscription_keys.len()
-        );
+        // Include keys requested via unary GetFeatureByKey so long-lived streams
+        // can pick up those updates without reconnecting.
+        let requested_keys_for_client = {
+            let map = self.requested_keys.read().await;
+            map.get(&client_id).cloned().unwrap_or_default()
+        };
 
         // Send initial snapshot
         {
             let feature_repo = &self.feature_repo;
 
-            // If subscription_keys is non-empty, fetch those specific features
-            // Otherwise, don't send any snapshot (empty subscribe)
-            let features_to_send = if subscription_keys.is_empty() {
-                vec![]
-            } else {
-                log::info!(
-                    "gRPC: Sending snapshot of {} specific features",
-                    subscription_keys.len()
-                );
-                let mut all_features = Vec::new();
-                for k in subscription_keys.iter() {
-                    let features = feature_repo
-                        .get_features(team_id, Some(k.clone()), None)
-                        .await
-                        .map_err(|e| Status::internal(format!("db error: {}", e)))?;
-                    all_features.extend(features);
-                }
-                all_features
-            };
+            let features_to_send =
+                match subscription_filter.snapshot_keys(&requested_keys_for_client) {
+                    None => {
+                        log::info!("gRPC: Sending full snapshot for client {}", client_id);
+                        feature_repo
+                            .get_features(team_id, None, None)
+                            .await
+                            .map_err(|e| Status::internal(format!("db error: {}", e)))?
+                    }
+                    Some(subscription_keys) => {
+                        if subscription_keys.is_empty() {
+                            vec![]
+                        } else {
+                            log::info!(
+                                "gRPC: Sending snapshot of {} feature key(s) for client {}",
+                                subscription_keys.len(),
+                                client_id
+                            );
+                            let mut all_features = Vec::new();
+                            for feature_key in &subscription_keys {
+                                let features = feature_repo
+                                    .get_features(team_id, Some(feature_key.clone()), None)
+                                    .await
+                                    .map_err(|e| Status::internal(format!("db error: {}", e)))?;
+                                all_features.extend(features);
+                            }
+                            all_features
+                        }
+                    }
+                };
 
             log::info!(
                 "gRPC: Snapshot contains {} features",
@@ -1080,6 +1456,7 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
         let mut rx = self.updates_tx.subscribe();
         let out_tx_clone = out_tx.clone();
         let requested_keys_clone = self.requested_keys.clone();
+        let subscriptions_clone = self.active_subscriptions.clone();
 
         tokio::spawn(async move {
             loop {
@@ -1092,13 +1469,14 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
                             update.feature_key.clone()
                         };
 
-                        // Read current subscription keys from shared map (allows dynamic updates)
-                        let should_send = {
-                            let map = requested_keys_clone.read().await;
-                            map.get(&client_id)
-                                .map(|keys| keys.contains(&key_for_update))
-                                .unwrap_or(false)
-                        };
+                        let should_send = stream_allows_feature(
+                            &requested_keys_clone,
+                            &subscriptions_clone,
+                            client_id,
+                            stream_id,
+                            &key_for_update,
+                        )
+                        .await;
 
                         if should_send {
                             log::info!(
@@ -1129,9 +1507,19 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
                                 error: "lagged".into(),
                             }))
                             .await;
+                        break;
                     }
                 }
             }
+            unregister_stream_subscription(&subscriptions_clone, client_id, stream_id).await;
+        });
+
+        // Ensure cleanup even when no further broadcast messages arrive.
+        let cleanup_tx = out_tx.clone();
+        let cleanup_subscriptions = self.active_subscriptions.clone();
+        tokio::spawn(async move {
+            cleanup_tx.closed().await;
+            unregister_stream_subscription(&cleanup_subscriptions, client_id, stream_id).await;
         });
 
         // Handle incoming heartbeats/acks (optional). We keep the stream alive by draining inputs.
@@ -1166,8 +1554,9 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
         request: Request<pb::PushEvaluationEventsRequest>,
     ) -> Result<Response<pb::PushEvaluationEventsResponse>, Status> {
         let req = request.into_inner();
+        let input_count = req.events.len();
 
-        if req.events.is_empty() {
+        if input_count == 0 {
             return Ok(Response::new(pb::PushEvaluationEventsResponse {
                 message_id: uuid::Uuid::new_v4().to_string(),
                 processed_count: 0,
@@ -1199,8 +1588,26 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
             return Err(Status::unauthenticated("invalid client_secret"));
         }
 
+        let request_fingerprint = push_evaluation_request_fingerprint(&req).map_err(|e| {
+            Status::internal(format!("failed to fingerprint evaluation payload: {e}"))
+        })?;
+        if self
+            .push_evaluation_deduper
+            .contains_recent(&request_fingerprint)
+            .await
+        {
+            log::debug!(
+                "Skipping duplicate push_evaluation_events batch ({} events)",
+                input_count
+            );
+            return Ok(Response::new(pb::PushEvaluationEventsResponse {
+                message_id: uuid::Uuid::new_v4().to_string(),
+                processed_count: input_count as i32,
+            }));
+        }
+
         // Convert proto events to database format
-        let mut evaluations = Vec::new();
+        let mut evaluations = Vec::with_capacity(input_count);
         for event in req.events {
             if event.feature_key.is_empty() {
                 return Err(Status::invalid_argument("feature_key cannot be empty"));
@@ -1217,16 +1624,8 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
             };
 
             // Convert context to JSON
-            let evaluation_context = if event.evaluation_context.is_empty() {
-                None
-            } else {
-                let context_map: std::collections::HashMap<String, String> = event
-                    .evaluation_context
-                    .iter()
-                    .map(|c| (c.key.clone(), c.value.clone()))
-                    .collect();
-                Some(serde_json::to_value(context_map).unwrap_or(serde_json::Value::Null))
-            };
+            let evaluation_context =
+                PushEvaluationRequestContext::from_proto(&event.evaluation_context).to_json_value();
 
             let user_context = if event.user_context.is_empty() {
                 None
@@ -1280,19 +1679,36 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
             );
         }
 
-        // Send evaluations to async writer (non-blocking)
-        let count = evaluations.len();
-        match self.evaluation_writer_tx.send(evaluations) {
-            Ok(_) => {
-                log::debug!("Queued {} evaluation events for async storage", count);
+        // Send evaluations to async writer (bounded queue with timeout-backed backpressure).
+        let send_result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            self.evaluation_writer_tx.send(evaluations),
+        )
+        .await;
+
+        match send_result {
+            Ok(Ok(())) => {
+                self.push_evaluation_deduper
+                    .remember(request_fingerprint)
+                    .await;
+                log::debug!("Queued {} evaluation events for async storage", input_count);
                 Ok(Response::new(pb::PushEvaluationEventsResponse {
                     message_id: uuid::Uuid::new_v4().to_string(),
-                    processed_count: count as i32,
+                    processed_count: input_count as i32,
                 }))
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 log::error!("Failed to queue evaluation events: {}", e);
                 Err(Status::internal("failed to queue evaluation events"))
+            }
+            Err(_) => {
+                log::warn!(
+                    "Timed out queueing {} evaluation events (writer queue backpressure)",
+                    input_count
+                );
+                Err(Status::resource_exhausted(
+                    "evaluation ingest queue is saturated; retry later",
+                ))
             }
         }
     }
@@ -1379,4 +1795,80 @@ pub async fn serve(
         .serve(addr)
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn push_evaluation_request_fingerprint_ignores_context_order() {
+        let request_a = pb::PushEvaluationEventsRequest {
+            events: vec![pb::FeatureEvaluationEvent {
+                feature_key: "feature-a".to_string(),
+                environment_id: "env-a".to_string(),
+                client_id: Uuid::new_v4().to_string(),
+                client_secret: "secret".to_string(),
+                evaluation_result: true,
+                evaluation_context: vec![
+                    pb::Context {
+                        key: "region".to_string(),
+                        value: "us".to_string(),
+                    },
+                    pb::Context {
+                        key: "tier".to_string(),
+                        value: "beta".to_string(),
+                    },
+                ],
+                user_context: "user-1".to_string(),
+                evaluated_at_unix_ms: 42,
+                prior_assignment: false,
+                variant: "control".to_string(),
+                variant_value: "{\"enabled\":true}".to_string(),
+            }],
+        };
+        let request_b = pb::PushEvaluationEventsRequest {
+            events: vec![pb::FeatureEvaluationEvent {
+                evaluation_context: vec![
+                    pb::Context {
+                        key: "tier".to_string(),
+                        value: "beta".to_string(),
+                    },
+                    pb::Context {
+                        key: "region".to_string(),
+                        value: "us".to_string(),
+                    },
+                ],
+                ..request_a.events[0].clone()
+            }],
+        };
+
+        let fingerprint_a = push_evaluation_request_fingerprint(&request_a).unwrap();
+        let fingerprint_b = push_evaluation_request_fingerprint(&request_b).unwrap();
+
+        assert_eq!(fingerprint_a, fingerprint_b);
+    }
+
+    #[tokio::test]
+    async fn push_evaluation_request_deduper_expires_entries() {
+        let deduper = PushEvaluationRequestDeduper::new(std::time::Duration::from_millis(5), 8);
+
+        deduper.remember("fingerprint-a".to_string()).await;
+        assert!(deduper.contains_recent("fingerprint-a").await);
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        assert!(!deduper.contains_recent("fingerprint-a").await);
+    }
+
+    #[tokio::test]
+    async fn push_evaluation_request_deduper_stays_bounded() {
+        let deduper = PushEvaluationRequestDeduper::new(std::time::Duration::from_secs(60), 1);
+
+        deduper.remember("fingerprint-a".to_string()).await;
+        deduper.remember("fingerprint-b".to_string()).await;
+
+        assert!(!deduper.contains_recent("fingerprint-a").await);
+        assert!(deduper.contains_recent("fingerprint-b").await);
+    }
 }

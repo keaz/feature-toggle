@@ -377,6 +377,7 @@ pub(crate) async fn create_user(
         (status = 400, description = "Invalid input", body = crate::rest::error::ErrorResponse),
         (status = 409, description = "Conflict", body = crate::rest::error::ErrorResponse)
     ),
+    security(()),
     tag = "Users"
 )]
 #[post("/admins")]

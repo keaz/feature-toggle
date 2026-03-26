@@ -244,10 +244,118 @@ pub fn map_proto_to_engine(f: &pb::FeatureFull) -> engine::Feature {
         feature_type: f.feature_type.clone(),
         active: f.active,
         enabled: f.active,
-        dependencies: vec![], // For minimal implementation, ignore dependency recursion
+        // Dependencies are hydrated from cache at evaluation time using dependency IDs.
+        dependencies: vec![],
         stages,
         variants,
     }
+}
+
+fn missing_dependency_placeholder(dependency_id: &str) -> engine::Feature {
+    engine::Feature {
+        id: dependency_id.to_string(),
+        key: dependency_id.to_string(),
+        feature_type: "Simple".to_string(),
+        active: false,
+        enabled: false,
+        dependencies: vec![],
+        stages: vec![],
+        variants: vec![],
+    }
+}
+
+fn build_hydrated_feature(
+    feature_id: &str,
+    feature_map: &std::collections::HashMap<String, std::sync::Arc<engine::Feature>>,
+    dependency_edges: &std::collections::HashMap<String, Vec<String>>,
+    memo: &mut std::collections::HashMap<String, engine::Feature>,
+    visiting: &mut std::collections::HashSet<String>,
+) -> engine::Feature {
+    if let Some(cached) = memo.get(feature_id) {
+        return cached.clone();
+    }
+
+    let Some(base_feature) = feature_map.get(feature_id) else {
+        return missing_dependency_placeholder(feature_id);
+    };
+
+    if !visiting.insert(feature_id.to_string()) {
+        let mut cycle_blocked = (**base_feature).clone();
+        cycle_blocked.enabled = false;
+        cycle_blocked.dependencies = vec![];
+        return cycle_blocked;
+    }
+
+    let dependencies = dependency_edges
+        .get(feature_id)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|dependency_id| {
+            if feature_map.contains_key(&dependency_id) {
+                build_hydrated_feature(
+                    dependency_id.as_str(),
+                    feature_map,
+                    dependency_edges,
+                    memo,
+                    visiting,
+                )
+            } else {
+                missing_dependency_placeholder(dependency_id.as_str())
+            }
+        })
+        .collect::<Vec<_>>();
+
+    visiting.remove(feature_id);
+
+    let mut hydrated = (**base_feature).clone();
+    hydrated.dependencies = dependencies;
+
+    memo.insert(feature_id.to_string(), hydrated.clone());
+    hydrated
+}
+
+async fn hydrate_feature_with_dependencies(
+    app: &AppState,
+    root_feature: &std::sync::Arc<engine::Feature>,
+) -> engine::Feature {
+    let mut feature_map: std::collections::HashMap<String, std::sync::Arc<engine::Feature>> =
+        std::collections::HashMap::new();
+    let mut dependency_edges: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    let mut queue: std::collections::VecDeque<String> =
+        std::collections::VecDeque::from([root_feature.id.clone()]);
+
+    feature_map.insert(root_feature.id.clone(), root_feature.clone());
+
+    while let Some(feature_id) = queue.pop_front() {
+        let dependency_ids = app
+            .mapped_cache
+            .get_dependency_ids(feature_id.as_str())
+            .await;
+        dependency_edges.insert(feature_id.clone(), dependency_ids.clone());
+
+        for dependency_id in dependency_ids {
+            if feature_map.contains_key(&dependency_id) {
+                continue;
+            }
+
+            if let Some(dependency_feature) = app.mapped_cache.get_by_id(&dependency_id).await {
+                feature_map.insert(dependency_id.clone(), dependency_feature);
+                queue.push_back(dependency_id);
+            }
+        }
+    }
+
+    let mut memo = std::collections::HashMap::new();
+    let mut visiting = std::collections::HashSet::new();
+    build_hydrated_feature(
+        root_feature.id.as_str(),
+        &feature_map,
+        &dependency_edges,
+        &mut memo,
+        &mut visiting,
+    )
 }
 
 /// Map HTTP context to evaluation engine format
@@ -303,75 +411,61 @@ fn validate_web_origin(
 }
 
 /// Get feature from cache or fetch from backend (returns mapped engine::Feature)
-/// Uses request coalescing to prevent concurrent fetches for the same key
 async fn get_or_fetch_feature(
     app: &AppState,
     feature_key: &str,
     client_id: &str,
     client_secret: &str,
-) -> Option<std::sync::Arc<engine::Feature>> {
+) -> Result<Option<std::sync::Arc<engine::Feature>>, tonic::Status> {
     // Check negative cache first - avoid repeated gRPC calls for non-existent features
     if app.mapped_cache.is_negative_cached(feature_key).await {
-        return None;
+        return Ok(None);
     }
 
-    // Use optionally_get_with for automatic request coalescing
-    // If multiple concurrent requests ask for the same uncached key,
-    // only one will execute the fetch function while others wait
-    let client_id_owned = client_id.to_string();
-    let client_secret_owned = client_secret.to_string();
-    let app_clone = app.clone();
-    let feature_key_owned = feature_key.to_string();
+    if let Some(cached) = app.mapped_cache.get(feature_key).await {
+        return Ok(Some(cached));
+    }
 
-    app.mapped_cache
-        .optionally_get_with(feature_key.to_string(), || async move {
+    info_log!(
+        "Feature '{}' NOT in cache, fetching from backend via gRPC",
+        feature_key
+    );
+
+    let pb_feature = fetch_feature_via_grpc(app, feature_key, client_id, client_secret).await?;
+
+    match pb_feature {
+        Some(pf) => {
+            let dependency_ids = pf
+                .dependencies
+                .iter()
+                .map(|dependency| dependency.depends_on_id.clone())
+                .collect::<Vec<_>>();
+
+            // Map to engine format
+            let engine_feature = std::sync::Arc::new(map_proto_to_engine(&pf));
+
+            // Also update the by_id index
+            app.mapped_cache
+                .update_id_index(&engine_feature.id, &engine_feature.key)
+                .await;
+            app.mapped_cache
+                .set_dependency_ids(&engine_feature.id, dependency_ids)
+                .await;
+
+            info_log!("Feature '{}' successfully fetched and cached", feature_key);
+
+            Ok(Some(engine_feature))
+        }
+        None => {
+            // Only negative-cache definitive misses. Transport/auth failures are returned as Err.
             info_log!(
-                "Feature '{}' NOT in cache, fetching from backend via gRPC",
-                feature_key_owned
+                "Feature '{}' not found in backend, adding to negative cache",
+                feature_key
             );
-
-            // Fetch protobuf from backend
-            let pb_feature = fetch_feature_via_grpc(
-                &app_clone,
-                &feature_key_owned,
-                &client_id_owned,
-                &client_secret_owned,
-            )
-            .await;
-
-            match pb_feature {
-                Some(pf) => {
-                    // Map to engine format
-                    let engine_feature = std::sync::Arc::new(map_proto_to_engine(&pf));
-
-                    // Also update the by_id index
-                    app_clone
-                        .mapped_cache
-                        .update_id_index(&engine_feature.id, &engine_feature.key)
-                        .await;
-
-                    info_log!(
-                        "Feature '{}' successfully fetched and cached",
-                        feature_key_owned
-                    );
-
-                    Some(engine_feature)
-                }
-                None => {
-                    // Feature not found - add to negative cache
-                    info_log!(
-                        "Feature '{}' not found in backend, adding to negative cache",
-                        feature_key_owned
-                    );
-                    app_clone
-                        .mapped_cache
-                        .add_negative(&feature_key_owned)
-                        .await;
-                    None
-                }
-            }
-        })
-        .await
+            app.mapped_cache.add_negative(feature_key).await;
+            Ok(None)
+        }
+    }
 }
 
 /// HTTP handler for feature evaluation
@@ -417,8 +511,8 @@ pub async fn evaluate_handler(
 
     // Get feature from cache or backend
     let feature = match get_or_fetch_feature(&app, &feature_key, &client_id, &client_secret).await {
-        Some(f) => f,
-        None => {
+        Ok(Some(f)) => f,
+        Ok(None) => {
             // Feature doesn't exist, return default
             return Ok(web::Json(EvaluateHttpResponse {
                 flag_key: feature_key.clone(),
@@ -429,7 +523,19 @@ pub async fn evaluate_handler(
                 metadata: None,
             }));
         }
+        Err(status) => {
+            error!(
+                "Failed to fetch feature '{}' from backend: code={:?} msg={}",
+                feature_key,
+                status.code(),
+                status.message()
+            );
+            return Err(actix_web::error::ErrorBadGateway(
+                "Failed to fetch feature from backend",
+            ));
+        }
     };
+    let feature = std::sync::Arc::new(hydrate_feature_with_dependencies(&app, &feature).await);
 
     // This is kill switch enabled we should disable the feature.
     if !feature.active {
@@ -630,11 +736,9 @@ pub async fn health_handler(app: web::Data<AppState>) -> impl Responder {
 
 // ===== OFREP (OpenFeature Remote Evaluation Protocol) Handlers =====
 
-/// Extract credentials from Authorization header or X-API-Key header
-fn extract_auth_from_headers(
-    http_req: &actix_web::HttpRequest,
-    app: &AppState,
-) -> (String, String) {
+/// Extract explicit credentials from Authorization header or X-API-Key header.
+/// Returns `None` when no explicit credentials were provided.
+fn extract_auth_from_headers(http_req: &actix_web::HttpRequest) -> Option<(String, String)> {
     // Try Bearer token first
     if let Some(auth_header) = http_req.headers().get("authorization")
         && let Ok(auth_str) = auth_header.to_str()
@@ -642,18 +746,17 @@ fn extract_auth_from_headers(
     {
         // For now, we don't parse JWT - just use the token as client_id
         // In production, you'd validate the JWT and extract client_id
-        return (token.to_string(), String::new());
+        return Some((token.to_string(), String::new()));
     }
 
     // Try X-API-Key
     if let Some(api_key) = http_req.headers().get("x-api-key")
         && let Ok(key_str) = api_key.to_str()
     {
-        return (key_str.to_string(), String::new());
+        return Some((key_str.to_string(), String::new()));
     }
 
-    // Fallback to app defaults
-    (app.client_id.clone(), app.client_secret.clone())
+    None
 }
 
 /// Map OFREP context to engine context
@@ -700,7 +803,11 @@ pub async fn ofrep_evaluate_flag(
     let req = req.into_inner();
 
     // Extract credentials from headers (OFREP standard)
-    let (client_id, client_secret) = extract_auth_from_headers(&http_req, &app);
+    let Some((client_id, client_secret)) = extract_auth_from_headers(&http_req) else {
+        return Err(actix_web::error::ErrorUnauthorized(
+            "Missing explicit client credentials",
+        ));
+    };
 
     // Validate targetingKey is not empty
     if req.context.targeting_key.is_empty() {
@@ -730,8 +837,8 @@ pub async fn ofrep_evaluate_flag(
 
     // Get feature from cache or backend
     let feature = match get_or_fetch_feature(&app, &feature_key, &client_id, &client_secret).await {
-        Some(f) => f,
-        None => {
+        Ok(Some(f)) => f,
+        Ok(None) => {
             // OFREP: Return 404 for missing flags
             return Ok(HttpResponse::NotFound().json(OFREPErrorResponse {
                 key: feature_key,
@@ -739,7 +846,19 @@ pub async fn ofrep_evaluate_flag(
                 error_details: Some("The requested feature flag does not exist".to_string()),
             }));
         }
+        Err(status) => {
+            error!(
+                "OFREP fetch failed for '{}': code={:?} msg={}",
+                feature_key,
+                status.code(),
+                status.message()
+            );
+            return Err(actix_web::error::ErrorBadGateway(
+                "Failed to fetch feature from backend",
+            ));
+        }
     };
+    let feature = std::sync::Arc::new(hydrate_feature_with_dependencies(&app, &feature).await);
 
     // Kill switch: disable feature if not active
     if !feature.active {
@@ -899,4 +1018,34 @@ pub async fn ofrep_evaluate_flag(
         variant: result.variant,
         metadata: None,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_auth_from_headers;
+    use actix_web::test::TestRequest;
+
+    #[test]
+    fn extract_auth_requires_explicit_headers() {
+        let req = TestRequest::default().to_http_request();
+        assert!(extract_auth_from_headers(&req).is_none());
+    }
+
+    #[test]
+    fn extract_auth_uses_bearer_token_when_present() {
+        let req = TestRequest::default()
+            .insert_header(("authorization", "Bearer token-123"))
+            .to_http_request();
+        let auth = extract_auth_from_headers(&req);
+        assert_eq!(auth, Some(("token-123".to_string(), String::new())));
+    }
+
+    #[test]
+    fn extract_auth_uses_api_key_when_present() {
+        let req = TestRequest::default()
+            .insert_header(("x-api-key", "api-key-123"))
+            .to_http_request();
+        let auth = extract_auth_from_headers(&req);
+        assert_eq!(auth, Some(("api-key-123".to_string(), String::new())));
+    }
 }

@@ -589,7 +589,7 @@ impl FeatureCrudLogic for FeatureLogicImpl {
         name: Option<String>,
         feature_type: Option<ModelFeatureType>,
     ) -> Result<Vec<Feature>, Error> {
-        let team_id = Uuid::try_from(team_id).unwrap();
+        let team_id = Uuid::try_from(team_id).map_err(|e| Error::InvalidInput(e.to_string()))?;
         let entity_feature_type = feature_type.map(Self::map_api_to_entity_feature_type);
         let features = self
             .repository
@@ -1258,9 +1258,10 @@ impl DeploymentLogic for FeatureLogicImpl {
                     .ok_or(Error::NotFound(stage_uuid))?,
             );
 
+            let feature_id_for_stage = feature_id_for_stage.ok_or(Error::NotFound(stage_uuid))?;
             let db_feature = self
                 .repository
-                .get_feature_by_id(feature_id_for_stage.unwrap())
+                .get_feature_by_id(feature_id_for_stage)
                 .await?;
 
             if let Some(request) = approval_logic

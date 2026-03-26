@@ -235,3 +235,19 @@ impl From<crate::logic::feature_evaluation::FeatureEvaluationLogicError> for Res
         }
     }
 }
+
+impl From<crate::logic::canary::CanaryLogicError> for RestError {
+    fn from(err: crate::logic::canary::CanaryLogicError) -> Self {
+        match err {
+            crate::logic::canary::CanaryLogicError::InvalidInput(msg) => {
+                RestError::invalid_input(msg)
+            }
+            crate::logic::canary::CanaryLogicError::NotFound(msg) => RestError::not_found(msg),
+            crate::logic::canary::CanaryLogicError::Feature(inner) => RestError::from(inner),
+            crate::logic::canary::CanaryLogicError::Metrics(inner) => RestError::from(inner),
+            crate::logic::canary::CanaryLogicError::Database(_) => {
+                RestError::internal("Internal server error")
+            }
+        }
+    }
+}

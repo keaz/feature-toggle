@@ -463,3 +463,141 @@ fn evaluate_variant_not_found_returns_default() {
     assert_eq!(result.value, json!(true));
     assert_eq!(result.variant, Some("non-existent-variant".to_string()));
 }
+
+#[test]
+fn evaluate_dependency_block_includes_reason_details() {
+    let ctx = mk_ctx("feature-root", "env-a", "user123", &[]);
+
+    let blocked_dependency = Feature {
+        id: "dep-1".to_string(),
+        key: "feature-dependency".to_string(),
+        feature_type: "Simple".to_string(),
+        active: true,
+        enabled: false,
+        dependencies: vec![],
+        stages: vec![],
+        variants: vec![],
+    };
+
+    let root = Feature {
+        id: "root-1".to_string(),
+        key: "feature-root".to_string(),
+        feature_type: "Simple".to_string(),
+        active: true,
+        enabled: true,
+        dependencies: vec![blocked_dependency],
+        stages: vec![stage("env-a", true, None, vec![])],
+        variants: vec![],
+    };
+
+    let result = evaluation_engine::evaluate(&ctx, &root);
+    assert_eq!(result.value, json!(false));
+    assert_eq!(result.reason, EvaluationReason::Disabled);
+
+    let metadata = result.metadata.expect("expected dependency block metadata");
+    let dependency_block = metadata
+        .get("dependencyBlock")
+        .expect("missing dependencyBlock metadata");
+
+    assert_eq!(
+        dependency_block
+            .get("dependencyKey")
+            .and_then(|value| value.as_str()),
+        Some("feature-dependency")
+    );
+    assert_eq!(
+        dependency_block
+            .get("code")
+            .and_then(|value| value.as_str()),
+        Some("DEPENDENCY_DISABLED")
+    );
+}
+
+#[test]
+fn evaluate_allowed_dependency_chain_returns_true() {
+    let ctx = mk_ctx("feature-root", "env-a", "user123", &[]);
+
+    let feature_c = Feature {
+        id: "feature-c".to_string(),
+        key: "feature-c".to_string(),
+        feature_type: "Simple".to_string(),
+        active: true,
+        enabled: true,
+        dependencies: vec![],
+        stages: vec![stage("env-a", true, None, vec![])],
+        variants: vec![],
+    };
+
+    let feature_b = Feature {
+        id: "feature-b".to_string(),
+        key: "feature-b".to_string(),
+        feature_type: "Simple".to_string(),
+        active: true,
+        enabled: true,
+        dependencies: vec![feature_c],
+        stages: vec![stage("env-a", true, None, vec![])],
+        variants: vec![],
+    };
+
+    let feature_a = Feature {
+        id: "feature-a".to_string(),
+        key: "feature-root".to_string(),
+        feature_type: "Simple".to_string(),
+        active: true,
+        enabled: true,
+        dependencies: vec![feature_b],
+        stages: vec![stage("env-a", true, None, vec![])],
+        variants: vec![],
+    };
+
+    let result = evaluation_engine::evaluate(&ctx, &feature_a);
+    assert_eq!(result.value, json!(true));
+    assert_eq!(result.reason, EvaluationReason::Static);
+    assert!(result.metadata.is_none());
+}
+
+#[test]
+fn evaluate_dependency_cycle_is_detected_and_blocked() {
+    let ctx = mk_ctx("feature-a", "env-a", "user123", &[]);
+
+    let self_dependency = Feature {
+        id: "feature-a".to_string(),
+        key: "feature-a".to_string(),
+        feature_type: "Simple".to_string(),
+        active: true,
+        enabled: true,
+        dependencies: vec![],
+        stages: vec![stage("env-a", true, None, vec![])],
+        variants: vec![],
+    };
+
+    let feature_a = Feature {
+        id: "feature-a".to_string(),
+        key: "feature-a".to_string(),
+        feature_type: "Simple".to_string(),
+        active: true,
+        enabled: true,
+        dependencies: vec![self_dependency],
+        stages: vec![stage("env-a", true, None, vec![])],
+        variants: vec![],
+    };
+
+    let result = evaluation_engine::evaluate(&ctx, &feature_a);
+    assert_eq!(result.value, json!(false));
+    assert_eq!(result.reason, EvaluationReason::Disabled);
+
+    let metadata = result.metadata.expect("expected cycle metadata");
+    let dependency_block = metadata
+        .get("dependencyBlock")
+        .expect("missing dependencyBlock metadata");
+    assert_eq!(
+        dependency_block
+            .get("code")
+            .and_then(|value| value.as_str()),
+        Some("DEPENDENCY_CYCLE_DETECTED")
+    );
+    assert!(
+        dependency_block.get("cyclePath").is_some(),
+        "cyclePath should be included for cycle errors"
+    );
+}

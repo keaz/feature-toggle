@@ -48,9 +48,9 @@ pub async fn run() -> std::io::Result<()> {
     let cfg = crate::config::Config::load();
 
     let db_pool = init_pg_pool().await;
-    database::run_migrations(&db_pool).await.map_err(|e| {
-        std::io::Error::other(format!("Failed to run database migrations: {e}"))
-    })?;
+    database::run_migrations(&db_pool)
+        .await
+        .map_err(|e| std::io::Error::other(format!("Failed to run database migrations: {e}")))?;
 
     // Initialize activity log repository (shared across all logic layers)
     let activity_log_repository = database::activity_log::activity_log_repository(db_pool.clone());
@@ -117,6 +117,13 @@ pub async fn run() -> std::io::Result<()> {
         database::metrics::metric_repository(db_pool.clone()),
         database::client::client_repository(db_pool.clone()),
     );
+    let canary_logic = logic::canary::canary_logic(
+        database::canary::canary_repository(db_pool.clone()),
+        metric_logic.clone(),
+        feature_repository.clone_box(),
+        feature_logic.clone(),
+        activity_log_repository.clone_box(),
+    );
     let context_logic = logic::context::context_logic(
         database::context::context_repository(db_pool.clone()),
         database::feature::feature_repository(db_pool.clone()),
@@ -135,6 +142,11 @@ pub async fn run() -> std::io::Result<()> {
         database::jwt_token::jwt_token_repository(db_pool.clone()),
         user_logic.clone(),
         role_logic.clone(),
+        jwt_secret_logic.clone(),
+    );
+    let system_client_logic = logic::system_client::system_client_logic(
+        database::system_client::system_client_repository(db_pool.clone()),
+        database::system_client_token::system_client_token_repository(db_pool.clone()),
         jwt_secret_logic.clone(),
     );
     // Broadcast channel for feature evaluation events powering REST streams.
@@ -214,6 +226,12 @@ pub async fn run() -> std::io::Result<()> {
         auto_approval_scheduler.start().await;
     });
 
+    let canary_scheduler =
+        scheduler::CanaryGovernanceScheduler::new(canary_logic.clone(), Duration::from_secs(60));
+    tokio::spawn(async move {
+        canary_scheduler.start().await;
+    });
+
     // Clone values for use in the HttpServer closure
     let jwt_secret_logic_for_server = jwt_secret_logic.clone();
     let jwt_token_logic_for_server = jwt_token_logic.clone();
@@ -250,7 +268,9 @@ pub async fn run() -> std::io::Result<()> {
             .app_data(web::Data::new(team_logic.clone()))
             .app_data(web::Data::new(context_logic.clone()))
             .app_data(web::Data::new(client_logic.clone()))
+            .app_data(web::Data::new(system_client_logic.clone()))
             .app_data(web::Data::new(feature_logic.clone()))
+            .app_data(web::Data::new(canary_logic.clone()))
             .app_data(web::Data::new(approval_logic.clone()))
             .app_data(web::Data::new(approval_repository.clone_box()))
             .app_data(web::Data::new(activity_log_repository.clone_box()))

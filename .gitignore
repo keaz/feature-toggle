@@ -25,3 +25,4 @@ node_modules/
 .pnpm-store
 .jest-cache
 output*
+feature-toggle-backend/contracts/generated/

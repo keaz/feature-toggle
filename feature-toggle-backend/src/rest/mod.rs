@@ -14,12 +14,19 @@ pub mod pipeline;
 pub mod role;
 pub mod serde;
 pub mod stream;
+pub mod system_client;
 pub mod team;
 pub mod types;
 pub mod user;
 
 use actix_web::{HttpResponse, Responder, get, web};
-use utoipa::OpenApi;
+use utoipa::openapi::{
+    ObjectBuilder, Required, Schema,
+    path::{Operation, ParameterBuilder, ParameterIn},
+    schema::Type,
+    security::{HttpAuthScheme, HttpBuilder, SecurityRequirement, SecurityScheme},
+};
+use utoipa::{Modify, OpenApi};
 use utoipa_swagger_ui::SwaggerUi;
 
 use crate::rest::approval::{
@@ -61,12 +68,14 @@ use crate::rest::feature::{
 use crate::rest::jwt_secret::JwtSecretResponse;
 use crate::rest::metrics::{
     ActivityEntityDetailsResponse, ActivityLogPageResponse, ActivityLogResponse,
-    ActivityRecentQuery, CreateMetricRequest, EvaluationByFeatureResponse, EvaluationCountQuery,
-    EvaluationRateResponse, EvaluationRatesQuery, EvaluationSummaryQuery,
-    EvaluationSummaryResponse, EvaluationsByFeatureQuery, EvaluationsByFeatureResponse,
-    ExperimentAnalysisResponse, ExperimentResultsQuery, FeatureGrowthQuery, FeatureGrowthResponse,
-    MetricAnalysisResponse, MetricResponse, MetricResultResponse, MetricsByFeatureQuery,
-    MetricsResponse, SystemMetricsResponse, TrackMetricEventRequest, TrackMetricsRequest,
+    ActivityRecentQuery, AnalyzeCanaryGateRequest, CanaryAnalysisResponse, CanaryDirection,
+    CanaryGateConfigRequest, CanaryGateResponse, CanaryVariantSnapshotResponse,
+    CreateMetricRequest, EvaluationByFeatureResponse, EvaluationCountQuery, EvaluationRateResponse,
+    EvaluationRatesQuery, EvaluationSummaryQuery, EvaluationSummaryResponse,
+    EvaluationsByFeatureQuery, EvaluationsByFeatureResponse, ExperimentAnalysisResponse,
+    ExperimentResultsQuery, FeatureGrowthQuery, FeatureGrowthResponse, MetricAnalysisResponse,
+    MetricResponse, MetricResultResponse, MetricsByFeatureQuery, MetricsResponse,
+    SetCanaryGatesRequest, SystemMetricsResponse, TrackMetricEventRequest, TrackMetricsRequest,
     TrackMetricsResponse,
 };
 use crate::rest::notification::{
@@ -81,6 +90,10 @@ use crate::rest::pipeline::{
     UpdatePipelineRequest,
 };
 use crate::rest::role::{CreateRoleRequest, RoleResponse};
+use crate::rest::system_client::{
+    CreateSystemClientRequest, SystemClientListQuery, SystemClientResponse,
+    SystemClientWithTokenResponse, SystemClientsResponse, UpdateSystemClientRequest,
+};
 use crate::rest::team::{CreateTeamRequest, TeamResponse, UpdateTeamRequest};
 use crate::rest::types::HealthResponse;
 use crate::rest::user::{
@@ -95,6 +108,7 @@ use crate::rest::user::{
         (status = 200, description = "Service is healthy", body = HealthResponse),
         (status = 500, description = "Server error", body = ErrorResponse)
     ),
+    security(()),
     tag = "System"
 )]
 #[get("/health")]
@@ -120,6 +134,11 @@ async fn health() -> impl Responder {
         client::get_client,
         client::create_client,
         client::update_client,
+        system_client::list_system_clients,
+        system_client::get_system_client,
+        system_client::create_system_client,
+        system_client::update_system_client,
+        system_client::regenerate_system_client_token,
         pipeline::list_pipelines,
         pipeline::get_pipeline,
         pipeline::create_pipeline,
@@ -183,6 +202,9 @@ async fn health() -> impl Responder {
         metrics::recent_activity,
         metrics::system_metrics,
         metrics::track_metrics,
+        metrics::list_canary_gates,
+        metrics::replace_canary_gates,
+        metrics::analyze_canary_gate,
         notification::get_notification_settings,
         notification::update_notification_channel,
         notification::update_notification_preference
@@ -209,6 +231,12 @@ async fn health() -> impl Responder {
         CreateClientRequest,
         UpdateClientRequest,
         ClientType,
+        SystemClientListQuery,
+        SystemClientResponse,
+        SystemClientsResponse,
+        CreateSystemClientRequest,
+        UpdateSystemClientRequest,
+        SystemClientWithTokenResponse,
         PipelineListQuery,
         PipelineResponse,
         PipelinesResponse,
@@ -306,17 +334,29 @@ async fn health() -> impl Responder {
         TrackMetricsResponse,
         TrackMetricEventRequest,
         TrackMetricsRequest,
+        CanaryDirection,
+        CanaryGateConfigRequest,
+        SetCanaryGatesRequest,
+        AnalyzeCanaryGateRequest,
+        CanaryGateResponse,
+        CanaryVariantSnapshotResponse,
+        CanaryAnalysisResponse,
         NotificationChannelConfigResponse,
         NotificationPreferenceResponse,
         NotificationSettingsResponse,
         UpdateNotificationChannelConfigRequest,
         UpdateNotificationPreferenceRequest
     )),
+    modifiers(&SecurityAddon),
+    security(
+        ("bearer_auth" = [])
+    ),
     tags(
         (name = "System", description = "System health and metadata"),
         (name = "Environments", description = "Environment management"),
         (name = "Contexts", description = "Context management"),
         (name = "Clients", description = "Client management"),
+        (name = "System Clients", description = "System automation clients and JWT token management"),
         (name = "Pipelines", description = "Pipeline management"),
         (name = "Features", description = "Feature management and rollout"),
         (name = "Criteria", description = "Stage criteria and rule groups"),
@@ -332,6 +372,103 @@ async fn health() -> impl Responder {
 )]
 pub struct ApiDoc;
 
+struct SecurityAddon;
+
+fn is_public_operation(path: &str, method: &str) -> bool {
+    matches!(
+        (path, method),
+        ("/api/v1/health", "GET")
+            | ("/api/v1/metrics/track", "POST")
+            | ("/api/v1/auth/login", "POST")
+            | ("/api/v1/auth/status", "GET")
+            | ("/api/v1/admins", "POST")
+    )
+}
+
+fn set_operation_security(path: &str, method: &str, operation: &mut Option<Operation>) {
+    let Some(operation) = operation.as_mut() else {
+        return;
+    };
+
+    if is_public_operation(path, method) {
+        operation.security = Some(Vec::new());
+        remove_bearer_header_parameter(operation);
+    } else {
+        operation.security = Some(vec![SecurityRequirement::new(
+            "bearer_auth",
+            Vec::<String>::new(),
+        )]);
+        ensure_bearer_header_parameter(operation);
+    }
+}
+
+fn is_authorization_header(parameter: &utoipa::openapi::path::Parameter) -> bool {
+    matches!(parameter.parameter_in, ParameterIn::Header)
+        && parameter.name.eq_ignore_ascii_case("Authorization")
+}
+
+fn remove_bearer_header_parameter(operation: &mut Operation) {
+    if let Some(parameters) = operation.parameters.as_mut() {
+        parameters.retain(|parameter| !is_authorization_header(parameter));
+        if parameters.is_empty() {
+            operation.parameters = None;
+        }
+    }
+}
+
+fn ensure_bearer_header_parameter(operation: &mut Operation) {
+    if operation
+        .parameters
+        .as_ref()
+        .is_some_and(|parameters| parameters.iter().any(is_authorization_header))
+    {
+        return;
+    }
+
+    let authorization_header = ParameterBuilder::new()
+        .name("Authorization")
+        .parameter_in(ParameterIn::Header)
+        .required(Required::True)
+        .description(Some("Bearer access token. Format: Bearer <token>"))
+        .schema(Some(Schema::Object(
+            ObjectBuilder::new().schema_type(Type::String).build(),
+        )))
+        .build();
+
+    if let Some(parameters) = operation.parameters.as_mut() {
+        parameters.push(authorization_header);
+    } else {
+        operation.parameters = Some(vec![authorization_header]);
+    }
+}
+
+impl Modify for SecurityAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        if let Some(components) = openapi.components.as_mut() {
+            components.add_security_scheme(
+                "bearer_auth",
+                SecurityScheme::Http(
+                    HttpBuilder::new()
+                        .scheme(HttpAuthScheme::Bearer)
+                        .bearer_format("JWT")
+                        .build(),
+                ),
+            );
+        }
+
+        for (path, path_item) in openapi.paths.paths.iter_mut() {
+            set_operation_security(path, "GET", &mut path_item.get);
+            set_operation_security(path, "POST", &mut path_item.post);
+            set_operation_security(path, "PUT", &mut path_item.put);
+            set_operation_security(path, "PATCH", &mut path_item.patch);
+            set_operation_security(path, "DELETE", &mut path_item.delete);
+            set_operation_security(path, "OPTIONS", &mut path_item.options);
+            set_operation_security(path, "HEAD", &mut path_item.head);
+            set_operation_security(path, "TRACE", &mut path_item.trace);
+        }
+    }
+}
+
 async fn get_openapi() -> impl Responder {
     HttpResponse::Ok().json(ApiDoc::openapi())
 }
@@ -344,6 +481,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .configure(environment::configure)
             .configure(context::configure)
             .configure(client::configure)
+            .configure(system_client::configure)
             .configure(pipeline::configure)
             .configure(feature::configure)
             .configure(criteria::configure)

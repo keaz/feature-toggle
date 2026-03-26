@@ -446,6 +446,18 @@ impl FeatureRepositoryImpl {
         handle_error(Some(id), result)
     }
 
+    async fn is_feature_exists_id_conn(
+        &self,
+        conn: &mut PgConnection,
+        id: Uuid,
+    ) -> Result<Option<Uuid>, Error> {
+        let result = sqlx::query_scalar!(r#"SELECT id FROM features WHERE id = $1"#, id)
+            .fetch_optional(&mut *conn)
+            .await;
+
+        handle_error(Some(id), result)
+    }
+
     async fn get_feature_dependencies(
         &self,
         feature_id: &Uuid,
@@ -456,6 +468,31 @@ impl FeatureRepositoryImpl {
             feature_id
         )
         .fetch_all(&self.pool)
+        .await;
+
+        let rows = handle_error(Some(*feature_id), result)?;
+        let dependencies = rows
+            .into_iter()
+            .map(|row| FeatureDependency {
+                feature_id: row.feature_id,
+                depends_on_id: row.depends_on_id,
+            })
+            .collect();
+
+        Ok(dependencies)
+    }
+
+    async fn get_feature_dependencies_conn(
+        &self,
+        conn: &mut PgConnection,
+        feature_id: &Uuid,
+    ) -> Result<Vec<FeatureDependency>, Error> {
+        let result = sqlx::query_as!(
+            FeatureDependencyRow,
+            r#"SELECT feature_id, depends_on_id FROM feature_dependencies WHERE feature_id = $1"#,
+            feature_id
+        )
+        .fetch_all(&mut *conn)
         .await;
 
         let rows = handle_error(Some(*feature_id), result)?;
@@ -502,6 +539,60 @@ impl FeatureRepositoryImpl {
         }
 
         Ok(dependencies_by_feature)
+    }
+
+    async fn get_feature_by_id_conn(
+        &self,
+        conn: &mut PgConnection,
+        id: Uuid,
+    ) -> Result<Feature, Error> {
+        let result = sqlx::query_as::<_, FeatureWithStageRow>(
+            format!(r#"{} WHERE f.id = $1"#, FEATURE_SELECT).as_str(),
+        )
+        .bind(id)
+        .fetch_all(&mut *conn)
+        .await;
+
+        let feature = handle_error(Some(id), result)?;
+        if feature.is_empty() {
+            return Err(Error::NotFound(id));
+        }
+
+        let mut mapped_feature = Self::map_row_to_feature(feature);
+        mapped_feature.dependencies = self.get_feature_dependencies_conn(conn, &id).await?;
+
+        Ok(mapped_feature)
+    }
+
+    async fn get_feature_stages_conn(
+        &self,
+        conn: &mut PgConnection,
+        feature_id: Uuid,
+    ) -> Result<Vec<FeaturePipelineStage>, Error> {
+        let result = sqlx::query_as!(
+            FeaturePipelineStageRow,
+            r#"SELECT id, feature_id, environment_id, order_index, parent_stage_id, position, status, enabled
+            FROM features_pipeline_stages WHERE feature_id = $1"#,
+            feature_id
+        )
+        .fetch_all(&mut *conn)
+        .await;
+
+        let rows = handle_error(None, result)?;
+        let stages = rows
+            .into_iter()
+            .map(|r| FeaturePipelineStage {
+                id: r.id,
+                feature_id: r.feature_id,
+                environment_id: r.environment_id,
+                order_index: r.order_index,
+                parent_stage_id: r.parent_stage_id,
+                position: r.position,
+                enabled: r.enabled,
+                status: r.status,
+            })
+            .collect::<Vec<FeaturePipelineStage>>();
+        Ok(stages)
     }
 
     async fn create_feature_stage(
@@ -614,7 +705,7 @@ impl FeatureRepositoryImpl {
         input: Vec<CreateFeatureStage>,
         tx: &mut PgConnection,
     ) -> Result<PgQueryResult, Error> {
-        let existing_stages = self.get_feature_stages(*feature_id).await?;
+        let existing_stages = self.get_feature_stages_conn(tx, *feature_id).await?;
         if existing_stages.is_empty() {
             return self.create_feature_stage(feature_id, input, tx).await;
         }
@@ -626,7 +717,8 @@ impl FeatureRepositoryImpl {
 
         if updates.is_empty() {
             // That means all stages are new, so we can delete existing stages and create new ones
-            self.delete_feature_stage(feature_id.to_owned()).await?;
+            self.delete_feature_stage_conn(tx, feature_id.to_owned())
+                .await?;
             self.create_feature_stage(feature_id, input, tx).await?;
 
             return Ok(PgQueryResult::default());
@@ -727,7 +819,7 @@ impl FeatureRepositoryImpl {
         tx: &mut PgConnection,
     ) -> Result<PgQueryResult, Error> {
         // Delete existing dependencies
-        self.delete_feature_dependencies(feature_id.to_owned())
+        self.delete_feature_dependencies_conn(tx, feature_id.to_owned())
             .await?;
 
         // Create new dependencies
@@ -751,12 +843,48 @@ impl FeatureRepositoryImpl {
         }
     }
 
+    async fn delete_feature_stage_conn(
+        &self,
+        conn: &mut PgConnection,
+        id: Uuid,
+    ) -> Result<(), Error> {
+        let result = sqlx::query!(
+            r#"DELETE FROM features_pipeline_stages WHERE feature_id = $1"#,
+            id
+        )
+        .execute(&mut *conn)
+        .await;
+
+        match result {
+            Ok(_) => Ok(()),
+            Err(e) => Err(Error::DatabaseError(e)),
+        }
+    }
+
     async fn delete_feature_dependencies(&self, id: Uuid) -> Result<(), Error> {
         let result = sqlx::query!(
             r#"DELETE FROM feature_dependencies WHERE feature_id = $1"#,
             id
         )
         .execute(&self.pool)
+        .await;
+
+        match result {
+            Ok(_) => Ok(()),
+            Err(e) => Err(Error::DatabaseError(e)),
+        }
+    }
+
+    async fn delete_feature_dependencies_conn(
+        &self,
+        conn: &mut PgConnection,
+        id: Uuid,
+    ) -> Result<(), Error> {
+        let result = sqlx::query!(
+            r#"DELETE FROM feature_dependencies WHERE feature_id = $1"#,
+            id
+        )
+        .execute(&mut *conn)
         .await;
 
         match result {
@@ -975,7 +1103,7 @@ impl FeatureRepositoryImpl {
         input: &UpdateFeature,
         tx: &mut PgConnection,
     ) -> Result<PgQueryResult, Error> {
-        let existing_feature = self.get_feature_by_id(input.id).await?;
+        let existing_feature = self.get_feature_by_id_conn(tx, input.id).await?;
 
         let feature_type_str = match input
             .feature_type
@@ -2497,12 +2625,14 @@ impl FeatureRepositoryTx for FeatureRepositoryImpl {
         }
 
         // Return updated feature
-        self.get_feature_by_id(feature_id).await
+        self.get_feature_by_id_conn(conn, feature_id).await
     }
 
     async fn delete_feature_tx(&self, conn: &mut PgConnection, id: Uuid) -> Result<(), Error> {
         // Ensure feature exists
-        self.get_feature_by_id(id).await?;
+        if self.is_feature_exists_id_conn(conn, id).await?.is_none() {
+            return Err(Error::NotFound(id));
+        }
 
         let result = sqlx::query!("DELETE FROM features WHERE id = $1", id)
             .execute(&mut *conn)
@@ -3021,7 +3151,7 @@ impl FeatureRepositoryTx for FeatureRepositoryImpl {
         .await;
 
         handle_error(Some(feature_id), result)?;
-        self.get_feature_by_id(feature_id).await
+        self.get_feature_by_id_conn(conn, feature_id).await
     }
 
     async fn emergency_enable_feature_tx(
@@ -3042,7 +3172,7 @@ impl FeatureRepositoryTx for FeatureRepositoryImpl {
         .await;
 
         handle_error(Some(feature_id), result)?;
-        self.get_feature_by_id(feature_id).await
+        self.get_feature_by_id_conn(conn, feature_id).await
     }
 }
 

@@ -74,6 +74,7 @@ fn jwt_user(req: &HttpRequest) -> Result<JwtUser, RestError> {
         (status = 400, description = "Invalid input", body = crate::rest::error::ErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::rest::error::ErrorResponse)
     ),
+    security(()),
     tag = "Auth"
 )]
 #[post("/auth/login")]
@@ -104,14 +105,27 @@ pub(crate) async fn login(
 )]
 #[post("/auth/logout")]
 pub(crate) async fn logout(
+    db_pool: web::Data<sqlx::PgPool>,
     logic: web::Data<Box<dyn JwtTokenLogic>>,
     req: HttpRequest,
 ) -> Result<impl Responder, RestError> {
     let user = jwt_user(&req)?;
-    let _ = logic
+    let revoked_user_token = logic
         .revoke_token(&user.token_hash)
         .await
         .map_err(RestError::from)?;
+
+    if !revoked_user_token {
+        let system_token_repo =
+            crate::database::system_client_token::system_client_token_repository(
+                db_pool.get_ref().clone(),
+            );
+        let _ = system_token_repo
+            .revoke_token(&user.token_hash)
+            .await
+            .map_err(RestError::from)?;
+    }
+
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -228,6 +242,7 @@ pub(crate) async fn set_temporary_password(
     responses(
         (status = 200, description = "Application status", body = AuthStatusResponse)
     ),
+    security(()),
     tag = "Auth"
 )]
 #[get("/auth/status")]

@@ -175,8 +175,9 @@ impl TeamLogic for TeamLogicImpl {
         input: UpdateTeamInput,
         actor: Option<crate::logic::ActorContext>,
     ) -> Result<Team, Error> {
+        let id = Uuid::try_from(id).map_err(|e| Error::InvalidInput(e.to_string()))?;
         let input = crate::database::team::UpdateTeam {
-            id: Uuid::try_from(id).unwrap(),
+            id,
             name: input.name,
             description: input.description,
         };

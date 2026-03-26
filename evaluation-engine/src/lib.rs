@@ -3,7 +3,7 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{OnceLock, RwLock};
 
 // Evaluation request with dynamic context object
@@ -83,6 +83,37 @@ impl ErrorCode {
             Self::FlagNotFound => "FLAG_NOT_FOUND",
         }
     }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum DependencyBlockCode {
+    DependencyDisabled,
+    DependencyStageDisabled,
+    DependencyTargetingMismatch,
+    DependencyFlagNotFound,
+    DependencyChainBlocked,
+    DependencyCycleDetected,
+    DependencyEvaluationFailed,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct DependencyBlockDetails {
+    #[serde(rename = "dependencyId")]
+    pub dependency_id: String,
+    #[serde(rename = "dependencyKey")]
+    pub dependency_key: String,
+    pub code: DependencyBlockCode,
+    pub message: String,
+    #[serde(rename = "dependencyReason")]
+    pub dependency_reason: EvaluationReason,
+    #[serde(
+        rename = "dependencyErrorCode",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub dependency_error_code: Option<ErrorCode>,
+    #[serde(rename = "cyclePath", skip_serializing_if = "Option::is_none")]
+    pub cycle_path: Option<Vec<String>>,
 }
 
 // Feature data structures
@@ -552,14 +583,111 @@ fn get_variant_value(feature: &Feature, variant_control: Option<String>) -> Json
     JsonValue::Bool(true)
 }
 
+fn has_dependency_block_metadata(metadata: &Option<HashMap<String, JsonValue>>) -> bool {
+    metadata
+        .as_ref()
+        .is_some_and(|meta| meta.contains_key("dependencyBlock"))
+}
+
+fn dependency_block_code_from_result(dep_result: &EvaluationResult) -> DependencyBlockCode {
+    if has_dependency_block_metadata(&dep_result.metadata) {
+        return DependencyBlockCode::DependencyChainBlocked;
+    }
+
+    match dep_result.reason {
+        EvaluationReason::Static => DependencyBlockCode::DependencyDisabled,
+        EvaluationReason::Disabled => DependencyBlockCode::DependencyStageDisabled,
+        EvaluationReason::Unknown => match dep_result.error_code {
+            Some(ErrorCode::FlagNotFound) => DependencyBlockCode::DependencyFlagNotFound,
+            _ => DependencyBlockCode::DependencyTargetingMismatch,
+        },
+        _ => DependencyBlockCode::DependencyEvaluationFailed,
+    }
+}
+
+fn dependency_cycle_path(
+    visiting: &[(String, String)],
+    dependency: &Feature,
+) -> Option<Vec<String>> {
+    let start_index = visiting
+        .iter()
+        .position(|(feature_id, _)| feature_id == &dependency.id)?;
+    let mut cycle = visiting[start_index..]
+        .iter()
+        .map(|(_, feature_key)| feature_key.clone())
+        .collect::<Vec<_>>();
+    cycle.push(dependency.key.clone());
+    Some(cycle)
+}
+
+fn dependency_blocked_result(
+    flag_key: String,
+    dependency: &Feature,
+    dep_result: &EvaluationResult,
+    code: DependencyBlockCode,
+    message: String,
+    cycle_path: Option<Vec<String>>,
+) -> EvaluationResult {
+    let details = DependencyBlockDetails {
+        dependency_id: dependency.id.clone(),
+        dependency_key: dependency.key.clone(),
+        code,
+        message,
+        dependency_reason: dep_result.reason.clone(),
+        dependency_error_code: dep_result.error_code.clone(),
+        cycle_path,
+    };
+
+    let mut metadata = HashMap::new();
+    metadata.insert(
+        "dependencyBlock".to_string(),
+        serde_json::to_value(details).unwrap_or(JsonValue::Null),
+    );
+
+    EvaluationResult {
+        flag_key,
+        value: JsonValue::Bool(false),
+        variant: None,
+        reason: EvaluationReason::Disabled,
+        error_code: None,
+        metadata: Some(metadata),
+    }
+}
+
 fn evaluate_with_memo(
     evaluation_context: &FeatureEvaluationContext,
     feature: &Feature,
     memo: &mut HashMap<String, EvaluationResult>,
+    visiting: &mut Vec<(String, String)>,
+    visiting_set: &mut HashSet<String>,
 ) -> EvaluationResult {
     if let Some(cached) = memo.get(&feature.id) {
         return cached.clone();
     }
+
+    if visiting_set.contains(&feature.id) {
+        let cycle = dependency_cycle_path(visiting, feature)
+            .unwrap_or_else(|| vec![feature.key.clone(), feature.key.clone()]);
+        let dep_result = EvaluationResult {
+            flag_key: feature.key.clone(),
+            value: JsonValue::Bool(false),
+            variant: None,
+            reason: EvaluationReason::Disabled,
+            error_code: None,
+            metadata: None,
+        };
+        return dependency_blocked_result(
+            evaluation_context.flag_key.clone(),
+            feature,
+            &dep_result,
+            DependencyBlockCode::DependencyCycleDetected,
+            format!("Dependency cycle detected: {}", cycle.join(" -> ")),
+            Some(cycle),
+        );
+    }
+
+    visiting_set.insert(feature.id.clone());
+    visiting.push((feature.id.clone(), feature.key.clone()));
 
     // Evaluation walkthrough:
     // 1) Kill switch: if the feature is disabled, short-circuit to false.
@@ -570,100 +698,133 @@ fn evaluate_with_memo(
     // 5) When a variant is selected, return its value; otherwise default to true for contextual flags.
     let flag_key = evaluation_context.flag_key.clone();
 
-    // Kill switch check: if enabled is false, feature is disabled
-    if !feature.enabled {
-        let result = EvaluationResult {
-            flag_key,
-            value: JsonValue::Bool(false),
-            variant: None,
-            reason: EvaluationReason::Static,
-            error_code: None,
-            metadata: None,
-        };
-        memo.insert(feature.id.clone(), result.clone());
-        return result;
-    }
+    let result = (|| {
+        // Kill switch check: if enabled is false, feature is disabled
+        if !feature.enabled {
+            return EvaluationResult {
+                flag_key: flag_key.clone(),
+                value: JsonValue::Bool(false),
+                variant: None,
+                reason: EvaluationReason::Static,
+                error_code: None,
+                metadata: None,
+            };
+        }
 
-    // All dependencies must evaluate to true
-    for dependency in &feature.dependencies {
-        let dep_result = evaluate_with_memo(evaluation_context, dependency, memo);
-        if !dep_result.value.as_bool().unwrap_or(false) {
-            let result = EvaluationResult {
-                flag_key,
+        // All dependencies must evaluate to true
+        for dependency in &feature.dependencies {
+            if visiting_set.contains(&dependency.id) {
+                let cycle = dependency_cycle_path(visiting, dependency)
+                    .unwrap_or_else(|| vec![dependency.key.clone(), dependency.key.clone()]);
+                let dep_result = EvaluationResult {
+                    flag_key: dependency.key.clone(),
+                    value: JsonValue::Bool(false),
+                    variant: None,
+                    reason: EvaluationReason::Disabled,
+                    error_code: None,
+                    metadata: None,
+                };
+                return dependency_blocked_result(
+                    flag_key.clone(),
+                    dependency,
+                    &dep_result,
+                    DependencyBlockCode::DependencyCycleDetected,
+                    format!("Dependency cycle detected: {}", cycle.join(" -> ")),
+                    Some(cycle),
+                );
+            }
+
+            let dep_result =
+                evaluate_with_memo(evaluation_context, dependency, memo, visiting, visiting_set);
+            if !dep_result.value.as_bool().unwrap_or(false) {
+                let code = dependency_block_code_from_result(&dep_result);
+                let message = match dep_result.error_code {
+                    Some(ref error_code) => format!(
+                        "Dependency '{}' blocked evaluation: reason={}, error={}",
+                        dependency.key,
+                        dep_result.reason.as_str(),
+                        error_code.as_str()
+                    ),
+                    None => format!(
+                        "Dependency '{}' blocked evaluation: reason={}",
+                        dependency.key,
+                        dep_result.reason.as_str()
+                    ),
+                };
+
+                return dependency_blocked_result(
+                    flag_key.clone(),
+                    dependency,
+                    &dep_result,
+                    code,
+                    message,
+                    None,
+                );
+            }
+        }
+
+        // There must be a stage matching the environment_id and it must be enabled
+        let stage = match feature
+            .stages
+            .iter()
+            .find(|stage| stage.environment_id == evaluation_context.context.environment_id)
+        {
+            None => {
+                return EvaluationResult {
+                    flag_key: flag_key.clone(),
+                    value: JsonValue::Bool(false),
+                    variant: None,
+                    reason: EvaluationReason::Unknown,
+                    error_code: Some(ErrorCode::FlagNotFound),
+                    metadata: None,
+                };
+            }
+            Some(stage) => stage,
+        };
+
+        // Stage must be enabled
+        if !stage.enabled {
+            return EvaluationResult {
+                flag_key: flag_key.clone(),
                 value: JsonValue::Bool(false),
                 variant: None,
                 reason: EvaluationReason::Disabled,
                 error_code: None,
                 metadata: None,
             };
-            memo.insert(feature.id.clone(), result.clone());
-            return result;
         }
-    }
 
-    // There must be a stage matching the environment_id and it must be enabled
-    let stage = match feature
-        .stages
-        .iter()
-        .find(|stage| stage.environment_id == evaluation_context.context.environment_id)
-    {
-        None => {
-            let result = EvaluationResult {
-                flag_key,
+        // Evaluate stage criteria
+        let criteria_result = passes_stage_criteria(evaluation_context, stage);
+
+        if !criteria_result.matched {
+            return EvaluationResult {
+                flag_key: flag_key.clone(),
                 value: JsonValue::Bool(false),
                 variant: None,
-                reason: EvaluationReason::Unknown,
-                error_code: Some(ErrorCode::FlagNotFound),
+                reason: criteria_result.reason,
+                error_code: None,
                 metadata: None,
             };
-            memo.insert(feature.id.clone(), result.clone());
-            return result;
         }
-        Some(stage) => stage,
-    };
 
-    // Stage must be enabled
-    if !stage.enabled {
-        let result = EvaluationResult {
-            flag_key,
-            value: JsonValue::Bool(false),
-            variant: None,
-            reason: EvaluationReason::Disabled,
-            error_code: None,
-            metadata: None,
-        };
-        memo.insert(feature.id.clone(), result.clone());
-        return result;
-    }
+        // Feature is enabled, determine variant and value
+        let variant = criteria_result.variant;
+        let value = get_variant_value(feature, variant.clone());
 
-    // Evaluate stage criteria
-    let criteria_result = passes_stage_criteria(evaluation_context, stage);
-
-    if !criteria_result.matched {
-        let result = EvaluationResult {
-            flag_key,
-            value: JsonValue::Bool(false),
-            variant: None,
+        EvaluationResult {
+            flag_key: flag_key.clone(),
+            value,
+            variant,
             reason: criteria_result.reason,
             error_code: None,
             metadata: None,
-        };
-        memo.insert(feature.id.clone(), result.clone());
-        return result;
-    }
+        }
+    })();
 
-    // Feature is enabled, determine variant and value
-    let variant = criteria_result.variant;
-    let value = get_variant_value(feature, variant.clone());
+    visiting.pop();
+    visiting_set.remove(&feature.id);
 
-    let result = EvaluationResult {
-        flag_key,
-        value,
-        variant,
-        reason: criteria_result.reason,
-        error_code: None,
-        metadata: None,
-    };
     memo.insert(feature.id.clone(), result.clone());
     result
 }
@@ -673,7 +834,15 @@ pub fn evaluate(
     feature: &Feature,
 ) -> EvaluationResult {
     let mut memo = HashMap::new();
-    evaluate_with_memo(evaluation_context, feature, &mut memo)
+    let mut visiting = Vec::new();
+    let mut visiting_set = HashSet::new();
+    evaluate_with_memo(
+        evaluation_context,
+        feature,
+        &mut memo,
+        &mut visiting,
+        &mut visiting_set,
+    )
 }
 
 #[cfg(test)]

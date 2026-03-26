@@ -147,6 +147,21 @@ impl ClientRepositoryImpl {
         Ok(rows.into_iter().map(|r| r.origin).collect())
     }
 
+    async fn load_web_origins_conn(
+        &self,
+        conn: &mut PgConnection,
+        client_id: Uuid,
+    ) -> Result<Vec<String>, Error> {
+        let result = sqlx::query!(
+            r#"SELECT origin FROM client_web_origins WHERE client_id = $1 ORDER BY origin"#,
+            client_id
+        )
+        .fetch_all(&mut *conn)
+        .await;
+        let rows = handle_error(Some(client_id), result)?;
+        Ok(rows.into_iter().map(|r| r.origin).collect())
+    }
+
     async fn load_web_origins_batch(
         &self,
         client_ids: &[Uuid],
@@ -259,12 +274,61 @@ impl ClientRepositoryImpl {
         Ok(count)
     }
 
+    async fn get_client_by_id_conn(
+        &self,
+        conn: &mut PgConnection,
+        id: Uuid,
+    ) -> Result<Client, Error> {
+        let result = sqlx::query!(
+            r#"SELECT id, team_id, environment_id, name, description, enabled, client_type, api_key
+               FROM clients WHERE id = $1"#,
+            id
+        )
+        .fetch_one(&mut *conn)
+        .await;
+
+        let row = handle_error(Some(id), result)?;
+        let client_type = Self::from_type_str(&row.client_type);
+        let web_origins = if matches!(client_type, ClientType::Web) {
+            Some(self.load_web_origins_conn(conn, row.id).await?)
+        } else {
+            None
+        };
+
+        Ok(Client {
+            id: row.id,
+            team_id: row.team_id,
+            environment_id: row.environment_id,
+            name: row.name,
+            description: row.description,
+            enabled: row.enabled,
+            client_type,
+            api_key: row.api_key,
+            web_origins,
+        })
+    }
+
     async fn is_api_key_unique(&self, api_key: &str) -> Result<bool, Error> {
         let result = sqlx::query_scalar!(
             r#"SELECT EXISTS(SELECT 1 FROM clients WHERE api_key = $1) AS exists"#,
             api_key
         )
         .fetch_one(&self.pool)
+        .await;
+        let exists: Option<bool> = handle_error(None, result)?;
+        Ok(!exists.unwrap_or(false))
+    }
+
+    async fn is_api_key_unique_conn(
+        &self,
+        conn: &mut PgConnection,
+        api_key: &str,
+    ) -> Result<bool, Error> {
+        let result = sqlx::query_scalar!(
+            r#"SELECT EXISTS(SELECT 1 FROM clients WHERE api_key = $1) AS exists"#,
+            api_key
+        )
+        .fetch_one(&mut *conn)
         .await;
         let exists: Option<bool> = handle_error(None, result)?;
         Ok(!exists.unwrap_or(false))
@@ -279,6 +343,23 @@ impl ClientRepositoryImpl {
                 .map(char::from)
                 .collect();
             if self.is_api_key_unique(&api_key).await? {
+                return Ok(api_key);
+            }
+        }
+        Err(Error::InvalidInput(
+            "Failed to generate unique API key".into(),
+        ))
+    }
+
+    async fn generate_unique_api_key_conn(&self, conn: &mut PgConnection) -> Result<String, Error> {
+        // 48-length URL-safe key
+        for _ in 0..10 {
+            let api_key: String = rand::rng()
+                .sample_iter(&Alphanumeric)
+                .take(48)
+                .map(char::from)
+                .collect();
+            if self.is_api_key_unique_conn(conn, &api_key).await? {
                 return Ok(api_key);
             }
         }
@@ -673,13 +754,13 @@ impl ClientRepositoryTx for ClientRepositoryImpl {
         team_id: Uuid,
         input: CreateClient,
     ) -> Result<Client, Error> {
-        // Ensure unique name per team (read from pool)
+        // Ensure unique name per team.
         let existing = sqlx::query_scalar!(
             r#"SELECT EXISTS(SELECT 1 FROM clients WHERE team_id = $1 AND name = $2) AS exists"#,
             team_id,
             input.name
         )
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *conn)
         .await;
         let exists: Option<bool> = handle_error(None, existing)?;
         if exists.unwrap_or_default() {
@@ -688,8 +769,8 @@ impl ClientRepositoryTx for ClientRepositoryImpl {
             ));
         }
 
-        // Generate API key (uses pool for read)
-        let api_key = self.generate_unique_api_key().await?;
+        // Generate API key using the same transaction connection.
+        let api_key = self.generate_unique_api_key_conn(conn).await?;
         let id = Uuid::new_v4();
         let client_type_str = Self::to_type_str(&input.client_type);
 
@@ -728,7 +809,7 @@ impl ClientRepositoryTx for ClientRepositoryImpl {
         }
 
         let web_origins = if matches!(input.client_type, ClientType::Web) {
-            Some(self.load_web_origins(row.id).await?)
+            Some(self.load_web_origins_conn(conn, row.id).await?)
         } else {
             None
         };
@@ -752,7 +833,7 @@ impl ClientRepositoryTx for ClientRepositoryImpl {
         id: Uuid,
         input: UpdateClient,
     ) -> Result<Client, Error> {
-        let existing = self.get_client_by_id(id).await?;
+        let existing = self.get_client_by_id_conn(conn, id).await?;
         let updated_type = input
             .client_type
             .clone()
@@ -794,7 +875,7 @@ impl ClientRepositoryTx for ClientRepositoryImpl {
 
         let client_type = Self::from_type_str(&row.client_type);
         let web_origins = if matches!(client_type, ClientType::Web) {
-            Some(self.load_web_origins(row.id).await?)
+            Some(self.load_web_origins_conn(conn, row.id).await?)
         } else {
             None
         };
@@ -814,7 +895,7 @@ impl ClientRepositoryTx for ClientRepositoryImpl {
 
     async fn delete_client_tx(&self, conn: &mut PgConnection, id: Uuid) -> Result<(), Error> {
         // ensure exists
-        self.get_client_by_id(id).await?;
+        self.get_client_by_id_conn(conn, id).await?;
         let result = sqlx::query!("DELETE FROM clients WHERE id = $1", id)
             .execute(&mut *conn)
             .await;
