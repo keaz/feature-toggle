@@ -39,14 +39,14 @@ jobs:
       - name: Install sqlx-cli
         run: cargo install sqlx-cli --no-default-features --features postgres
 
-      - name: Run database migrations
+      - name: Apply schema migrations
         working-directory: ./feature-toggle-backend
         run: sqlx migrate run --database-url postgres://postgres:local123@localhost:5432/feature_toggle
 
-      - name: Copy SQL to the container
+      - name: Copy seed-only fixture script to the container
         run: docker cp ./init.sql ${{ env.POSTGRES_CONTAINER_ID }}:/init.sql
 
-      - name: Execute SQL script
+      - name: Seed fixture data from init.sql
         run: docker exec ${{ env.POSTGRES_CONTAINER_ID }} psql -U postgres -d feature_toggle -f /init.sql
 
       - name: Build

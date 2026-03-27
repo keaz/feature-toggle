@@ -57,11 +57,18 @@ base_delay_ms = 500
 # Maximum number of retry attempts
 max_attempts = 3
 
+# Retry only applies to transient gRPC failures; NotFound is treated as a
+# definitive miss and is not retried.
+
 # Initial delay for stream reconnection in seconds
 stream_initial_delay_secs = 1
 
 # Maximum delay for stream reconnection in seconds
 stream_max_delay_secs = 30
+
+# When the backend emits a `lagged` stream marker, the edge drops its local
+# feature/assignment caches and reconnects with an empty subscription key set
+# so the next stream starts with a full snapshot resync.
 
 [cache]
 # Maximum number of features to cache (LRU eviction when exceeded)
@@ -287,7 +294,7 @@ spec:
 | `base_delay_ms` | u64 | 500 | Base delay for retries in milliseconds |
 | `max_attempts` | usize | 3 | Maximum number of retry attempts |
 | `stream_initial_delay_secs` | u64 | 1 | Initial delay for stream reconnection in seconds |
-| `stream_max_delay_secs` | u64 | 30 | Maximum delay for stream reconnection in seconds |
+| `stream_max_delay_secs` | u64 | 30 | Maximum delay for stream reconnection in seconds; lagged streams trigger a full snapshot resync on reconnect |
 
 ### Cache Settings (`[cache]`)
 

@@ -8,11 +8,11 @@ use crate::Error;
 use crate::database::activity_log::{ActivityLogRepository, CreateActivityLog};
 use crate::database::team::{CreateTeam, TeamRepositoryTx, UpdateTeam};
 use crate::logic::ActorContext;
+use crate::logic::stage_builder::id_to_uuid;
 use crate::model::ID;
 use crate::model::{CreateTeamInput, Team, UpdateTeamInput};
 use crate::utils::activity_logger::activity_types;
 use sqlx::PgConnection;
-use uuid::Uuid;
 
 /// Create a team within a transaction.
 ///
@@ -90,7 +90,7 @@ where
     R: TeamRepositoryTx,
 {
     let db_input = UpdateTeam {
-        id: Uuid::try_from(id).unwrap(),
+        id: id_to_uuid(id)?,
         name: input.name.clone(),
         description: input.description.clone(),
     };
@@ -107,8 +107,8 @@ where
 
     // Build description
     let mut changes = Vec::new();
-    if input.name.is_some() {
-        changes.push(format!("name to '{}'", input.name.as_ref().unwrap()));
+    if let Some(name) = input.name.as_ref() {
+        changes.push(format!("name to '{}'", name));
     }
     if input.description.is_some() {
         changes.push("description".to_string());

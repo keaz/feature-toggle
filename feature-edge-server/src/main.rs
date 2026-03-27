@@ -200,6 +200,7 @@ impl MappedFeatureCache {
         let id = feature.id.clone();
 
         self.by_key.insert(key.clone(), feature).await;
+        self.negative_cache.invalidate(&key).await;
         self.by_id.insert(id.clone(), key).await;
         self.dependency_ids.insert(id, dependency_ids).await;
     }
@@ -250,16 +251,35 @@ impl MappedFeatureCache {
         self.by_key.entry_count()
     }
 
+    /// Clear all feature cache state so the next subscribe requests a fresh snapshot.
+    pub async fn clear_all(&self) {
+        self.by_key.invalidate_all();
+        self.by_id.invalidate_all();
+        self.dependency_ids.invalidate_all();
+        self.negative_cache.invalidate_all();
+
+        self.by_key.run_pending_tasks().await;
+        self.by_id.run_pending_tasks().await;
+        self.dependency_ids.run_pending_tasks().await;
+        self.negative_cache.run_pending_tasks().await;
+    }
+
     /// Run pending cache tasks (useful for testing)
     #[cfg(test)]
     pub async fn run_pending_tasks(&self) {
         self.by_key.run_pending_tasks().await;
         self.by_id.run_pending_tasks().await;
         self.dependency_ids.run_pending_tasks().await;
+        self.negative_cache.run_pending_tasks().await;
     }
 }
 
 impl AppState {
+    pub fn clear_assignment_caches(&self) {
+        self.assigned_cache.clear();
+        while self.pending_assignments.pop().is_some() {}
+    }
+
     pub async fn purge_assignments_for_feature(&self, feature_id: &str) {
         // DashMap allows concurrent iteration and removal
         self.assigned_cache
@@ -276,6 +296,11 @@ impl AppState {
         for assignment in to_keep {
             self.pending_assignments.push(assignment);
         }
+    }
+
+    pub fn purge_all_assignments(&self) {
+        self.assigned_cache.clear();
+        while self.pending_assignments.pop().is_some() {}
     }
 }
 
@@ -544,6 +569,32 @@ mod tests {
         mapped_cache.invalidate("test_key").await;
         mapped_cache.run_pending_tasks().await;
         assert!(mapped_cache.get("test_key").await.is_none());
+
+        // Successful inserts should clear stale negative-cache entries.
+        mapped_cache.add_negative("neg_key").await;
+        assert!(mapped_cache.is_negative_cached("neg_key").await);
+
+        let recovered_feature = Arc::new(evaluation_engine::Feature {
+            id: "neg_id".to_string(),
+            key: "neg_key".to_string(),
+            feature_type: "Simple".to_string(),
+            active: true,
+            enabled: true,
+            dependencies: vec![],
+            stages: vec![],
+            variants: vec![],
+        });
+        mapped_cache
+            .insert_with_dependencies(recovered_feature.clone(), vec!["dep-1".to_string()])
+            .await;
+        mapped_cache.run_pending_tasks().await;
+        assert!(mapped_cache.get("neg_key").await.is_some());
+        assert!(mapped_cache.get_by_id("neg_id").await.is_some());
+        assert!(!mapped_cache.is_negative_cached("neg_key").await);
+        assert_eq!(
+            mapped_cache.get_dependency_ids("neg_id").await,
+            vec!["dep-1".to_string()]
+        );
 
         // Test non-existent key
         assert!(mapped_cache.get("non_existent").await.is_none());

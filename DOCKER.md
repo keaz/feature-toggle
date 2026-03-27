@@ -39,7 +39,8 @@ docker build -f feature-edge-server/Dockerfile -t feature-edge-server .
 
 ### Prerequisites
 - PostgreSQL database running and accessible
-- Database migrations completed
+- Schema migrations applied before starting the backend
+- Optional: fixture data loaded from `init.sql` when you need the seeded local/test dataset
 
 ### Feature Toggle Backend
 ```bash
@@ -119,7 +120,8 @@ docker-compose logs -f feature_edge_server
 
 2. **Migration Failures**
    - Check database permissions
-   - Ensure init.sql is accessible
+   - Ensure SQLx migrations have been applied before seeding fixtures
+   - Ensure the `init.sql` seed file is accessible if you are loading test fixtures
    - Verify sqlx-cli installation
 
 3. **gRPC Connection Issues**

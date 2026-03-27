@@ -318,12 +318,31 @@ pub fn feature_logic_with_approval(
     user_repository: Box<dyn crate::database::user::UserRepository>,
     approval_logic: Option<Box<dyn ApprovalLogic>>,
 ) -> Box<dyn FeatureLogic> {
+    feature_logic_with_approval_and_notifications(
+        repository,
+        environment_logic,
+        activity_log_repository,
+        user_repository,
+        approval_logic,
+        None,
+    )
+}
+
+pub fn feature_logic_with_approval_and_notifications(
+    repository: Box<dyn FeatureRepository>,
+    environment_logic: Box<dyn EnvironmentLogic>,
+    activity_log_repository: Box<dyn crate::database::activity_log::ActivityLogRepository>,
+    user_repository: Box<dyn crate::database::user::UserRepository>,
+    approval_logic: Option<Box<dyn ApprovalLogic>>,
+    notification_logic: Option<Box<dyn crate::logic::notification::NotificationLogic>>,
+) -> Box<dyn FeatureLogic> {
     Box::new(FeatureLogicImpl {
         repository,
         environment_logic,
         activity_log_repository,
         user_repository,
         approval_logic,
+        notification_logic,
     })
 }
 
@@ -333,6 +352,7 @@ struct FeatureLogicImpl {
     activity_log_repository: Box<dyn crate::database::activity_log::ActivityLogRepository>,
     user_repository: Box<dyn crate::database::user::UserRepository>,
     approval_logic: Option<Box<dyn ApprovalLogic>>,
+    notification_logic: Option<Box<dyn crate::logic::notification::NotificationLogic>>,
 }
 
 impl Clone for FeatureLogicImpl {
@@ -343,11 +363,21 @@ impl Clone for FeatureLogicImpl {
             activity_log_repository: self.activity_log_repository.clone_box(),
             user_repository: self.user_repository.clone_box(),
             approval_logic: self.approval_logic.as_ref().map(|a| a.clone_box()),
+            notification_logic: self
+                .notification_logic
+                .as_ref()
+                .map(|logic| logic.clone_box()),
         }
     }
 }
 
 impl FeatureLogicImpl {
+    fn dispatch_notification(&self, event: crate::logic::notification::NotificationEvent) {
+        if let Some(logic) = &self.notification_logic {
+            crate::logic::notification::spawn_notification_dispatch(logic.clone_box(), event);
+        }
+    }
+
     fn map_api_to_entity_feature_type(feature_type: ModelFeatureType) -> EntityFeatureType {
         match feature_type {
             ModelFeatureType::Simple => EntityFeatureType::Simple,
@@ -691,23 +721,20 @@ impl FeatureCrudLogic for FeatureLogicImpl {
             format!("Feature '{feature_key}' was created for team '{team_id_str}'.")
         };
 
-        crate::logic::notification::dispatch_notification_event(
-            crate::logic::notification::NotificationEvent {
-                notification_type: crate::logic::notification::NOTIFICATION_TYPE_FEATURE_CREATED
-                    .to_string(),
-                team_id: Some(team_id),
-                actor_id,
-                subject: format!("Feature created: {feature_key}"),
-                message,
-                metadata: Some(serde_json::json!({
-                    "feature_id": feature_id.to_string(),
-                    "feature_key": feature_key,
-                    "team_id": team_id_str,
-                    "created_by": notification_actor_name,
-                })),
-            },
-        )
-        .await;
+        self.dispatch_notification(crate::logic::notification::NotificationEvent {
+            notification_type: crate::logic::notification::NOTIFICATION_TYPE_FEATURE_CREATED
+                .to_string(),
+            team_id: Some(team_id),
+            actor_id,
+            subject: format!("Feature created: {feature_key}"),
+            message,
+            metadata: Some(serde_json::json!({
+                "feature_id": feature_id.to_string(),
+                "feature_key": feature_key,
+                "team_id": team_id_str,
+                "created_by": notification_actor_name,
+            })),
+        });
 
         Ok(ID::from(feature_id.to_string()))
     }
@@ -991,25 +1018,22 @@ impl FeatureCrudLogic for FeatureLogicImpl {
             }
         };
 
-        crate::logic::notification::dispatch_notification_event(
-            crate::logic::notification::NotificationEvent {
-                notification_type:
-                    crate::logic::notification::NOTIFICATION_TYPE_KILL_SWITCH_ACTIVATED.to_string(),
-                team_id: Some(feature.team_id),
-                actor_id,
-                subject: format!("Kill switch activated: {}", feature.key),
-                message,
-                metadata: Some(serde_json::json!({
-                    "feature_id": feature.id.to_string(),
-                    "feature_key": feature.key.clone(),
-                    "team_id": feature.team_id.to_string(),
-                    "rollback_in_minutes": rollback_in_minutes,
-                    "rollback_scheduled_at": scheduled_at,
-                    "activated_by": actor_display_name,
-                })),
-            },
-        )
-        .await;
+        self.dispatch_notification(crate::logic::notification::NotificationEvent {
+            notification_type: crate::logic::notification::NOTIFICATION_TYPE_KILL_SWITCH_ACTIVATED
+                .to_string(),
+            team_id: Some(feature.team_id),
+            actor_id,
+            subject: format!("Kill switch activated: {}", feature.key),
+            message,
+            metadata: Some(serde_json::json!({
+                "feature_id": feature.id.to_string(),
+                "feature_key": feature.key.clone(),
+                "team_id": feature.team_id.to_string(),
+                "rollback_in_minutes": rollback_in_minutes,
+                "rollback_scheduled_at": scheduled_at,
+                "activated_by": actor_display_name,
+            })),
+        });
 
         Ok(Self::map_entity_to_api_feature(feature))
     }
@@ -1108,24 +1132,21 @@ impl FeatureCrudLogic for FeatureLogicImpl {
             )
         };
 
-        crate::logic::notification::dispatch_notification_event(
-            crate::logic::notification::NotificationEvent {
-                notification_type:
-                    crate::logic::notification::NOTIFICATION_TYPE_KILL_SWITCH_ACTIVATED.to_string(),
-                team_id: Some(feature.team_id),
-                actor_id,
-                subject: format!("Scheduled kill switch executed: {}", feature.key),
-                message,
-                metadata: Some(serde_json::json!({
-                    "feature_id": feature.id.to_string(),
-                    "feature_key": feature.key.clone(),
-                    "team_id": feature.team_id.to_string(),
-                    "scheduled_execution": true,
-                    "executed_by": actor_display_name,
-                })),
-            },
-        )
-        .await;
+        self.dispatch_notification(crate::logic::notification::NotificationEvent {
+            notification_type: crate::logic::notification::NOTIFICATION_TYPE_KILL_SWITCH_ACTIVATED
+                .to_string(),
+            team_id: Some(feature.team_id),
+            actor_id,
+            subject: format!("Scheduled kill switch executed: {}", feature.key),
+            message,
+            metadata: Some(serde_json::json!({
+                "feature_id": feature.id.to_string(),
+                "feature_key": feature.key.clone(),
+                "team_id": feature.team_id.to_string(),
+                "scheduled_execution": true,
+                "executed_by": actor_display_name,
+            })),
+        });
 
         Ok(Self::map_entity_to_api_feature(feature))
     }
@@ -1230,10 +1251,30 @@ impl DeploymentLogic for FeatureLogicImpl {
         {
             return Err(Error::InvalidInput(e));
         }
+        let feature_id_for_stage = self
+            .repository
+            .get_feature_id_by_stage_id(stage_uuid)
+            .await?
+            .ok_or(Error::NotFound(stage_uuid))?;
+        let db_feature = self
+            .repository
+            .get_feature_by_id(feature_id_for_stage)
+            .await?;
 
-        let mut feature_id_for_stage: Option<Uuid> = None;
+        // This method is the single orchestration entrypoint for stage changes:
+        // both approval-gated requests and direct transitions must pass the same
+        // rollout-safety and transition-validation rules before any side effects.
+        if matches!(next_status, "DEPLOYMENT_REQUESTED" | "DEPLOYED") {
+            crate::logic::dependency_graph::ensure_rollout_dependencies_safe(
+                self.repository.as_ref(),
+                db_feature.id,
+                stage.environment_id,
+            )
+            .await?;
+        }
 
-        // If an approval policy applies, create a pending approval request instead of executing immediately.
+        // Approval gating only changes the persistence target. The validation and
+        // notification flow still originates from this same service path.
         if let Some(approval_logic) = &self.approval_logic
             && crate::logic::approval::status_requires_interception(next_status)
         {
@@ -1250,19 +1291,6 @@ impl DeploymentLogic for FeatureLogicImpl {
             {
                 return Err(Error::InvalidInput(e));
             }
-
-            feature_id_for_stage = Some(
-                self.repository
-                    .get_feature_id_by_stage_id(stage_uuid)
-                    .await?
-                    .ok_or(Error::NotFound(stage_uuid))?,
-            );
-
-            let feature_id_for_stage = feature_id_for_stage.ok_or(Error::NotFound(stage_uuid))?;
-            let db_feature = self
-                .repository
-                .get_feature_by_id(feature_id_for_stage)
-                .await?;
 
             if let Some(request) = approval_logic
                 .maybe_create_stage_change_request(&db_feature, &stage, next_status, user_id)
@@ -1329,29 +1357,26 @@ impl DeploymentLogic for FeatureLogicImpl {
                         ),
                     };
 
-                    crate::logic::notification::dispatch_notification_event(
-                        crate::logic::notification::NotificationEvent {
-                            notification_type:
-                                crate::logic::notification::NOTIFICATION_TYPE_STAGE_CHANGE_REQUESTED
-                                    .to_string(),
-                            team_id: Some(notification_team_id),
-                            actor_id: Some(user_id),
-                            subject,
-                            message,
-                            metadata: Some(serde_json::json!({
-                                "feature_id": notification_feature_id.to_string(),
-                                "feature_key": notification_feature_key,
-                                "stage_id": stage_id.to_string(),
-                                "status": next_status,
-                                "team_id": notification_team_id.to_string(),
-                                "environment_id": environment_id.to_string(),
-                                "environment_name": environment_name,
-                                "requested_by": requester_name,
-                                "approval_request_id": request.id.to_string(),
-                            })),
-                        },
-                    )
-                    .await;
+                    self.dispatch_notification(crate::logic::notification::NotificationEvent {
+                        notification_type:
+                            crate::logic::notification::NOTIFICATION_TYPE_STAGE_CHANGE_REQUESTED
+                                .to_string(),
+                        team_id: Some(notification_team_id),
+                        actor_id: Some(user_id),
+                        subject,
+                        message,
+                        metadata: Some(serde_json::json!({
+                            "feature_id": notification_feature_id.to_string(),
+                            "feature_key": notification_feature_key,
+                            "stage_id": stage_id.to_string(),
+                            "status": next_status,
+                            "team_id": notification_team_id.to_string(),
+                            "environment_id": environment_id.to_string(),
+                            "environment_name": environment_name,
+                            "requested_by": requester_name,
+                            "approval_request_id": request.id.to_string(),
+                        })),
+                    });
                 }
 
                 return Ok(api_feature);
@@ -1362,15 +1387,6 @@ impl DeploymentLogic for FeatureLogicImpl {
         if let Err(e) = crate::validation::validate_stage_transition(&stage.status, next_status) {
             return Err(Error::InvalidInput(e));
         }
-
-        let feature_id_for_stage = match feature_id_for_stage {
-            Some(id) => id,
-            None => self
-                .repository
-                .get_feature_id_by_stage_id(stage_uuid)
-                .await?
-                .ok_or(Error::NotFound(stage_uuid))?,
-        };
 
         let ok = match request {
             StageChangeRequestType::DeploymentRequested
@@ -1545,28 +1561,25 @@ impl DeploymentLogic for FeatureLogicImpl {
                     db_feature.key
                 ),
             };
-            crate::logic::notification::dispatch_notification_event(
-                crate::logic::notification::NotificationEvent {
-                    notification_type:
-                        crate::logic::notification::NOTIFICATION_TYPE_STAGE_CHANGE_REQUESTED
-                            .to_string(),
-                    team_id: Some(db_feature.team_id),
-                    actor_id: Some(user_id),
-                    subject,
-                    message,
-                    metadata: Some(serde_json::json!({
-                        "feature_id": db_feature.id.to_string(),
-                        "feature_key": db_feature.key.clone(),
-                        "stage_id": stage_id.to_string(),
-                        "status": next_status,
-                        "team_id": db_feature.team_id.to_string(),
-                        "environment_id": environment_id.map(|id| id.to_string()),
-                        "environment_name": environment_name.clone(),
-                        "requested_by": actor_display_name.clone(),
-                    })),
-                },
-            )
-            .await;
+            self.dispatch_notification(crate::logic::notification::NotificationEvent {
+                notification_type:
+                    crate::logic::notification::NOTIFICATION_TYPE_STAGE_CHANGE_REQUESTED
+                        .to_string(),
+                team_id: Some(db_feature.team_id),
+                actor_id: Some(user_id),
+                subject,
+                message,
+                metadata: Some(serde_json::json!({
+                    "feature_id": db_feature.id.to_string(),
+                    "feature_key": db_feature.key.clone(),
+                    "stage_id": stage_id.to_string(),
+                    "status": next_status,
+                    "team_id": db_feature.team_id.to_string(),
+                    "environment_id": environment_id.map(|id| id.to_string()),
+                    "environment_name": environment_name.clone(),
+                    "requested_by": actor_display_name.clone(),
+                })),
+            });
         }
 
         if matches!(request, StageChangeRequestType::Deployed) {
@@ -1590,26 +1603,23 @@ impl DeploymentLogic for FeatureLogicImpl {
                 ),
                 (None, None) => format!("Feature '{}' was deployed.", db_feature.key),
             };
-            crate::logic::notification::dispatch_notification_event(
-                crate::logic::notification::NotificationEvent {
-                    notification_type:
-                        crate::logic::notification::NOTIFICATION_TYPE_FEATURE_DEPLOYED.to_string(),
-                    team_id: Some(db_feature.team_id),
-                    actor_id: Some(user_id),
-                    subject,
-                    message,
-                    metadata: Some(serde_json::json!({
-                        "feature_id": db_feature.id.to_string(),
-                        "feature_key": db_feature.key.clone(),
-                        "stage_id": stage_id.to_string(),
-                        "team_id": db_feature.team_id.to_string(),
-                        "environment_id": environment_id.map(|id| id.to_string()),
-                        "environment_name": environment_name.clone(),
-                        "deployed_by": actor_display_name.clone(),
-                    })),
-                },
-            )
-            .await;
+            self.dispatch_notification(crate::logic::notification::NotificationEvent {
+                notification_type: crate::logic::notification::NOTIFICATION_TYPE_FEATURE_DEPLOYED
+                    .to_string(),
+                team_id: Some(db_feature.team_id),
+                actor_id: Some(user_id),
+                subject,
+                message,
+                metadata: Some(serde_json::json!({
+                    "feature_id": db_feature.id.to_string(),
+                    "feature_key": db_feature.key.clone(),
+                    "stage_id": stage_id.to_string(),
+                    "team_id": db_feature.team_id.to_string(),
+                    "environment_id": environment_id.map(|id| id.to_string()),
+                    "environment_name": environment_name.clone(),
+                    "deployed_by": actor_display_name.clone(),
+                })),
+            });
         }
 
         if matches!(request, StageChangeRequestType::Rollbacked) {
@@ -1636,27 +1646,23 @@ impl DeploymentLogic for FeatureLogicImpl {
                 ),
                 (None, None) => format!("Feature '{}' was rolled back.", db_feature.key),
             };
-            crate::logic::notification::dispatch_notification_event(
-                crate::logic::notification::NotificationEvent {
-                    notification_type:
-                        crate::logic::notification::NOTIFICATION_TYPE_FEATURE_ROLLED_BACK
-                            .to_string(),
-                    team_id: Some(db_feature.team_id),
-                    actor_id: Some(user_id),
-                    subject,
-                    message,
-                    metadata: Some(serde_json::json!({
-                        "feature_id": db_feature.id.to_string(),
-                        "feature_key": db_feature.key.clone(),
-                        "stage_id": stage_id.to_string(),
-                        "team_id": db_feature.team_id.to_string(),
-                        "environment_id": environment_id.map(|id| id.to_string()),
-                        "environment_name": environment_name.clone(),
-                        "rolled_back_by": actor_display_name.clone(),
-                    })),
-                },
-            )
-            .await;
+            self.dispatch_notification(crate::logic::notification::NotificationEvent {
+                notification_type:
+                    crate::logic::notification::NOTIFICATION_TYPE_FEATURE_ROLLED_BACK.to_string(),
+                team_id: Some(db_feature.team_id),
+                actor_id: Some(user_id),
+                subject,
+                message,
+                metadata: Some(serde_json::json!({
+                    "feature_id": db_feature.id.to_string(),
+                    "feature_key": db_feature.key.clone(),
+                    "stage_id": stage_id.to_string(),
+                    "team_id": db_feature.team_id.to_string(),
+                    "environment_id": environment_id.map(|id| id.to_string()),
+                    "environment_name": environment_name.clone(),
+                    "rolled_back_by": actor_display_name.clone(),
+                })),
+            });
         }
 
         Ok(FeatureLogicImpl::map_entity_to_api_feature(db_feature))
@@ -1782,6 +1788,8 @@ mod test {
     use crate::database::feature::MockFeatureRepository;
     use crate::logic::environment::MockEnvironmentLogic;
     use crate::model::FeatureType;
+    use tokio::sync::mpsc;
+    use tokio::time::{Duration, timeout};
 
     fn create_mock_activity_log() -> Box<dyn crate::database::activity_log::ActivityLogRepository> {
         let mut mock = MockActivityLogRepository::new();
@@ -1827,6 +1835,46 @@ mod test {
         mock.expect_clone_box()
             .returning(|| create_mock_user_repository());
         Box::new(mock)
+    }
+
+    #[derive(Clone)]
+    struct RecordingNotificationLogic {
+        sender: mpsc::UnboundedSender<String>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::logic::notification::NotificationLogic for RecordingNotificationLogic {
+        async fn get_settings(
+            &self,
+        ) -> Result<crate::logic::notification::NotificationSettingsView, Error> {
+            Err(Error::InvalidInput("unused_in_test".to_string()))
+        }
+
+        async fn update_channel_config(
+            &self,
+            _input: crate::logic::notification::UpdateNotificationChannelConfigInput,
+        ) -> Result<crate::logic::notification::NotificationChannelConfigView, Error> {
+            Err(Error::InvalidInput("unused_in_test".to_string()))
+        }
+
+        async fn update_preference(
+            &self,
+            _input: crate::logic::notification::UpdateNotificationPreferenceInput,
+        ) -> Result<crate::logic::notification::NotificationPreferenceView, Error> {
+            Err(Error::InvalidInput("unused_in_test".to_string()))
+        }
+
+        async fn dispatch_event(
+            &self,
+            event: crate::logic::notification::NotificationEvent,
+        ) -> Result<(), Error> {
+            let _ = self.sender.send(event.notification_type);
+            Ok(())
+        }
+
+        fn clone_box(&self) -> Box<dyn crate::logic::notification::NotificationLogic> {
+            Box::new(self.clone())
+        }
     }
 
     #[test]
@@ -2184,13 +2232,31 @@ mod test {
         repository
             .expect_get_feature_by_id()
             .with(mockall::predicate::eq(feature_id))
-            .times(1) // Called once after the stage change
+            .times(3) // Preload + dependency safety check + response reload
             .returning(move |_| {
                 Ok(create_entity_feature_with_stage_status(
                     feature_id,
                     stage_id,
                     "NOT_DEPLOYED",
                 ))
+            });
+
+        repository
+            .expect_get_features()
+            .with(
+                mockall::predicate::eq(
+                    Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
+                ),
+                mockall::predicate::eq(None),
+                mockall::predicate::eq(None),
+            )
+            .times(1)
+            .returning(move |_, _, _| {
+                Ok(vec![create_entity_feature_with_stage_status(
+                    feature_id,
+                    stage_id,
+                    "NOT_DEPLOYED",
+                )])
             });
 
         // Mock the stage change request
@@ -2239,6 +2305,119 @@ mod test {
     }
 
     #[tokio::test]
+    async fn test_request_stage_change_uses_injected_notifier() {
+        let mut repository = MockFeatureRepository::new();
+        let mut environment_logic = MockEnvironmentLogic::new();
+
+        let stage_id = Uuid::new_v4();
+        let feature_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let stage = create_pipeline_stage_with_status(stage_id, feature_id, "NOT_DEPLOYED");
+
+        let stage_clone_for_lookup = stage.clone();
+        repository
+            .expect_get_stage_by_id()
+            .with(mockall::predicate::eq(stage_id))
+            .times(1)
+            .returning(move |_| Ok(Some(stage_clone_for_lookup.clone())));
+
+        let stage_clone_for_list = stage.clone();
+        repository
+            .expect_get_feature_stages()
+            .with(mockall::predicate::eq(feature_id))
+            .times(1)
+            .returning(move |_| Ok(vec![stage_clone_for_list.clone()]));
+
+        repository
+            .expect_get_feature_id_by_stage_id()
+            .with(mockall::predicate::eq(stage_id))
+            .times(1)
+            .returning(move |_| Ok(Some(feature_id)));
+
+        repository
+            .expect_get_feature_by_id()
+            .with(mockall::predicate::eq(feature_id))
+            .times(3)
+            .returning(move |_| {
+                Ok(create_entity_feature_with_stage_status(
+                    feature_id,
+                    stage_id,
+                    "NOT_DEPLOYED",
+                ))
+            });
+
+        repository
+            .expect_get_features()
+            .with(
+                mockall::predicate::eq(
+                    Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
+                ),
+                mockall::predicate::eq(None),
+                mockall::predicate::eq(None),
+            )
+            .times(1)
+            .returning(move |_, _, _| {
+                Ok(vec![create_entity_feature_with_stage_status(
+                    feature_id,
+                    stage_id,
+                    "NOT_DEPLOYED",
+                )])
+            });
+
+        repository
+            .expect_request_stage_change()
+            .with(
+                mockall::predicate::eq(stage_id),
+                mockall::predicate::eq("DEPLOYMENT_REQUESTED"),
+                mockall::predicate::eq(user_id),
+                mockall::predicate::function(|_: &chrono::DateTime<chrono::Utc>| true),
+            )
+            .times(1)
+            .returning(|_, _, _, _| Ok(true));
+
+        environment_logic
+            .expect_get_environment_by_id()
+            .times(1)
+            .returning(|_| {
+                Ok(crate::model::Environment {
+                    id: ID::from("51ecc366-f1cd-4d3d-ab73-fa60bad98f27"),
+                    name: "Test Environment".to_string(),
+                    active: true,
+                    team_id: ID::from(Uuid::new_v4()),
+                    environment_type: "Development".to_string(),
+                })
+            });
+
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let logic = feature_logic_with_approval_and_notifications(
+            Box::new(repository),
+            Box::new(environment_logic),
+            create_mock_activity_log(),
+            create_mock_user_repository(),
+            None,
+            Some(Box::new(RecordingNotificationLogic { sender })),
+        );
+
+        logic
+            .request_stage_change(
+                ID::from(stage_id),
+                StageChangeRequestType::DeploymentRequested,
+                user_id,
+            )
+            .await
+            .expect("stage change should succeed");
+
+        let notification_type = timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("notification task should complete")
+            .expect("notification channel should receive an event");
+        assert_eq!(
+            notification_type,
+            crate::logic::notification::NOTIFICATION_TYPE_STAGE_CHANGE_REQUESTED
+        );
+    }
+
+    #[tokio::test]
     async fn test_request_stage_change_deployment_rejected() {
         let mut repository = MockFeatureRepository::new();
         let mut environment_logic = MockEnvironmentLogic::new();
@@ -2273,7 +2452,7 @@ mod test {
         repository
             .expect_get_feature_by_id()
             .with(mockall::predicate::eq(feature_id))
-            .times(1)
+            .times(2)
             .returning(move |_| {
                 Ok(create_entity_feature_with_stage_status(
                     feature_id,
@@ -2357,13 +2536,31 @@ mod test {
         repository
             .expect_get_feature_by_id()
             .with(mockall::predicate::eq(feature_id))
-            .times(1)
+            .times(3)
             .returning(move |_| {
                 Ok(create_entity_feature_with_stage_status(
                     feature_id,
                     stage_id,
                     "DEPLOYMENT_APPROVED",
                 ))
+            });
+
+        repository
+            .expect_get_features()
+            .with(
+                mockall::predicate::eq(
+                    Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
+                ),
+                mockall::predicate::eq(None),
+                mockall::predicate::eq(None),
+            )
+            .times(1)
+            .returning(move |_, _, _| {
+                Ok(vec![create_entity_feature_with_stage_status(
+                    feature_id,
+                    stage_id,
+                    "DEPLOYMENT_APPROVED",
+                )])
             });
 
         repository
@@ -2440,7 +2637,7 @@ mod test {
         repository
             .expect_get_feature_by_id()
             .with(mockall::predicate::eq(feature_id))
-            .times(1)
+            .times(2)
             .returning(move |_| {
                 Ok(create_entity_feature_with_stage_status(
                     feature_id, stage_id, "DEPLOYED",
@@ -2522,7 +2719,7 @@ mod test {
         repository
             .expect_get_feature_by_id()
             .with(mockall::predicate::eq(feature_id))
-            .times(1)
+            .times(2)
             .returning(move |_| {
                 Ok(create_entity_feature_with_stage_status(
                     feature_id,
@@ -2605,7 +2802,7 @@ mod test {
         repository
             .expect_get_feature_by_id()
             .with(mockall::predicate::eq(feature_id))
-            .times(1)
+            .times(2)
             .returning(move |_| {
                 Ok(create_entity_feature_with_stage_status(
                     feature_id,
@@ -2773,7 +2970,32 @@ mod test {
         repository
             .expect_get_feature_by_id()
             .with(mockall::predicate::eq(feature_id))
-            .never();
+            .times(2)
+            .returning(move |_| {
+                Ok(create_entity_feature_with_stage_status(
+                    feature_id,
+                    stage_id,
+                    "NOT_DEPLOYED",
+                ))
+            });
+
+        repository
+            .expect_get_features()
+            .with(
+                mockall::predicate::eq(
+                    Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap(),
+                ),
+                mockall::predicate::eq(None),
+                mockall::predicate::eq(None),
+            )
+            .times(1)
+            .returning(move |_, _, _| {
+                Ok(vec![create_entity_feature_with_stage_status(
+                    feature_id,
+                    stage_id,
+                    "NOT_DEPLOYED",
+                )])
+            });
 
         repository
             .expect_request_stage_change()

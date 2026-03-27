@@ -68,15 +68,17 @@ pub fn create_relationships<R: Relationship + 'static>(
         .iter()
         .filter(|stage| stage.parent_stage_id().is_some())
         .for_each(|stage| {
-            stages
-                .iter()
-                .filter(|stage_inner| stage.parent_stage_id().unwrap() == stage_inner.get_id())
-                .for_each(|stage_inner| {
-                    relationships.push(relationship_factory(
-                        stage_inner.order_index(),
-                        stage.order_index(),
-                    ));
-                });
+            if let Some(parent_stage_id) = stage.parent_stage_id() {
+                stages
+                    .iter()
+                    .filter(|stage_inner| parent_stage_id == stage_inner.get_id())
+                    .for_each(|stage_inner| {
+                        relationships.push(relationship_factory(
+                            stage_inner.order_index(),
+                            stage.order_index(),
+                        ));
+                    });
+            }
         });
 
     relationships
@@ -91,17 +93,14 @@ pub fn map_stages<R: Stage + 'static>(
     let mut mapped_stages: Vec<R> = vec![];
     if has_stage {
         stages.iter().for_each(|stage| {
-            let feature_stage = stage_factory(
-                stage.get_id().into(),
-                environment_map
-                    .get(&stage.environment_id())
-                    .unwrap()
-                    .to_owned(),
-                stage.order_index(),
-                stage.position(),
-            );
-
-            mapped_stages.push(feature_stage);
+            if let Some(environment) = environment_map.get(&stage.environment_id()) {
+                mapped_stages.push(stage_factory(
+                    stage.get_id().into(),
+                    environment.to_owned(),
+                    stage.order_index(),
+                    stage.position(),
+                ));
+            }
         });
         mapped_stages
     } else {

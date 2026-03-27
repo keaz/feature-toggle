@@ -21,7 +21,7 @@ pnpm install
 This runs API tests against an isolated Docker environment:
 - PostgreSQL in Docker
 - backend in Docker
-- migrations + `init.sql` seeding before tests
+- SQLx migrations first, then seed fixtures from `init.sql`
 
 ```bash
 pnpm --dir api-tests run test:docker
@@ -47,7 +47,7 @@ pnpm --dir api-tests test
 pnpm --dir api-tests run docker:down
 ```
 
-`docker:seed` runs non-interactive (`-T --no-deps --rm`) so it exits automatically when seeding is complete.
+`docker:seed` runs non-interactive (`-T --no-deps --rm`) so it exits automatically after migrations and seeding are complete.
 
 ### Manual Local Backend (Optional)
 

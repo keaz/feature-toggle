@@ -1,12 +1,17 @@
+mod flush;
+mod stream;
+
 use crate::AppState;
 use crate::pb;
-use std::collections::HashMap;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
-use tokio_retry::Retry;
-use tokio_stream::StreamExt;
+use tokio_retry::{Retry, RetryIf};
 use tonic::transport::Endpoint;
-use tracing::{error, info, warn};
+use tracing::{error, info};
+
+pub use flush::{run_evaluation_flush_task, run_flush_task};
+pub use stream::run_stream_task;
+#[cfg(test)]
+pub(crate) use stream::{handle_feature_update, prepare_for_full_resync, send_initial_subscribe};
 
 #[derive(Clone, Debug)]
 pub struct UserAssignment {
@@ -15,6 +20,10 @@ pub struct UserAssignment {
     pub environment_id: String,
     pub assigned: bool,
     pub variant: Option<String>,
+}
+
+fn should_retry_feature_fetch(status: &tonic::Status) -> bool {
+    status.code() != tonic::Code::NotFound
 }
 
 /// Fetch a feature by key from the backend via gRPC with retry logic
@@ -45,7 +54,7 @@ pub async fn fetch_feature_via_grpc(
             .await
     };
 
-    match Retry::spawn(retry_strategy, action).await {
+    match RetryIf::spawn(retry_strategy, action, should_retry_feature_fetch).await {
         Ok(resp) => {
             let feature = resp.into_inner().feature;
             if feature.is_some() {
@@ -184,456 +193,6 @@ pub fn build_endpoint(grpc_addr: &str) -> Endpoint {
         .tcp_nodelay(true)
 }
 
-/// Send initial subscribe message to the streaming connection
-async fn send_initial_subscribe(tx: &tokio::sync::mpsc::Sender<pb::StreamRequest>, app: &AppState) {
-    // Collect all cached feature keys to send to backend
-    // This allows backend to rebuild its memory of which features this client is interested in
-    let cached_keys = app.mapped_cache.get_all_keys().await;
-
-    tracing::info!("Subscribing with {} cached feature keys", cached_keys.len());
-
-    let subscribe = pb::SubscribeRequest {
-        client_id: app.client_id.clone(),
-        client_secret: app.client_secret.clone(),
-        feature_keys: cached_keys,
-        environment_id: "".into(),
-    };
-    let initial = pb::StreamRequest {
-        payload: Some(pb::stream_request::Payload::Subscribe(subscribe)),
-    };
-    let _ = tx.send(initial).await;
-}
-
-/// Spawn a background task to send periodic heartbeats
-fn spawn_heartbeat(tx: tokio::sync::mpsc::Sender<pb::StreamRequest>) {
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_secs(30)).await;
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0);
-            let _ = tx
-                .send(pb::StreamRequest {
-                    payload: Some(pb::stream_request::Payload::Heartbeat(pb::Heartbeat {
-                        ts_unix_ms: ts,
-                    })),
-                })
-                .await;
-        }
-    });
-}
-
-/// Open a streaming gRPC call for feature updates
-async fn open_streaming_call(
-    mut client: pb::feature_evaluation_client::FeatureEvaluationClient<tonic::transport::Channel>,
-    rx: tokio::sync::mpsc::Receiver<pb::StreamRequest>,
-) -> Result<tonic::Response<tonic::Streaming<pb::FeatureUpdate>>, tonic::Status> {
-    use tokio_stream::wrappers::ReceiverStream;
-    let req_stream = ReceiverStream::new(rx);
-    client.stream_updates(req_stream).await
-}
-
-/// Handle a feature update message from the stream
-async fn handle_feature_update(app: &AppState, update: pb::FeatureUpdate) -> bool {
-    use pb::feature_update::Action;
-    match update.action {
-        x if x == Action::Upsert as i32 || x == Action::Snapshot as i32 => {
-            if let Some(f) = update.feature {
-                let feature_id = f.id.clone();
-                let dependency_ids = f
-                    .dependencies
-                    .iter()
-                    .map(|dependency| dependency.depends_on_id.clone())
-                    .collect::<Vec<_>>();
-
-                // Map protobuf to engine format and cache
-                let engine_feature = std::sync::Arc::new(crate::handlers::map_proto_to_engine(&f));
-                app.mapped_cache
-                    .insert_with_dependencies(engine_feature, dependency_ids)
-                    .await;
-
-                // Purge assignments for feature on every feature update
-                app.purge_assignments_for_feature(&feature_id).await;
-            }
-        }
-        x if x == Action::Delete as i32 => {
-            if !update.feature_key.is_empty()
-                && let Some(feature_id) = app.mapped_cache.delete_by_key(&update.feature_key).await
-            {
-                app.purge_assignments_for_feature(&feature_id).await;
-            }
-        }
-        x if x == Action::Error as i32 => {
-            if update.error == "lagged" {
-                warn!("Received lagged marker from backend stream; forcing reconnect");
-                return true;
-            }
-            if !update.error.is_empty() {
-                warn!("Received backend stream error marker: {}", update.error);
-            }
-        }
-        _ => {}
-    }
-    false
-}
-
-/// Background task to maintain streaming connection with backend
-pub async fn run_stream_task(app: AppState, grpc_addr: String) {
-    use std::sync::atomic::Ordering;
-
-    // Exponential backoff for stream reconnection using config values
-    let mut retry_delay = app.retry_config.stream_initial_delay();
-    let max_retry_delay = app.retry_config.stream_max_delay();
-
-    loop {
-        // reset status while attempting to connect
-        app.connected.store(false, Ordering::Relaxed);
-
-        // Try to connect with retry
-        let endpoint = build_endpoint(&grpc_addr);
-        match endpoint.connect().await {
-            Ok(channel) => {
-                let client = pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
-                info!("Connected to backend gRPC {}", &grpc_addr);
-
-                // Reset retry delay on successful connection
-                retry_delay = app.retry_config.stream_initial_delay();
-
-                let (tx, rx) = tokio::sync::mpsc::channel::<pb::StreamRequest>(16);
-
-                // Send initial Subscribe BEFORE opening the streaming call
-                send_initial_subscribe(&tx, &app).await;
-
-                // Heartbeats
-                spawn_heartbeat(tx.clone());
-
-                let response = match open_streaming_call(client, rx).await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        error!("Failed to open streaming call: {}", e);
-                        app.connected.store(false, Ordering::Relaxed);
-                        tokio::time::sleep(retry_delay).await;
-                        retry_delay = std::cmp::min(retry_delay * 2, max_retry_delay);
-                        continue;
-                    }
-                };
-
-                // streaming successfully opened -> mark healthy
-                app.connected.store(true, Ordering::Relaxed);
-                info!("Stream connection established, receiving updates");
-                let mut inbound = response.into_inner();
-
-                // Process updates
-                while let Some(msg) = inbound.next().await {
-                    match msg {
-                        Ok(update) => {
-                            if handle_feature_update(&app, update).await {
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            error!("Stream error: {}", e);
-                            break;
-                        }
-                    }
-                }
-
-                // stream closed -> mark unhealthy
-                app.connected.store(false, Ordering::Relaxed);
-                warn!("Stream connection closed, will retry in {:?}", retry_delay);
-            }
-            Err(e) => {
-                error!("Failed to connect to backend gRPC {}: {}", &grpc_addr, e);
-                app.connected.store(false, Ordering::Relaxed);
-                warn!("Retrying connection in {:?}", retry_delay);
-            }
-        }
-
-        // Wait before reconnecting with exponential backoff
-        tokio::time::sleep(retry_delay).await;
-        retry_delay = std::cmp::min(retry_delay * 2, max_retry_delay);
-    }
-}
-
-/// Background task to periodically flush user assignments to backend
-pub async fn run_flush_task(app: AppState) {
-    let batch_size = app.assignment_flush_batch_size.max(1);
-    loop {
-        tokio::time::sleep(app.flush_interval).await;
-
-        let mut total_unique = 0usize;
-        let mut total_drained = 0usize;
-        let mut batches = 0usize;
-        let mut failed = false;
-
-        loop {
-            let mut drained = 0usize;
-            let mut dedup: HashMap<String, UserAssignment> = HashMap::new();
-
-            while drained < batch_size {
-                match app.pending_assignments.pop() {
-                    Some(assignment) => {
-                        drained += 1;
-                        let key = assignment_key(
-                            &assignment.user_id,
-                            &assignment.feature_id,
-                            &assignment.environment_id,
-                        );
-                        dedup.insert(key, assignment);
-                    }
-                    None => break,
-                }
-            }
-
-            if dedup.is_empty() {
-                break;
-            }
-
-            total_drained += drained;
-            let assignments: Vec<UserAssignment> = dedup.into_values().collect();
-            let assignment_count = assignments.len();
-
-            let client_id = app.client_id.clone();
-            let client_secret = app.client_secret.clone();
-            let stream = tokio_stream::iter(assignments.clone().into_iter().enumerate().map(
-                move |(idx, a)| {
-                    pb::UserFlagAssignment {
-                        user_id: a.user_id,
-                        feature_id: a.feature_id,
-                        environment_id: a.environment_id,
-                        assigned: a.assigned,
-                        // Only send credentials on first message
-                        client_id: if idx == 0 {
-                            client_id.clone()
-                        } else {
-                            String::new()
-                        },
-                        client_secret: if idx == 0 {
-                            client_secret.clone()
-                        } else {
-                            String::new()
-                        },
-                        variant: a.variant.unwrap_or_default(),
-                    }
-                },
-            ));
-
-            // Use a cloned client to avoid holding the lock
-            let mut client = {
-                let guard = app.grpc.lock().await;
-                guard.clone()
-            };
-
-            // Note: Streaming calls can't be easily retried as the stream is consumed
-            match client.push_user_assignments(stream).await {
-                Ok(_) => {
-                    total_unique += assignment_count;
-                    batches += 1;
-                }
-                Err(e) => {
-                    error!("Failed to push user assignments: {}", e);
-                    warn!(
-                        "Will retry on next flush cycle ({}s)",
-                        app.flush_interval.as_secs()
-                    );
-                    for assignment in assignments {
-                        app.pending_assignments.push(assignment);
-                    }
-                    failed = true;
-                    break;
-                }
-            }
-        }
-
-        if !failed && total_unique > 0 {
-            info!(
-                "Successfully pushed {} user assignments in {} batch(es) ({} drained)",
-                total_unique, batches, total_drained
-            );
-        }
-    }
-}
-
-/// Background task to periodically flush evaluation events to backend
-pub async fn run_evaluation_flush_task(
-    app: AppState,
-    mut event_rx: tokio::sync::mpsc::Receiver<crate::EvaluationEvent>,
-) {
-    let mut buffer = Vec::new();
-    let flush_interval = app.evaluation_flush_interval;
-    let max_buffered = app.evaluation_event_queue_capacity.max(1);
-    let batch_size = app.evaluation_flush_batch_size.max(1);
-
-    loop {
-        tokio::time::sleep(flush_interval).await;
-
-        let dropped = app.evaluation_event_dropped.swap(0, Ordering::Relaxed);
-        if dropped > 0 {
-            warn!(
-                "Dropped {} evaluation events due to full queue (capacity={})",
-                dropped, max_buffered
-            );
-        }
-
-        // Drain events up to the buffer limit
-        while buffer.len() < max_buffered {
-            match event_rx.try_recv() {
-                Ok(event) => buffer.push(event),
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
-            }
-        }
-
-        // Drop any additional events still waiting in the channel once the buffer is full
-        let mut dropped_in_flush = 0u64;
-        if buffer.len() >= max_buffered {
-            loop {
-                match event_rx.try_recv() {
-                    Ok(_) => dropped_in_flush += 1,
-                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
-                }
-            }
-        }
-        if dropped_in_flush > 0 {
-            warn!(
-                "Dropped {} evaluation events while draining (buffer full, capacity={})",
-                dropped_in_flush, max_buffered
-            );
-        }
-
-        if buffer.is_empty() {
-            continue;
-        }
-
-        let mut to_send = std::mem::take(&mut buffer);
-        let mut total_sent = 0usize;
-        let mut total_processed = 0usize;
-        let mut batches = 0usize;
-        let mut failed = false;
-
-        while !to_send.is_empty() {
-            let chunk = if to_send.len() > batch_size {
-                let rest = to_send.split_off(batch_size);
-                let chunk = to_send;
-                to_send = rest;
-                chunk
-            } else {
-                let chunk = to_send;
-                to_send = Vec::new();
-                chunk
-            };
-
-            // Convert to proto format - pre-allocate capacity
-            let mut proto_events = Vec::with_capacity(chunk.len());
-            for event in chunk.iter() {
-                let evaluated_at_unix_ms = event
-                    .evaluated_at
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as i64)
-                    .unwrap_or(0);
-
-                // Convert EvaluateContext to proto Context entries
-                // Pre-allocate: 1 for bucketingKey + number of attributes
-                let mut proto_context =
-                    Vec::with_capacity(1 + event.evaluation_context.attributes.len());
-
-                // Add bucketing_key as a context entry
-                proto_context.push(pb::Context {
-                    key: "bucketingKey".to_string(),
-                    value: event.evaluation_context.bucketing_key.clone(),
-                });
-
-                // Add all dynamic attributes as context entries
-                for (key, value) in &event.evaluation_context.attributes {
-                    // Convert JSON value to string
-                    let value_str = match value {
-                        serde_json::Value::String(s) => s.clone(),
-                        serde_json::Value::Number(n) => n.to_string(),
-                        serde_json::Value::Bool(b) => if *b { "true" } else { "false" }.to_string(),
-                        _ => value.to_string(),
-                    };
-                    proto_context.push(pb::Context {
-                        key: key.clone(),
-                        value: value_str,
-                    });
-                }
-
-                proto_events.push(pb::FeatureEvaluationEvent {
-                    feature_key: event.feature_key.clone(),
-                    environment_id: event.environment_id.clone(),
-                    client_id: app.client_id.clone(),
-                    client_secret: app.client_secret.clone(),
-                    evaluation_result: event.evaluation_result,
-                    evaluation_context: proto_context,
-                    user_context: event.user_context.clone().unwrap_or_default(),
-                    evaluated_at_unix_ms,
-                    prior_assignment: event.prior_assignment,
-                    variant: event.variant.clone().unwrap_or_default(),
-                    variant_value: event
-                        .variant_value
-                        .as_ref()
-                        .map(|v| serde_json::to_string(v).unwrap_or_default())
-                        .unwrap_or_default(),
-                });
-            }
-
-            // Retry evaluation events push with exponential backoff using config values
-            use tokio_retry::strategy::ExponentialBackoff;
-            let retry_strategy = ExponentialBackoff::from_millis(app.retry_config.base_delay_ms)
-                .take(app.retry_config.max_attempts);
-            let action = || async {
-                let mut client = {
-                    let guard = app.grpc.lock().await;
-                    guard.clone()
-                };
-                let req = pb::PushEvaluationEventsRequest {
-                    events: proto_events.clone(),
-                };
-                client.push_evaluation_events(req).await
-            };
-
-            match Retry::spawn(retry_strategy, action).await {
-                Ok(response) => {
-                    let resp = response.into_inner();
-                    total_sent += chunk.len();
-                    total_processed += resp.processed_count as usize;
-                    batches += 1;
-                }
-                Err(e) => {
-                    error!("Failed to push evaluation events after retries: {}", e);
-                    warn!(
-                        "Will retry on next flush cycle ({}s)",
-                        flush_interval.as_secs()
-                    );
-                    let mut requeue = chunk;
-                    requeue.extend(to_send);
-                    if requeue.len() > max_buffered {
-                        let drop_count = requeue.len() - max_buffered;
-                        buffer.extend(requeue.into_iter().skip(drop_count));
-                        warn!(
-                            "Dropped {} evaluation events while requeueing (buffer limit={})",
-                            drop_count, max_buffered
-                        );
-                    } else {
-                        buffer.extend(requeue);
-                    }
-                    failed = true;
-                    break;
-                }
-            }
-        }
-
-        if !failed && total_sent > 0 {
-            info!(
-                "Successfully pushed {} evaluation events in {} batch(es) ({} processed)",
-                total_sent, batches, total_processed
-            );
-        }
-    }
-}
-
 /// Generate a unique key for user assignment caching
 pub fn assignment_key(user_id: &str, feature_id: &str, environment_id: &str) -> String {
     format!("{}|{}|{}", user_id, feature_id, environment_id)
@@ -642,8 +201,180 @@ pub fn assignment_key(user_id: &str, feature_id: &str, environment_id: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use feature_toggle_backend::grpc::pb as backend_pb;
+    use feature_toggle_backend::grpc::pb::feature_evaluation_server::{
+        FeatureEvaluation, FeatureEvaluationServer,
+    };
     use std::sync::Arc;
-    use tonic::transport::Endpoint;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio_retry::strategy::ExponentialBackoff;
+    use tokio_stream::StreamExt;
+    use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
+    use tonic::transport::{Endpoint, Server};
+    use tonic::{Request, Response, Status};
+
+    #[derive(Default)]
+    struct MockBackendState {
+        assignment_attempts: AtomicUsize,
+        evaluation_attempts: AtomicUsize,
+    }
+
+    #[derive(Clone)]
+    struct MockBackend {
+        state: Arc<MockBackendState>,
+    }
+
+    #[tonic::async_trait]
+    impl FeatureEvaluation for MockBackend {
+        type StreamUpdatesStream = ReceiverStream<Result<backend_pb::FeatureUpdate, Status>>;
+
+        async fn evaluate(
+            &self,
+            _request: Request<backend_pb::EvaluateRequest>,
+        ) -> Result<Response<backend_pb::EvaluateResponse>, Status> {
+            Err(Status::unimplemented("not used in edge ingestion tests"))
+        }
+
+        async fn get_feature_by_key(
+            &self,
+            _request: Request<backend_pb::GetFeatureByKeyRequest>,
+        ) -> Result<Response<backend_pb::GetFeatureByKeyResponse>, Status> {
+            Err(Status::unimplemented("not used in edge ingestion tests"))
+        }
+
+        async fn get_client_info(
+            &self,
+            _request: Request<backend_pb::GetClientInfoRequest>,
+        ) -> Result<Response<backend_pb::GetClientInfoResponse>, Status> {
+            Err(Status::unimplemented("not used in edge ingestion tests"))
+        }
+
+        async fn push_user_assignments(
+            &self,
+            request: Request<tonic::Streaming<backend_pb::UserFlagAssignment>>,
+        ) -> Result<Response<backend_pb::Ack>, Status> {
+            let attempt = self
+                .state
+                .assignment_attempts
+                .fetch_add(1, Ordering::SeqCst);
+            let mut count = 0usize;
+            let mut stream = request.into_inner();
+            while let Some(msg) = stream.next().await {
+                msg.map_err(|e| Status::internal(format!("stream error: {e}")))?;
+                count += 1;
+            }
+
+            if attempt == 0 {
+                return Err(Status::unavailable("transient assignment ingest failure"));
+            }
+
+            Ok(Response::new(backend_pb::Ack {
+                message_id: format!("assignment-ack-{}", count),
+            }))
+        }
+
+        async fn list_user_assignments(
+            &self,
+            _request: Request<backend_pb::ListUserFlagAssignmentsRequest>,
+        ) -> Result<Response<backend_pb::ListUserFlagAssignmentsResponse>, Status> {
+            Err(Status::unimplemented("not used in edge ingestion tests"))
+        }
+
+        async fn stream_updates(
+            &self,
+            _request: Request<tonic::Streaming<backend_pb::StreamRequest>>,
+        ) -> Result<Response<Self::StreamUpdatesStream>, Status> {
+            let (_tx, rx) =
+                tokio::sync::mpsc::channel::<Result<backend_pb::FeatureUpdate, Status>>(1);
+            Ok(Response::new(ReceiverStream::new(rx)))
+        }
+
+        async fn push_evaluation_events(
+            &self,
+            request: Request<backend_pb::PushEvaluationEventsRequest>,
+        ) -> Result<Response<backend_pb::PushEvaluationEventsResponse>, Status> {
+            let req = request.into_inner();
+            let attempt = self
+                .state
+                .evaluation_attempts
+                .fetch_add(1, Ordering::SeqCst);
+
+            if attempt == 0 {
+                return Err(Status::unavailable("transient evaluation ingest failure"));
+            }
+
+            Ok(Response::new(backend_pb::PushEvaluationEventsResponse {
+                message_id: format!("evaluation-ack-{}", req.events.len()),
+                processed_count: req.events.len() as i32,
+            }))
+        }
+
+        async fn track_metrics(
+            &self,
+            _request: Request<backend_pb::TrackMetricRequest>,
+        ) -> Result<Response<backend_pb::TrackMetricResponse>, Status> {
+            Err(Status::unimplemented("not used in edge ingestion tests"))
+        }
+    }
+
+    fn test_app_state_with_endpoint(
+        mapped_cache: Arc<crate::MappedFeatureCache>,
+        endpoint: &str,
+    ) -> crate::AppState {
+        let channel = Endpoint::from_shared(endpoint.to_string())
+            .expect("valid gRPC endpoint")
+            .connect_lazy();
+        let grpc_client =
+            crate::pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
+        let client_info_cache = Arc::new(crate::ClientInfoCache::new(
+            std::time::Duration::from_secs(300),
+        ));
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(10);
+
+        crate::AppState {
+            mapped_cache,
+            client_info_cache,
+            grpc: Arc::new(tokio::sync::Mutex::new(grpc_client)),
+            client_id: "test-client-id".to_string(),
+            client_secret: "test-secret".to_string(),
+            connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            assigned_cache: Arc::new(dashmap::DashMap::new()),
+            pending_assignments: Arc::new(crossbeam::queue::SegQueue::new()),
+            flush_interval: std::time::Duration::from_secs(10),
+            assignment_flush_batch_size: 1000,
+            evaluation_event_tx: event_tx,
+            evaluation_flush_interval: std::time::Duration::from_secs(30),
+            evaluation_flush_batch_size: 500,
+            evaluation_event_queue_capacity: 10,
+            evaluation_event_dropped: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            retry_config: crate::config::RetryConfig::default(),
+        }
+    }
+
+    fn test_app_state(mapped_cache: Arc<crate::MappedFeatureCache>) -> crate::AppState {
+        test_app_state_with_endpoint(mapped_cache, "http://127.0.0.1:50051")
+    }
+
+    async fn start_mock_backend() -> (String, Arc<MockBackendState>, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind mock backend listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let incoming = TcpListenerStream::new(listener);
+        let state = Arc::new(MockBackendState::default());
+        let svc = MockBackend {
+            state: state.clone(),
+        };
+        let router = Server::builder().add_service(FeatureEvaluationServer::new(svc));
+        let handle = tokio::spawn(async move {
+            router
+                .serve_with_incoming(incoming)
+                .await
+                .expect("mock backend should run");
+        });
+
+        (format!("http://{}", addr), state, handle)
+    }
 
     #[tokio::test]
     async fn test_send_initial_subscribe_with_cached_keys() {
@@ -665,40 +396,13 @@ mod tests {
             mapped_cache.insert(feature).await;
         }
 
-        // Create AppState with the populated cache
-        let channel = Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
-        let grpc_client =
-            crate::pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
-
-        let client_info_cache = Arc::new(crate::ClientInfoCache::new(
-            std::time::Duration::from_secs(300),
-        ));
-        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(10);
-
-        let app_state = crate::AppState {
-            mapped_cache,
-            client_info_cache,
-            grpc: Arc::new(tokio::sync::Mutex::new(grpc_client)),
-            client_id: "test-client-id".to_string(),
-            client_secret: "test-secret".to_string(),
-            connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            assigned_cache: Arc::new(dashmap::DashMap::new()),
-            pending_assignments: Arc::new(crossbeam::queue::SegQueue::new()),
-            flush_interval: std::time::Duration::from_secs(10),
-            assignment_flush_batch_size: 1000,
-            evaluation_event_tx: event_tx,
-            evaluation_flush_interval: std::time::Duration::from_secs(30),
-            evaluation_flush_batch_size: 500,
-            evaluation_event_queue_capacity: 10,
-            evaluation_event_dropped: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            retry_config: crate::config::RetryConfig::default(),
-        };
+        let app_state = test_app_state(mapped_cache);
 
         // Create a channel to send the subscribe request
         let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::pb::StreamRequest>(10);
 
         // Call send_initial_subscribe
-        send_initial_subscribe(&tx, &app_state).await;
+        send_initial_subscribe(&tx, &app_state, false).await;
 
         // Receive the message
         let received = rx.recv().await;
@@ -735,38 +439,11 @@ mod tests {
     async fn test_send_initial_subscribe_with_empty_cache() {
         // Create an empty cache
         let mapped_cache = Arc::new(crate::MappedFeatureCache::new(100));
-
-        let channel = Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
-        let grpc_client =
-            crate::pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
-
-        let client_info_cache = Arc::new(crate::ClientInfoCache::new(
-            std::time::Duration::from_secs(300),
-        ));
-        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(10);
-
-        let app_state = crate::AppState {
-            mapped_cache,
-            client_info_cache,
-            grpc: Arc::new(tokio::sync::Mutex::new(grpc_client)),
-            client_id: "test-client-id".to_string(),
-            client_secret: "test-secret".to_string(),
-            connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            assigned_cache: Arc::new(dashmap::DashMap::new()),
-            pending_assignments: Arc::new(crossbeam::queue::SegQueue::new()),
-            flush_interval: std::time::Duration::from_secs(10),
-            assignment_flush_batch_size: 1000,
-            evaluation_event_tx: event_tx,
-            evaluation_flush_interval: std::time::Duration::from_secs(30),
-            evaluation_flush_batch_size: 500,
-            evaluation_event_queue_capacity: 10,
-            evaluation_event_dropped: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            retry_config: crate::config::RetryConfig::default(),
-        };
+        let app_state = test_app_state(mapped_cache);
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::pb::StreamRequest>(10);
 
-        send_initial_subscribe(&tx, &app_state).await;
+        send_initial_subscribe(&tx, &app_state, false).await;
 
         let received = rx.recv().await;
         assert!(received.is_some());
@@ -781,6 +458,38 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_send_initial_subscribe_forces_full_snapshot_after_lag() {
+        let mapped_cache = Arc::new(crate::MappedFeatureCache::new(100));
+        mapped_cache
+            .insert(Arc::new(evaluation_engine::Feature {
+                id: "id_1".to_string(),
+                key: "feature_key_1".to_string(),
+                feature_type: "Simple".to_string(),
+                active: true,
+                enabled: true,
+                dependencies: vec![],
+                stages: vec![],
+                variants: vec![],
+            }))
+            .await;
+        let app_state = test_app_state(mapped_cache);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::pb::StreamRequest>(10);
+
+        send_initial_subscribe(&tx, &app_state, true).await;
+
+        let received = rx.recv().await.expect("missing subscribe request");
+        match received.payload.expect("missing payload") {
+            crate::pb::stream_request::Payload::Subscribe(subscribe) => {
+                assert!(
+                    subscribe.feature_keys.is_empty(),
+                    "full resync should request a complete snapshot"
+                );
+            }
+            _ => panic!("Expected Subscribe payload"),
+        }
+    }
+
     #[test]
     fn test_assignment_key_format() {
         let key = assignment_key("user-123", "feature-456", "env-789");
@@ -788,35 +497,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_fetch_feature_retry_skips_not_found() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_clone = attempts.clone();
+        let action = move || {
+            let attempts = attempts_clone.clone();
+            async move {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Err::<tonic::Response<pb::GetFeatureByKeyResponse>, tonic::Status>(
+                    tonic::Status::not_found("missing"),
+                )
+            }
+        };
+
+        let result = RetryIf::spawn(
+            ExponentialBackoff::from_millis(0).take(3),
+            action,
+            should_retry_feature_fetch,
+        )
+        .await;
+
+        assert!(matches!(result, Err(status) if status.code() == tonic::Code::NotFound));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_feature_retry_retries_transient_statuses() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_clone = attempts.clone();
+        let action = move || {
+            let attempts = attempts_clone.clone();
+            async move {
+                let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                if attempt == 0 {
+                    Err::<tonic::Response<pb::GetFeatureByKeyResponse>, tonic::Status>(
+                        tonic::Status::unavailable("transient"),
+                    )
+                } else {
+                    Ok(tonic::Response::new(pb::GetFeatureByKeyResponse {
+                        feature: Some(pb::FeatureFull {
+                            id: "feature-id".to_string(),
+                            key: "flag".to_string(),
+                            description: String::new(),
+                            feature_type: "Simple".to_string(),
+                            team_id: "team-1".to_string(),
+                            created_at: "2026-03-26T00:00:00Z".to_string(),
+                            active: true,
+                            kill_switch_enabled: true,
+                            kill_switch_activated_at: String::new(),
+                            rollback_scheduled_at: String::new(),
+                            stages: vec![],
+                            dependencies: vec![],
+                            variants: vec![],
+                        }),
+                    }))
+                }
+            }
+        };
+
+        let result = RetryIf::spawn(
+            ExponentialBackoff::from_millis(0).take(3),
+            action,
+            should_retry_feature_fetch,
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
     async fn test_handle_feature_update_populates_cache() {
         // Create test AppState
         let mapped_cache = Arc::new(crate::MappedFeatureCache::new(100));
-        let client_info_cache = Arc::new(crate::ClientInfoCache::new(
-            std::time::Duration::from_secs(300),
-        ));
-        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(10);
-        let channel = Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
-        let grpc_client =
-            crate::pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
-
-        let app_state = crate::AppState {
-            mapped_cache: mapped_cache.clone(),
-            client_info_cache,
-            grpc: Arc::new(tokio::sync::Mutex::new(grpc_client)),
-            client_id: "test-client-id".to_string(),
-            client_secret: "test-secret".to_string(),
-            connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            assigned_cache: Arc::new(dashmap::DashMap::new()),
-            pending_assignments: Arc::new(crossbeam::queue::SegQueue::new()),
-            flush_interval: std::time::Duration::from_secs(10),
-            assignment_flush_batch_size: 1000,
-            evaluation_event_tx: event_tx,
-            evaluation_flush_interval: std::time::Duration::from_secs(30),
-            evaluation_flush_batch_size: 500,
-            evaluation_event_queue_capacity: 10,
-            evaluation_event_dropped: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            retry_config: crate::config::RetryConfig::default(),
-        };
+        let app_state = test_app_state(mapped_cache.clone());
 
         // Create a test feature
         let test_feature = crate::pb::FeatureFull {
@@ -854,5 +608,181 @@ mod tests {
             "Mapped cache should contain the feature"
         );
         assert_eq!(cached_mapped.unwrap().id, "feature-id-123");
+    }
+
+    #[tokio::test]
+    async fn test_lag_recovery_clears_stale_cache_and_requests_full_snapshot() {
+        let mapped_cache = Arc::new(crate::MappedFeatureCache::new(100));
+        let app_state = test_app_state(mapped_cache.clone());
+
+        let stale_feature = Arc::new(evaluation_engine::Feature {
+            id: "stale-id".to_string(),
+            key: "stale-key".to_string(),
+            feature_type: "Simple".to_string(),
+            active: true,
+            enabled: true,
+            dependencies: vec![],
+            stages: vec![],
+            variants: vec![],
+        });
+        mapped_cache.insert(stale_feature).await;
+        mapped_cache.add_negative("stale-miss").await;
+        app_state.assigned_cache.insert(
+            assignment_key("user-1", "stale-id", "env-1"),
+            crate::CachedAssignment {
+                value: serde_json::json!(true),
+                variant: None,
+                reason: evaluation_engine::EvaluationReason::Static,
+            },
+        );
+        app_state.pending_assignments.push(UserAssignment {
+            user_id: "user-1".to_string(),
+            feature_id: "stale-id".to_string(),
+            environment_id: "env-1".to_string(),
+            assigned: true,
+            variant: None,
+        });
+
+        let lagged = pb::FeatureUpdate {
+            action: pb::feature_update::Action::Error as i32,
+            feature: None,
+            feature_key: String::new(),
+            error: "lagged".to_string(),
+            message_id: "lag-1".to_string(),
+        };
+        assert!(handle_feature_update(&app_state, lagged).await);
+
+        prepare_for_full_resync(&app_state).await;
+        mapped_cache.run_pending_tasks().await;
+        assert_eq!(mapped_cache.entry_count(), 0);
+        assert!(mapped_cache.get("stale-key").await.is_none());
+        assert!(!mapped_cache.is_negative_cached("stale-miss").await);
+        assert!(app_state.assigned_cache.is_empty());
+        assert!(app_state.pending_assignments.pop().is_none());
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::pb::StreamRequest>(10);
+        send_initial_subscribe(&tx, &app_state, true).await;
+        let subscribe = rx.recv().await.expect("missing subscribe message");
+        match subscribe.payload.expect("missing payload") {
+            crate::pb::stream_request::Payload::Subscribe(subscribe) => {
+                assert!(subscribe.feature_keys.is_empty());
+            }
+            _ => panic!("Expected Subscribe payload"),
+        }
+
+        let snapshot_feature = crate::pb::FeatureFull {
+            id: "fresh-id".to_string(),
+            key: "fresh-key".to_string(),
+            description: "Recovered".to_string(),
+            feature_type: "Simple".to_string(),
+            team_id: "team-1".to_string(),
+            created_at: "2024-01-01".to_string(),
+            active: true,
+            kill_switch_enabled: true,
+            kill_switch_activated_at: String::new(),
+            rollback_scheduled_at: String::new(),
+            stages: vec![],
+            dependencies: vec![],
+            variants: vec![],
+        };
+        let snapshot = crate::pb::FeatureUpdate {
+            action: crate::pb::feature_update::Action::Snapshot as i32,
+            feature: Some(snapshot_feature.clone()),
+            feature_key: snapshot_feature.key.clone(),
+            error: String::new(),
+            message_id: "snapshot-1".to_string(),
+        };
+
+        assert!(!handle_feature_update(&app_state, snapshot).await);
+        let recovered = mapped_cache.get("fresh-key").await;
+        assert!(
+            recovered.is_some(),
+            "fresh snapshot should repopulate cache"
+        );
+        assert_eq!(recovered.unwrap().id, "fresh-id");
+        assert!(mapped_cache.get("stale-key").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_run_flush_task_requeues_assignments_after_failure() {
+        let (endpoint, state, server_handle) = start_mock_backend().await;
+        let mapped_cache = Arc::new(crate::MappedFeatureCache::new(100));
+        let mut app_state = test_app_state_with_endpoint(mapped_cache, &endpoint);
+        app_state.flush_interval = std::time::Duration::from_millis(0);
+        let user_id = "user-1".to_string();
+        let feature_id = "feature-1".to_string();
+        let environment_id = "env-1".to_string();
+        app_state.pending_assignments.push(UserAssignment {
+            user_id: user_id.clone(),
+            feature_id: feature_id.clone(),
+            environment_id: environment_id.clone(),
+            assigned: true,
+            variant: Some("variant-a".to_string()),
+        });
+
+        let task = tokio::spawn(run_flush_task(app_state.clone()));
+
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if state.assignment_attempts.load(Ordering::SeqCst) >= 2
+                    && app_state.pending_assignments.pop().is_none()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("assignment flush should retry and drain");
+
+        assert_eq!(state.assignment_attempts.load(Ordering::SeqCst), 2);
+        assert!(app_state.pending_assignments.pop().is_none());
+
+        task.abort();
+        server_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_run_evaluation_flush_task_retries_transient_failure() {
+        let (endpoint, state, server_handle) = start_mock_backend().await;
+        let mapped_cache = Arc::new(crate::MappedFeatureCache::new(100));
+        let mut app_state = test_app_state_with_endpoint(mapped_cache, &endpoint);
+        app_state.evaluation_flush_interval = std::time::Duration::from_millis(0);
+        app_state.retry_config.base_delay_ms = 0;
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(10);
+        let event = crate::EvaluationEvent {
+            feature_key: "feature-a".to_string(),
+            environment_id: "env-a".to_string(),
+            evaluation_result: true,
+            evaluation_context: crate::handlers::EvaluateContext {
+                bucketing_key: "user-1".to_string(),
+                environment_id: "env-a".to_string(),
+                attributes: std::collections::HashMap::new(),
+            },
+            user_context: Some("user-1".to_string()),
+            evaluated_at: std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(42),
+            prior_assignment: false,
+            variant: Some("control".to_string()),
+            variant_value: Some(serde_json::json!({"enabled": true})),
+        };
+        event_tx.send(event).await.expect("queue event");
+        drop(event_tx);
+
+        let task = tokio::spawn(run_evaluation_flush_task(app_state.clone(), event_rx));
+
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if state.evaluation_attempts.load(Ordering::SeqCst) >= 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("evaluation flush should retry");
+
+        assert_eq!(state.evaluation_attempts.load(Ordering::SeqCst), 2);
+        task.abort();
+        server_handle.abort();
     }
 }

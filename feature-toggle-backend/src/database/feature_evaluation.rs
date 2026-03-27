@@ -1,6 +1,7 @@
 #![allow(deprecated)]
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use sqlx::types::chrono::{DateTime, Utc};
 use uuid::Uuid;
 
@@ -27,6 +28,8 @@ pub struct FeatureEvaluationRow {
     pub evaluation_value: Option<serde_json::Value>,
     /// The variant name that was served (if applicable)
     pub variant: Option<String>,
+    /// Stable fingerprint used to make ingestion idempotent.
+    pub ingest_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,6 +53,42 @@ pub struct CreateFeatureEvaluation {
     pub evaluation_value: Option<serde_json::Value>,
     /// The variant name that was served (if applicable)
     pub variant: Option<String>,
+}
+
+#[derive(Serialize)]
+struct EvaluationIngestFingerprint<'a> {
+    feature_key: &'a str,
+    environment_id: &'a str,
+    client_id: Uuid,
+    evaluated_at_unix_ms: i64,
+    #[allow(deprecated)]
+    evaluation_result: bool,
+    evaluation_context: &'a Option<serde_json::Value>,
+    user_context: &'a Option<String>,
+    prior_assignment: bool,
+    evaluation_success: bool,
+    evaluation_value: &'a Option<serde_json::Value>,
+    variant: &'a Option<String>,
+}
+
+fn evaluation_ingest_fingerprint(evaluation: &CreateFeatureEvaluation) -> String {
+    let payload = EvaluationIngestFingerprint {
+        feature_key: &evaluation.feature_key,
+        environment_id: &evaluation.environment_id,
+        client_id: evaluation.client_id,
+        evaluated_at_unix_ms: evaluation.evaluated_at.timestamp_millis(),
+        evaluation_result: evaluation.evaluation_result,
+        evaluation_context: &evaluation.evaluation_context,
+        user_context: &evaluation.user_context,
+        prior_assignment: evaluation.prior_assignment,
+        evaluation_success: evaluation.evaluation_success,
+        evaluation_value: &evaluation.evaluation_value,
+        variant: &evaluation.variant,
+    };
+    let encoded = serde_json::to_vec(&payload).expect("evaluation fingerprint serialization");
+    let mut hasher = Sha256::new();
+    hasher.update(encoded);
+    format!("{:x}", hasher.finalize())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -190,6 +229,10 @@ pub struct EvaluationByFeature {
     pub last_evaluated_at: chrono::DateTime<chrono::Utc>,
 }
 
+fn canonical_environment_id(environment_id: Option<&String>) -> Option<Uuid> {
+    environment_id.and_then(|value| Uuid::parse_str(value).ok())
+}
+
 #[derive(Clone)]
 pub struct PgFeatureEvaluationRepository {
     pool: sqlx::PgPool,
@@ -216,20 +259,20 @@ impl PgFeatureEvaluationRepository {
             INSERT INTO feature_evaluations (
                 feature_key, environment_id, client_id, evaluated_at,
                 evaluation_result, evaluation_context, user_context, prior_assignment,
-                evaluation_success, evaluation_value, variant
+                evaluation_success, evaluation_value, variant, ingest_fingerprint
             )
             VALUES
             "#,
         );
 
-        // Build the VALUES clause dynamically - 11 parameters per evaluation
+        // Build the VALUES clause dynamically - 12 parameters per evaluation
         for (i, _) in evaluations.iter().enumerate() {
             if i > 0 {
                 query.push_str(", ");
             }
-            let base = i * 11;
+            let base = i * 12;
             query.push_str(&format!(
-                "(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
+                "(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
                 base + 1,
                 base + 2,
                 base + 3,
@@ -240,15 +283,17 @@ impl PgFeatureEvaluationRepository {
                 base + 8,
                 base + 9,
                 base + 10,
-                base + 11
+                base + 11,
+                base + 12
             ));
         }
-        query.push_str(" RETURNING *");
+        query.push_str(" ON CONFLICT (ingest_fingerprint) DO NOTHING RETURNING *");
 
         let mut sql_query = sqlx::query_as::<_, FeatureEvaluationRow>(&query);
 
         // Bind all parameters
         for evaluation in evaluations {
+            let ingest_fingerprint = evaluation_ingest_fingerprint(evaluation);
             sql_query = sql_query
                 .bind(&evaluation.feature_key)
                 .bind(&evaluation.environment_id)
@@ -260,7 +305,8 @@ impl PgFeatureEvaluationRepository {
                 .bind(evaluation.prior_assignment)
                 .bind(evaluation.evaluation_success)
                 .bind(&evaluation.evaluation_value)
-                .bind(&evaluation.variant);
+                .bind(&evaluation.variant)
+                .bind(ingest_fingerprint);
         }
 
         let rows = sql_query.fetch_all(&self.pool).await?;
@@ -275,14 +321,16 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
         &self,
         evaluation: CreateFeatureEvaluation,
     ) -> Result<FeatureEvaluationRow, sqlx::Error> {
+        let ingest_fingerprint = evaluation_ingest_fingerprint(&evaluation);
         let row = sqlx::query_as::<_, FeatureEvaluationRow>(
             r#"
             INSERT INTO feature_evaluations (
                 feature_key, environment_id, client_id, evaluated_at,
                 evaluation_result, evaluation_context, user_context, prior_assignment,
-                evaluation_success, evaluation_value, variant
+                evaluation_success, evaluation_value, variant, ingest_fingerprint
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            ON CONFLICT (ingest_fingerprint) DO NOTHING
             RETURNING *
             "#,
         )
@@ -297,10 +345,27 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
         .bind(evaluation.evaluation_success)
         .bind(&evaluation.evaluation_value)
         .bind(&evaluation.variant)
-        .fetch_one(&self.pool)
+        .bind(&ingest_fingerprint)
+        .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row)
+        if let Some(row) = row {
+            return Ok(row);
+        }
+
+        sqlx::query_as::<_, FeatureEvaluationRow>(
+            r#"
+            SELECT id, feature_key, environment_id, client_id, evaluated_at,
+                   evaluation_result, evaluation_context, user_context, prior_assignment,
+                   created_at, evaluation_success, evaluation_value, variant,
+                   ingest_fingerprint
+              FROM feature_evaluations
+             WHERE ingest_fingerprint = $1
+            "#,
+        )
+        .bind(&ingest_fingerprint)
+        .fetch_one(&self.pool)
+        .await
     }
 
     async fn bulk_create_evaluations(
@@ -331,46 +396,82 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
         &self,
         filter: FeatureEvaluationFilter,
     ) -> Result<Vec<FeatureEvaluationRow>, sqlx::Error> {
-        let mut query = String::from("SELECT * FROM feature_evaluations WHERE 1=1");
+        let FeatureEvaluationFilter {
+            team_id,
+            feature_key,
+            environment_id,
+            client_id,
+            user_context,
+            prior_assignment,
+            from_date,
+            to_date,
+            limit,
+            offset,
+        } = filter;
+        let canonical_environment_id = canonical_environment_id(environment_id.as_ref());
+        let mut query = String::from(
+            "SELECT fe.id, fe.feature_key, fe.environment_id, fe.client_id, fe.evaluated_at, \
+             fe.evaluation_result, fe.evaluation_context, fe.user_context, fe.prior_assignment, \
+             fe.created_at, fe.evaluation_success, fe.evaluation_value, fe.variant, \
+             fe.ingest_fingerprint \
+             FROM feature_evaluations fe",
+        );
+        if team_id.is_some() {
+            query.push_str(" JOIN environments env ON env.id = fe.environment_ref_id");
+        }
+        query.push_str(" WHERE 1=1");
         let mut param_count = 0;
 
         // Build dynamic WHERE clause
-        if filter.feature_key.is_some() {
+        if team_id.is_some() {
             param_count += 1;
-            query.push_str(&format!(" AND feature_key = ${}", param_count));
+            query.push_str(&format!(" AND env.team_id = ${}", param_count));
         }
-        if filter.environment_id.is_some() {
+        if feature_key.is_some() {
             param_count += 1;
-            query.push_str(&format!(" AND environment_id = ${}", param_count));
+            query.push_str(&format!(" AND fe.feature_key = ${}", param_count));
         }
-        if filter.client_id.is_some() {
-            param_count += 1;
-            query.push_str(&format!(" AND client_id = ${}", param_count));
+        if environment_id.is_some() {
+            if canonical_environment_id.is_some() {
+                let legacy_param = param_count + 1;
+                let canonical_param = param_count + 2;
+                query.push_str(&format!(
+                    " AND (fe.environment_id = ${legacy_param} OR fe.environment_ref_id = ${canonical_param})"
+                ));
+                param_count += 2;
+            } else {
+                param_count += 1;
+                query.push_str(&format!(" AND fe.environment_id = ${}", param_count));
+            }
         }
-        if filter.user_context.is_some() {
+        if client_id.is_some() {
             param_count += 1;
-            query.push_str(&format!(" AND user_context = ${}", param_count));
+            query.push_str(&format!(" AND fe.client_id = ${}", param_count));
         }
-        if filter.prior_assignment.is_some() {
+        if user_context.is_some() {
             param_count += 1;
-            query.push_str(&format!(" AND prior_assignment = ${}", param_count));
+            query.push_str(&format!(" AND fe.user_context = ${}", param_count));
         }
-        if filter.from_date.is_some() {
+        if prior_assignment.is_some() {
             param_count += 1;
-            query.push_str(&format!(" AND evaluated_at >= ${}", param_count));
+            query.push_str(&format!(" AND fe.prior_assignment = ${}", param_count));
         }
-        if filter.to_date.is_some() {
+        if from_date.is_some() {
             param_count += 1;
-            query.push_str(&format!(" AND evaluated_at <= ${}", param_count));
+            query.push_str(&format!(" AND fe.evaluated_at >= ${}", param_count));
+        }
+        if to_date.is_some() {
+            param_count += 1;
+            query.push_str(&format!(" AND fe.evaluated_at <= ${}", param_count));
         }
 
-        query.push_str(" ORDER BY evaluated_at DESC");
+        query.push_str(" ORDER BY fe.evaluated_at DESC");
 
-        if let Some(_limit) = filter.limit {
+        if limit.is_some() {
             param_count += 1;
             query.push_str(&format!(" LIMIT ${}", param_count));
         }
-        if let Some(_offset) = filter.offset {
+        if offset.is_some() {
             param_count += 1;
             query.push_str(&format!(" OFFSET ${}", param_count));
         }
@@ -378,31 +479,37 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
         let mut sql_query = sqlx::query_as::<_, FeatureEvaluationRow>(&query);
 
         // Bind parameters in the same order
-        if let Some(feature_key) = filter.feature_key {
+        if let Some(team_id) = team_id {
+            sql_query = sql_query.bind(team_id);
+        }
+        if let Some(feature_key) = feature_key {
             sql_query = sql_query.bind(feature_key);
         }
-        if let Some(environment_id) = filter.environment_id {
-            sql_query = sql_query.bind(environment_id);
+        if let Some(environment_id) = environment_id {
+            sql_query = sql_query.bind(environment_id.clone());
+            if let Some(canonical_environment_id) = canonical_environment_id {
+                sql_query = sql_query.bind(canonical_environment_id);
+            }
         }
-        if let Some(client_id) = filter.client_id {
+        if let Some(client_id) = client_id {
             sql_query = sql_query.bind(client_id);
         }
-        if let Some(user_context) = filter.user_context {
+        if let Some(user_context) = user_context {
             sql_query = sql_query.bind(user_context);
         }
-        if let Some(prior_assignment) = filter.prior_assignment {
+        if let Some(prior_assignment) = prior_assignment {
             sql_query = sql_query.bind(prior_assignment);
         }
-        if let Some(from_date) = filter.from_date {
+        if let Some(from_date) = from_date {
             sql_query = sql_query.bind(from_date);
         }
-        if let Some(to_date) = filter.to_date {
+        if let Some(to_date) = to_date {
             sql_query = sql_query.bind(to_date);
         }
-        if let Some(limit) = filter.limit {
+        if let Some(limit) = limit {
             sql_query = sql_query.bind(limit);
         }
-        if let Some(offset) = filter.offset {
+        if let Some(offset) = offset {
             sql_query = sql_query.bind(offset);
         }
 
@@ -414,44 +521,65 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
         &self,
         filter: FeatureEvaluationFilter,
     ) -> Result<i64, sqlx::Error> {
-        // Join environments when a team filter is present so we can scope by team_id
+        let FeatureEvaluationFilter {
+            team_id,
+            feature_key,
+            environment_id,
+            client_id,
+            user_context,
+            prior_assignment,
+            from_date,
+            to_date,
+            limit: _,
+            offset: _,
+        } = filter;
+        let canonical_environment_id = canonical_environment_id(environment_id.as_ref());
         let mut query = String::from("SELECT COUNT(*) as count FROM feature_evaluations fe");
-        if filter.team_id.is_some() {
-            query.push_str(" JOIN environments env ON env.id::text = fe.environment_id");
+        if team_id.is_some() {
+            query.push_str(" JOIN environments env ON env.id = fe.environment_ref_id");
         }
         query.push_str(" WHERE 1=1");
         let mut param_count = 0;
 
         // Build dynamic WHERE clause (same as get_evaluations)
-        if filter.team_id.is_some() {
+        if team_id.is_some() {
             param_count += 1;
             query.push_str(&format!(" AND env.team_id = ${}", param_count));
         }
-        if filter.feature_key.is_some() {
+        if feature_key.is_some() {
             param_count += 1;
             query.push_str(&format!(" AND fe.feature_key = ${}", param_count));
         }
-        if filter.environment_id.is_some() {
-            param_count += 1;
-            query.push_str(&format!(" AND fe.environment_id = ${}", param_count));
+        if environment_id.is_some() {
+            if canonical_environment_id.is_some() {
+                let legacy_param = param_count + 1;
+                let canonical_param = param_count + 2;
+                query.push_str(&format!(
+                    " AND (fe.environment_id = ${legacy_param} OR fe.environment_ref_id = ${canonical_param})"
+                ));
+                param_count += 2;
+            } else {
+                param_count += 1;
+                query.push_str(&format!(" AND fe.environment_id = ${}", param_count));
+            }
         }
-        if filter.client_id.is_some() {
+        if client_id.is_some() {
             param_count += 1;
             query.push_str(&format!(" AND fe.client_id = ${}", param_count));
         }
-        if filter.user_context.is_some() {
+        if user_context.is_some() {
             param_count += 1;
             query.push_str(&format!(" AND fe.user_context = ${}", param_count));
         }
-        if filter.prior_assignment.is_some() {
+        if prior_assignment.is_some() {
             param_count += 1;
             query.push_str(&format!(" AND fe.prior_assignment = ${}", param_count));
         }
-        if filter.from_date.is_some() {
+        if from_date.is_some() {
             param_count += 1;
             query.push_str(&format!(" AND fe.evaluated_at >= ${}", param_count));
         }
-        if filter.to_date.is_some() {
+        if to_date.is_some() {
             param_count += 1;
             query.push_str(&format!(" AND fe.evaluated_at <= ${}", param_count));
         }
@@ -459,28 +587,31 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
         let mut sql_query = sqlx::query_scalar::<_, i64>(&query);
 
         // Bind parameters in the same order
-        if let Some(team_id) = filter.team_id {
+        if let Some(team_id) = team_id {
             sql_query = sql_query.bind(team_id);
         }
-        if let Some(feature_key) = filter.feature_key {
+        if let Some(feature_key) = feature_key {
             sql_query = sql_query.bind(feature_key);
         }
-        if let Some(environment_id) = filter.environment_id {
-            sql_query = sql_query.bind(environment_id);
+        if let Some(environment_id) = environment_id {
+            sql_query = sql_query.bind(environment_id.clone());
+            if let Some(canonical_environment_id) = canonical_environment_id {
+                sql_query = sql_query.bind(canonical_environment_id);
+            }
         }
-        if let Some(client_id) = filter.client_id {
+        if let Some(client_id) = client_id {
             sql_query = sql_query.bind(client_id);
         }
-        if let Some(user_context) = filter.user_context {
+        if let Some(user_context) = user_context {
             sql_query = sql_query.bind(user_context);
         }
-        if let Some(prior_assignment) = filter.prior_assignment {
+        if let Some(prior_assignment) = prior_assignment {
             sql_query = sql_query.bind(prior_assignment);
         }
-        if let Some(from_date) = filter.from_date {
+        if let Some(from_date) = from_date {
             sql_query = sql_query.bind(from_date);
         }
-        if let Some(to_date) = filter.to_date {
+        if let Some(to_date) = to_date {
             sql_query = sql_query.bind(to_date);
         }
 
@@ -512,9 +643,10 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
             "#,
             interval_minutes, interval_minutes
         );
+        let canonical_environment_id = canonical_environment_id(environment_id.as_ref());
 
         if team_id.is_some() {
-            query.push_str(" JOIN environments env ON env.id::text = fe.environment_id");
+            query.push_str(" JOIN environments env ON env.id = fe.environment_ref_id");
         }
 
         query.push_str(" WHERE fe.evaluated_at >= $1 AND fe.evaluated_at <= $2");
@@ -531,8 +663,17 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
             query.push_str(&format!(" AND fe.feature_key = ${}", param_count));
         }
         if environment_id.is_some() {
-            param_count += 1;
-            query.push_str(&format!(" AND fe.environment_id = ${}", param_count));
+            if canonical_environment_id.is_some() {
+                let legacy_param = param_count + 1;
+                let canonical_param = param_count + 2;
+                query.push_str(&format!(
+                    " AND (fe.environment_id = ${legacy_param} OR fe.environment_ref_id = ${canonical_param})"
+                ));
+                param_count += 2;
+            } else {
+                param_count += 1;
+                query.push_str(&format!(" AND fe.environment_id = ${}", param_count));
+            }
         }
         if client_id.is_some() {
             param_count += 1;
@@ -553,7 +694,10 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
             sql_query = sql_query.bind(key);
         }
         if let Some(env_id) = environment_id {
-            sql_query = sql_query.bind(env_id);
+            sql_query = sql_query.bind(env_id.clone());
+            if let Some(canonical_environment_id) = canonical_environment_id {
+                sql_query = sql_query.bind(canonical_environment_id);
+            }
         }
         if let Some(c_id) = client_id {
             sql_query = sql_query.bind(c_id);
@@ -592,9 +736,10 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
             FROM feature_evaluations fe
             "#,
         );
+        let canonical_environment_id = canonical_environment_id(environment_id.as_ref());
 
         if team_id.is_some() {
-            query.push_str(" JOIN environments env ON env.id::text = fe.environment_id");
+            query.push_str(" JOIN environments env ON env.id = fe.environment_ref_id");
         }
 
         query.push_str(
@@ -615,8 +760,17 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
             query.push_str(&format!(" AND fe.feature_key = ${}", param_count));
         }
         if environment_id.is_some() {
-            param_count += 1;
-            query.push_str(&format!(" AND fe.environment_id = ${}", param_count));
+            if canonical_environment_id.is_some() {
+                let legacy_param = param_count + 1;
+                let canonical_param = param_count + 2;
+                query.push_str(&format!(
+                    " AND (fe.environment_id = ${legacy_param} OR fe.environment_ref_id = ${canonical_param})"
+                ));
+                param_count += 2;
+            } else {
+                param_count += 1;
+                query.push_str(&format!(" AND fe.environment_id = ${}", param_count));
+            }
         }
         if client_id.is_some() {
             param_count += 1;
@@ -635,7 +789,10 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
             sql_query = sql_query.bind(key);
         }
         if let Some(ref env_id) = environment_id {
-            sql_query = sql_query.bind(env_id);
+            sql_query = sql_query.bind(env_id.clone());
+            if let Some(canonical_environment_id) = canonical_environment_id {
+                sql_query = sql_query.bind(canonical_environment_id);
+            }
         }
         if let Some(c_id) = client_id {
             sql_query = sql_query.bind(c_id);
@@ -652,8 +809,7 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
         );
 
         if team_id.is_some() {
-            top_feature_query
-                .push_str(" JOIN environments env ON env.id::text = fe.environment_id");
+            top_feature_query.push_str(" JOIN environments env ON env.id = fe.environment_ref_id");
         }
 
         top_feature_query.push_str(
@@ -672,8 +828,17 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
             top_feature_query.push_str(&format!(" AND fe.feature_key = ${}", param_count));
         }
         if environment_id.is_some() {
-            param_count += 1;
-            top_feature_query.push_str(&format!(" AND fe.environment_id = ${}", param_count));
+            if canonical_environment_id.is_some() {
+                let legacy_param = param_count + 1;
+                let canonical_param = param_count + 2;
+                top_feature_query.push_str(&format!(
+                    " AND (fe.environment_id = ${legacy_param} OR fe.environment_ref_id = ${canonical_param})"
+                ));
+                param_count += 2;
+            } else {
+                param_count += 1;
+                top_feature_query.push_str(&format!(" AND fe.environment_id = ${}", param_count));
+            }
         }
         if client_id.is_some() {
             param_count += 1;
@@ -693,7 +858,10 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
             top_feature_sql = top_feature_sql.bind(key);
         }
         if let Some(ref env_id) = environment_id {
-            top_feature_sql = top_feature_sql.bind(env_id);
+            top_feature_sql = top_feature_sql.bind(env_id.clone());
+            if let Some(canonical_environment_id) = canonical_environment_id {
+                top_feature_sql = top_feature_sql.bind(canonical_environment_id);
+            }
         }
         if let Some(c_id) = client_id {
             top_feature_sql = top_feature_sql.bind(c_id);
@@ -739,9 +907,10 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
             FROM feature_evaluations fe
             "#,
         );
+        let canonical_environment_id = canonical_environment_id(environment_id.as_ref());
 
         if team_id.is_some() {
-            query.push_str(" JOIN environments env ON env.id::text = fe.environment_id");
+            query.push_str(" JOIN environments env ON env.id = fe.environment_ref_id");
         }
 
         query.push_str(
@@ -758,8 +927,17 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
             query.push_str(&format!(" AND env.team_id = ${}", param_count));
         }
         if environment_id.is_some() {
-            param_count += 1;
-            query.push_str(&format!(" AND fe.environment_id = ${}", param_count));
+            if canonical_environment_id.is_some() {
+                let legacy_param = param_count + 1;
+                let canonical_param = param_count + 2;
+                query.push_str(&format!(
+                    " AND (fe.environment_id = ${legacy_param} OR fe.environment_ref_id = ${canonical_param})"
+                ));
+                param_count += 2;
+            } else {
+                param_count += 1;
+                query.push_str(&format!(" AND fe.environment_id = ${}", param_count));
+            }
         }
         if client_id.is_some() {
             param_count += 1;
@@ -787,7 +965,10 @@ impl FeatureEvaluationRepository for PgFeatureEvaluationRepository {
             sql_query = sql_query.bind(tid);
         }
         if let Some(env_id) = environment_id {
-            sql_query = sql_query.bind(env_id);
+            sql_query = sql_query.bind(env_id.clone());
+            if let Some(canonical_environment_id) = canonical_environment_id {
+                sql_query = sql_query.bind(canonical_environment_id);
+            }
         }
         if let Some(c_id) = client_id {
             sql_query = sql_query.bind(c_id);

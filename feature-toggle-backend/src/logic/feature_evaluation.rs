@@ -488,6 +488,7 @@ mod tests {
             evaluation_success: eval.evaluation_success,
             evaluation_value: eval.evaluation_value,
             variant: eval.variant,
+            ingest_fingerprint: Some("test-fingerprint".to_string()),
         }
     }
 

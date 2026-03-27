@@ -1,6 +1,9 @@
+use feature_toggle_backend::Error;
 use feature_toggle_backend::database::client::{CreateClient, client_repository};
 use feature_toggle_backend::database::entity::ClientType;
+use feature_toggle_backend::database::environment::{CreateEnvironment, environment_repository};
 use feature_toggle_backend::database::init_pg_pool;
+use feature_toggle_backend::database::team::{CreateTeam, team_repository};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -161,6 +164,52 @@ async fn test_create_and_delete_client() {
 
     // cleanup
     repo.delete_client(created.id).await.expect("delete ok");
+}
+
+#[tokio::test]
+async fn test_create_client_rejects_cross_team_environment() {
+    let pool = pool().await;
+    let repo = client_repository(pool.clone());
+    let team_repo = team_repository(pool.clone());
+    let environment_repo = environment_repository(pool.clone());
+
+    let foreign_team = team_repo
+        .create_team(CreateTeam {
+            name: format!("Foreign Team {}", Uuid::new_v4()),
+            description: "foreign team for client integrity test".to_string(),
+        })
+        .await
+        .expect("foreign team should be created");
+
+    let foreign_environment = environment_repo
+        .create_environment(
+            foreign_team.id,
+            CreateEnvironment {
+                name: format!("Foreign Env {}", Uuid::new_v4()),
+                active: true,
+                environment_type: Some("Development".to_string()),
+            },
+        )
+        .await
+        .expect("foreign environment should be created");
+
+    let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+    let input = CreateClient {
+        name: format!("invalid-client-{}", Uuid::new_v4()),
+        description: Some("should fail because env is owned by another team".into()),
+        enabled: true,
+        client_type: ClientType::Web,
+        web_origins: Some(vec!["http://example.invalid".into()]),
+        environment_id: foreign_environment.id,
+    };
+
+    let result = repo.create_client(team_id, input).await;
+    assert!(matches!(result, Err(Error::DatabaseError(_))));
+
+    team_repo
+        .delete_team(foreign_team.id)
+        .await
+        .expect("foreign team cleanup should succeed");
 }
 
 #[tokio::test]

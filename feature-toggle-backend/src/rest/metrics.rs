@@ -1587,7 +1587,14 @@ pub(crate) async fn system_metrics(
 pub(crate) async fn track_metrics(
     metric_logic: web::Data<Box<dyn MetricLogic>>,
     payload: web::Json<TrackMetricsRequest>,
-) -> Result<impl Responder, RestError> {
+) -> Result<HttpResponse, RestError> {
+    track_metrics_handler(metric_logic, payload).await
+}
+
+pub(crate) async fn track_metrics_handler(
+    metric_logic: web::Data<Box<dyn MetricLogic>>,
+    payload: web::Json<TrackMetricsRequest>,
+) -> Result<HttpResponse, RestError> {
     let body = payload.into_inner();
 
     let mut events = Vec::with_capacity(body.events.len());
@@ -1770,13 +1777,106 @@ mod tests {
     };
     use crate::database::client::client_repository;
     use crate::database::feature::{FeatureRepository, MockFeatureRepository};
-    use crate::database::metrics::{CreateMetric, MetricType as DbMetricType, metric_repository};
+    use crate::database::metrics::{
+        CreateMetric, MetricAggregationRow, MetricRow, MetricType as DbMetricType,
+        metric_repository,
+    };
     use crate::logic::client::{ClientLogic, MockClientLogic};
     use crate::logic::environment::{EnvironmentLogic, MockEnvironmentLogic};
-    use crate::logic::metrics::metric_logic;
+    use crate::logic::metrics::{MetricLogic, MetricLogicError, TrackMetricInput, metric_logic};
     use crate::logic::pipeline::{MockPipelineLogic, PipelineLogic};
-    use actix_web::{App, http::StatusCode, test};
+    use actix_web::{App, guard, http::StatusCode, test};
     use sqlx::postgres::PgPoolOptions;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Debug, Clone)]
+    struct RecordedTrackCall {
+        client_id: String,
+        client_secret: String,
+        events: Vec<TrackMetricInput>,
+    }
+
+    #[derive(Clone)]
+    struct RecordingMetricLogic {
+        processed: usize,
+        calls: Arc<Mutex<Vec<RecordedTrackCall>>>,
+    }
+
+    impl RecordingMetricLogic {
+        fn new(processed: usize) -> Self {
+            Self {
+                processed,
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn recorded_calls(&self) -> Vec<RecordedTrackCall> {
+            self.calls
+                .lock()
+                .expect("track call mutex poisoned")
+                .clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MetricLogic for RecordingMetricLogic {
+        async fn create_metric(
+            &self,
+            _team_id: Uuid,
+            _key: String,
+            _name: String,
+            _description: Option<String>,
+            _metric_type: crate::database::metrics::MetricType,
+            _unit: Option<String>,
+            _success_criteria: Option<serde_json::Value>,
+        ) -> Result<MetricRow, MetricLogicError> {
+            unreachable!("create_metric is not used in track_metrics route tests")
+        }
+
+        async fn track_metrics(
+            &self,
+            client_id: &str,
+            client_secret: &str,
+            events: Vec<TrackMetricInput>,
+        ) -> Result<usize, MetricLogicError> {
+            self.calls
+                .lock()
+                .expect("track call mutex poisoned")
+                .push(RecordedTrackCall {
+                    client_id: client_id.to_string(),
+                    client_secret: client_secret.to_string(),
+                    events,
+                });
+            Ok(self.processed)
+        }
+
+        async fn aggregate_metrics(
+            &self,
+            _from: DateTime<Utc>,
+            _to: DateTime<Utc>,
+            _bucket: &str,
+        ) -> Result<u64, MetricLogicError> {
+            unreachable!("aggregate_metrics is not used in track_metrics route tests")
+        }
+
+        async fn get_metric_results(
+            &self,
+            _feature_key: &str,
+            _environment_id: Option<Uuid>,
+            _from: DateTime<Utc>,
+            _to: DateTime<Utc>,
+        ) -> Result<Vec<MetricAggregationRow>, MetricLogicError> {
+            unreachable!("get_metric_results is not used in track_metrics route tests")
+        }
+
+        async fn list_metrics(&self, _team_id: Uuid) -> Result<Vec<MetricRow>, MetricLogicError> {
+            unreachable!("list_metrics is not used in track_metrics route tests")
+        }
+
+        fn clone_box(&self) -> Box<dyn MetricLogic> {
+            Box::new(self.clone())
+        }
+    }
 
     async fn test_pool() -> sqlx::PgPool {
         let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL not set");
@@ -1962,5 +2062,134 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["items"][0]["id"], created.id.to_string());
         assert_eq!(json["items"][0]["activityType"], "team_created");
+    }
+
+    #[actix_web::test]
+    async fn track_metrics_endpoints_share_invalid_input_mapping() {
+        let metric_logic: Box<dyn MetricLogic> = Box::new(RecordingMetricLogic::new(1));
+        let payload = serde_json::json!({
+            "clientId": Uuid::new_v4().to_string(),
+            "clientSecret": "secret",
+            "events": [{
+                "metricKey": "signup_conversion",
+                "userContext": "user-123",
+                "value": 1.0,
+                "environmentId": "not-a-uuid"
+            }]
+        });
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(metric_logic))
+                .service(
+                    web::resource("/metrics/track")
+                        .guard(guard::Post())
+                        .to(super::track_metrics_handler),
+                )
+                .service(web::scope("/api/v1").configure(super::configure)),
+        )
+        .await;
+
+        let root_resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/metrics/track")
+                .set_json(payload.clone())
+                .to_request(),
+        )
+        .await;
+        let root_status = root_resp.status();
+        let root_json: serde_json::Value = test::read_body_json(root_resp).await;
+
+        let scoped_resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/api/v1/metrics/track")
+                .set_json(payload)
+                .to_request(),
+        )
+        .await;
+        let scoped_status = scoped_resp.status();
+        let scoped_json: serde_json::Value = test::read_body_json(scoped_resp).await;
+
+        assert_eq!(root_status, StatusCode::BAD_REQUEST);
+        assert_eq!(root_status, scoped_status);
+        assert_eq!(root_json, scoped_json);
+        assert_eq!(root_json["error"], "invalid_input");
+        assert_eq!(root_json["message"], "invalid environment_id");
+    }
+
+    #[actix_web::test]
+    async fn track_metrics_endpoints_share_success_mapping_and_delegate_same_payload() {
+        let metric_logic = RecordingMetricLogic::new(1);
+        let payload = serde_json::json!({
+            "clientId": Uuid::new_v4().to_string(),
+            "clientSecret": "secret",
+            "events": [{
+                "metricKey": "signup_conversion",
+                "featureKey": "feature-a",
+                "environmentId": Uuid::new_v4().to_string(),
+                "userContext": "user-123",
+                "variant": "control",
+                "value": 1.0,
+                "metadata": { "source": "sdk" },
+                "timestampUnixMs": 1_725_000_000_000_i64
+            }]
+        });
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(
+                    Box::new(metric_logic.clone()) as Box<dyn MetricLogic>
+                ))
+                .service(
+                    web::resource("/metrics/track")
+                        .guard(guard::Post())
+                        .to(super::track_metrics_handler),
+                )
+                .service(web::scope("/api/v1").configure(super::configure)),
+        )
+        .await;
+
+        let root_resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/metrics/track")
+                .set_json(payload.clone())
+                .to_request(),
+        )
+        .await;
+        let root_status = root_resp.status();
+        let root_json: serde_json::Value = test::read_body_json(root_resp).await;
+
+        let scoped_resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/api/v1/metrics/track")
+                .set_json(payload)
+                .to_request(),
+        )
+        .await;
+        let scoped_status = scoped_resp.status();
+        let scoped_json: serde_json::Value = test::read_body_json(scoped_resp).await;
+
+        assert_eq!(root_status, StatusCode::OK);
+        assert_eq!(root_status, scoped_status);
+        assert_eq!(root_json, scoped_json);
+        assert_eq!(root_json["processed"], 1);
+
+        let calls = metric_logic.recorded_calls();
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().all(|call| call.client_secret == "secret"));
+        assert!(calls.iter().all(|call| call.events.len() == 1));
+        assert_eq!(calls[0].client_id, calls[1].client_id);
+
+        let first_event = &calls[0].events[0];
+        assert_eq!(first_event.metric_key, "signup_conversion");
+        assert_eq!(first_event.feature_key.as_deref(), Some("feature-a"));
+        assert_eq!(first_event.variant.as_deref(), Some("control"));
+        assert_eq!(first_event.user_context, "user-123");
+        assert!(first_event.environment_id.is_some());
+        assert!(first_event.timestamp.is_some());
     }
 }

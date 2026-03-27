@@ -545,6 +545,7 @@ pub(crate) async fn assign_user_teams(
     db_pool: web::Data<sqlx::PgPool>,
     activity_repo: web::Data<Box<dyn ActivityLogRepository>>,
     logic: web::Data<Box<dyn UserLogic>>,
+    notification_logic: web::Data<Box<dyn crate::logic::notification::NotificationLogic>>,
     req: HttpRequest,
     user_id: web::Path<String>,
     payload: web::Json<AssignUserTeamsRequest>,
@@ -621,7 +622,8 @@ pub(crate) async fn assign_user_teams(
                     format!("User {assigned_user_name} was added to team '{team_name}'.")
                 };
 
-                crate::logic::notification::dispatch_notification_event(
+                crate::logic::notification::spawn_notification_dispatch(
+                    notification_logic.as_ref().as_ref().clone_box(),
                     crate::logic::notification::NotificationEvent {
                         notification_type:
                             crate::logic::notification::NOTIFICATION_TYPE_USER_ADDED_TO_TEAM
@@ -638,8 +640,7 @@ pub(crate) async fn assign_user_teams(
                             "added_by": actor_name_for_notification.clone(),
                         })),
                     },
-                )
-                .await;
+                );
             }
         }
         Err(err) => {

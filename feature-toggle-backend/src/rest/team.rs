@@ -168,6 +168,7 @@ pub(crate) async fn list_teams(
 pub(crate) async fn create_team(
     db_pool: web::Data<sqlx::PgPool>,
     activity_repo: web::Data<Box<dyn ActivityLogRepository>>,
+    notification_logic: web::Data<Box<dyn crate::logic::notification::NotificationLogic>>,
     req: HttpRequest,
     payload: web::Json<CreateTeamRequest>,
 ) -> Result<impl Responder, RestError> {
@@ -229,7 +230,8 @@ pub(crate) async fn create_team(
                 )
             };
 
-            crate::logic::notification::dispatch_notification_event(
+            crate::logic::notification::spawn_notification_dispatch(
+                notification_logic.as_ref().as_ref().clone_box(),
                 crate::logic::notification::NotificationEvent {
                     notification_type: crate::logic::notification::NOTIFICATION_TYPE_TEAM_CREATED
                         .to_string(),
@@ -244,8 +246,7 @@ pub(crate) async fn create_team(
                         "created_by": created_by,
                     })),
                 },
-            )
-            .await;
+            );
 
             Ok(HttpResponse::Created().json(TeamResponse::from(team)))
         }
@@ -336,11 +337,49 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Error;
     use crate::database::activity_log::PgActivityLogRepository;
+    use crate::logic::notification::{
+        NotificationChannelConfigView, NotificationEvent, NotificationLogic,
+        NotificationPreferenceView, NotificationSettingsView, UpdateNotificationChannelConfigInput,
+        UpdateNotificationPreferenceInput,
+    };
     use crate::logic::team::MockTeamLogic;
     use crate::logic::user::MockUserLogic;
     use actix_web::{App, http::StatusCode, test, web};
     use sqlx::postgres::PgPoolOptions;
+
+    #[derive(Clone)]
+    struct NoopNotificationLogic;
+
+    #[async_trait::async_trait]
+    impl NotificationLogic for NoopNotificationLogic {
+        async fn get_settings(&self) -> Result<NotificationSettingsView, Error> {
+            Err(Error::InvalidInput("not_implemented_for_test".to_string()))
+        }
+
+        async fn update_channel_config(
+            &self,
+            _input: UpdateNotificationChannelConfigInput,
+        ) -> Result<NotificationChannelConfigView, Error> {
+            Err(Error::InvalidInput("not_implemented_for_test".to_string()))
+        }
+
+        async fn update_preference(
+            &self,
+            _input: UpdateNotificationPreferenceInput,
+        ) -> Result<NotificationPreferenceView, Error> {
+            Err(Error::InvalidInput("not_implemented_for_test".to_string()))
+        }
+
+        async fn dispatch_event(&self, _event: NotificationEvent) -> Result<(), Error> {
+            Ok(())
+        }
+
+        fn clone_box(&self) -> Box<dyn NotificationLogic> {
+            Box::new(self.clone())
+        }
+    }
 
     fn sample_team(team_id: Uuid) -> crate::model::Team {
         crate::model::Team {
@@ -428,6 +467,9 @@ mod tests {
                 .app_data(web::Data::new(
                     Box::new(activity_repo) as Box<dyn ActivityLogRepository>
                 ))
+                .app_data(web::Data::new(
+                    Box::new(NoopNotificationLogic) as Box<dyn NotificationLogic>
+                ))
                 .service(web::scope("/api/v1").configure(super::configure)),
         )
         .await;
@@ -454,6 +496,9 @@ mod tests {
                 .app_data(web::Data::new(pool))
                 .app_data(web::Data::new(
                     Box::new(activity_repo) as Box<dyn ActivityLogRepository>
+                ))
+                .app_data(web::Data::new(
+                    Box::new(NoopNotificationLogic) as Box<dyn NotificationLogic>
                 ))
                 .service(web::scope("/api/v1").configure(super::configure)),
         )

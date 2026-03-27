@@ -37,7 +37,7 @@ where
     let team_uuid = Uuid::try_from(team_id).map_err(|e| Error::InvalidInput(e.to_string()))?;
     let pipeline_name = input.name.clone();
 
-    let db_input = map_to_create_pipeline(team_uuid, input);
+    let db_input = map_to_create_pipeline(team_uuid, input)?;
 
     if db_input.name.is_empty() {
         return Err(Error::InvalidInput(
@@ -93,7 +93,7 @@ pub async fn update_pipeline_in_tx<R>(
 where
     R: PipelineRepositoryTx,
 {
-    let db_input = map_to_update_pipeline(id, input);
+    let db_input = map_to_update_pipeline(id, input)?;
 
     // Update pipeline within transaction
     let pipeline = repo.update_pipeline_tx(conn, db_input).await?;
@@ -179,20 +179,23 @@ where
 
 // Helper functions copied from pipeline.rs to avoid circular dependencies
 
-fn map_to_create_pipeline(team_id: Uuid, input: CreatePipelineInput) -> CreatePipeline {
+fn map_to_create_pipeline(
+    team_id: Uuid,
+    input: CreatePipelineInput,
+) -> Result<CreatePipeline, Error> {
     let mut pipeline = CreatePipeline {
         team_id,
         name: input.name.clone(),
         stages: vec![],
     };
 
-    let stages = get_stages_to_create(input.stages, input.relationships);
+    let stages = get_stages_to_create(input.stages, input.relationships)?;
     pipeline.stages = stages;
-    pipeline
+    Ok(pipeline)
 }
 
-fn map_to_update_pipeline(id: ID, input: UpdatePipelineInput) -> UpdatePipeline {
-    let id = Uuid::try_from(id).unwrap();
+fn map_to_update_pipeline(id: ID, input: UpdatePipelineInput) -> Result<UpdatePipeline, Error> {
+    let id = id_to_uuid(id)?;
     let mut update = UpdatePipeline {
         id,
         name: input.name,
@@ -200,27 +203,27 @@ fn map_to_update_pipeline(id: ID, input: UpdatePipelineInput) -> UpdatePipeline 
         stages: vec![],
     };
 
-    update.stages = get_stages_to_create(input.stages, input.relationships);
-    update
+    update.stages = get_stages_to_create(input.stages, input.relationships)?;
+    Ok(update)
 }
 
 fn get_stages_to_create(
     stages: Vec<CreateStageInput>,
     relationships: Vec<CreateRelationshipInput>,
-) -> Vec<CreateStage> {
+) -> Result<Vec<CreateStage>, Error> {
     let stages = stages
         .into_iter()
         .map(|stage| {
-            CreateStage::new(
+            Ok(CreateStage::new(
                 Uuid::new_v4(),
-                id_to_uuid(stage.environment_id).unwrap(),
+                id_to_uuid(stage.environment_id)?,
                 stage.order_index,
                 None,
                 stage.position,
-            )
+            ))
         })
-        .collect::<Vec<CreateStage>>();
+        .collect::<Result<Vec<CreateStage>, Error>>()?;
 
     // Use shared relationship building logic
-    build_stage_relationships(stages, relationships)
+    Ok(build_stage_relationships(stages, relationships))
 }

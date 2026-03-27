@@ -110,6 +110,26 @@ pub fn approval_logic(
     approval_events_tx: broadcast::Sender<ApprovalRequestEvent>,
     feature_updates_tx: broadcast::Sender<crate::grpc::pb::FeatureUpdate>,
 ) -> Box<dyn ApprovalLogic> {
+    approval_logic_with_notifications(
+        approval_repository,
+        feature_repository,
+        environment_logic,
+        role_repository,
+        approval_events_tx,
+        feature_updates_tx,
+        None,
+    )
+}
+
+pub fn approval_logic_with_notifications(
+    approval_repository: Box<dyn ApprovalRepository>,
+    feature_repository: Box<dyn FeatureRepository>,
+    environment_logic: Box<dyn EnvironmentLogic>,
+    role_repository: Box<dyn RoleRepository>,
+    approval_events_tx: broadcast::Sender<ApprovalRequestEvent>,
+    feature_updates_tx: broadcast::Sender<crate::grpc::pb::FeatureUpdate>,
+    notification_logic: Option<Box<dyn crate::logic::notification::NotificationLogic>>,
+) -> Box<dyn ApprovalLogic> {
     Box::new(ApprovalLogicImpl {
         db_pool: None,
         approval_repository,
@@ -118,6 +138,7 @@ pub fn approval_logic(
         role_repository,
         approval_events_tx,
         feature_updates_tx,
+        notification_logic,
     })
 }
 
@@ -130,6 +151,28 @@ pub fn approval_logic_with_pool(
     approval_events_tx: broadcast::Sender<ApprovalRequestEvent>,
     feature_updates_tx: broadcast::Sender<crate::grpc::pb::FeatureUpdate>,
 ) -> Box<dyn ApprovalLogic> {
+    approval_logic_with_pool_and_notifications(
+        db_pool,
+        approval_repository,
+        feature_repository,
+        environment_logic,
+        role_repository,
+        approval_events_tx,
+        feature_updates_tx,
+        None,
+    )
+}
+
+pub fn approval_logic_with_pool_and_notifications(
+    db_pool: PgPool,
+    approval_repository: Box<dyn ApprovalRepository>,
+    feature_repository: Box<dyn FeatureRepository>,
+    environment_logic: Box<dyn EnvironmentLogic>,
+    role_repository: Box<dyn RoleRepository>,
+    approval_events_tx: broadcast::Sender<ApprovalRequestEvent>,
+    feature_updates_tx: broadcast::Sender<crate::grpc::pb::FeatureUpdate>,
+    notification_logic: Option<Box<dyn crate::logic::notification::NotificationLogic>>,
+) -> Box<dyn ApprovalLogic> {
     Box::new(ApprovalLogicImpl {
         db_pool: Some(db_pool),
         approval_repository,
@@ -138,6 +181,7 @@ pub fn approval_logic_with_pool(
         role_repository,
         approval_events_tx,
         feature_updates_tx,
+        notification_logic,
     })
 }
 
@@ -150,9 +194,16 @@ struct ApprovalLogicImpl {
     role_repository: Box<dyn RoleRepository>,
     approval_events_tx: broadcast::Sender<ApprovalRequestEvent>,
     feature_updates_tx: broadcast::Sender<crate::grpc::pb::FeatureUpdate>,
+    notification_logic: Option<Box<dyn crate::logic::notification::NotificationLogic>>,
 }
 
 impl ApprovalLogicImpl {
+    fn dispatch_notification(&self, event: crate::logic::notification::NotificationEvent) {
+        if let Some(logic) = &self.notification_logic {
+            crate::logic::notification::spawn_notification_dispatch(logic.clone_box(), event);
+        }
+    }
+
     async fn notify_edge_servers(&self, feature_id: Uuid) {
         if let Ok(db_feature) = self.feature_repository.get_feature_by_id(feature_id).await
             && let Ok(full) = crate::broadcast::map_db_feature_to_full_for_broadcast(
@@ -349,28 +400,25 @@ impl ApprovalLogicImpl {
             }
         };
 
-        crate::logic::notification::dispatch_notification_event(
-            crate::logic::notification::NotificationEvent {
-                notification_type:
-                    crate::logic::notification::NOTIFICATION_TYPE_STAGE_CHANGE_APPROVED.to_string(),
-                team_id: Some(team_id),
-                actor_id,
-                subject,
-                message,
-                metadata: Some(serde_json::json!({
-                    "approval_request_id": request.id.to_string(),
-                    "feature_id": request.feature_id.to_string(),
-                    "feature_key": feature_key,
-                    "team_id": team_id.to_string(),
-                    "environment_id": environment_id.map(|id| id.to_string()),
-                    "environment_name": environment_name,
-                    "approved_by": approver_name,
-                    "auto_approved": was_auto_approved,
-                    "status": format!("{:?}", request.status),
-                })),
-            },
-        )
-        .await;
+        self.dispatch_notification(crate::logic::notification::NotificationEvent {
+            notification_type: crate::logic::notification::NOTIFICATION_TYPE_STAGE_CHANGE_APPROVED
+                .to_string(),
+            team_id: Some(team_id),
+            actor_id,
+            subject,
+            message,
+            metadata: Some(serde_json::json!({
+                "approval_request_id": request.id.to_string(),
+                "feature_id": request.feature_id.to_string(),
+                "feature_key": feature_key,
+                "team_id": team_id.to_string(),
+                "environment_id": environment_id.map(|id| id.to_string()),
+                "environment_name": environment_name,
+                "approved_by": approver_name,
+                "auto_approved": was_auto_approved,
+                "status": format!("{:?}", request.status),
+            })),
+        });
     }
 
     async fn apply_vote(
@@ -992,6 +1040,48 @@ mod tests {
     use crate::logic::environment::MockEnvironmentLogic;
     use crate::model::Environment;
     use chrono::Utc;
+    use tokio::sync::mpsc;
+    use tokio::time::{Duration, timeout};
+
+    #[derive(Clone)]
+    struct RecordingNotificationLogic {
+        sender: mpsc::UnboundedSender<String>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::logic::notification::NotificationLogic for RecordingNotificationLogic {
+        async fn get_settings(
+            &self,
+        ) -> Result<crate::logic::notification::NotificationSettingsView, Error> {
+            Err(Error::InvalidInput("unused_in_test".to_string()))
+        }
+
+        async fn update_channel_config(
+            &self,
+            _input: crate::logic::notification::UpdateNotificationChannelConfigInput,
+        ) -> Result<crate::logic::notification::NotificationChannelConfigView, Error> {
+            Err(Error::InvalidInput("unused_in_test".to_string()))
+        }
+
+        async fn update_preference(
+            &self,
+            _input: crate::logic::notification::UpdateNotificationPreferenceInput,
+        ) -> Result<crate::logic::notification::NotificationPreferenceView, Error> {
+            Err(Error::InvalidInput("unused_in_test".to_string()))
+        }
+
+        async fn dispatch_event(
+            &self,
+            event: crate::logic::notification::NotificationEvent,
+        ) -> Result<(), Error> {
+            let _ = self.sender.send(event.notification_type);
+            Ok(())
+        }
+
+        fn clone_box(&self) -> Box<dyn crate::logic::notification::NotificationLogic> {
+            Box::new(self.clone())
+        }
+    }
 
     #[tokio::test]
     async fn test_approve_request_success_with_valid_roles() {
@@ -1108,6 +1198,104 @@ mod tests {
         let result = logic.approve_request(request_id, approver_id, None).await;
 
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_stage_change_approved_notification_uses_injected_notifier() {
+        let mut feature_repo = MockFeatureRepository::new();
+        let mut env_logic = MockEnvironmentLogic::new();
+        let approval_repo = MockApprovalRepository::new();
+        let role_repo = MockRoleRepository::new();
+        let team_id = Uuid::new_v4();
+        let feature_id = Uuid::new_v4();
+        let environment_id = Uuid::new_v4();
+
+        feature_repo
+            .expect_get_feature_by_id()
+            .with(mockall::predicate::eq(feature_id))
+            .times(1)
+            .returning(move |_| {
+                Ok(DbFeature {
+                    id: feature_id,
+                    team_id,
+                    key: "feature-a".to_string(),
+                    description: Some("feature".to_string()),
+                    feature_type: FeatureType::Simple,
+                    active: true,
+                    kill_switch_enabled: false,
+                    kill_switch_activated_at: None,
+                    rollback_scheduled_at: None,
+                    deprecated_at: None,
+                    deprecation_notice: None,
+                    lifecycle_stage: "Active".to_string(),
+                    created_at: Utc::now(),
+                    dependencies: vec![],
+                    last_evaluated_at: None,
+                    evaluation_count_7d: 0,
+                    evaluation_count_30d: 0,
+                    evaluation_count_90d: 0,
+                })
+            });
+
+        env_logic
+            .expect_get_environment_by_id()
+            .with(mockall::predicate::eq(ID::from(environment_id)))
+            .times(1)
+            .returning(move |_| {
+                Ok(Environment {
+                    id: ID::from(environment_id),
+                    name: "Production".to_string(),
+                    active: true,
+                    team_id: ID::from(team_id),
+                    environment_type: "Production".to_string(),
+                })
+            });
+
+        let (approval_events_tx, _) = tokio::sync::broadcast::channel(4);
+        let (feature_updates_tx, _) = tokio::sync::broadcast::channel(4);
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let logic = ApprovalLogicImpl {
+            db_pool: Some(sqlx::PgPool::connect_lazy("postgres://unused").expect("lazy pool")),
+            approval_repository: Box::new(approval_repo),
+            feature_repository: Box::new(feature_repo),
+            environment_logic: Box::new(env_logic),
+            role_repository: Box::new(role_repo),
+            approval_events_tx,
+            feature_updates_tx,
+            notification_logic: Some(Box::new(RecordingNotificationLogic { sender })),
+        };
+
+        let request = ApprovalRequest {
+            id: Uuid::new_v4(),
+            policy_id: Uuid::new_v4(),
+            feature_id,
+            environment_id: Some(environment_id),
+            change_type: "stage_change".into(),
+            change_payload: serde_json::json!({
+                "next_status": "DEPLOYMENT_REQUESTED"
+            }),
+            change_description: None,
+            requested_by: Uuid::new_v4(),
+            status: ApprovalStatus::Approved,
+            approved_count: 1,
+            rejected_count: 0,
+            executed_at: Some(Utc::now()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        logic
+            .dispatch_stage_change_approved_notification(&request, team_id, None)
+            .await;
+
+        let notification_type = timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("notification task should complete")
+            .expect("notification channel should receive an event");
+        assert_eq!(
+            notification_type,
+            crate::logic::notification::NOTIFICATION_TYPE_STAGE_CHANGE_APPROVED
+        );
     }
 
     // Note: test_approve_request_fails_without_approver_role was removed due to mockall limitations

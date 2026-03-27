@@ -203,9 +203,10 @@ The backend will:
 
 ### Seed test data
 
-If you want the database populated with the provided schema fixtures:
+If you want the database populated with the provided seed fixtures after migrations:
 
 ```bash
+sqlx migrate run --database-url "$DATABASE_URL" --source feature-toggle-backend/migrations
 psql "$DATABASE_URL" -f init.sql
 ```
 

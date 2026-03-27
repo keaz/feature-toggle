@@ -4,8 +4,8 @@ use feature_toggle_backend::database::notification::{
     notification_repository,
 };
 use feature_toggle_backend::logic::notification::{
-    NOTIFICATION_TYPE_FEATURE_CREATED, NotificationEvent, dispatch_notification_event,
-    install_global_notification_logic, notification_logic,
+    NOTIFICATION_TYPE_FEATURE_CREATED, NotificationEvent, notification_logic,
+    spawn_notification_dispatch,
 };
 use sqlx::Row;
 use std::collections::HashMap;
@@ -178,7 +178,7 @@ async fn dispatch_feature_created_creates_email_and_sms_deliveries_for_team_admi
 }
 
 #[tokio::test]
-async fn global_dispatch_notification_event_creates_delivery_async() {
+async fn explicit_async_notification_dispatch_creates_delivery_async() {
     let _guard = notification_test_mutex().lock().await;
 
     let pool = init_pg_pool().await;
@@ -249,7 +249,6 @@ async fn global_dispatch_notification_event_creates_delivery_async() {
 
     let repo = notification_repository(pool.clone());
     let logic = notification_logic(repo.clone_box());
-    install_global_notification_logic(logic);
 
     repo.upsert_channel_config(UpsertNotificationChannelConfigInput {
         channel: "email".to_string(),
@@ -280,15 +279,17 @@ async fn global_dispatch_notification_event_creates_delivery_async() {
     .await
     .expect("failed to configure preference");
 
-    dispatch_notification_event(NotificationEvent {
-        notification_type: NOTIFICATION_TYPE_FEATURE_CREATED.to_string(),
-        team_id: Some(team_id),
-        actor_id: None,
-        subject: subject.clone(),
-        message: "Async global dispatch message.".to_string(),
-        metadata: Some(serde_json::json!({"kind": "async_global_dispatch"})),
-    })
-    .await;
+    spawn_notification_dispatch(
+        logic.clone_box(),
+        NotificationEvent {
+            notification_type: NOTIFICATION_TYPE_FEATURE_CREATED.to_string(),
+            team_id: Some(team_id),
+            actor_id: None,
+            subject: subject.clone(),
+            message: "Async global dispatch message.".to_string(),
+            metadata: Some(serde_json::json!({"kind": "async_global_dispatch"})),
+        },
+    );
 
     let start = tokio::time::Instant::now();
     loop {

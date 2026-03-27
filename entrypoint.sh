@@ -14,14 +14,6 @@ echo "PostgreSQL is up - executing migrations"
 cd /app
 sqlx feature-toggle-backend/migrate run --database-url ${DATABASE_URL}
 
-echo "Migrations completed - executing init.sql"
-
-# Execute init.sql
-PGPASSWORD=local123 psql -h postgres_server -U postgres -d feature_toggle -f /app/init.sql
-
-echo "Init script executed - starting application"
+echo "Migrations completed - running tests"
 
 cargo test
-
-# Start the application
-#exec feature-toggle-backend

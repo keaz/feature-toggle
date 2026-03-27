@@ -17,12 +17,9 @@ use crate::middleware::access_log::AccessLogger;
 use crate::middleware::admin_guard::{AdminGuard, AdminState};
 use crate::middleware::jwt_guard::JwtGuard;
 use actix_cors::Cors;
-use actix_web::error::{
-    ErrorBadRequest, ErrorConflict, ErrorForbidden, ErrorInternalServerError, ErrorUnauthorized,
-};
-use actix_web::{App, HttpResponse, HttpServer, Result, guard, web};
-use chrono::{DateTime, Utc};
+use actix_web::{App, HttpServer, guard, web};
 use log::error;
+use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
@@ -42,7 +39,7 @@ pub enum Error {
 }
 
 pub async fn run() -> std::io::Result<()> {
-    setup_logger().unwrap();
+    setup_logger()?;
 
     // Load configuration (from TOML or defaults)
     let cfg = crate::config::Config::load();
@@ -75,7 +72,6 @@ pub async fn run() -> std::io::Result<()> {
     let notification_repository = database::notification::notification_repository(db_pool.clone());
     let notification_logic =
         logic::notification::notification_logic(notification_repository.clone_box());
-    logic::notification::install_global_notification_logic(notification_logic.clone_box());
     let (approval_events_tx, _approval_events_rx) =
         tokio::sync::broadcast::channel::<logic::approval::ApprovalRequestEvent>(128);
 
@@ -83,7 +79,7 @@ pub async fn run() -> std::io::Result<()> {
     let (updates_tx, _updates_rx) =
         tokio::sync::broadcast::channel::<crate::grpc::pb::FeatureUpdate>(128);
 
-    let approval_logic = logic::approval::approval_logic_with_pool(
+    let approval_logic = logic::approval::approval_logic_with_pool_and_notifications(
         db_pool.clone(),
         approval_repository.clone(),
         feature_repository.clone_box(),
@@ -91,22 +87,25 @@ pub async fn run() -> std::io::Result<()> {
         role_repository.clone(),
         approval_events_tx.clone(),
         updates_tx.clone(),
+        Some(notification_logic.clone_box()),
     );
-    let team_logic = logic::team::team_logic(
+    let team_logic = logic::team::team_logic_with_notifications(
         database::team::team_repository(db_pool.clone()),
         activity_log_repository.clone_box(),
+        Some(notification_logic.clone_box()),
     );
     let pipeline_logic = logic::pipeline::pipeline_logic(
         database::pipeline::pipeline_repository(db_pool.clone()),
         environment_logic.clone(),
         activity_log_repository.clone_box(),
     );
-    let feature_logic = logic::feature::feature_logic_with_approval(
+    let feature_logic = logic::feature::feature_logic_with_approval_and_notifications(
         feature_repository.clone_box(),
         environment_logic.clone(),
         activity_log_repository.clone_box(),
         database::user::user_repository(db_pool.clone()),
         Some(approval_logic.clone()),
+        Some(notification_logic.clone_box()),
     );
 
     let client_logic = logic::client::client_logic(
@@ -129,9 +128,10 @@ pub async fn run() -> std::io::Result<()> {
         database::feature::feature_repository(db_pool.clone()),
         updates_tx.clone(),
     );
-    let user_logic = logic::user::user_logic(
+    let user_logic = logic::user::user_logic_with_notifications(
         database::user::user_repository(db_pool.clone()),
         activity_log_repository.clone_box(),
+        Some(notification_logic.clone_box()),
     );
     let role_logic = logic::role::role_logic(
         database::role::role_repository(db_pool.clone()),
@@ -168,7 +168,7 @@ pub async fn run() -> std::io::Result<()> {
     jwt_secret_logic
         .initialize_secret()
         .await
-        .expect("Failed to initialize JWT secret");
+        .map_err(|e| io::Error::other(format!("Failed to initialize JWT secret: {e}")))?;
     log::info!("JWT secret initialized successfully");
 
     let grpc_pool = db_pool.clone();
@@ -176,9 +176,7 @@ pub async fn run() -> std::io::Result<()> {
     // Clone evaluation events sender for gRPC so original can be used later in HttpServer closure
     let evaluation_events_tx_for_grpc = evaluation_events_tx.clone();
     // Spawn gRPC server on separate task
-    let grpc_addr: std::net::SocketAddr = cfg
-        .grpc_socket_addr()
-        .unwrap_or_else(|_| "0.0.0.0:50051".parse().unwrap());
+    let grpc_addr = resolve_grpc_addr(&cfg)?;
     tokio::spawn(async move {
         if let Err(e) = crate::grpc::serve(
             grpc_pool,
@@ -289,7 +287,7 @@ pub async fn run() -> std::io::Result<()> {
             .service(
                 web::resource("/metrics/track")
                     .guard(guard::Post())
-                    .to(track_metrics_http),
+                    .to(crate::rest::metrics::track_metrics_handler),
             )
             .configure(rest::configure)
             .service(rest::swagger_ui())
@@ -308,65 +306,16 @@ pub struct JwtUser {
     pub token_hash: String, // SHA256 hash of the current token for logout
 }
 
-async fn track_metrics_http(
-    metric_logic: web::Data<Box<dyn crate::logic::metrics::MetricLogic>>,
-    payload: web::Json<crate::rest::metrics::TrackMetricsRequest>,
-) -> Result<HttpResponse, actix_web::Error> {
-    let body = payload.into_inner();
-    let mut events = Vec::with_capacity(body.events.len());
-
-    for ev in body.events {
-        let environment_id = match ev.environment_id {
-            Some(ref env) if !env.is_empty() => {
-                Some(Uuid::parse_str(env).map_err(|_| ErrorBadRequest("invalid environment_id"))?)
-            }
-            _ => None,
-        };
-
-        let timestamp = match ev.timestamp_unix_ms {
-            Some(ts) if ts > 0 => Some(
-                DateTime::<Utc>::from_timestamp_millis(ts)
-                    .ok_or_else(|| ErrorBadRequest("invalid timestamp_unix_ms"))?,
-            ),
-            _ => None,
-        };
-
-        events.push(crate::logic::metrics::TrackMetricInput {
-            metric_key: ev.metric_key,
-            feature_key: ev.feature_key,
-            environment_id,
-            user_context: ev.user_context,
-            variant: ev.variant,
-            value: ev.value,
-            metadata: ev.metadata,
-            timestamp,
-        });
-    }
-
-    let processed = metric_logic
-        .track_metrics(&body.client_id, &body.client_secret, events)
-        .await
-        .map_err(map_metric_logic_error_to_http)?;
-
-    Ok(HttpResponse::Ok().json(serde_json::json!({ "processed": processed })))
-}
-
-fn map_metric_logic_error_to_http(
-    err: crate::logic::metrics::MetricLogicError,
-) -> actix_web::Error {
-    match err {
-        crate::logic::metrics::MetricLogicError::InvalidInput(msg) => ErrorBadRequest(msg),
-        crate::logic::metrics::MetricLogicError::NotFound(msg) => ErrorBadRequest(msg),
-        crate::logic::metrics::MetricLogicError::RecordAlreadyExists(msg) => ErrorConflict(msg),
-        crate::logic::metrics::MetricLogicError::Unauthenticated(msg) => ErrorUnauthorized(msg),
-        crate::logic::metrics::MetricLogicError::PermissionDenied(msg) => ErrorForbidden(msg),
-        crate::logic::metrics::MetricLogicError::Database(e) => {
-            ErrorInternalServerError(format!("database error: {e}"))
-        }
-    }
-}
-
-fn setup_logger() -> Result<(), Box<dyn std::error::Error>> {
-    log4rs::init_file("log4rs.yaml", Default::default())?;
+fn setup_logger() -> io::Result<()> {
+    log4rs::init_file("log4rs.yaml", Default::default())
+        .map_err(|e| io::Error::other(format!("Failed to initialize logger: {e}")))?;
     Ok(())
+}
+
+fn resolve_grpc_addr(cfg: &crate::config::Config) -> io::Result<std::net::SocketAddr> {
+    cfg.grpc_socket_addr().or_else(|_| {
+        "0.0.0.0:50051"
+            .parse()
+            .map_err(|e| io::Error::other(format!("Invalid default gRPC socket address: {e}")))
+    })
 }

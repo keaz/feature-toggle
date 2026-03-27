@@ -155,6 +155,74 @@ impl PipelineRepositoryImpl {
         handle_error(Some(id), result)
     }
 
+    async fn is_pipeline_exists_id_conn(
+        &self,
+        conn: &mut PgConnection,
+        id: Uuid,
+    ) -> Result<Option<Uuid>, Error> {
+        let result = sqlx::query_scalar!(r#"SELECT id FROM pipelines WHERE id = $1"#, id)
+            .fetch_optional(&mut *conn)
+            .await;
+
+        handle_error(Some(id), result)
+    }
+
+    async fn get_pipeline_by_id_conn(
+        &self,
+        conn: &mut PgConnection,
+        id: Uuid,
+    ) -> Result<Pipeline, Error> {
+        let result = sqlx::query_as::<_, PipelineWithStageRow>(
+            r#"SELECT p.id as pipeline_id, p.name as pipeline_name, p.active, p.team_id,
+            s.id as stage_id, s.pipeline_id as pipeline_id_stage, s.environment_id, s.order_index,
+            s.parent_stage_id, s.position FROM pipelines p LEFT JOIN pipeline_stages s ON s.pipeline_id = p.id WHERE p.id = $1"#,
+        )
+        .bind(id)
+        .fetch_all(&mut *conn)
+        .await;
+
+        let pipelines = handle_error(Some(id), result)?;
+        if pipelines.is_empty() {
+            return Err(Error::NotFound(id));
+        }
+
+        Self::map_row_to_pipeline(pipelines)
+    }
+
+    async fn get_pipelines_conn(
+        &self,
+        conn: &mut PgConnection,
+        team_id: Uuid,
+        name: Option<String>,
+        active: Option<bool>,
+    ) -> Result<Vec<Pipeline>, Error> {
+        let mut query_builder = sqlx::QueryBuilder::new(
+            r#"SELECT p.id as pipeline_id, p.name as pipeline_name, p.active, p.team_id,
+            s.id as stage_id, s.pipeline_id as pipeline_id_stage, s.environment_id, s.order_index,
+            s.parent_stage_id, s.position FROM pipelines p LEFT JOIN pipeline_stages s ON s.pipeline_id = p.id"#,
+        );
+        query_builder.push(" WHERE p.team_id = ").push_bind(team_id);
+
+        if let Some(name) = name {
+            query_builder.push(" AND p.name ILIKE ");
+            query_builder.push_bind(format!("%{name}%"));
+        }
+        if let Some(active_value) = active {
+            query_builder
+                .push(" AND p.active = ")
+                .push_bind(active_value);
+        }
+        query_builder.push(" ORDER BY p.name");
+
+        let result = query_builder
+            .build_query_as::<PipelineWithStageRow>()
+            .fetch_all(&mut *conn)
+            .await;
+
+        let pipelines = handle_error(None, result)?;
+        Ok(Self::map_rows_to_pipelines(pipelines))
+    }
+
     async fn create_stage(
         &self,
         pipeline_id: &Uuid,
@@ -540,7 +608,7 @@ impl PipelineRepositoryTx for PipelineRepositoryImpl {
     ) -> Result<Uuid, Error> {
         // Check for existing pipeline
         let existing_pipeline = self
-            .get_pipelines(input.team_id, Some(input.name.clone()), None)
+            .get_pipelines_conn(conn, input.team_id, Some(input.name.clone()), None)
             .await;
 
         if let Ok(existing_pipeline) = existing_pipeline
@@ -570,7 +638,7 @@ impl PipelineRepositoryTx for PipelineRepositoryImpl {
         conn: &mut PgConnection,
         input: UpdatePipeline,
     ) -> Result<Pipeline, Error> {
-        let existing_env = self.get_pipeline_by_id(input.id).await?;
+        let existing_env = self.get_pipeline_by_id_conn(conn, input.id).await?;
         let result = sqlx::query!(
             r#"UPDATE pipelines SET name = $1, active = $2 WHERE id = $3"#,
             input.name.clone().unwrap_or(existing_env.name),
@@ -587,11 +655,11 @@ impl PipelineRepositoryTx for PipelineRepositoryImpl {
                 .await?;
         }
 
-        self.get_pipeline_by_id(input.id).await
+        self.get_pipeline_by_id_conn(conn, input.id).await
     }
 
     async fn delete_pipeline_tx(&self, conn: &mut PgConnection, id: Uuid) -> Result<(), Error> {
-        if self.is_pipeline_exists_id(id).await?.is_none() {
+        if self.is_pipeline_exists_id_conn(conn, id).await?.is_none() {
             return Err(Error::NotFound(id));
         }
 

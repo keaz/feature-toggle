@@ -11,7 +11,6 @@ use lettre::{Message, SmtpTransport, Transport};
 use mockall::automock;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
 use uuid::Uuid;
 
 pub const TEAM_ADMIN_ROLE: &str = "Team Admin";
@@ -808,21 +807,12 @@ impl NotificationLogic for NotificationLogicImpl {
     }
 }
 
-static GLOBAL_NOTIFICATION_LOGIC: OnceLock<Arc<dyn NotificationLogic>> = OnceLock::new();
-
-pub fn install_global_notification_logic(logic: Box<dyn NotificationLogic>) {
-    let _ = GLOBAL_NOTIFICATION_LOGIC.set(Arc::from(logic));
-}
-
-pub async fn dispatch_notification_event(event: NotificationEvent) {
-    if let Some(logic) = GLOBAL_NOTIFICATION_LOGIC.get() {
-        let logic = Arc::clone(logic);
-        tokio::spawn(async move {
-            if let Err(error) = logic.dispatch_event(event).await {
-                log::error!("notification dispatch failed: {error}");
-            }
-        });
-    }
+pub fn spawn_notification_dispatch(logic: Box<dyn NotificationLogic>, event: NotificationEvent) {
+    tokio::spawn(async move {
+        if let Err(error) = logic.dispatch_event(event).await {
+            log::error!("notification dispatch failed: {error}");
+        }
+    });
 }
 
 #[cfg(test)]
@@ -1026,24 +1016,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_notification_event_runs_in_background() {
+    async fn spawn_notification_dispatch_runs_in_background() {
         let (sender, mut receiver) = mpsc::unbounded_channel::<String>();
-        install_global_notification_logic(Box::new(TestNotificationLogic {
+        let logic = Box::new(TestNotificationLogic {
             delay: Duration::from_millis(250),
             sender,
-        }));
+        });
 
         let subject = format!("bg-dispatch-{}", Uuid::new_v4());
         let start = tokio::time::Instant::now();
-        dispatch_notification_event(NotificationEvent {
-            notification_type: NOTIFICATION_TYPE_FEATURE_CREATED.to_string(),
-            team_id: Some(Uuid::new_v4()),
-            actor_id: None,
-            subject: subject.clone(),
-            message: "background dispatch test".to_string(),
-            metadata: None,
-        })
-        .await;
+        spawn_notification_dispatch(
+            logic,
+            NotificationEvent {
+                notification_type: NOTIFICATION_TYPE_FEATURE_CREATED.to_string(),
+                team_id: Some(Uuid::new_v4()),
+                actor_id: None,
+                subject: subject.clone(),
+                message: "background dispatch test".to_string(),
+                metadata: None,
+            },
+        );
 
         assert!(start.elapsed() < Duration::from_millis(100));
 

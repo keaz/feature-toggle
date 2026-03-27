@@ -5,7 +5,7 @@
 //! nodes register themselves in the database and discover peers by querying
 //! the cluster_nodes table.
 
-use chrono::{DateTime, Utc};
+use chrono::NaiveDateTime;
 use sqlx::PgPool;
 
 /// Result type for cluster database operations
@@ -29,8 +29,8 @@ pub enum ClusterDbError {
 pub struct ClusterNode {
     pub node_id: String,
     pub listen_addr: String,
-    pub last_heartbeat: DateTime<Utc>,
-    pub created_at: DateTime<Utc>,
+    pub last_heartbeat: NaiveDateTime,
+    pub created_at: NaiveDateTime,
 }
 
 /// Repository for cluster node database operations
@@ -259,8 +259,8 @@ mod tests {
             .await
             .expect("Failed to connect to test database");
 
-        // Clean up any existing test nodes
-        sqlx::query("DELETE FROM cluster_nodes WHERE node_id LIKE 'test-%'")
+        // Isolate tests from any previously registered cluster nodes.
+        sqlx::query("DELETE FROM cluster_nodes")
             .execute(&pool)
             .await
             .expect("Failed to clean up test data");
@@ -269,14 +269,14 @@ mod tests {
     }
 
     async fn cleanup_test_db(pool: &PgPool) {
-        sqlx::query("DELETE FROM cluster_nodes WHERE node_id LIKE 'test-%'")
+        sqlx::query("DELETE FROM cluster_nodes")
             .execute(pool)
             .await
             .expect("Failed to clean up test data");
     }
 
     #[tokio::test]
-    #[ignore] // Temporarily ignored - database repository tests may hang. TODO: Fix potential async issues
+    #[serial_test::serial]
     async fn test_register_node() {
         let pool = setup_test_db().await;
         let repo = ClusterNodeRepo::new(pool.clone());
@@ -295,7 +295,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Temporarily ignored - database repository tests may hang. TODO: Fix potential async issues
+    #[serial_test::serial]
     async fn test_register_node_upsert() {
         let pool = setup_test_db().await;
         let repo = ClusterNodeRepo::new(pool.clone());
@@ -318,7 +318,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Temporarily ignored - database repository tests may hang. TODO: Fix potential async issues
+    #[serial_test::serial]
     async fn test_register_node_empty_id() {
         let pool = setup_test_db().await;
         let repo = ClusterNodeRepo::new(pool.clone());
@@ -330,7 +330,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Temporarily ignored - database repository tests may hang. TODO: Fix potential async issues
+    #[serial_test::serial]
     async fn test_heartbeat() {
         let pool = setup_test_db().await;
         let repo = ClusterNodeRepo::new(pool.clone());
@@ -355,7 +355,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Temporarily ignored - database repository tests may hang. TODO: Fix potential async issues
+    #[serial_test::serial]
     async fn test_heartbeat_nonexistent_node() {
         let pool = setup_test_db().await;
         let repo = ClusterNodeRepo::new(pool.clone());
@@ -367,7 +367,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Temporarily ignored - database repository tests may hang. TODO: Fix potential async issues
+    #[serial_test::serial]
     async fn test_get_active_peers() {
         let pool = setup_test_db().await;
         let repo = ClusterNodeRepo::new(pool.clone());
@@ -394,7 +394,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Temporarily ignored - database repository tests may hang. TODO: Fix potential async issues
+    #[serial_test::serial]
     async fn test_get_active_peers_excludes_stale() {
         let pool = setup_test_db().await;
         let repo = ClusterNodeRepo::new(pool.clone());
@@ -424,7 +424,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Temporarily ignored - database repository tests may hang. TODO: Fix potential async issues
+    #[serial_test::serial]
     async fn test_deregister_node() {
         let pool = setup_test_db().await;
         let repo = ClusterNodeRepo::new(pool.clone());
@@ -446,7 +446,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Temporarily ignored - database repository tests may hang. TODO: Fix potential async issues
+    #[serial_test::serial]
     async fn test_deregister_nonexistent_node() {
         let pool = setup_test_db().await;
         let repo = ClusterNodeRepo::new(pool.clone());
@@ -459,7 +459,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Temporarily ignored - database repository tests may hang. TODO: Fix potential async issues
+    #[serial_test::serial]
     async fn test_cleanup_stale_nodes() {
         let pool = setup_test_db().await;
         let repo = ClusterNodeRepo::new(pool.clone());
@@ -502,7 +502,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Temporarily ignored - database repository tests may hang. TODO: Fix potential async issues
+    #[serial_test::serial]
     async fn test_get_all_nodes() {
         let pool = setup_test_db().await;
         let repo = ClusterNodeRepo::new(pool.clone());
@@ -529,7 +529,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Temporarily ignored - database repository tests may hang. TODO: Fix potential async issues
+    #[serial_test::serial]
     async fn test_concurrent_registration() {
         let pool = setup_test_db().await;
         let repo = ClusterNodeRepo::new(pool.clone());

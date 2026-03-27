@@ -51,6 +51,70 @@ fn valid_env_id() -> String {
     "51ecc366-f1cd-4d3d-ab73-fa60bad98f27".to_string()
 }
 
+fn test_client(
+    id: Uuid,
+    team_id: Uuid,
+    environment_id: Uuid,
+    secret: &str,
+    client_type: db::ClientType,
+    enabled: bool,
+) -> db::Client {
+    db::Client {
+        id,
+        team_id,
+        environment_id,
+        name: "Client".into(),
+        description: None,
+        enabled,
+        client_type,
+        api_key: secret.to_string(),
+        web_origins: None,
+    }
+}
+
+fn test_feature(
+    id: Uuid,
+    key: &str,
+    team_id: Uuid,
+    active: bool,
+    kill_switch_enabled: bool,
+    dependencies: Vec<db::FeatureDependency>,
+) -> db::Feature {
+    db::Feature {
+        id,
+        key: key.to_string(),
+        description: Some(String::new()),
+        feature_type: db::FeatureType::Simple,
+        team_id,
+        active,
+        created_at: chrono::Utc::now(),
+        kill_switch_enabled,
+        kill_switch_activated_at: None,
+        rollback_scheduled_at: Some(chrono::Utc::now() + chrono::Duration::minutes(30)),
+        lifecycle_stage: "active".to_string(),
+        deprecated_at: None,
+        deprecation_notice: None,
+        last_evaluated_at: None,
+        evaluation_count_7d: 0,
+        evaluation_count_30d: 0,
+        evaluation_count_90d: 0,
+        dependencies,
+    }
+}
+
+fn test_stage(feature_id: Uuid, environment_id: Uuid, enabled: bool) -> db::FeaturePipelineStage {
+    db::FeaturePipelineStage {
+        id: Uuid::new_v4(),
+        feature_id,
+        environment_id,
+        order_index: 0,
+        parent_stage_id: None,
+        position: "Start".into(),
+        enabled,
+        status: "NOT_DEPLOYED".into(),
+    }
+}
+
 async fn recv_update_with_timeout(
     stream: &mut tonic::Streaming<pb::FeatureUpdate>,
     timeout: Duration,
@@ -362,6 +426,230 @@ async fn evaluate_auth_and_success() {
     };
     let resp = client.evaluate(req).await.unwrap().into_inner();
     assert!(resp.enabled);
+}
+
+#[tokio::test]
+async fn evaluate_returns_false_for_kill_switched_feature() {
+    let (cid, sec) = client_ids();
+    let valid_client_id = Uuid::parse_str(&cid).unwrap();
+    let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+    let env_id = team_id;
+
+    let mut client_mock = MockClientRepository::new();
+    let sec_clone = sec.clone();
+    client_mock.expect_get_client_by_id().returning(move |id| {
+        if id == valid_client_id {
+            Ok(test_client(
+                id,
+                team_id,
+                env_id,
+                &sec_clone,
+                db::ClientType::Web,
+                true,
+            ))
+        } else {
+            Err(Error::NotFound(id))
+        }
+    });
+
+    let mut feature_mock = MockFeatureRepository::new();
+    let feature_id = Uuid::new_v4();
+    feature_mock
+        .expect_get_features()
+        .returning(move |_team, key, _ftype| match key.as_deref() {
+            Some("Test Feature") => Ok(vec![test_feature(
+                feature_id,
+                "Test Feature",
+                team_id,
+                true,
+                false,
+                vec![],
+            )]),
+            _ => Ok(vec![]),
+        });
+
+    let (tx, _rx) = broadcast::channel::<pb::FeatureUpdate>(8);
+    let (addr, _server) =
+        start_server_with_repos(Box::new(feature_mock), Box::new(client_mock), tx).await;
+    let endpoint = format!("http://{}", addr);
+    let mut client = FeatureEvaluationClient::connect(endpoint).await.unwrap();
+
+    let req = EvaluateRequest {
+        feature_key: "Test Feature".into(),
+        environment_id: valid_env_id(),
+        context: vec![],
+        feature_id: String::new(),
+        client_id: cid,
+        client_secret: sec,
+    };
+
+    let resp = client.evaluate(req).await.unwrap().into_inner();
+    assert!(!resp.enabled);
+}
+
+#[tokio::test]
+async fn evaluate_returns_false_for_stage_disabled_feature() {
+    let (cid, sec) = client_ids();
+    let valid_client_id = Uuid::parse_str(&cid).unwrap();
+    let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+    let env_id = team_id;
+
+    let mut client_mock = MockClientRepository::new();
+    let sec_clone = sec.clone();
+    client_mock.expect_get_client_by_id().returning(move |id| {
+        if id == valid_client_id {
+            Ok(test_client(
+                id,
+                team_id,
+                env_id,
+                &sec_clone,
+                db::ClientType::Web,
+                true,
+            ))
+        } else {
+            Err(Error::NotFound(id))
+        }
+    });
+
+    let mut feature_mock = MockFeatureRepository::new();
+    let feature_id = Uuid::new_v4();
+    feature_mock
+        .expect_get_features()
+        .returning(move |_team, key, _ftype| match key.as_deref() {
+            Some("Test Feature") => Ok(vec![test_feature(
+                feature_id,
+                "Test Feature",
+                team_id,
+                true,
+                true,
+                vec![],
+            )]),
+            _ => Ok(vec![]),
+        });
+    feature_mock
+        .expect_get_feature_stages()
+        .returning(move |id| {
+            if id == feature_id {
+                Ok(vec![test_stage(feature_id, env_id, false)])
+            } else {
+                Ok(vec![])
+            }
+        });
+    feature_mock
+        .expect_get_stage_criteria()
+        .returning(|_sid| Ok(Vec::new()));
+
+    let (tx, _rx) = broadcast::channel::<pb::FeatureUpdate>(8);
+    let (addr, _server) =
+        start_server_with_repos(Box::new(feature_mock), Box::new(client_mock), tx).await;
+    let endpoint = format!("http://{}", addr);
+    let mut client = FeatureEvaluationClient::connect(endpoint).await.unwrap();
+
+    let req = EvaluateRequest {
+        feature_key: "Test Feature".into(),
+        environment_id: valid_env_id(),
+        context: vec![],
+        feature_id: String::new(),
+        client_id: cid,
+        client_secret: sec,
+    };
+
+    let resp = client.evaluate(req).await.unwrap().into_inner();
+    assert!(!resp.enabled);
+}
+
+#[tokio::test]
+async fn evaluate_returns_false_for_dependency_disabled_by_kill_switch() {
+    let (cid, sec) = client_ids();
+    let valid_client_id = Uuid::parse_str(&cid).unwrap();
+    let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+    let env_id = team_id;
+    let root_id = Uuid::new_v4();
+    let dependency_id = Uuid::new_v4();
+
+    let mut client_mock = MockClientRepository::new();
+    let sec_clone = sec.clone();
+    client_mock.expect_get_client_by_id().returning(move |id| {
+        if id == valid_client_id {
+            Ok(test_client(
+                id,
+                team_id,
+                env_id,
+                &sec_clone,
+                db::ClientType::Web,
+                true,
+            ))
+        } else {
+            Err(Error::NotFound(id))
+        }
+    });
+
+    let mut feature_mock = MockFeatureRepository::new();
+    feature_mock
+        .expect_get_features()
+        .returning(move |_team, key, _ftype| match key.as_deref() {
+            Some("Test Feature") => Ok(vec![test_feature(
+                root_id,
+                "Test Feature",
+                team_id,
+                true,
+                true,
+                vec![db::FeatureDependency {
+                    feature_id: root_id,
+                    depends_on_id: dependency_id,
+                }],
+            )]),
+            _ => Ok(vec![]),
+        });
+    feature_mock
+        .expect_get_feature_by_id()
+        .returning(move |id| {
+            if id == dependency_id {
+                Ok(test_feature(
+                    dependency_id,
+                    "Dependency Feature",
+                    team_id,
+                    true,
+                    false,
+                    vec![],
+                ))
+            } else {
+                Err(Error::NotFound(id))
+            }
+        });
+    feature_mock
+        .expect_get_feature_stages()
+        .returning(move |id| {
+            if id == root_id || id == dependency_id {
+                Ok(vec![test_stage(id, env_id, true)])
+            } else {
+                Ok(vec![])
+            }
+        });
+    feature_mock
+        .expect_get_stage_criteria()
+        .returning(|_sid| Ok(Vec::new()));
+
+    let (tx, _rx) = broadcast::channel::<pb::FeatureUpdate>(8);
+    let (addr, _server) =
+        start_server_with_repos(Box::new(feature_mock), Box::new(client_mock), tx).await;
+    let endpoint = format!("http://{}", addr);
+    let mut client = FeatureEvaluationClient::connect(endpoint).await.unwrap();
+
+    let req = EvaluateRequest {
+        feature_key: "Test Feature".into(),
+        environment_id: valid_env_id(),
+        context: vec![pb::Context {
+            key: "bucketingKey".into(),
+            value: "user-1".into(),
+        }],
+        feature_id: String::new(),
+        client_id: cid,
+        client_secret: sec,
+    };
+
+    let resp = client.evaluate(req).await.unwrap().into_inner();
+    assert!(!resp.enabled);
 }
 
 #[tokio::test]
@@ -1176,4 +1464,189 @@ async fn stream_subscriptions_are_connection_scoped() {
         }
     }
     assert!(got_b, "did not receive feature-B update");
+}
+
+#[tokio::test]
+async fn requested_keys_are_cleared_when_last_stream_disconnects() {
+    use chrono::{Duration as ChronoDuration, Utc};
+
+    let (updates_tx, _updates_rx) = broadcast::channel::<pb::FeatureUpdate>(16);
+    let (cid, sec) = client_ids();
+    let valid_client_id = Uuid::parse_str(&cid).unwrap();
+    let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+    let env_id = team_id;
+
+    let mut client_mock = MockClientRepository::new();
+    let sec_clone = sec.clone();
+    client_mock.expect_get_client_by_id().returning(move |id| {
+        if id == valid_client_id {
+            Ok(db::Client {
+                id,
+                team_id,
+                environment_id: env_id,
+                name: "Client".into(),
+                description: None,
+                enabled: true,
+                client_type: db::ClientType::Web,
+                api_key: sec_clone.clone(),
+                web_origins: None,
+            })
+        } else {
+            Err(Error::NotFound(id))
+        }
+    });
+
+    let mut feature_mock = MockFeatureRepository::new();
+    let feature_a_id = Uuid::new_v4();
+    let feature_b_id = Uuid::new_v4();
+    feature_mock
+        .expect_get_feature_stages()
+        .returning(|_fid| Ok(Vec::new()));
+    feature_mock
+        .expect_get_features()
+        .returning(move |_team, key, _ftype| match key.as_deref() {
+            Some("feature-A") => Ok(vec![db::Feature {
+                id: feature_a_id,
+                key: "feature-A".into(),
+                description: Some(String::new()),
+                feature_type: db::FeatureType::Simple,
+                team_id,
+                active: true,
+                created_at: Utc::now(),
+                kill_switch_enabled: true,
+                kill_switch_activated_at: None,
+                rollback_scheduled_at: Some(Utc::now() + ChronoDuration::minutes(10)),
+                lifecycle_stage: "active".to_string(),
+                deprecated_at: None,
+                deprecation_notice: None,
+                last_evaluated_at: None,
+                evaluation_count_7d: 0,
+                evaluation_count_30d: 0,
+                evaluation_count_90d: 0,
+                dependencies: vec![],
+            }]),
+            Some("feature-B") => Ok(vec![db::Feature {
+                id: feature_b_id,
+                key: "feature-B".into(),
+                description: Some(String::new()),
+                feature_type: db::FeatureType::Simple,
+                team_id,
+                active: true,
+                created_at: Utc::now(),
+                kill_switch_enabled: true,
+                kill_switch_activated_at: None,
+                rollback_scheduled_at: Some(Utc::now() + ChronoDuration::minutes(10)),
+                lifecycle_stage: "active".to_string(),
+                deprecated_at: None,
+                deprecation_notice: None,
+                last_evaluated_at: None,
+                evaluation_count_7d: 0,
+                evaluation_count_30d: 0,
+                evaluation_count_90d: 0,
+                dependencies: vec![],
+            }]),
+            _ => Ok(vec![]),
+        });
+    feature_mock
+        .expect_get_stage_criteria()
+        .returning(|_sid| Ok(Vec::new()));
+
+    let (addr, _server) =
+        start_server_with_repos(Box::new(feature_mock), Box::new(client_mock), updates_tx).await;
+    let endpoint = format!("http://{}", addr);
+
+    let mut unary = FeatureEvaluationClient::connect(endpoint.clone())
+        .await
+        .unwrap();
+    let unary_response = unary
+        .get_feature_by_key(GetFeatureByKeyRequest {
+            feature_key: "feature-A".into(),
+            client_id: cid.clone(),
+            client_secret: sec.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(unary_response.feature.is_some());
+
+    let mut raw_a = FeatureEvaluationClient::connect(endpoint.clone())
+        .await
+        .unwrap();
+    let (tx_a, rx_a) = tokio::sync::mpsc::channel::<pb::StreamRequest>(16);
+    tx_a.send(StreamRequest {
+        payload: Some(pb::stream_request::Payload::Subscribe(
+            pb::SubscribeRequest {
+                client_id: cid.clone(),
+                client_secret: sec.clone(),
+                feature_keys: vec!["feature-B".into()],
+                environment_id: String::new(),
+            },
+        )),
+    })
+    .await
+    .unwrap();
+    let mut stream_a = raw_a
+        .stream_updates(ReceiverStream::new(rx_a))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let mut first_snapshot_keys = std::collections::HashSet::new();
+    for _ in 0..5 {
+        if let Some(update) =
+            recv_update_with_timeout(&mut stream_a, Duration::from_millis(250)).await
+            && update.action == (pb::feature_update::Action::Snapshot as i32)
+            && let Some(feature) = update.feature
+        {
+            first_snapshot_keys.insert(feature.key);
+            if first_snapshot_keys.contains("feature-A")
+                && first_snapshot_keys.contains("feature-B")
+            {
+                break;
+            }
+        }
+    }
+    assert!(first_snapshot_keys.contains("feature-A"));
+    assert!(first_snapshot_keys.contains("feature-B"));
+
+    drop(stream_a);
+    drop(tx_a);
+    sleep(Duration::from_millis(100)).await;
+
+    let mut raw_b = FeatureEvaluationClient::connect(endpoint).await.unwrap();
+    let (tx_b, rx_b) = tokio::sync::mpsc::channel::<pb::StreamRequest>(16);
+    tx_b.send(StreamRequest {
+        payload: Some(pb::stream_request::Payload::Subscribe(
+            pb::SubscribeRequest {
+                client_id: cid,
+                client_secret: sec,
+                feature_keys: vec!["feature-B".into()],
+                environment_id: String::new(),
+            },
+        )),
+    })
+    .await
+    .unwrap();
+    let mut stream_b = raw_b
+        .stream_updates(ReceiverStream::new(rx_b))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let mut second_snapshot_keys = std::collections::HashSet::new();
+    for _ in 0..5 {
+        if let Some(update) =
+            recv_update_with_timeout(&mut stream_b, Duration::from_millis(250)).await
+            && update.action == (pb::feature_update::Action::Snapshot as i32)
+            && let Some(feature) = update.feature
+        {
+            second_snapshot_keys.insert(feature.key);
+        }
+    }
+
+    assert!(
+        !second_snapshot_keys.contains("feature-A"),
+        "stale unary requested key leaked into a fresh stream after disconnect"
+    );
+    assert!(second_snapshot_keys.contains("feature-B"));
 }

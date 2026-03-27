@@ -128,6 +128,70 @@ async fn test_stage_change_creates_approval_request_when_policy_exists() {
 }
 
 #[tokio::test]
+async fn test_stage_change_without_approval_logic_transitions_directly() {
+    let pool = init_pg_pool().await;
+    let feature_repository = feature::feature_repository(pool.clone());
+    let activity_log_repository =
+        feature_toggle_backend::database::activity_log::activity_log_repository(pool.clone());
+    let environment_logic = environment::environment_logic(
+        feature_toggle_backend::database::environment::environment_repository(pool.clone()),
+        activity_log_repository.clone_box(),
+    );
+    let feature_logic = feature_logic::feature_logic(
+        feature_repository.clone_box(),
+        environment_logic.clone(),
+        activity_log_repository.clone_box(),
+        feature_toggle_backend::database::user::user_repository(pool.clone()),
+    );
+
+    let (feature_id, stage_id) = create_isolated_feature_stage(feature_repository.as_ref()).await;
+    let requester = Uuid::parse_str("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb").unwrap();
+
+    sqlx::query!(
+        "UPDATE features_pipeline_stages SET status = 'NOT_DEPLOYED' WHERE id = $1",
+        stage_id
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let feature = feature_logic
+        .request_stage_change(
+            ID::from(stage_id),
+            StageChangeRequestType::DeploymentRequested,
+            requester,
+        )
+        .await
+        .expect("stage change should transition directly without approval logic");
+
+    assert!(
+        feature.pending_approval_request_id.is_none(),
+        "direct path should not create an approval request"
+    );
+
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM features_pipeline_stages WHERE id = $1")
+            .bind(stage_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(status, "DEPLOYMENT_REQUESTED");
+
+    let pending_requests: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::BIGINT FROM approval_requests WHERE feature_id = $1 AND status = 'pending'",
+    )
+    .bind(feature_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(pending_requests, 0);
+
+    let _ = sqlx::query!("DELETE FROM features WHERE id = $1", feature_id)
+        .execute(&pool)
+        .await;
+}
+
+#[tokio::test]
 async fn test_quorum_approvals_execute_stage_change() {
     let pool = init_pg_pool().await;
     let feature_repository = feature::feature_repository(pool.clone());

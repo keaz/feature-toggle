@@ -1,4 +1,4 @@
-use feature_toggle_backend::database::init_pg_pool;
+use feature_toggle_backend::database::{init_pg_pool, run_migrations};
 use feature_toggle_backend::grpc::pb;
 use feature_toggle_backend::grpc::pb::feature_evaluation_client::FeatureEvaluationClient;
 use feature_toggle_backend::grpc::{
@@ -65,6 +65,34 @@ async fn wait_for_evaluation_count(
     }
 }
 
+async fn wait_for_assignment_count(
+    pool: &sqlx::PgPool,
+    user_id: &str,
+    feature_id: Uuid,
+    environment_id: Uuid,
+    expected_count: i64,
+    timeout: Duration,
+) -> i64 {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::bigint FROM user_flag_assignments WHERE user_id = $1 AND feature_id = $2 AND environment_id = $3",
+        )
+        .bind(user_id)
+        .bind(feature_id)
+        .bind(environment_id)
+        .fetch_one(pool)
+        .await
+        .expect("count query should succeed");
+
+        if count == expected_count || Instant::now() >= deadline {
+            return count;
+        }
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 #[tokio::test]
 async fn push_evaluation_events_dedupes_retries_with_reordered_context() {
     if std::env::var("DATABASE_URL").is_err() {
@@ -73,6 +101,9 @@ async fn push_evaluation_events_dedupes_retries_with_reordered_context() {
     }
 
     let pool = init_pg_pool().await;
+    run_migrations(&pool)
+        .await
+        .expect("feature evaluation migrations should be applied");
     let (addr, server_handle) = start_server(pool.clone()).await;
     let endpoint = format!("http://{}", addr);
     let mut client = FeatureEvaluationClient::connect(endpoint)
@@ -159,6 +190,78 @@ async fn push_evaluation_events_dedupes_retries_with_reordered_context() {
         .execute(&pool)
         .await
         .expect("cleanup should succeed");
+
+    server_handle.abort();
+}
+
+#[tokio::test]
+async fn push_user_assignments_upserts_duplicate_deliveries() {
+    if std::env::var("DATABASE_URL").is_err() {
+        eprintln!("Skipping test: DATABASE_URL is not set");
+        return;
+    }
+
+    let pool = init_pg_pool().await;
+    run_migrations(&pool)
+        .await
+        .expect("feature evaluation migrations should be applied");
+    let (addr, server_handle) = start_server(pool.clone()).await;
+    let endpoint = format!("http://{}", addr);
+    let mut client = FeatureEvaluationClient::connect(endpoint)
+        .await
+        .expect("connect grpc client");
+
+    let test_suffix = Uuid::new_v4().to_string();
+    let user_id = format!("grpc-idempotency-user-{test_suffix}");
+    let feature_id = Uuid::new_v4();
+    let environment_id = Uuid::new_v4();
+    let assignment = pb::UserFlagAssignment {
+        user_id: user_id.clone(),
+        feature_id: feature_id.to_string(),
+        environment_id: environment_id.to_string(),
+        assigned: true,
+        client_id: SEEDED_CLIENT_ID.to_string(),
+        client_secret: SEEDED_CLIENT_SECRET.to_string(),
+        variant: "variant-a".to_string(),
+    };
+
+    let first = client
+        .push_user_assignments(tokio_stream::iter(vec![assignment.clone()]))
+        .await
+        .expect("first push should succeed")
+        .into_inner();
+    assert!(!first.message_id.is_empty());
+
+    let second = client
+        .push_user_assignments(tokio_stream::iter(vec![assignment]))
+        .await
+        .expect("duplicate push should succeed")
+        .into_inner();
+    assert!(!second.message_id.is_empty());
+
+    let persisted = wait_for_assignment_count(
+        &pool,
+        &user_id,
+        feature_id,
+        environment_id,
+        1,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(
+        persisted, 1,
+        "duplicate delivery should not create a second assignment row"
+    );
+
+    sqlx::query(
+        "DELETE FROM user_flag_assignments WHERE user_id = $1 AND feature_id = $2 AND environment_id = $3",
+    )
+    .bind(&user_id)
+    .bind(feature_id)
+    .bind(environment_id)
+    .execute(&pool)
+    .await
+    .expect("cleanup should succeed");
 
     server_handle.abort();
 }

@@ -243,7 +243,7 @@ pub fn map_proto_to_engine(f: &pb::FeatureFull) -> engine::Feature {
         key: f.key.clone(),
         feature_type: f.feature_type.clone(),
         active: f.active,
-        enabled: f.active,
+        enabled: f.active && f.kill_switch_enabled,
         // Dependencies are hydrated from cache at evaluation time using dependency IDs.
         dependencies: vec![],
         stages,
@@ -358,6 +358,23 @@ async fn hydrate_feature_with_dependencies(
     )
 }
 
+async fn cache_fetched_feature(
+    app: &AppState,
+    pb_feature: &pb::FeatureFull,
+) -> std::sync::Arc<engine::Feature> {
+    let dependency_ids = pb_feature
+        .dependencies
+        .iter()
+        .map(|dependency| dependency.depends_on_id.clone())
+        .collect::<Vec<_>>();
+
+    let engine_feature = std::sync::Arc::new(map_proto_to_engine(pb_feature));
+    app.mapped_cache
+        .insert_with_dependencies(engine_feature.clone(), dependency_ids)
+        .await;
+    engine_feature
+}
+
 /// Map HTTP context to evaluation engine format
 pub fn map_http_context_to_engine(
     feature_key: String,
@@ -371,6 +388,51 @@ pub fn map_http_context_to_engine(
             attributes: ctx.attributes,
         },
     }
+}
+
+fn evaluate_http_feature_locally(
+    feature_key: &str,
+    feature: &engine::Feature,
+    eval_context: &EvaluateContext,
+) -> engine::EvaluationResult {
+    if !feature.enabled {
+        return engine::EvaluationResult {
+            flag_key: feature_key.to_string(),
+            value: serde_json::json!(false),
+            variant: None,
+            reason: engine::EvaluationReason::Static,
+            error_code: None,
+            metadata: None,
+        };
+    }
+
+    let stage_exists = feature
+        .stages
+        .iter()
+        .any(|stage| stage.environment_id == eval_context.environment_id);
+    if !stage_exists {
+        return engine::EvaluationResult {
+            flag_key: feature_key.to_string(),
+            value: serde_json::json!(false),
+            variant: None,
+            reason: engine::EvaluationReason::Unknown,
+            error_code: Some(engine::ErrorCode::FlagNotFound),
+            metadata: None,
+        };
+    }
+
+    let mut result = engine::evaluate(
+        &map_http_context_to_engine(feature_key.to_string(), eval_context.clone()),
+        feature,
+    );
+
+    if feature.feature_type == "Simple" {
+        let is_enabled = result.value.as_bool().unwrap_or(false);
+        result.value = serde_json::json!(is_enabled);
+        result.variant = None;
+    }
+
+    result
 }
 
 /// Validate web origin for Web client types
@@ -435,22 +497,7 @@ async fn get_or_fetch_feature(
 
     match pb_feature {
         Some(pf) => {
-            let dependency_ids = pf
-                .dependencies
-                .iter()
-                .map(|dependency| dependency.depends_on_id.clone())
-                .collect::<Vec<_>>();
-
-            // Map to engine format
-            let engine_feature = std::sync::Arc::new(map_proto_to_engine(&pf));
-
-            // Also update the by_id index
-            app.mapped_cache
-                .update_id_index(&engine_feature.id, &engine_feature.key)
-                .await;
-            app.mapped_cache
-                .set_dependency_ids(&engine_feature.id, dependency_ids)
-                .await;
+            let engine_feature = cache_fetched_feature(app, &pf).await;
 
             info_log!("Feature '{}' successfully fetched and cached", feature_key);
 
@@ -538,7 +585,7 @@ pub async fn evaluate_handler(
     let feature = std::sync::Arc::new(hydrate_feature_with_dependencies(&app, &feature).await);
 
     // This is kill switch enabled we should disable the feature.
-    if !feature.active {
+    if !feature.enabled {
         app.purge_assignments_for_feature(&feature.id).await;
         return Ok(web::Json(EvaluateHttpResponse {
             flag_key: feature_key.clone(),
@@ -575,33 +622,22 @@ pub async fn evaluate_handler(
         .iter()
         .find(|s| s.environment_id == eval_context.environment_id);
 
-    if stage.is_none() || !stage.unwrap().enabled {
+    if stage.is_none() {
         return Ok(web::Json(EvaluateHttpResponse {
             flag_key: feature_key.clone(),
             value: serde_json::json!(false),
             variant: None,
-            reason: if stage.is_none() {
-                "DEFAULT"
-            } else {
-                "DISABLED"
-            }
-            .to_string(),
-            error_code: if stage.is_none() {
-                Some("ENVIRONMENT_NOT_FOUND".to_string())
-            } else {
-                None
-            },
+            reason: "DEFAULT".to_string(),
+            error_code: Some("ENVIRONMENT_NOT_FOUND".to_string()),
             metadata: None,
         }));
     }
-
-    let _stage = stage.unwrap();
 
     // Use targeting_key from request context (OpenFeature standard)
     let user_id_opt = Some(eval_context.bucketing_key.clone());
 
     // Perform evaluation (check cache first if we have a user_id)
-    let (mut result, prior_assignment) = if let Some(user_id) = &user_id_opt {
+    let (result, prior_assignment) = if let Some(user_id) = &user_id_opt {
         let key = assignment_key(user_id, &feature.id, &eval_context.environment_id);
         let cached = app
             .assigned_cache
@@ -622,22 +658,13 @@ pub async fn evaluate_handler(
                 true,
             )
         } else {
-            let ec = map_http_context_to_engine(feature_key.clone(), eval_context.clone());
-            let result = engine::evaluate(&ec, &feature);
+            let result = evaluate_http_feature_locally(&feature_key, &feature, &eval_context);
             (result, false)
         }
     } else {
-        let ec = map_http_context_to_engine(feature_key.clone(), eval_context.clone());
-        let result = engine::evaluate(&ec, &feature);
+        let result = evaluate_http_feature_locally(&feature_key, &feature, &eval_context);
         (result, false)
     };
-
-    // For Simple features, ensure value is always boolean and variant is None
-    if feature.feature_type == "Simple" {
-        let is_enabled = result.value.as_bool().unwrap_or(false);
-        result.value = serde_json::json!(is_enabled);
-        result.variant = None;
-    }
 
     // Record the evaluation event for analytics
     // For analytics, consider the feature "enabled" if:
@@ -861,7 +888,7 @@ pub async fn ofrep_evaluate_flag(
     let feature = std::sync::Arc::new(hydrate_feature_with_dependencies(&app, &feature).await);
 
     // Kill switch: disable feature if not active
-    if !feature.active {
+    if !feature.enabled {
         app.purge_assignments_for_feature(&feature.id).await;
         return Ok(HttpResponse::Ok().json(OFREPSuccessResponse {
             key: None,
@@ -1022,8 +1049,88 @@ pub async fn ofrep_evaluate_flag(
 
 #[cfg(test)]
 mod tests {
-    use super::extract_auth_from_headers;
+    use super::{
+        EvaluateContext, cache_fetched_feature, evaluate_http_feature_locally,
+        extract_auth_from_headers, hydrate_feature_with_dependencies, map_proto_to_engine,
+    };
+    use crate::pb;
     use actix_web::test::TestRequest;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+    use tonic::transport::Endpoint;
+
+    fn simple_stage(environment_id: &str, enabled: bool) -> pb::FeatureStageFull {
+        pb::FeatureStageFull {
+            id: format!("stage-{environment_id}-{enabled}"),
+            environment_id: environment_id.to_string(),
+            order_index: 0,
+            position: "Start".to_string(),
+            enabled,
+            criterias: vec![],
+        }
+    }
+
+    fn simple_feature(
+        id: &str,
+        key: &str,
+        active: bool,
+        kill_switch_enabled: bool,
+        stages: Vec<pb::FeatureStageFull>,
+        dependencies: Vec<pb::FeatureDependencyFull>,
+    ) -> pb::FeatureFull {
+        pb::FeatureFull {
+            id: id.to_string(),
+            key: key.to_string(),
+            description: String::new(),
+            feature_type: "Simple".to_string(),
+            team_id: "team-1".to_string(),
+            created_at: "2026-03-26T00:00:00Z".to_string(),
+            kill_switch_enabled,
+            kill_switch_activated_at: String::new(),
+            rollback_scheduled_at: String::new(),
+            stages,
+            dependencies,
+            active,
+            variants: vec![],
+        }
+    }
+
+    fn eval_context(environment_id: &str) -> EvaluateContext {
+        EvaluateContext {
+            bucketing_key: "user-1".to_string(),
+            environment_id: environment_id.to_string(),
+            attributes: HashMap::new(),
+        }
+    }
+
+    fn test_app_state(mapped_cache: Arc<crate::MappedFeatureCache>) -> crate::AppState {
+        let client_info_cache = Arc::new(crate::ClientInfoCache::new(
+            std::time::Duration::from_secs(300),
+        ));
+        let channel = Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
+        let grpc_client = pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
+        let (event_tx, _event_rx) = mpsc::channel(4);
+
+        crate::AppState {
+            mapped_cache,
+            client_info_cache,
+            grpc: Arc::new(tokio::sync::Mutex::new(grpc_client)),
+            client_id: "client".into(),
+            client_secret: "secret".into(),
+            connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            assigned_cache: Arc::new(dashmap::DashMap::new()),
+            pending_assignments: Arc::new(crossbeam::queue::SegQueue::new()),
+            flush_interval: std::time::Duration::from_secs(60),
+            assignment_flush_batch_size: 10,
+            evaluation_event_tx: event_tx,
+            evaluation_flush_interval: std::time::Duration::from_secs(60),
+            evaluation_flush_batch_size: 10,
+            evaluation_event_queue_capacity: 4,
+            evaluation_event_dropped: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            retry_config: crate::config::RetryConfig::default(),
+        }
+    }
 
     #[test]
     fn extract_auth_requires_explicit_headers() {
@@ -1047,5 +1154,132 @@ mod tests {
             .to_http_request();
         let auth = extract_auth_from_headers(&req);
         assert_eq!(auth, Some(("api-key-123".to_string(), String::new())));
+    }
+
+    #[test]
+    fn map_proto_to_engine_disables_kill_switched_features() {
+        let feature = simple_feature(
+            "feature-1",
+            "feature-key",
+            true,
+            false,
+            vec![simple_stage("env-1", true)],
+            vec![],
+        );
+
+        let mapped = map_proto_to_engine(&feature);
+        assert!(mapped.active);
+        assert!(!mapped.enabled);
+    }
+
+    #[test]
+    fn local_evaluation_returns_false_for_kill_switched_features() {
+        let feature = map_proto_to_engine(&simple_feature(
+            "feature-1",
+            "feature-key",
+            true,
+            false,
+            vec![simple_stage("env-1", true)],
+            vec![],
+        ));
+
+        let result = evaluate_http_feature_locally("feature-key", &feature, &eval_context("env-1"));
+        assert_eq!(result.value, serde_json::json!(false));
+        assert_eq!(result.reason.as_str(), "STATIC");
+    }
+
+    #[test]
+    fn local_evaluation_returns_false_for_disabled_stage() {
+        let feature = map_proto_to_engine(&simple_feature(
+            "feature-1",
+            "feature-key",
+            true,
+            true,
+            vec![simple_stage("env-1", false)],
+            vec![],
+        ));
+
+        let result = evaluate_http_feature_locally("feature-key", &feature, &eval_context("env-1"));
+        assert_eq!(result.value, serde_json::json!(false));
+        assert_eq!(result.reason.as_str(), "DISABLED");
+    }
+
+    #[tokio::test]
+    async fn local_evaluation_returns_false_for_disabled_dependency() {
+        let mapped_cache = Arc::new(crate::MappedFeatureCache::new(10));
+        let app = test_app_state(mapped_cache.clone());
+
+        let dependency = simple_feature(
+            "dep-1",
+            "dependency-flag",
+            true,
+            false,
+            vec![simple_stage("env-1", true)],
+            vec![],
+        );
+        let root = simple_feature(
+            "feature-1",
+            "feature-key",
+            true,
+            true,
+            vec![simple_stage("env-1", true)],
+            vec![pb::FeatureDependencyFull {
+                feature_id: "feature-1".to_string(),
+                depends_on_id: "dep-1".to_string(),
+            }],
+        );
+
+        cache_fetched_feature(&app, &dependency).await;
+        let root_feature = cache_fetched_feature(&app, &root).await;
+        mapped_cache.run_pending_tasks().await;
+
+        let hydrated = hydrate_feature_with_dependencies(&app, &root_feature).await;
+        let result =
+            evaluate_http_feature_locally("feature-key", &hydrated, &eval_context("env-1"));
+
+        assert_eq!(result.value, serde_json::json!(false));
+        assert_eq!(result.reason.as_str(), "DISABLED");
+        assert!(
+            result
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("dependencyBlock"))
+                .is_some(),
+            "expected dependency block metadata"
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_fetched_feature_clears_negative_cache_and_indexes_by_id() {
+        let mapped_cache = Arc::new(crate::MappedFeatureCache::new(10));
+        let app = test_app_state(mapped_cache.clone());
+
+        let feature_key = "flag-new";
+        mapped_cache.add_negative(feature_key).await;
+        assert!(mapped_cache.is_negative_cached(feature_key).await);
+
+        let pb_feature = simple_feature(
+            "feature-id",
+            feature_key,
+            true,
+            true,
+            vec![],
+            vec![pb::FeatureDependencyFull {
+                feature_id: "feature-id".to_string(),
+                depends_on_id: "dep-1".to_string(),
+            }],
+        );
+
+        let cached = cache_fetched_feature(&app, &pb_feature).await;
+        mapped_cache.run_pending_tasks().await;
+
+        assert_eq!(cached.key, feature_key);
+        assert!(mapped_cache.get(feature_key).await.is_some());
+        assert!(mapped_cache.get_by_id("feature-id").await.is_some());
+        assert!(!mapped_cache.is_negative_cached(feature_key).await);
+        assert_eq!(
+            mapped_cache.get_dependency_ids("feature-id").await,
+            vec!["dep-1".to_string()]
+        );
     }
 }

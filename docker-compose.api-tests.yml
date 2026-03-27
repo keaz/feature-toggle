@@ -29,6 +29,7 @@ services:
       - -lc
     command:
       - |
+        # Schema comes from migrations; init.sql is seed-only.
         sqlx migrate run --database-url "$$DATABASE_URL" --source /app/migrations &&
         psql "$$DATABASE_URL" -v ON_ERROR_STOP=1 -f /app/init.sql
     stdin_open: false

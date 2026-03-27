@@ -121,12 +121,12 @@ export async function cleanupAll(
 }
 
 /**
- * Known test team ID from init.sql - used for tests that need an existing team
+ * Known seeded test team ID - used for tests that need an existing team
  */
 export const TEST_TEAM_ID = '51ecc366-f1cd-4d3d-ab73-fa60bad98f27';
 
 /**
- * Known test environment ID from init.sql
+ * Known seeded test environment ID
  */
 export const TEST_ENVIRONMENT_ID = '51ecc366-f1cd-4d3d-ab73-fa60bad98f27';
 

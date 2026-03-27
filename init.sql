@@ -1,18 +1,6 @@
--- Drop and recreate the constraints to ensure they're correct
-ALTER TABLE IF EXISTS public.features_pipeline_stages
-DROP CONSTRAINT IF EXISTS features_pipeline_stages_feature_id_fkey;
+-- Seed-only fixture data. Schema changes are managed by migrations.
+-- Clean out existing rows in dependency order before re-seeding.
 
-ALTER TABLE IF EXISTS public.features_pipeline_stages
-ADD CONSTRAINT features_pipeline_stages_feature_id_fkey FOREIGN KEY (feature_id) REFERENCES public.features (id) ON DELETE CASCADE;
-
--- Update the parent_stage_id constraint to reference features_pipeline_stages instead of pipeline_stages
-ALTER TABLE IF EXISTS public.features_pipeline_stages
-DROP CONSTRAINT IF EXISTS features_pipeline_stages_parent_stage_id_fkey;
-
-ALTER TABLE IF EXISTS public.features_pipeline_stages
-ADD CONSTRAINT features_pipeline_stages_parent_stage_id_fkey FOREIGN KEY (parent_stage_id) REFERENCES public.features_pipeline_stages (id) ON DELETE CASCADE;
-
--- Delete data in the correct order to avoid foreign key constraint violations
 DELETE FROM public.feature_dependencies;
 
 DELETE FROM public.feature_stage_criteria;
@@ -27,16 +15,6 @@ DELETE FROM public.features_pipeline_stages;
 
 DELETE FROM public.features;
 
--- Align schema with simplified criteria (priority only)
-ALTER TABLE IF EXISTS public.feature_stage_criteria
-    DROP COLUMN IF EXISTS context_key,
-    DROP COLUMN IF EXISTS context_id,
-    DROP COLUMN IF EXISTS rollout_percentage,
-    DROP COLUMN IF EXISTS serve,
-    DROP COLUMN IF EXISTS operator;
-
-DROP INDEX IF EXISTS idx_feature_stage_criteria_serve;
-DROP INDEX IF EXISTS idx_feature_stage_criteria_operator;
 -- clients and origins
 DELETE FROM public.client_web_origins;
 
@@ -434,9 +412,6 @@ VALUES (
 ON CONFLICT (id) DO NOTHING;
 
 DELETE FROM public.features;
-
--- Ensure the default is set correctly (fix for inverted logic)
-ALTER TABLE features ALTER COLUMN kill_switch_enabled SET DEFAULT true;
 
 INSERT INTO
     public.features (
@@ -1084,6 +1059,12 @@ VALUES (
 ON CONFLICT (id) DO NOTHING;
 
 -- Seed feature_evaluations for integration tests
+ALTER TABLE public.feature_evaluations
+    ADD COLUMN IF NOT EXISTS ingest_fingerprint TEXT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_feature_evaluations_ingest_fingerprint
+    ON public.feature_evaluations(ingest_fingerprint);
+
 DELETE FROM public.feature_evaluations;
 
 INSERT INTO

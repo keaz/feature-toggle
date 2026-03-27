@@ -85,15 +85,25 @@ pub fn user_logic(
     repository: Box<dyn UserRepository>,
     activity_log_repository: Box<dyn crate::database::activity_log::ActivityLogRepository>,
 ) -> Box<dyn UserLogic> {
+    user_logic_with_notifications(repository, activity_log_repository, None)
+}
+
+pub fn user_logic_with_notifications(
+    repository: Box<dyn UserRepository>,
+    activity_log_repository: Box<dyn crate::database::activity_log::ActivityLogRepository>,
+    notification_logic: Option<Box<dyn crate::logic::notification::NotificationLogic>>,
+) -> Box<dyn UserLogic> {
     Box::new(UserLogicImpl {
         repository,
         activity_log_repository,
+        notification_logic,
     })
 }
 
 struct UserLogicImpl {
     repository: Box<dyn UserRepository>,
     activity_log_repository: Box<dyn crate::database::activity_log::ActivityLogRepository>,
+    notification_logic: Option<Box<dyn crate::logic::notification::NotificationLogic>>,
 }
 
 impl Clone for UserLogicImpl {
@@ -101,6 +111,18 @@ impl Clone for UserLogicImpl {
         Self {
             repository: self.repository.clone_box(),
             activity_log_repository: self.activity_log_repository.clone_box(),
+            notification_logic: self
+                .notification_logic
+                .as_ref()
+                .map(|logic| logic.clone_box()),
+        }
+    }
+}
+
+impl UserLogicImpl {
+    fn dispatch_notification(&self, event: crate::logic::notification::NotificationEvent) {
+        if let Some(logic) = &self.notification_logic {
+            crate::logic::notification::spawn_notification_dispatch(logic.clone_box(), event);
         }
     }
 }
@@ -146,7 +168,8 @@ fn user_display_name(first_name: &str, last_name: &str, username: &str, fallback
 #[async_trait::async_trait]
 impl UserLogic for UserLogicImpl {
     async fn get_user_by_id(&self, id: ID) -> Result<ApiUser, Error> {
-        let id = Uuid::try_from(id).unwrap();
+        let id =
+            Uuid::try_from(id).map_err(|e| Error::InvalidInput(format!("Invalid user id: {e}")))?;
         let u = self.repository.get_user_by_id(id).await?;
         Ok(ApiUser {
             id: ID::from(u.id),
@@ -313,7 +336,8 @@ impl UserLogic for UserLogicImpl {
         input: UpdateUserInput,
         actor: Option<crate::logic::ActorContext>,
     ) -> Result<ApiUser, Error> {
-        let id = Uuid::try_from(id).unwrap();
+        let id =
+            Uuid::try_from(id).map_err(|e| Error::InvalidInput(format!("Invalid user id: {e}")))?;
 
         // If updating email, validate uniqueness (allow unchanged or same owner)
         if let Some(ref new_email) = input.email
@@ -381,7 +405,8 @@ impl UserLogic for UserLogicImpl {
         new_password: String,
         _actor: Option<crate::logic::ActorContext>,
     ) -> Result<(), Error> {
-        let user_id = Uuid::try_from(id).unwrap();
+        let user_id =
+            Uuid::try_from(id).map_err(|e| Error::InvalidInput(format!("Invalid user id: {e}")))?;
 
         // Get current user to verify current password
         let user = self.repository.get_user_by_id(user_id).await?;
@@ -441,7 +466,8 @@ impl UserLogic for UserLogicImpl {
         temporary_password: String,
         actor: Option<crate::logic::ActorContext>,
     ) -> Result<(), Error> {
-        let user_uuid = Uuid::try_from(user_id).unwrap();
+        let user_uuid = Uuid::try_from(user_id)
+            .map_err(|e| Error::InvalidInput(format!("Invalid user id: {e}")))?;
 
         // Verify user exists
         let _user = self.repository.get_user_by_id(user_uuid).await?;
@@ -562,25 +588,21 @@ impl UserLogic for UserLogicImpl {
             )
             .await;
 
-            crate::logic::notification::dispatch_notification_event(
-                crate::logic::notification::NotificationEvent {
-                    notification_type:
-                        crate::logic::notification::NOTIFICATION_TYPE_USER_ADDED_TO_TEAM
-                            .to_string(),
-                    team_id: Some(*team_id),
-                    actor_id,
-                    subject: format!("User added to team: {team_name}"),
-                    message,
-                    metadata: Some(serde_json::json!({
-                        "team_id": team_id.to_string(),
-                        "team_name": team_name.clone(),
-                        "user_id": user_id.to_string(),
-                        "user_display_name": assigned_user_name.clone(),
-                        "added_by": added_by,
-                    })),
-                },
-            )
-            .await;
+            self.dispatch_notification(crate::logic::notification::NotificationEvent {
+                notification_type: crate::logic::notification::NOTIFICATION_TYPE_USER_ADDED_TO_TEAM
+                    .to_string(),
+                team_id: Some(*team_id),
+                actor_id,
+                subject: format!("User added to team: {team_name}"),
+                message,
+                metadata: Some(serde_json::json!({
+                    "team_id": team_id.to_string(),
+                    "team_name": team_name.clone(),
+                    "user_id": user_id.to_string(),
+                    "user_display_name": assigned_user_name.clone(),
+                    "added_by": added_by,
+                })),
+            });
         }
 
         Ok(true)
@@ -607,7 +629,10 @@ impl UserLogic for UserLogicImpl {
         page_number: i32,
         page_size: i32,
     ) -> Result<(Vec<ApiUser>, i64), Error> {
-        let team_uuid: Option<Uuid> = team_id.map(|id| Uuid::try_from(id).unwrap());
+        let team_uuid = team_id
+            .map(Uuid::try_from)
+            .transpose()
+            .map_err(|e| Error::InvalidInput(format!("Invalid team id: {e}")))?;
         let (items, total) = self
             .repository
             .search_users(team_uuid, name, page_number, page_size)
@@ -699,6 +724,19 @@ mod tests {
         assert_eq!(gql.username, "jdoe");
         assert_eq!(gql.email, "john@example.com");
         assert_eq!(Uuid::try_from(gql.id.clone()).unwrap(), id);
+    }
+
+    #[tokio::test]
+    async fn test_get_user_by_id_rejects_invalid_uuid() {
+        let mock = MockUserRepository::new();
+        let logic = user_logic(Box::new(mock), create_mock_activity_log());
+
+        let err = logic
+            .get_user_by_id(ID::from("not-a-uuid"))
+            .await
+            .expect_err("invalid ids should not panic");
+
+        assert!(matches!(err, Error::InvalidInput(message) if message.contains("Invalid user id")));
     }
 
     #[tokio::test]
@@ -1015,6 +1053,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_update_user_rejects_invalid_uuid() {
+        let mock = MockUserRepository::new();
+        let logic = user_logic(Box::new(mock), create_mock_activity_log());
+
+        let err = logic
+            .update_user(
+                ID::from("not-a-uuid"),
+                UpdateUserInput {
+                    first_name: Some("Jane".to_string()),
+                    last_name: None,
+                    email: None,
+                    mobile_number: None,
+                    is_admin: None,
+                    enabled: None,
+                },
+                None,
+            )
+            .await
+            .expect_err("invalid ids should not panic");
+
+        assert!(matches!(err, Error::InvalidInput(message) if message.contains("Invalid user id")));
+    }
+
+    #[tokio::test]
     async fn test_assign_user_teams_delegates_to_repo() {
         let id = Uuid::new_v4();
         let t1 = Uuid::new_v4();
@@ -1094,5 +1156,18 @@ mod tests {
             .await;
 
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_search_users_rejects_invalid_team_uuid() {
+        let mock = MockUserRepository::new();
+        let logic = user_logic(Box::new(mock), create_mock_activity_log());
+
+        let err = logic
+            .search_users(Some(ID::from("not-a-uuid")), None, 1, 10)
+            .await
+            .expect_err("invalid ids should not panic");
+
+        assert!(matches!(err, Error::InvalidInput(message) if message.contains("Invalid team id")));
     }
 }

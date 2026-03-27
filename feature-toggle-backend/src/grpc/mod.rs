@@ -1,3 +1,5 @@
+mod ingest;
+
 pub mod pb {
     tonic::include_proto!("featuretoggle");
 }
@@ -7,9 +9,13 @@ use crate::logic::metrics::{MetricLogic, MetricLogicError, TrackMetricInput};
 use chrono::{DateTime, Utc};
 use evaluation_engine as engine;
 use futures_util::StreamExt;
+use ingest::{
+    EVALUATION_DURABILITY_ACK_TIMEOUT, EVALUATION_WRITER_QUEUE_CAPACITY, EvaluationWriteJob,
+    PUSH_EVALUATION_DEDUP_MAX_ENTRIES, PUSH_EVALUATION_DEDUP_TTL, PushEvaluationRequestContext,
+    PushEvaluationRequestDeduper, RequestedKeyMap, push_evaluation_request_fingerprint,
+};
 use pb::feature_evaluation_server::{FeatureEvaluation, FeatureEvaluationServer};
 use pb::{EvaluateRequest, EvaluateResponse};
-use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::codec::CompressionEncoding;
@@ -119,172 +125,8 @@ impl crate::logic::metrics::MetricLogic for NoopMetricLogic {
     }
 }
 
-// Message type for async database writer
-type EvaluationBatch = Vec<crate::database::feature_evaluation::CreateFeatureEvaluation>;
-const EVALUATION_WRITER_QUEUE_CAPACITY: usize = 2048;
-const PUSH_EVALUATION_DEDUP_TTL: std::time::Duration = std::time::Duration::from_secs(60);
-const PUSH_EVALUATION_DEDUP_MAX_ENTRIES: usize = 4096;
-type RequestedKeyMap = std::collections::HashMap<Uuid, std::collections::HashSet<String>>;
 type ActiveSubscriptionMap =
     std::collections::HashMap<Uuid, std::collections::HashMap<Uuid, SubscriptionFilter>>;
-
-#[derive(Clone)]
-enum PushEvaluationRequestContext {
-    Empty,
-    Values(std::collections::BTreeMap<String, String>),
-}
-
-impl PushEvaluationRequestContext {
-    fn from_proto(context: &[pb::Context]) -> Self {
-        if context.is_empty() {
-            return Self::Empty;
-        }
-
-        // Canonicalize by key so the fingerprint is stable even when the wire order changes.
-        Self::Values(
-            context
-                .iter()
-                .map(|entry| (entry.key.clone(), entry.value.clone()))
-                .collect(),
-        )
-    }
-
-    fn to_json_value(&self) -> Option<serde_json::Value> {
-        match self {
-            Self::Empty => None,
-            Self::Values(entries) => {
-                Some(serde_json::to_value(entries).unwrap_or(serde_json::Value::Null))
-            }
-        }
-    }
-}
-
-#[derive(serde::Serialize)]
-struct PushEvaluationRequestFingerprintEvent {
-    feature_key: String,
-    environment_id: String,
-    client_id: String,
-    client_secret: String,
-    evaluation_result: bool,
-    evaluation_context: std::collections::BTreeMap<String, String>,
-    user_context: String,
-    evaluated_at_unix_ms: i64,
-    prior_assignment: bool,
-    variant: String,
-    variant_value: String,
-}
-
-fn push_evaluation_request_fingerprint(
-    request: &pb::PushEvaluationEventsRequest,
-) -> Result<String, serde_json::Error> {
-    let events = request
-        .events
-        .iter()
-        .map(|event| PushEvaluationRequestFingerprintEvent {
-            feature_key: event.feature_key.clone(),
-            environment_id: event.environment_id.clone(),
-            client_id: event.client_id.clone(),
-            client_secret: event.client_secret.clone(),
-            evaluation_result: event.evaluation_result,
-            evaluation_context: match PushEvaluationRequestContext::from_proto(
-                &event.evaluation_context,
-            ) {
-                PushEvaluationRequestContext::Empty => std::collections::BTreeMap::new(),
-                PushEvaluationRequestContext::Values(entries) => entries,
-            },
-            user_context: event.user_context.clone(),
-            evaluated_at_unix_ms: event.evaluated_at_unix_ms,
-            prior_assignment: event.prior_assignment,
-            variant: event.variant.clone(),
-            variant_value: event.variant_value.clone(),
-        })
-        .collect::<Vec<_>>();
-    let encoded = serde_json::to_vec(&events)?;
-    let mut hasher = Sha256::new();
-    hasher.update(encoded);
-    Ok(format!("{:x}", hasher.finalize()))
-}
-
-struct PushEvaluationDedupeEntries {
-    by_fingerprint: std::collections::HashMap<String, std::time::Instant>,
-    order: std::collections::VecDeque<(String, std::time::Instant)>,
-}
-
-impl PushEvaluationDedupeEntries {
-    fn new() -> Self {
-        Self {
-            by_fingerprint: std::collections::HashMap::new(),
-            order: std::collections::VecDeque::new(),
-        }
-    }
-
-    fn prune_expired(&mut self, now: std::time::Instant, ttl: std::time::Duration) {
-        loop {
-            let Some((fingerprint, seen_at)) = self.order.front() else {
-                break;
-            };
-
-            let is_current = matches!(self.by_fingerprint.get(fingerprint), Some(current) if *current == *seen_at);
-            if !is_current {
-                self.order.pop_front();
-                continue;
-            }
-
-            if now.saturating_duration_since(*seen_at) < ttl {
-                break;
-            }
-
-            let stale_fingerprint = fingerprint.clone();
-            self.by_fingerprint.remove(&stale_fingerprint);
-            self.order.pop_front();
-        }
-    }
-
-    fn enforce_bound(&mut self, max_entries: usize) {
-        while self.by_fingerprint.len() > max_entries {
-            let Some((fingerprint, seen_at)) = self.order.pop_front() else {
-                break;
-            };
-            let is_current = matches!(self.by_fingerprint.get(&fingerprint), Some(current) if *current == seen_at);
-            if is_current {
-                self.by_fingerprint.remove(&fingerprint);
-            }
-        }
-    }
-}
-
-/// Dedupes accepted evaluation push payloads for a short TTL window.
-struct PushEvaluationRequestDeduper {
-    ttl: std::time::Duration,
-    max_entries: usize,
-    entries: tokio::sync::Mutex<PushEvaluationDedupeEntries>,
-}
-
-impl PushEvaluationRequestDeduper {
-    fn new(ttl: std::time::Duration, max_entries: usize) -> Self {
-        Self {
-            ttl,
-            max_entries,
-            entries: tokio::sync::Mutex::new(PushEvaluationDedupeEntries::new()),
-        }
-    }
-
-    async fn contains_recent(&self, fingerprint: &str) -> bool {
-        let mut guard = self.entries.lock().await;
-        let now = std::time::Instant::now();
-        guard.prune_expired(now, self.ttl);
-        guard.by_fingerprint.contains_key(fingerprint)
-    }
-
-    async fn remember(&self, fingerprint: String) {
-        let mut guard = self.entries.lock().await;
-        let now = std::time::Instant::now();
-        guard.prune_expired(now, self.ttl);
-        guard.by_fingerprint.insert(fingerprint.clone(), now);
-        guard.order.push_back((fingerprint, now));
-        guard.enforce_bound(self.max_entries);
-    }
-}
 
 #[derive(Clone, Debug)]
 enum SubscriptionFilter {
@@ -326,6 +168,7 @@ impl SubscriptionFilter {
 }
 
 async fn unregister_stream_subscription(
+    requested_keys: &std::sync::Arc<tokio::sync::RwLock<RequestedKeyMap>>,
     subscriptions: &std::sync::Arc<tokio::sync::RwLock<ActiveSubscriptionMap>>,
     client_id: Uuid,
     stream_id: Uuid,
@@ -335,6 +178,8 @@ async fn unregister_stream_subscription(
         per_client.remove(&stream_id);
         if per_client.is_empty() {
             map.remove(&client_id);
+            drop(map);
+            requested_keys.write().await.remove(&client_id);
         }
     }
 }
@@ -385,7 +230,7 @@ pub struct FeatureEvaluationSvc {
     metric_logic: Box<dyn MetricLogic>,
     updates_tx: tokio::sync::broadcast::Sender<pb::FeatureUpdate>,
     // Async database writer channel - sends evaluation batches to background task
-    evaluation_writer_tx: tokio::sync::mpsc::Sender<EvaluationBatch>,
+    evaluation_writer_tx: tokio::sync::mpsc::Sender<EvaluationWriteJob>,
     // Short-lived payload dedupe for retry-safe evaluation ingestion.
     push_evaluation_deduper: std::sync::Arc<PushEvaluationRequestDeduper>,
     // Tracks, per client_id, keys explicitly requested via GetFeatureByKeyRequest.
@@ -452,7 +297,7 @@ impl FeatureEvaluationSvc {
 
         // Create mpsc channel for async database writes
         let (evaluation_writer_tx, evaluation_writer_rx) =
-            tokio::sync::mpsc::channel::<EvaluationBatch>(EVALUATION_WRITER_QUEUE_CAPACITY);
+            tokio::sync::mpsc::channel::<EvaluationWriteJob>(EVALUATION_WRITER_QUEUE_CAPACITY);
 
         // Spawn background task to handle database writes
         let logic_clone = feature_evaluation_logic.clone_box();
@@ -487,22 +332,32 @@ impl FeatureEvaluationSvc {
     /// This prevents database writes from blocking the gRPC stream
     async fn run_evaluation_writer(
         logic: Box<dyn crate::logic::feature_evaluation::FeatureEvaluationLogic>,
-        mut rx: tokio::sync::mpsc::Receiver<EvaluationBatch>,
+        mut rx: tokio::sync::mpsc::Receiver<EvaluationWriteJob>,
     ) {
         log::info!("Starting async evaluation writer task");
-        while let Some(evaluations) = rx.recv().await {
+        while let Some(job) = rx.recv().await {
+            let EvaluationWriteJob {
+                evaluations,
+                completion,
+            } = job;
             let count = evaluations.len();
-            match logic.record_evaluations_bulk(evaluations).await {
+            let ack = match logic.record_evaluations_bulk(evaluations).await {
                 Ok(stored) => {
                     log::debug!(
                         "Async writer stored {} evaluations (received {})",
                         stored.len(),
                         count
                     );
+                    Ok(())
                 }
                 Err(e) => {
                     log::error!("Async writer failed to store {} evaluations: {}", count, e);
+                    Err(e.to_string())
                 }
+            };
+
+            if completion.send(ack).is_err() {
+                log::debug!("Async evaluation write completed after caller stopped waiting");
             }
         }
         log::warn!("Evaluation writer task shutting down");
@@ -538,7 +393,7 @@ impl FeatureEvaluationSvc {
 
         // Create mpsc channel for async database writes (test mode)
         let (evaluation_writer_tx, evaluation_writer_rx) =
-            tokio::sync::mpsc::channel::<EvaluationBatch>(EVALUATION_WRITER_QUEUE_CAPACITY);
+            tokio::sync::mpsc::channel::<EvaluationWriteJob>(EVALUATION_WRITER_QUEUE_CAPACITY);
 
         // Spawn background task to handle database writes
         let logic_clone = feature_evaluation_logic.clone_box();
@@ -613,7 +468,7 @@ impl FeatureEvaluationSvc {
                     key: feature.key.clone(),
                     feature_type: format!("{:?}", feature.feature_type),
                     active: feature.active,
-                    enabled: feature.active,
+                    enabled: feature.active && feature.kill_switch_enabled,
                     dependency_ids: feature
                         .dependencies
                         .iter()
@@ -1389,7 +1244,8 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
         }
 
         // Include keys requested via unary GetFeatureByKey so long-lived streams
-        // can pick up those updates without reconnecting.
+        // can pick up those updates without reconnecting. These keys remain
+        // client-scoped only while the client still has at least one live stream.
         let requested_keys_for_client = {
             let map = self.requested_keys.read().await;
             map.get(&client_id).cloned().unwrap_or_default()
@@ -1511,15 +1367,28 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
                     }
                 }
             }
-            unregister_stream_subscription(&subscriptions_clone, client_id, stream_id).await;
+            unregister_stream_subscription(
+                &requested_keys_clone,
+                &subscriptions_clone,
+                client_id,
+                stream_id,
+            )
+            .await;
         });
 
         // Ensure cleanup even when no further broadcast messages arrive.
         let cleanup_tx = out_tx.clone();
+        let cleanup_requested_keys = self.requested_keys.clone();
         let cleanup_subscriptions = self.active_subscriptions.clone();
         tokio::spawn(async move {
             cleanup_tx.closed().await;
-            unregister_stream_subscription(&cleanup_subscriptions, client_id, stream_id).await;
+            unregister_stream_subscription(
+                &cleanup_requested_keys,
+                &cleanup_subscriptions,
+                client_id,
+                stream_id,
+            )
+            .await;
         });
 
         // Handle incoming heartbeats/acks (optional). We keep the stream alive by draining inputs.
@@ -1679,23 +1548,58 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
             );
         }
 
-        // Send evaluations to async writer (bounded queue with timeout-backed backpressure).
+        // Ack only after a bounded queue handoff and a durability confirmation
+        // from the writer task. ResourceExhausted tells the edge to retry
+        // instead of assuming the batch was durably recorded.
+        let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+        let job = EvaluationWriteJob {
+            evaluations,
+            completion: completion_tx,
+        };
         let send_result = tokio::time::timeout(
             std::time::Duration::from_secs(1),
-            self.evaluation_writer_tx.send(evaluations),
+            self.evaluation_writer_tx.send(job),
         )
         .await;
 
         match send_result {
             Ok(Ok(())) => {
-                self.push_evaluation_deduper
-                    .remember(request_fingerprint)
-                    .await;
-                log::debug!("Queued {} evaluation events for async storage", input_count);
-                Ok(Response::new(pb::PushEvaluationEventsResponse {
-                    message_id: uuid::Uuid::new_v4().to_string(),
-                    processed_count: input_count as i32,
-                }))
+                match tokio::time::timeout(EVALUATION_DURABILITY_ACK_TIMEOUT, completion_rx).await {
+                    Ok(Ok(Ok(()))) => {
+                        self.push_evaluation_deduper
+                            .remember(request_fingerprint)
+                            .await;
+                        log::debug!(
+                            "Persisted {} evaluation events after bounded queueing",
+                            input_count
+                        );
+                        Ok(Response::new(pb::PushEvaluationEventsResponse {
+                            message_id: uuid::Uuid::new_v4().to_string(),
+                            processed_count: input_count as i32,
+                        }))
+                    }
+                    Ok(Ok(Err(err))) => {
+                        log::error!("Async writer failed to persist evaluation events: {}", err);
+                        Err(Status::internal(format!(
+                            "failed to persist evaluation events: {err}"
+                        )))
+                    }
+                    Ok(Err(_)) => {
+                        log::error!("Async writer dropped persistence ack channel");
+                        Err(Status::internal(
+                            "failed to confirm persistence of evaluation events",
+                        ))
+                    }
+                    Err(_) => {
+                        log::warn!(
+                            "Timed out waiting for durability ack for {} evaluation events",
+                            input_count
+                        );
+                        Err(Status::resource_exhausted(
+                            "evaluation ingest writer is slow; retry later",
+                        ))
+                    }
+                }
             }
             Ok(Err(e)) => {
                 log::error!("Failed to queue evaluation events: {}", e);
@@ -1800,6 +1704,148 @@ pub async fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::client::MockClientRepository;
+    use crate::database::entity as db;
+    use crate::database::feature::MockFeatureRepository;
+    use crate::database::feature_evaluation::CreateFeatureEvaluation;
+    use std::sync::Arc;
+    use tokio::sync::{Notify, mpsc};
+    use tokio::time::{Duration, timeout};
+
+    fn test_service(
+        evaluation_writer_tx: mpsc::Sender<EvaluationWriteJob>,
+    ) -> FeatureEvaluationSvc {
+        let pool = sqlx::PgPool::connect_lazy("postgres://unused").expect("lazy pool");
+        let feature_repo = Box::new(MockFeatureRepository::new());
+        let client_repo = Box::new(MockClientRepository::new());
+        let user_flag_repo =
+            crate::database::user_flag_assignment::user_flag_assignment_repository(pool.clone());
+        let feature_evaluation_repo =
+            crate::database::feature_evaluation::feature_evaluation_repository(pool.clone());
+        let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<
+            crate::logic::feature_evaluation::FeatureEvaluationEvent,
+        >(8);
+        let feature_evaluation_logic =
+            crate::logic::feature_evaluation::feature_evaluation_logic_with_events(
+                feature_evaluation_repo,
+                events_tx,
+            );
+        let metric_logic: Box<dyn MetricLogic> = Box::new(NoopMetricLogic);
+
+        FeatureEvaluationSvc {
+            pool,
+            feature_repo,
+            client_repo,
+            user_flag_repo,
+            user_flag_logic: Box::new(NoopUserFlagLogic),
+            feature_evaluation_logic,
+            metric_logic,
+            updates_tx: tokio::sync::broadcast::channel(8).0,
+            evaluation_writer_tx,
+            push_evaluation_deduper: Arc::new(PushEvaluationRequestDeduper::new(
+                PUSH_EVALUATION_DEDUP_TTL,
+                PUSH_EVALUATION_DEDUP_MAX_ENTRIES,
+            )),
+            requested_keys: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            active_subscriptions: Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
+        }
+    }
+
+    fn spawn_acknowledging_writer() -> (
+        mpsc::Sender<EvaluationWriteJob>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (tx, mut rx) = mpsc::channel::<EvaluationWriteJob>(2);
+        let handle = tokio::spawn(async move {
+            while let Some(job) = rx.recv().await {
+                let _ = job.completion.send(Ok(()));
+            }
+        });
+        (tx, handle)
+    }
+
+    fn spawn_gated_writer(
+        gate: Arc<Notify>,
+    ) -> (
+        mpsc::Sender<EvaluationWriteJob>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (tx, mut rx) = mpsc::channel::<EvaluationWriteJob>(1);
+        let handle = tokio::spawn(async move {
+            gate.notified().await;
+            while let Some(job) = rx.recv().await {
+                let _ = job.completion.send(Ok(()));
+            }
+        });
+        (tx, handle)
+    }
+
+    fn test_client(id: Uuid, team_id: Uuid, environment_id: Uuid, secret: &str) -> db::Client {
+        db::Client {
+            id,
+            team_id,
+            environment_id,
+            name: "client".into(),
+            description: None,
+            enabled: true,
+            client_type: db::ClientType::Backend,
+            api_key: secret.to_string(),
+            web_origins: None,
+        }
+    }
+
+    fn push_event(
+        feature_key: &str,
+        environment_id: &str,
+        client_id: &Uuid,
+        client_secret: &str,
+        value: bool,
+        evaluated_at_unix_ms: i64,
+    ) -> pb::FeatureEvaluationEvent {
+        pb::FeatureEvaluationEvent {
+            feature_key: feature_key.to_string(),
+            environment_id: environment_id.to_string(),
+            client_id: client_id.to_string(),
+            client_secret: client_secret.to_string(),
+            evaluation_result: value,
+            evaluation_context: vec![pb::Context {
+                key: "bucketingKey".to_string(),
+                value: "user-1".to_string(),
+            }],
+            user_context: "user-1".to_string(),
+            evaluated_at_unix_ms,
+            prior_assignment: false,
+            variant: String::new(),
+            variant_value: String::new(),
+        }
+    }
+
+    fn test_evaluation(
+        feature_key: &str,
+        environment_id: &str,
+        client_id: Uuid,
+        evaluated_at_unix_ms: i64,
+    ) -> CreateFeatureEvaluation {
+        CreateFeatureEvaluation {
+            feature_key: feature_key.to_string(),
+            environment_id: environment_id.to_string(),
+            client_id,
+            evaluated_at: sqlx::types::chrono::DateTime::from_timestamp_millis(
+                evaluated_at_unix_ms,
+            )
+            .unwrap_or_else(sqlx::types::chrono::Utc::now),
+            #[allow(deprecated)]
+            evaluation_result: true,
+            evaluation_context: Some(serde_json::json!({"bucketingKey":"user-1"})),
+            user_context: Some("user-1".to_string()),
+            prior_assignment: false,
+            evaluation_success: true,
+            evaluation_value: Some(serde_json::json!(true)),
+            variant: None,
+        }
+    }
 
     #[test]
     fn push_evaluation_request_fingerprint_ignores_context_order() {
@@ -1870,5 +1916,106 @@ mod tests {
 
         assert!(!deduper.contains_recent("fingerprint-a").await);
         assert!(deduper.contains_recent("fingerprint-b").await);
+    }
+
+    #[tokio::test]
+    async fn push_evaluation_events_dedupes_identical_payloads_after_durable_ack() {
+        let (writer_tx, writer_handle) = spawn_acknowledging_writer();
+        let svc = test_service(writer_tx);
+        let client_id = Uuid::new_v4();
+        let client_secret = "secret-123";
+
+        let mut client_repo = MockClientRepository::new();
+        let client = test_client(client_id, Uuid::new_v4(), Uuid::new_v4(), client_secret);
+        client_repo.expect_get_client_by_id().returning(move |id| {
+            if id == client_id {
+                Ok(client.clone())
+            } else {
+                Err(crate::Error::NotFound(id))
+            }
+        });
+        let svc = FeatureEvaluationSvc {
+            client_repo: Box::new(client_repo),
+            ..svc
+        };
+        let request = pb::PushEvaluationEventsRequest {
+            events: vec![push_event(
+                "feature-a",
+                "env-a",
+                &client_id,
+                client_secret,
+                true,
+                42,
+            )],
+        };
+
+        let first = svc
+            .push_evaluation_events(Request::new(request.clone()))
+            .await;
+        assert!(first.is_ok());
+
+        let second = svc.push_evaluation_events(Request::new(request)).await;
+        assert!(second.is_ok());
+        assert_eq!(second.unwrap().into_inner().processed_count, 1);
+
+        writer_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn push_evaluation_events_returns_resource_exhausted_when_writer_queue_is_saturated() {
+        let gate = Arc::new(Notify::new());
+        let (writer_tx, writer_handle) = spawn_gated_writer(gate.clone());
+        let svc = test_service(writer_tx.clone());
+        let client_id = Uuid::new_v4();
+        let client_secret = "secret-123";
+        let team_id = Uuid::new_v4();
+        let env_id = Uuid::new_v4();
+
+        let mut client_repo = MockClientRepository::new();
+        let client = test_client(client_id, team_id, env_id, client_secret);
+        client_repo.expect_get_client_by_id().returning(move |id| {
+            if id == client_id {
+                Ok(client.clone())
+            } else {
+                Err(crate::Error::NotFound(id))
+            }
+        });
+        let svc = FeatureEvaluationSvc {
+            client_repo: Box::new(client_repo),
+            ..svc
+        };
+        let second = pb::PushEvaluationEventsRequest {
+            events: vec![push_event(
+                "feature-b",
+                "env-a",
+                &client_id,
+                client_secret,
+                true,
+                43,
+            )],
+        };
+
+        let (occupied_completion_tx, _occupied_completion_rx) = tokio::sync::oneshot::channel();
+        writer_tx
+            .send(EvaluationWriteJob {
+                evaluations: vec![test_evaluation("feature-a", "env-a", client_id, 42)],
+                completion: occupied_completion_tx,
+            })
+            .await
+            .expect("failed to prefill bounded writer queue");
+
+        let second_resp = timeout(
+            Duration::from_secs(2),
+            svc.push_evaluation_events(Request::new(second)),
+        )
+        .await
+        .expect("push_evaluation_events should resolve via timeout");
+        assert!(
+            matches!(second_resp, Err(status) if status.code() == tonic::Code::ResourceExhausted)
+        );
+
+        gate.notify_one();
+
+        writer_handle.abort();
     }
 }

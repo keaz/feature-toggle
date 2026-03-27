@@ -69,6 +69,13 @@ impl AbortOnDrop {
             handle: Some(handle),
         }
     }
+
+    async fn abort_and_wait(mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+            let _ = handle.await;
+        }
+    }
 }
 
 impl Drop for AbortOnDrop {
@@ -135,11 +142,21 @@ impl ClusterHandle {
         let mut rx = self.connection_ready_rx.clone();
         // Wait until the value becomes true, with a timeout
         let timeout_duration = tokio::time::Duration::from_secs(10);
-        tokio::time::timeout(timeout_duration, async {
+        if tokio::time::timeout(timeout_duration, async {
             rx.wait_for(|&ready| ready).await.ok();
         })
         .await
-        .expect("Cluster connection timed out after 10 seconds");
+        .is_err()
+        {
+            warn!("Cluster connection did not become ready within 10 seconds");
+        }
+    }
+
+    /// Stop cluster background tasks and wait for cancellation.
+    pub async fn shutdown(mut self) {
+        for task in self.tasks.drain(..) {
+            task.abort_and_wait().await;
+        }
     }
 }
 
@@ -336,7 +353,10 @@ pub fn start(
     }
 
     // Database-backed discovery
-    let pool = db_pool.expect("Database pool required for cluster discovery");
+    let Some(pool) = db_pool else {
+        error!("Database pool required for cluster discovery");
+        return None;
+    };
     let repo = db_discovery::ClusterNodeRepo::new(pool);
 
     let discovery_config = discovery::DbDiscoveryConfig {
@@ -346,7 +366,8 @@ pub fn start(
         cleanup_interval_secs: cfg.discovery.cleanup_interval_secs,
     };
 
-    let service = discovery::DbDiscoveryService::new(discovery_config, repo);
+    let service =
+        discovery::DbDiscoveryService::with_node_id(discovery_config, repo, node_id.clone());
 
     // Spawn task to start discovery service and handle peer events
     let state_clone = state.clone();
@@ -412,6 +433,34 @@ async fn run_listener(state: Arc<ClusterState>, listen_addr: String) {
             let mut join_set = JoinSet::new();
             let mut has_notified = false;
             loop {
+                if join_set.is_empty() {
+                    match listener.accept().await {
+                        Ok((stream, addr)) => {
+                            let peer_label = format!("inbound:{}", addr);
+                            let state_clone = state.clone();
+
+                            // Notify that at least one connection is ready (do this once)
+                            if !has_notified {
+                                let _ = state.connection_ready_tx.send(true);
+                                has_notified = true;
+                            }
+
+                            join_set.spawn(async move {
+                                if let Err(err) =
+                                    connection_loop(state_clone, stream, peer_label).await
+                                {
+                                    debug!("Inbound cluster connection ended: {}", err);
+                                }
+                            });
+                        }
+                        Err(err) => {
+                            warn!("Cluster listener accept error: {}", err);
+                            break;
+                        }
+                    }
+                    continue;
+                }
+
                 select! {
                     accept_res = listener.accept() => {
                         match accept_res {
@@ -437,8 +486,8 @@ async fn run_listener(state: Arc<ClusterState>, listen_addr: String) {
                             }
                         }
                     }
-                    join_res = join_set.join_next() => {
-                        if let Some(Err(err)) = join_res {
+                    Some(join_res) = join_set.join_next() => {
+                        if let Err(err) = join_res {
                             debug!("Cluster connection task aborted: {}", err);
                         }
                     }
@@ -470,27 +519,15 @@ async fn run_peer_connector(state: Arc<ClusterState>, peer: String, reconnect_de
         "Cluster node {} starting peer connector for {}",
         state.node_id, peer
     );
-    eprintln!(
-        "CLUSTER: Node {} starting peer connector for {}",
-        state.node_id, peer
-    );
     loop {
         debug!(
             "Cluster node {} attempting to connect to peer {}...",
-            state.node_id, peer
-        );
-        eprintln!(
-            "CLUSTER: Node {} attempting to connect to {}...",
             state.node_id, peer
         );
         match TcpStream::connect(&peer).await {
             Ok(stream) => {
                 info!(
                     "Cluster node {} successfully connected to peer {}",
-                    state.node_id, peer
-                );
-                eprintln!(
-                    "CLUSTER: Node {} successfully connected to peer {}",
                     state.node_id, peer
                 );
 
@@ -515,10 +552,6 @@ async fn run_peer_connector(state: Arc<ClusterState>, peer: String, reconnect_de
             Err(err) => {
                 warn!(
                     "Cluster node {} failed to connect to {}: {}",
-                    state.node_id, peer, err
-                );
-                eprintln!(
-                    "CLUSTER: Node {} failed to connect to {}: {}",
                     state.node_id, peer, err
                 );
             }

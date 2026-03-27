@@ -1,8 +1,10 @@
+use feature_toggle_backend::Error;
 use feature_toggle_backend::database::entity::{FeatureType, VariantSelectionMode};
 use feature_toggle_backend::database::feature::{
     CreateFeature, CreateFeatureStage, CreateStageCriterion,
 };
 use feature_toggle_backend::database::{feature, init_pg_pool};
+use serde_json::json;
 use uuid::Uuid;
 
 #[tokio::test]
@@ -125,4 +127,99 @@ async fn test_set_stage_criteria_stage_not_found() {
         feature_toggle_backend::Error::NotFound(id) => assert_eq!(id, non_existing_stage),
         _ => panic!("expected NotFound error"),
     }
+}
+
+#[tokio::test]
+async fn test_set_stage_criteria_rejects_variant_from_other_feature() {
+    let pool = init_pg_pool().await;
+    let repo = feature::feature_repository(pool);
+
+    let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+    let env_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+    let stage_id = Uuid::new_v4();
+
+    let primary_feature = repo
+        .create_feature(CreateFeature {
+            team_id,
+            key: format!("criteria-variant-primary-{}", Uuid::new_v4()),
+            description: Some("feature with a valid local variant".to_string()),
+            feature_type: FeatureType::Contextual,
+            stages: vec![CreateFeatureStage {
+                id: stage_id,
+                environment_id: env_id,
+                order_index: 0,
+                parent_stage: None,
+                position: "{ x: 10, y: 10 }".to_string(),
+                enabled: true,
+            }],
+            dependencies: vec![],
+            variants: Some(vec![(
+                "control".to_string(),
+                json!({"enabled": true}),
+                feature_toggle_backend::database::entity::VariantValueType::Json,
+                Some("primary control variant".to_string()),
+            )]),
+        })
+        .await
+        .expect("primary feature should be created");
+
+    let foreign_feature = repo
+        .create_feature(CreateFeature {
+            team_id,
+            key: format!("criteria-variant-foreign-{}", Uuid::new_v4()),
+            description: Some("feature with a foreign variant".to_string()),
+            feature_type: FeatureType::Contextual,
+            stages: vec![],
+            dependencies: vec![],
+            variants: Some(vec![(
+                "foreign-control".to_string(),
+                json!({"enabled": false}),
+                feature_toggle_backend::database::entity::VariantValueType::Json,
+                Some("foreign control variant".to_string()),
+            )]),
+        })
+        .await
+        .expect("foreign feature should be created");
+
+    let valid = repo
+        .set_stage_criteria(
+            stage_id,
+            vec![CreateStageCriterion {
+                priority: 0,
+                variant_selection_mode: VariantSelectionMode::SpecificVariant,
+                selected_variant_control: Some("control".to_string()),
+            }],
+        )
+        .await
+        .expect("local variant should be accepted");
+    assert_eq!(valid.len(), 1);
+    assert_eq!(
+        valid[0].selected_variant_control.as_deref(),
+        Some("control")
+    );
+
+    let invalid = repo
+        .set_stage_criteria(
+            stage_id,
+            vec![CreateStageCriterion {
+                priority: 0,
+                variant_selection_mode: VariantSelectionMode::SpecificVariant,
+                selected_variant_control: Some("foreign-control".to_string()),
+            }],
+        )
+        .await;
+    assert!(matches!(invalid, Err(Error::DatabaseError(_))));
+
+    let after = repo
+        .get_stage_criteria(stage_id)
+        .await
+        .expect("criteria should still be readable");
+    assert_eq!(after.len(), 1);
+    assert_eq!(
+        after[0].selected_variant_control.as_deref(),
+        Some("control")
+    );
+
+    let _ = repo.delete_feature(foreign_feature).await;
+    let _ = repo.delete_feature(primary_feature).await;
 }

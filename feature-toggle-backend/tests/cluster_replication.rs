@@ -17,34 +17,33 @@ fn free_port() -> u16 {
         .port()
 }
 
-#[tokio::test]
-#[ignore] // Temporarily ignored - cluster tests hang. TODO: Fix discovery/peer connection issue
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
 async fn cluster_db_discovery_propagates_feature_updates() {
-    println!("TEST: Starting database discovery cluster test");
-
     // Setup test database
     let database_url = std::env::var("DATABASE_URL")
         .expect("DATABASE_URL must be set for database discovery tests");
 
-    let pool = sqlx::postgres::PgPoolOptions::new()
+    let cluster_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(12)
+        .connect(&database_url)
+        .await
+        .expect("Failed to connect to cluster test database");
+
+    let assert_pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(5)
         .connect(&database_url)
         .await
-        .expect("Failed to connect to test database");
+        .expect("Failed to connect to assertion test database");
 
     // Clean up any existing test nodes
-    sqlx::query("DELETE FROM cluster_nodes WHERE node_id LIKE 'cluster-test-%'")
-        .execute(&pool)
+    sqlx::query("DELETE FROM cluster_nodes")
+        .execute(&assert_pool)
         .await
         .expect("Failed to clean up test data");
 
     let port_a = free_port();
     let port_b = free_port();
-    println!(
-        "TEST: Allocated ports: port_a={}, port_b={}",
-        port_a, port_b
-    );
-
     let cfg_a = ClusterConfig {
         enabled: true,
         listen_addr: format!("127.0.0.1:{port_a}"),
@@ -76,42 +75,42 @@ async fn cluster_db_discovery_propagates_feature_updates() {
     let (updates_b, _) = broadcast::channel::<pb::FeatureUpdate>(32);
     let (eval_b, _) = broadcast::channel::<FeatureEvaluationEvent>(32);
 
-    println!("TEST: Starting node A");
     // Start both nodes with database discovery
     let guard_a = feature_toggle_backend::cluster::start(
         &cfg_a,
-        Some(pool.clone()),
+        Some(cluster_pool.clone()),
         updates_a.clone(),
         eval_a.clone(),
     )
     .expect("cluster A guard");
 
-    println!("TEST: Starting node B");
     let guard_b = feature_toggle_backend::cluster::start(
         &cfg_b,
-        Some(pool.clone()),
+        Some(cluster_pool.clone()),
         updates_b.clone(),
         eval_b.clone(),
     )
     .expect("cluster B guard");
 
-    println!("TEST: Waiting for database discovery and connections to be established");
-    // Wait for database discovery and connections to be established
-    tokio::time::sleep(Duration::from_millis(3000)).await;
-
-    println!("TEST: Checking nodes in database");
-    // Check if nodes are registered
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM cluster_nodes WHERE node_id LIKE 'cluster-test-%'",
-    )
-    .fetch_one(&pool)
+    // Wait for node registration in discovery table.
+    timeout(Duration::from_secs(10), async {
+        loop {
+            let count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM cluster_nodes WHERE node_id LIKE 'cluster-test-%'",
+            )
+            .fetch_one(&assert_pool)
+            .await
+            .expect("Failed to count test nodes");
+            if count == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
     .await
-    .expect("Failed to count test nodes");
-    println!("TEST: Found {} nodes in database", count);
-    assert_eq!(count, 2, "Both nodes should be registered in database");
+    .expect("Both nodes should be registered in database");
 
     // Subscribe to node B's updates
-    println!("TEST: Subscribing to node B updates");
     let mut rx_b = updates_b.subscribe();
     let message_id = Uuid::new_v4().to_string();
     let update = pb::FeatureUpdate {
@@ -123,24 +122,18 @@ async fn cluster_db_discovery_propagates_feature_updates() {
     };
 
     // Send from node A
-    println!("TEST: Sending update from node A");
     updates_a.send(update).unwrap();
 
     // Receive at node B
-    println!("TEST: Waiting for update at node B");
     let received = timeout(Duration::from_secs(5), async {
         loop {
             match rx_b.recv().await {
                 Ok(incoming) => {
-                    println!("TEST: Received message_id: {}", incoming.message_id);
                     if incoming.message_id == message_id {
                         break incoming;
                     }
                 }
-                Err(e) => {
-                    println!("TEST: Receiver error: {}", e);
-                    panic!("cluster receiver closed");
-                }
+                Err(_) => panic!("cluster receiver closed"),
             }
         }
     })
@@ -148,24 +141,25 @@ async fn cluster_db_discovery_propagates_feature_updates() {
     .expect("feature update propagated via database discovery");
 
     assert_eq!(received.feature_key, "db-discovered-feature");
-    println!("TEST: Success! Feature update propagated correctly");
 
     // Cleanup
-    println!("TEST: Cleaning up");
     drop(guard_a);
     drop(guard_b);
 
-    // Give time for deregistration
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    // Verify nodes were deregistered
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM cluster_nodes WHERE node_id LIKE 'cluster-test-%'",
-    )
-    .fetch_one(&pool)
+    timeout(Duration::from_secs(10), async {
+        loop {
+            let count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM cluster_nodes WHERE node_id LIKE 'cluster-test-%'",
+            )
+            .fetch_one(&assert_pool)
+            .await
+            .expect("Failed to count test nodes");
+            if count == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
     .await
-    .expect("Failed to count test nodes");
-
-    println!("TEST: Nodes remaining after cleanup: {}", count);
-    assert_eq!(count, 0, "Nodes should be deregistered after shutdown");
+    .expect("Nodes should be deregistered after shutdown");
 }

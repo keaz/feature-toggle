@@ -68,32 +68,35 @@ impl DbDiscoveryHandle {
         for task in self.tasks.drain(..) {
             let _ = task.await;
         }
+
+        // Best-effort fallback in case cleanup task exited before deregistration.
+        if let Err(err) = self.repo.deregister_node(&self.node_id).await {
+            debug!(
+                "Discovery fallback deregistration failed for node {}: {}",
+                self.node_id, err
+            );
+        }
     }
 }
 
 impl Drop for DbDiscoveryHandle {
     fn drop(&mut self) {
-        // Send shutdown signal to allow cleanup task to deregister the node
+        // Signal shutdown so background tasks can exit.
         let _ = self.shutdown_tx.send(());
 
-        // Perform immediate deregistration in a blocking manner to ensure
-        // the database record is removed even if tasks are aborted
-        let repo = self.repo.clone();
-        let node_id = self.node_id.clone();
+        // Ensure tasks do not outlive the owner when the handle is dropped abruptly.
+        for task in self.tasks.drain(..) {
+            task.abort();
+        }
 
-        // Spawn a blocking task to deregister (won't block Drop)
-        // This ensures deregistration completes even if the main tasks are aborted
-        std::thread::spawn(move || {
-            // Create a minimal tokio runtime for this blocking operation
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(async {
-                if let Err(e) = repo.deregister_node(&node_id).await {
-                    log::error!("Failed to deregister node {} in Drop: {}", node_id, e);
-                } else {
-                    log::info!("Successfully deregistered node {} during shutdown", node_id);
-                }
+        // Best-effort immediate cleanup for abrupt drops where graceful shutdown wasn't awaited.
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let repo = self.repo.clone();
+            let node_id = self.node_id.clone();
+            runtime.spawn(async move {
+                let _ = repo.deregister_node(&node_id).await;
             });
-        });
+        }
     }
 }
 
@@ -107,10 +110,15 @@ pub struct DbDiscoveryService {
 impl DbDiscoveryService {
     /// Create a new discovery service with a dynamically generated node ID
     pub fn new(config: DbDiscoveryConfig, repo: ClusterNodeRepo) -> Self {
+        Self::with_node_id(config, repo, uuid::Uuid::new_v4().to_string())
+    }
+
+    /// Create a new discovery service with a fixed node ID.
+    pub fn with_node_id(config: DbDiscoveryConfig, repo: ClusterNodeRepo, node_id: String) -> Self {
         Self {
             config,
             repo,
-            node_id: uuid::Uuid::new_v4().to_string(),
+            node_id,
         }
     }
 
@@ -278,13 +286,72 @@ impl DbDiscoveryService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cluster::db_discovery::ClusterNodeRepo;
+    use crate::cluster::db_discovery::{ClusterNode, ClusterNodeRepo};
     use sqlx::postgres::PgPoolOptions;
     use std::env;
     use std::time::Duration;
     use tokio::time::{sleep, timeout};
 
-    async fn setup_test_repo(node_prefix: &str) -> ClusterNodeRepo {
+    async fn wait_for_node(
+        repo: &ClusterNodeRepo,
+        node_id: &str,
+        timeout_secs: u64,
+    ) -> Option<ClusterNode> {
+        timeout(Duration::from_secs(timeout_secs), async {
+            loop {
+                if let Some(node) = repo.get_node(node_id).await.expect("node lookup failed") {
+                    break Some(node);
+                }
+                sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    async fn wait_for_active_peer(
+        repo: &ClusterNodeRepo,
+        node_id: &str,
+        peer_addr: &str,
+        timeout_secs: u64,
+    ) -> bool {
+        timeout(Duration::from_secs(timeout_secs), async {
+            loop {
+                let peers = repo
+                    .get_active_peers(node_id, 30)
+                    .await
+                    .expect("peer query failed");
+                if peers.iter().any(|peer| peer == peer_addr) {
+                    break true;
+                }
+                sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .unwrap_or(false)
+    }
+
+    async fn wait_for_peer_event(
+        rx: &mut tokio::sync::mpsc::Receiver<PeerEvent>,
+        expected: PeerEvent,
+        timeout_secs: u64,
+    ) -> Option<PeerEvent> {
+        timeout(Duration::from_secs(timeout_secs), async {
+            loop {
+                match rx.recv().await {
+                    Some(event) if event == expected => break Some(event),
+                    Some(_) => continue,
+                    None => break None,
+                }
+            }
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    async fn setup_test_repo() -> ClusterNodeRepo {
         let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set for tests");
 
         let pool = PgPoolOptions::new()
@@ -293,22 +360,19 @@ mod tests {
             .await
             .expect("Failed to connect to test database");
 
-        // Clean up any existing test nodes for this prefix
-        sqlx::query(&format!(
-            "DELETE FROM cluster_nodes WHERE node_id LIKE '{}-%'",
-            node_prefix
-        ))
-        .execute(&pool)
-        .await
-        .expect("Failed to clean up test data");
+        // Isolate tests from any previously registered cluster nodes.
+        sqlx::query("DELETE FROM cluster_nodes")
+            .execute(&pool)
+            .await
+            .expect("Failed to clean up test data");
 
         ClusterNodeRepo::new(pool)
     }
 
     #[tokio::test]
-    #[ignore] // Temporarily ignored - discovery tests hang. TODO: Fix shutdown/cleanup issue
+    #[serial_test::serial]
     async fn test_service_starts_and_registers_node() {
-        let repo = setup_test_repo("disco-test-1").await;
+        let repo = setup_test_repo().await;
 
         let config = DbDiscoveryConfig {
             listen_addr: "127.0.0.1:50001".to_string(),
@@ -317,8 +381,9 @@ mod tests {
             cleanup_interval_secs: 20,
         };
 
-        let service = DbDiscoveryService::new(config, repo.clone());
-        let node_id = service.node_id.clone(); // Capture the generated node_id
+        let service =
+            DbDiscoveryService::with_node_id(config, repo.clone(), "disco-test-1-node".to_string());
+        let node_id = service.node_id.clone(); // Capture the configured node_id
         let handle = service.start().await.unwrap();
 
         // Verify node was registered
@@ -331,9 +396,9 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Temporarily ignored - discovery tests hang. TODO: Fix shutdown/cleanup issue
+    #[serial_test::serial]
     async fn test_heartbeat_updates() {
-        let repo = setup_test_repo("disco-test-2").await;
+        let repo = setup_test_repo().await;
 
         let config = DbDiscoveryConfig {
             listen_addr: "127.0.0.1:50002".to_string(),
@@ -342,17 +407,29 @@ mod tests {
             cleanup_interval_secs: 60,
         };
 
-        let service = DbDiscoveryService::new(config, repo.clone());
-        let node_id = service.node_id.clone(); // Capture the generated node_id
+        let service =
+            DbDiscoveryService::with_node_id(config, repo.clone(), "disco-test-2-node".to_string());
+        let node_id = service.node_id.clone(); // Capture the configured node_id
         let handle = service.start().await.unwrap();
 
-        // Get initial heartbeat
-        sleep(Duration::from_millis(500)).await;
-        let node1 = repo.get_node(&node_id).await.unwrap().unwrap();
+        // Wait until the node is definitely registered before sampling heartbeat values.
+        let node1 = wait_for_node(&repo, &node_id, 3)
+            .await
+            .expect("node should register before heartbeat sampling");
 
         // Wait for heartbeat to update
-        sleep(Duration::from_millis(1500)).await;
-        let node2 = repo.get_node(&node_id).await.unwrap().unwrap();
+        let node2 = timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(node) = repo.get_node(&node_id).await.unwrap() {
+                    if node.last_heartbeat > node1.last_heartbeat {
+                        break node;
+                    }
+                }
+                sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("heartbeat should update within timeout");
 
         // Heartbeat should have been updated
         assert!(node2.last_heartbeat > node1.last_heartbeat);
@@ -362,9 +439,9 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Temporarily ignored - discovery tests hang. TODO: Fix shutdown/cleanup issue
+    #[serial_test::serial]
     async fn test_peer_discovery() {
-        let repo = setup_test_repo("disco-test-3").await;
+        let repo = setup_test_repo().await;
 
         // Register node A
         let config_a = DbDiscoveryConfig {
@@ -374,11 +451,15 @@ mod tests {
             cleanup_interval_secs: 60,
         };
 
-        let service_a = DbDiscoveryService::new(config_a, repo.clone());
-        let mut handle_a = service_a.start().await.unwrap();
+        let service_a = DbDiscoveryService::with_node_id(
+            config_a,
+            repo.clone(),
+            "disco-test-3-node-a".to_string(),
+        );
+        let handle_a = service_a.start().await.unwrap();
 
         // Wait a bit
-        sleep(Duration::from_millis(500)).await;
+        sleep(Duration::from_millis(250)).await;
 
         // Register node B
         let config_b = DbDiscoveryConfig {
@@ -388,16 +469,18 @@ mod tests {
             cleanup_interval_secs: 60,
         };
 
-        let service_b = DbDiscoveryService::new(config_b, repo.clone());
+        let service_b = DbDiscoveryService::with_node_id(
+            config_b,
+            repo.clone(),
+            "disco-test-3-node-b".to_string(),
+        );
         let handle_b = service_b.start().await.unwrap();
 
-        // Node A should discover node B
-        let event = timeout(Duration::from_secs(3), handle_a.peer_events.recv())
-            .await
-            .expect("Timeout waiting for peer discovery")
-            .expect("Channel closed");
-
-        assert_eq!(event, PeerEvent::PeerAdded("127.0.0.1:50004".to_string()));
+        // Node A should discover node B in the active peer view.
+        assert!(
+            wait_for_active_peer(&repo, "disco-test-3-node-a", "127.0.0.1:50004", 5).await,
+            "Timeout waiting for peer discovery"
+        );
 
         // Cleanup
         handle_a.shutdown().await;
@@ -405,9 +488,9 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Temporarily ignored - discovery tests hang. TODO: Fix shutdown/cleanup issue
+    #[serial_test::serial]
     async fn test_stale_peer_detection() {
-        let repo = setup_test_repo("disco-test-4").await;
+        let repo = setup_test_repo().await;
 
         // Manually register a stale node
         repo.register_node("disco-test-4-stale", "127.0.0.1:50005")
@@ -431,11 +514,15 @@ mod tests {
             cleanup_interval_secs: 2, // Cleanup every 2 seconds
         };
 
-        let service_a = DbDiscoveryService::new(config_a, repo.clone());
+        let service_a = DbDiscoveryService::with_node_id(
+            config_a,
+            repo.clone(),
+            "disco-test-4-node-a".to_string(),
+        );
         let handle_a = service_a.start().await.unwrap();
 
         // Wait for cleanup to run
-        sleep(Duration::from_millis(2500)).await;
+        sleep(Duration::from_millis(3000)).await;
 
         // Stale node should be removed
         let stale_node = repo.get_node("disco-test-4-stale").await.unwrap();
@@ -449,9 +536,9 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Temporarily ignored - discovery tests hang. TODO: Fix shutdown/cleanup issue
+    #[serial_test::serial]
     async fn test_shutdown_deregisters_node() {
-        let repo = setup_test_repo("disco-test-5").await;
+        let repo = setup_test_repo().await;
 
         let config = DbDiscoveryConfig {
             listen_addr: "127.0.0.1:50007".to_string(),
@@ -460,8 +547,9 @@ mod tests {
             cleanup_interval_secs: 20,
         };
 
-        let service = DbDiscoveryService::new(config, repo.clone());
-        let node_id = service.node_id.clone(); // Capture the generated node_id
+        let service =
+            DbDiscoveryService::with_node_id(config, repo.clone(), "disco-test-5-node".to_string());
+        let node_id = service.node_id.clone(); // Capture the configured node_id
         let handle = service.start().await.unwrap();
 
         // Verify node exists
@@ -478,9 +566,9 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Temporarily ignored - discovery tests hang. TODO: Fix shutdown/cleanup issue
+    #[serial_test::serial]
     async fn test_peer_removed_event() {
-        let repo = setup_test_repo("disco-test-6").await;
+        let repo = setup_test_repo().await;
 
         // Start node A
         let config_a = DbDiscoveryConfig {
@@ -490,7 +578,11 @@ mod tests {
             cleanup_interval_secs: 60,
         };
 
-        let service_a = DbDiscoveryService::new(config_a, repo.clone());
+        let service_a = DbDiscoveryService::with_node_id(
+            config_a,
+            repo.clone(),
+            "disco-test-6-node-a".to_string(),
+        );
         let mut handle_a = service_a.start().await.unwrap();
 
         // Start node B
@@ -501,13 +593,20 @@ mod tests {
             cleanup_interval_secs: 60,
         };
 
-        let service_b = DbDiscoveryService::new(config_b, repo.clone());
+        let service_b = DbDiscoveryService::with_node_id(
+            config_b,
+            repo.clone(),
+            "disco-test-6-node-b".to_string(),
+        );
         let handle_b = service_b.start().await.unwrap();
 
         // Wait for node A to discover node B
-        let event = timeout(Duration::from_secs(3), handle_a.peer_events.recv())
-            .await
-            .expect("Timeout waiting for peer added");
+        let event = wait_for_peer_event(
+            &mut handle_a.peer_events,
+            PeerEvent::PeerAdded("127.0.0.1:50009".to_string()),
+            5,
+        )
+        .await;
         assert_eq!(
             event,
             Some(PeerEvent::PeerAdded("127.0.0.1:50009".to_string()))
@@ -518,9 +617,12 @@ mod tests {
         sleep(Duration::from_millis(500)).await;
 
         // Node A should detect node B is removed
-        let event = timeout(Duration::from_secs(4), handle_a.peer_events.recv())
-            .await
-            .expect("Timeout waiting for peer removed");
+        let event = wait_for_peer_event(
+            &mut handle_a.peer_events,
+            PeerEvent::PeerRemoved("127.0.0.1:50009".to_string()),
+            5,
+        )
+        .await;
         assert_eq!(
             event,
             Some(PeerEvent::PeerRemoved("127.0.0.1:50009".to_string()))

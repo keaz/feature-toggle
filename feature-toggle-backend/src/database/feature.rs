@@ -1398,52 +1398,19 @@ impl FeatureRepository for FeatureRepositoryImpl {
         }
 
         let mut tx = self.pool.begin().await.map_err(Error::DatabaseError)?;
-        handle_error(
-            Some(stage_id),
-            sqlx::query!(
-                "DELETE FROM feature_stage_criteria WHERE stage_id = $1",
-                stage_id
-            )
-            .execute(&mut *tx)
-            .await,
-        )?;
-        if !criteria.is_empty() {
-            let ids: Vec<Uuid> = criteria.iter().map(|_| Uuid::new_v4()).collect();
-            let stage_ids: Vec<Uuid> = vec![stage_id; criteria.len()];
-            let priorities: Vec<i32> = criteria.iter().map(|c| c.priority).collect();
-            let modes: Vec<String> = criteria
-                .iter()
-                .map(|c| match c.variant_selection_mode {
-                    crate::database::entity::VariantSelectionMode::WeightedSplit => {
-                        "WEIGHTED_SPLIT".to_string()
-                    }
-                    crate::database::entity::VariantSelectionMode::SpecificVariant => {
-                        "SPECIFIC_VARIANT".to_string()
-                    }
-                })
-                .collect();
-            let selected_variants: Vec<Option<String>> = criteria
-                .iter()
-                .map(|c| c.selected_variant_control.clone())
-                .collect();
-
-            handle_error(
-                None,
-                sqlx::query!(
-                    r#"INSERT INTO feature_stage_criteria(id, stage_id, priority, variant_selection_mode, selected_variant_control)
-                       SELECT unnest($1::uuid[]), unnest($2::uuid[]), unnest($3::int[]), unnest($4::variant_selection_mode[]), unnest($5::text[])"#,
-                    &ids[..],
-                    &stage_ids[..],
-                    &priorities[..],
-                    &modes[..] as &[String],
-                    &selected_variants[..] as &[Option<String>]
-                )
-                .execute(&mut *tx)
-                .await,
-            )?;
+        match self
+            .set_stage_criteria_tx(&mut tx, stage_id, criteria)
+            .await
+        {
+            Ok(updated) => {
+                tx.commit().await.map_err(Error::DatabaseError)?;
+                Ok(updated)
+            }
+            Err(err) => {
+                tx.rollback().await.map_err(Error::DatabaseError)?;
+                Err(err)
+            }
         }
-        tx.commit().await.map_err(Error::DatabaseError)?;
-        self.get_stage_criteria(stage_id).await
     }
 
     async fn get_feature_by_id(&self, id: Uuid) -> Result<Feature, Error> {
@@ -1668,32 +1635,19 @@ impl FeatureRepository for FeatureRepositoryImpl {
         }
 
         let mut tx = self.pool.begin().await.map_err(Error::DatabaseError)?;
-        // Clear existing
-        handle_error(
-            Some(stage_id),
-            sqlx::query!(
-                "DELETE FROM feature_stage_contexts WHERE stage_id=$1",
-                stage_id
-            )
-            .execute(&mut *tx)
-            .await,
-        )?;
-
-        if !context_ids.is_empty() {
-            let _ = handle_error(
-                None,
-                sqlx::query!(
-                    r#"INSERT INTO feature_stage_contexts(stage_id, context_id)
-                   SELECT unnest($1::uuid[]), unnest($2::uuid[])"#,
-                    &vec![stage_id; context_ids.len()][..],
-                    &context_ids[..]
-                )
-                .execute(&mut *tx)
-                .await,
-            )?;
+        match self
+            .set_stage_contexts_tx(&mut tx, stage_id, context_ids)
+            .await
+        {
+            Ok(updated) => {
+                tx.commit().await.map_err(Error::DatabaseError)?;
+                Ok(updated)
+            }
+            Err(err) => {
+                tx.rollback().await.map_err(Error::DatabaseError)?;
+                Err(err)
+            }
         }
-        tx.commit().await.map_err(Error::DatabaseError)?;
-        self.get_stage_contexts(stage_id).await
     }
 
     async fn get_feature_ids_by_context_id(&self, context_id: Uuid) -> Result<Vec<Uuid>, Error> {

@@ -6,5 +6,6 @@ cd "${ROOT_DIR}"
 
 : "${DATABASE_URL:?DATABASE_URL must be set}"
 
+sqlx migrate run --database-url "${DATABASE_URL}" --source feature-toggle-backend/migrations
 psql "${DATABASE_URL}" -f init.sql
 cargo test -p feature-toggle-backend --test grpc_ingest_idempotency_integration -- --nocapture

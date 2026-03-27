@@ -7,7 +7,6 @@ use futures_util::future::{LocalBoxFuture, Ready, ready};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sqlx::Row;
 use uuid::Uuid;
 
 fn default_token_type() -> String {
@@ -85,161 +84,11 @@ fn parse_uuid_claim(value: Option<&String>) -> Option<Uuid> {
     value.and_then(|raw| Uuid::parse_str(raw).ok())
 }
 
-async fn resolve_team_id_for_request(
-    path: &str,
-    pool: &sqlx::PgPool,
-) -> Result<Option<Uuid>, crate::Error> {
-    let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
-    if parts.len() < 3 || parts[0] != "api" || parts[1] != "v1" {
-        return Ok(None);
-    }
-
-    let resource = parts[2];
-
-    if resource == "teams" && parts.len() >= 4 {
-        return Uuid::parse_str(parts[3]).map(Some).map_err(|e| {
-            crate::Error::InvalidInput(format!("invalid team id in request path: {e}"))
-        });
-    }
-
-    let parse_id = |index: usize| -> Result<Option<Uuid>, crate::Error> {
-        if parts.len() <= index {
-            return Ok(None);
-        }
-        Uuid::parse_str(parts[index]).map(Some).map_err(|e| {
-            crate::Error::InvalidInput(format!("invalid resource id in request path: {e}"))
-        })
-    };
-
-    let team_id = match resource {
-        "features" => {
-            let feature_id = parse_id(3)?;
-            if let Some(feature_id) = feature_id {
-                sqlx::query("SELECT team_id FROM features WHERE id = $1")
-                    .bind(feature_id)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(crate::Error::DatabaseError)?
-                    .map(|row| row.get("team_id"))
-            } else {
-                None
-            }
-        }
-        "stages" => {
-            let stage_id = parse_id(3)?;
-            if let Some(stage_id) = stage_id {
-                sqlx::query(
-                    r#"
-                    SELECT f.team_id
-                    FROM features_pipeline_stages fs
-                    JOIN features f ON f.id = fs.feature_id
-                    WHERE fs.id = $1
-                    "#,
-                )
-                .bind(stage_id)
-                .fetch_optional(pool)
-                .await
-                .map_err(crate::Error::DatabaseError)?
-                .map(|row| row.get("team_id"))
-            } else {
-                None
-            }
-        }
-        "approval-requests" => {
-            let request_id = parse_id(3)?;
-            if let Some(request_id) = request_id {
-                sqlx::query(
-                    r#"
-                    SELECT f.team_id
-                    FROM approval_requests ar
-                    JOIN features f ON f.id = ar.feature_id
-                    WHERE ar.id = $1
-                    "#,
-                )
-                .bind(request_id)
-                .fetch_optional(pool)
-                .await
-                .map_err(crate::Error::DatabaseError)?
-                .map(|row| row.get("team_id"))
-            } else {
-                None
-            }
-        }
-        "pipelines" => {
-            let pipeline_id = parse_id(3)?;
-            if let Some(pipeline_id) = pipeline_id {
-                sqlx::query("SELECT team_id FROM pipelines WHERE id = $1")
-                    .bind(pipeline_id)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(crate::Error::DatabaseError)?
-                    .map(|row| row.get("team_id"))
-            } else {
-                None
-            }
-        }
-        "environments" => {
-            let environment_id = parse_id(3)?;
-            if let Some(environment_id) = environment_id {
-                sqlx::query("SELECT team_id FROM environments WHERE id = $1")
-                    .bind(environment_id)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(crate::Error::DatabaseError)?
-                    .map(|row| row.get("team_id"))
-            } else {
-                None
-            }
-        }
-        "contexts" => {
-            let context_id = parse_id(3)?;
-            if let Some(context_id) = context_id {
-                sqlx::query("SELECT team_id FROM contexts WHERE id = $1")
-                    .bind(context_id)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(crate::Error::DatabaseError)?
-                    .map(|row| row.get("team_id"))
-            } else {
-                None
-            }
-        }
-        "clients" => {
-            let client_id = parse_id(3)?;
-            if let Some(client_id) = client_id {
-                sqlx::query("SELECT team_id FROM clients WHERE id = $1")
-                    .bind(client_id)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(crate::Error::DatabaseError)?
-                    .map(|row| row.get("team_id"))
-            } else {
-                None
-            }
-        }
-        "system-clients" => {
-            let system_client_id = parse_id(3)?;
-            if let Some(system_client_id) = system_client_id {
-                sqlx::query("SELECT team_id FROM system_clients WHERE id = $1")
-                    .bind(system_client_id)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(crate::Error::DatabaseError)?
-                    .map(|row| row.get("team_id"))
-            } else {
-                None
-            }
-        }
-        _ => None,
-    };
-
-    Ok(team_id)
-}
-
 pub struct JwtGuard {
     ui_origin: String,
     jwt_secret_logic: Box<dyn crate::logic::jwt_secret::JwtSecretLogic>,
     pool: sqlx::PgPool,
+    scope_resolver: Box<dyn crate::logic::authorization::RequestScopeResolver>,
 }
 
 impl JwtGuard {
@@ -248,10 +97,21 @@ impl JwtGuard {
         jwt_secret_logic: Box<dyn crate::logic::jwt_secret::JwtSecretLogic>,
         pool: sqlx::PgPool,
     ) -> Self {
+        let scope_resolver = crate::logic::authorization::request_scope_resolver(pool.clone());
+        Self::with_scope_resolver(ui_origin, jwt_secret_logic, pool, scope_resolver)
+    }
+
+    pub fn with_scope_resolver(
+        ui_origin: String,
+        jwt_secret_logic: Box<dyn crate::logic::jwt_secret::JwtSecretLogic>,
+        pool: sqlx::PgPool,
+        scope_resolver: Box<dyn crate::logic::authorization::RequestScopeResolver>,
+    ) -> Self {
         Self {
             ui_origin,
             jwt_secret_logic,
             pool,
+            scope_resolver,
         }
     }
 }
@@ -274,6 +134,7 @@ where
             ui_origin: self.ui_origin.clone(),
             jwt_secret_logic: self.jwt_secret_logic.clone(),
             pool: self.pool.clone(),
+            scope_resolver: self.scope_resolver.clone(),
         }))
     }
 }
@@ -283,6 +144,7 @@ pub struct JwtGuardMiddleware<S> {
     ui_origin: String,
     jwt_secret_logic: Box<dyn crate::logic::jwt_secret::JwtSecretLogic>,
     pool: sqlx::PgPool,
+    scope_resolver: Box<dyn crate::logic::authorization::RequestScopeResolver>,
 }
 
 impl<S, B> Service<ServiceRequest> for JwtGuardMiddleware<S>
@@ -302,6 +164,7 @@ where
         let ui_origin = self.ui_origin.clone();
         let jwt_secret_logic = self.jwt_secret_logic.clone();
         let pool = self.pool.clone();
+        let scope_resolver = self.scope_resolver.clone();
 
         Box::pin(async move {
             // Allow preflight OPTIONS
@@ -611,7 +474,10 @@ where
                                         }
 
                                         if path != "/api/v1/auth/logout" {
-                                            match resolve_team_id_for_request(&path, &pool).await {
+                                            match scope_resolver
+                                                .resolve_team_id_for_request(&path)
+                                                .await
+                                            {
                                                 Ok(Some(team_id)) if team_id == claim_team_id => {}
                                                 Ok(Some(_)) | Ok(None) => {
                                                     let res = forbidden_response(
@@ -805,20 +671,6 @@ mod tests {
         PgPoolOptions::new()
             .connect_lazy("postgres://user:pass@localhost/test_db")
             .expect("Failed to create test pool")
-    }
-
-    async fn test_db_pool_from_env() -> Option<sqlx::PgPool> {
-        let Ok(db_url) = std::env::var("DATABASE_URL") else {
-            return None;
-        };
-
-        Some(
-            PgPoolOptions::new()
-                .max_connections(1)
-                .connect(&db_url)
-                .await
-                .expect("Failed to connect to DATABASE_URL for stage scope tests"),
-        )
     }
 
     fn mock_jwt_secret_logic() -> Box<dyn crate::logic::jwt_secret::JwtSecretLogic> {
@@ -1068,73 +920,6 @@ mod tests {
         assert_eq!(token_data.claims.team_id, Some(team_id.to_string()));
         assert!(token_data.claims.roles.contains(&"Requester".to_string()));
         assert!(token_data.claims.roles.contains(&"Approver".to_string()));
-    }
-
-    #[tokio::test]
-    async fn test_resolve_team_id_for_request_resolves_stage_scope() {
-        let Some(pool) = test_db_pool_from_env().await else {
-            eprintln!("Skipping stage scope resolution test: DATABASE_URL is not set");
-            return;
-        };
-
-        let stage_and_team = sqlx::query_as::<_, (Uuid, Uuid)>(
-            r#"
-            SELECT fps.id, f.team_id
-            FROM features_pipeline_stages fps
-            JOIN features f ON f.id = fps.feature_id
-            LIMIT 1
-            "#,
-        )
-        .fetch_optional(&pool)
-        .await
-        .expect("Failed to load stage/team data for scope resolution test");
-
-        let (stage_id, expected_team_id) = match stage_and_team {
-            Some(values) => values,
-            None => {
-                eprintln!(
-                    "Skipping stage scope resolution test: no records in features_pipeline_stages"
-                );
-                return;
-            }
-        };
-
-        let path = format!("/api/v1/stages/{stage_id}");
-        let resolved = resolve_team_id_for_request(&path, &pool)
-            .await
-            .expect("Stage scope resolution should succeed");
-
-        assert_eq!(resolved, Some(expected_team_id));
-    }
-
-    #[tokio::test]
-    async fn test_resolve_team_id_for_request_returns_none_for_missing_stage() {
-        let Some(pool) = test_db_pool_from_env().await else {
-            eprintln!("Skipping missing stage test: DATABASE_URL is not set");
-            return;
-        };
-
-        let missing_stage_id = loop {
-            let candidate = Uuid::new_v4();
-            let existing = sqlx::query_scalar::<_, Uuid>(
-                "SELECT id FROM features_pipeline_stages WHERE id = $1",
-            )
-            .bind(candidate)
-            .fetch_optional(&pool)
-            .await
-            .expect("Failed to verify missing stage id");
-
-            if existing.is_none() {
-                break candidate;
-            }
-        };
-
-        let path = format!("/api/v1/stages/{missing_stage_id}");
-        let resolved = resolve_team_id_for_request(&path, &pool)
-            .await
-            .expect("Missing stage lookup should not error");
-
-        assert_eq!(resolved, None);
     }
 
     #[actix_web::test]

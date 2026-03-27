@@ -40,15 +40,25 @@ pub fn team_logic(
     repository: Box<dyn TeamRepository>,
     activity_log_repository: Box<dyn crate::database::activity_log::ActivityLogRepository>,
 ) -> Box<dyn TeamLogic> {
+    team_logic_with_notifications(repository, activity_log_repository, None)
+}
+
+pub fn team_logic_with_notifications(
+    repository: Box<dyn TeamRepository>,
+    activity_log_repository: Box<dyn crate::database::activity_log::ActivityLogRepository>,
+    notification_logic: Option<Box<dyn crate::logic::notification::NotificationLogic>>,
+) -> Box<dyn TeamLogic> {
     Box::new(TeamLogicImpl {
         repository,
         activity_log_repository,
+        notification_logic,
     })
 }
 
 struct TeamLogicImpl {
     repository: Box<dyn TeamRepository>,
     activity_log_repository: Box<dyn crate::database::activity_log::ActivityLogRepository>,
+    notification_logic: Option<Box<dyn crate::logic::notification::NotificationLogic>>,
 }
 
 impl Clone for TeamLogicImpl {
@@ -56,6 +66,18 @@ impl Clone for TeamLogicImpl {
         Self {
             repository: self.repository.clone_box(),
             activity_log_repository: self.activity_log_repository.clone_box(),
+            notification_logic: self
+                .notification_logic
+                .as_ref()
+                .map(|logic| logic.clone_box()),
+        }
+    }
+}
+
+impl TeamLogicImpl {
+    fn dispatch_notification(&self, event: crate::logic::notification::NotificationEvent) {
+        if let Some(logic) = &self.notification_logic {
+            crate::logic::notification::spawn_notification_dispatch(logic.clone_box(), event);
         }
     }
 }
@@ -144,23 +166,20 @@ impl TeamLogic for TeamLogicImpl {
             )
         };
 
-        crate::logic::notification::dispatch_notification_event(
-            crate::logic::notification::NotificationEvent {
-                notification_type: crate::logic::notification::NOTIFICATION_TYPE_TEAM_CREATED
-                    .to_string(),
-                team_id: None,
-                actor_id,
-                subject: format!("Team created: {}", team.name),
-                message,
-                metadata: Some(serde_json::json!({
-                    "team_id": team.id.to_string(),
-                    "team_name": team.name.clone(),
-                    "team_description": team.description.clone(),
-                    "created_by": created_by,
-                })),
-            },
-        )
-        .await;
+        self.dispatch_notification(crate::logic::notification::NotificationEvent {
+            notification_type: crate::logic::notification::NOTIFICATION_TYPE_TEAM_CREATED
+                .to_string(),
+            team_id: None,
+            actor_id,
+            subject: format!("Team created: {}", team.name),
+            message,
+            metadata: Some(serde_json::json!({
+                "team_id": team.id.to_string(),
+                "team_name": team.name.clone(),
+                "team_description": team.description.clone(),
+                "created_by": created_by,
+            })),
+        });
 
         Ok(Team {
             id,
@@ -227,6 +246,8 @@ mod tests {
     use super::*;
     use crate::database::activity_log::MockActivityLogRepository;
     use crate::database::team::MockTeamRepository;
+    use tokio::sync::mpsc;
+    use tokio::time::{Duration, timeout};
 
     fn create_mock_activity_log() -> Box<dyn crate::database::activity_log::ActivityLogRepository> {
         let mut mock = MockActivityLogRepository::new();
@@ -246,6 +267,46 @@ mod tests {
         mock.expect_clone_box()
             .returning(|| create_mock_activity_log());
         Box::new(mock)
+    }
+
+    #[derive(Clone)]
+    struct RecordingNotificationLogic {
+        sender: mpsc::UnboundedSender<String>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::logic::notification::NotificationLogic for RecordingNotificationLogic {
+        async fn get_settings(
+            &self,
+        ) -> Result<crate::logic::notification::NotificationSettingsView, Error> {
+            Err(Error::InvalidInput("unused_in_test".to_string()))
+        }
+
+        async fn update_channel_config(
+            &self,
+            _input: crate::logic::notification::UpdateNotificationChannelConfigInput,
+        ) -> Result<crate::logic::notification::NotificationChannelConfigView, Error> {
+            Err(Error::InvalidInput("unused_in_test".to_string()))
+        }
+
+        async fn update_preference(
+            &self,
+            _input: crate::logic::notification::UpdateNotificationPreferenceInput,
+        ) -> Result<crate::logic::notification::NotificationPreferenceView, Error> {
+            Err(Error::InvalidInput("unused_in_test".to_string()))
+        }
+
+        async fn dispatch_event(
+            &self,
+            event: crate::logic::notification::NotificationEvent,
+        ) -> Result<(), Error> {
+            let _ = self.sender.send(event.notification_type);
+            Ok(())
+        }
+
+        fn clone_box(&self) -> Box<dyn crate::logic::notification::NotificationLogic> {
+            Box::new(self.clone())
+        }
     }
 
     #[tokio::test]
@@ -323,6 +384,47 @@ mod tests {
         let team = result.unwrap();
         assert_eq!(team.id, ID::from(expected_id));
         assert_eq!(team.name, "New Team");
+    }
+
+    #[tokio::test]
+    async fn test_create_team_uses_injected_notifier() {
+        let mut mock_repository = MockTeamRepository::new();
+        let input = CreateTeamInput {
+            name: "New Team".to_string(),
+            description: "Description of the new team".to_string(),
+        };
+        let expected_id = Uuid::new_v4();
+        mock_repository
+            .expect_create_team()
+            .times(1)
+            .returning(move |_| {
+                Ok(crate::database::entity::Team {
+                    id: expected_id,
+                    name: "New Team".to_string(),
+                    description: "Description of the new team".to_string(),
+                })
+            });
+
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let logic = team_logic_with_notifications(
+            Box::new(mock_repository),
+            create_mock_activity_log(),
+            Some(Box::new(RecordingNotificationLogic { sender })),
+        );
+
+        logic
+            .create_team(input, None)
+            .await
+            .expect("team creation should succeed");
+
+        let notification_type = timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("notification task should complete")
+            .expect("notification channel should receive an event");
+        assert_eq!(
+            notification_type,
+            crate::logic::notification::NOTIFICATION_TYPE_TEAM_CREATED
+        );
     }
 
     #[tokio::test]
