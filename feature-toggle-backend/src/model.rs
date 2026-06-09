@@ -284,6 +284,19 @@ pub struct SystemClient {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemClientToken {
+    pub id: ID,
+    pub system_client_id: ID,
+    pub name: String,
+    pub scopes: Vec<String>,
+    pub expires_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+    pub revoked_at: Option<DateTime<Utc>>,
+    pub is_revoked: bool,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextEntry {
     pub id: ID,
     pub value: String,
@@ -533,6 +546,8 @@ pub struct CreateSystemClientInput {
     pub description: Option<String>,
     pub enabled: Option<bool>,
     pub expires_at: DateTime<Utc>,
+    pub token_name: Option<String>,
+    pub scopes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -540,6 +555,13 @@ pub struct UpdateSystemClientInput {
     pub name: Option<String>,
     pub description: Option<String>,
     pub enabled: Option<bool>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateSystemClientTokenInput {
+    pub name: Option<String>,
+    pub scopes: Vec<String>,
     pub expires_at: Option<DateTime<Utc>>,
 }
 

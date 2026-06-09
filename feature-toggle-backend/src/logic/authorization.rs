@@ -15,6 +15,7 @@ enum ScopedResourceKind {
     Context,
     Client,
     SystemClient,
+    SystemClientToken,
 }
 
 impl ScopedResourceKind {
@@ -29,6 +30,7 @@ impl ScopedResourceKind {
             "contexts" => Some(Self::Context),
             "clients" => Some(Self::Client),
             "system-clients" => Some(Self::SystemClient),
+            "system-client-tokens" => Some(Self::SystemClientToken),
             _ => None,
         }
     }
@@ -159,6 +161,18 @@ impl RequestScopeResolver for DatabaseRequestScopeResolver {
             ScopedResourceKind::SystemClient => {
                 self.fetch_team_id(
                     "SELECT team_id FROM system_clients WHERE id = $1",
+                    resource.id,
+                )
+                .await
+            }
+            ScopedResourceKind::SystemClientToken => {
+                self.fetch_team_id(
+                    r#"
+                    SELECT sc.team_id
+                    FROM system_client_tokens sct
+                    JOIN system_clients sc ON sc.id = sct.system_client_id
+                    WHERE sct.id = $1
+                    "#,
                     resource.id,
                 )
                 .await

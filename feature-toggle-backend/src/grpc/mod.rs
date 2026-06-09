@@ -94,6 +94,14 @@ impl crate::logic::metrics::MetricLogic for NoopMetricLogic {
         Ok(0)
     }
 
+    async fn track_metrics_for_team(
+        &self,
+        _team_id: Uuid,
+        _events: Vec<TrackMetricInput>,
+    ) -> Result<usize, MetricLogicError> {
+        Ok(0)
+    }
+
     async fn aggregate_metrics(
         &self,
         _from: DateTime<Utc>,

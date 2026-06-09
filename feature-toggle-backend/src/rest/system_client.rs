@@ -4,9 +4,12 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::logic::system_client::{SystemClientLogic, SystemClientTokenResult};
+use crate::logic::system_client::{
+    SystemClientLogic, SystemClientTokenResult, default_system_client_scopes,
+};
 use crate::model::{
-    CreateSystemClientInput, ID, SystemClient as ModelSystemClient, UpdateSystemClientInput,
+    CreateSystemClientInput, CreateSystemClientTokenInput, ID, SystemClient as ModelSystemClient,
+    SystemClientToken as ModelSystemClientToken, UpdateSystemClientInput,
 };
 use crate::rest::error::RestError;
 use crate::rest::pagination::{PageMeta, PaginationQuery, normalize_pagination};
@@ -45,6 +48,7 @@ pub struct SystemClientsResponse {
 #[serde(rename_all = "camelCase")]
 pub struct SystemClientWithTokenResponse {
     pub system_client: SystemClientResponse,
+    pub token_meta: SystemClientTokenResponse,
     pub token: String,
 }
 
@@ -55,6 +59,8 @@ pub struct CreateSystemClientRequest {
     pub description: Option<String>,
     pub enabled: Option<bool>,
     pub expires_at: DateTime<Utc>,
+    pub token_name: Option<String>,
+    pub scopes: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
@@ -64,6 +70,34 @@ pub struct UpdateSystemClientRequest {
     pub description: Option<String>,
     pub enabled: Option<bool>,
     pub expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateSystemClientTokenRequest {
+    pub name: Option<String>,
+    pub scopes: Option<Vec<String>>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemClientTokenResponse {
+    pub id: String,
+    pub system_client_id: String,
+    pub name: String,
+    pub scopes: Vec<String>,
+    pub expires_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+    pub revoked_at: Option<DateTime<Utc>>,
+    pub is_revoked: bool,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemClientTokensResponse {
+    pub items: Vec<SystemClientTokenResponse>,
 }
 
 fn parse_uuid(value: &str, field: &str) -> Result<Uuid, RestError> {
@@ -107,10 +141,27 @@ impl From<ModelSystemClient> for SystemClientResponse {
     }
 }
 
+impl From<ModelSystemClientToken> for SystemClientTokenResponse {
+    fn from(value: ModelSystemClientToken) -> Self {
+        Self {
+            id: value.id.to_string(),
+            system_client_id: value.system_client_id.to_string(),
+            name: value.name,
+            scopes: value.scopes,
+            expires_at: value.expires_at,
+            created_at: value.created_at,
+            revoked_at: value.revoked_at,
+            is_revoked: value.is_revoked,
+            last_used_at: value.last_used_at,
+        }
+    }
+}
+
 impl From<SystemClientTokenResult> for SystemClientWithTokenResponse {
     fn from(value: SystemClientTokenResult) -> Self {
         Self {
             system_client: SystemClientResponse::from(value.system_client),
+            token_meta: SystemClientTokenResponse::from(value.token_meta),
             token: value.token,
         }
     }
@@ -231,6 +282,12 @@ pub(crate) async fn create_system_client(
                 description: payload.description.clone(),
                 enabled: payload.enabled,
                 expires_at: payload.expires_at,
+                token_name: payload.token_name.clone(),
+                scopes: payload
+                    .scopes
+                    .clone()
+                    .filter(|scopes| !scopes.is_empty())
+                    .unwrap_or_else(default_system_client_scopes),
             },
         )
         .await
@@ -303,15 +360,128 @@ pub(crate) async fn update_system_client(
 pub(crate) async fn regenerate_system_client_token(
     logic: web::Data<Box<dyn SystemClientLogic>>,
     id: web::Path<String>,
+    payload: Option<web::Json<CreateSystemClientTokenRequest>>,
 ) -> Result<impl Responder, RestError> {
     let system_client_id = parse_uuid(&id, "system client id")?;
+    let payload = payload
+        .map(|body| body.into_inner())
+        .unwrap_or(CreateSystemClientTokenRequest {
+            name: None,
+            scopes: None,
+            expires_at: None,
+        });
 
     let result = logic
-        .regenerate_token(ID::from(system_client_id))
+        .regenerate_token(
+            ID::from(system_client_id),
+            CreateSystemClientTokenInput {
+                name: payload.name,
+                scopes: payload
+                    .scopes
+                    .filter(|scopes| !scopes.is_empty())
+                    .unwrap_or_else(default_system_client_scopes),
+                expires_at: payload.expires_at,
+            },
+        )
         .await
         .map_err(RestError::from)?;
 
     Ok(HttpResponse::Ok().json(SystemClientWithTokenResponse::from(result)))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/system-clients/{id}/tokens",
+    params(("id" = String, Path, description = "System client ID")),
+    responses(
+        (status = 200, description = "System client tokens", body = SystemClientTokensResponse),
+        (status = 400, description = "Invalid input", body = crate::rest::error::ErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::rest::error::ErrorResponse),
+        (status = 403, description = "Forbidden", body = crate::rest::error::ErrorResponse),
+        (status = 404, description = "Not found", body = crate::rest::error::ErrorResponse)
+    ),
+    tag = "System Clients"
+)]
+#[get("/system-clients/{id}/tokens")]
+pub(crate) async fn list_system_client_tokens(
+    logic: web::Data<Box<dyn SystemClientLogic>>,
+    id: web::Path<String>,
+) -> Result<impl Responder, RestError> {
+    let system_client_id = parse_uuid(&id, "system client id")?;
+    let tokens = logic
+        .list_tokens(ID::from(system_client_id))
+        .await
+        .map_err(RestError::from)?;
+    Ok(HttpResponse::Ok().json(SystemClientTokensResponse {
+        items: tokens
+            .into_iter()
+            .map(SystemClientTokenResponse::from)
+            .collect(),
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/system-clients/{id}/tokens",
+    request_body = CreateSystemClientTokenRequest,
+    params(("id" = String, Path, description = "System client ID")),
+    responses(
+        (status = 201, description = "Token created", body = SystemClientWithTokenResponse),
+        (status = 400, description = "Invalid input", body = crate::rest::error::ErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::rest::error::ErrorResponse),
+        (status = 403, description = "Forbidden", body = crate::rest::error::ErrorResponse),
+        (status = 404, description = "Not found", body = crate::rest::error::ErrorResponse)
+    ),
+    tag = "System Clients"
+)]
+#[post("/system-clients/{id}/tokens")]
+pub(crate) async fn create_system_client_token(
+    logic: web::Data<Box<dyn SystemClientLogic>>,
+    id: web::Path<String>,
+    payload: web::Json<CreateSystemClientTokenRequest>,
+) -> Result<impl Responder, RestError> {
+    let system_client_id = parse_uuid(&id, "system client id")?;
+    let payload = payload.into_inner();
+    let result = logic
+        .create_token(
+            ID::from(system_client_id),
+            CreateSystemClientTokenInput {
+                name: payload.name,
+                scopes: payload
+                    .scopes
+                    .filter(|scopes| !scopes.is_empty())
+                    .unwrap_or_else(default_system_client_scopes),
+                expires_at: payload.expires_at,
+            },
+        )
+        .await
+        .map_err(RestError::from)?;
+    Ok(HttpResponse::Created().json(SystemClientWithTokenResponse::from(result)))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/system-client-tokens/{id}/revoke",
+    params(("id" = String, Path, description = "System client token ID")),
+    responses(
+        (status = 204, description = "Token revoked"),
+        (status = 400, description = "Invalid input", body = crate::rest::error::ErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::rest::error::ErrorResponse),
+        (status = 403, description = "Forbidden", body = crate::rest::error::ErrorResponse)
+    ),
+    tag = "System Clients"
+)]
+#[post("/system-client-tokens/{id}/revoke")]
+pub(crate) async fn revoke_system_client_token(
+    logic: web::Data<Box<dyn SystemClientLogic>>,
+    id: web::Path<String>,
+) -> Result<impl Responder, RestError> {
+    let token_id = parse_uuid(&id, "system client token id")?;
+    let _ = logic
+        .revoke_token(ID::from(token_id))
+        .await
+        .map_err(RestError::from)?;
+    Ok(HttpResponse::NoContent().finish())
 }
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
@@ -319,5 +489,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .service(get_system_client)
         .service(create_system_client)
         .service(update_system_client)
-        .service(regenerate_system_client_token);
+        .service(regenerate_system_client_token)
+        .service(list_system_client_tokens)
+        .service(create_system_client_token)
+        .service(revoke_system_client_token);
 }

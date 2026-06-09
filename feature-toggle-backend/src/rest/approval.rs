@@ -1489,6 +1489,7 @@ mod tests {
             username: "tester".to_string(),
             is_admin: true,
             roles: vec!["Approver".to_string()],
+            team_id: None,
             token_hash: "hash".to_string(),
         });
         let resp = test::call_service(&app, req).await;

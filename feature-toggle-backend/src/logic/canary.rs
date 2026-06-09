@@ -722,6 +722,16 @@ mod tests {
             ))
         }
 
+        async fn track_metrics_for_team(
+            &self,
+            _team_id: Uuid,
+            _events: Vec<crate::logic::metrics::TrackMetricInput>,
+        ) -> Result<usize, MetricLogicError> {
+            Err(MetricLogicError::InvalidInput(
+                "not implemented in test".to_string(),
+            ))
+        }
+
         async fn aggregate_metrics(
             &self,
             _from: DateTime<Utc>,

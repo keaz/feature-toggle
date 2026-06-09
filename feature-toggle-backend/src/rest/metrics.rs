@@ -1,4 +1,4 @@
-use actix_web::{HttpRequest, HttpResponse, Responder, get, post, put, web};
+use actix_web::{HttpMessage, HttpRequest, HttpResponse, Responder, get, post, put, web};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -351,6 +351,12 @@ pub struct TrackMetricsRequest {
     pub client_id: String,
     #[serde(alias = "client_secret")]
     pub client_secret: String,
+    pub events: Vec<TrackMetricEventRequest>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackMetricsWithTokenRequest {
     pub events: Vec<TrackMetricEventRequest>,
 }
 
@@ -1867,14 +1873,11 @@ pub(crate) async fn track_metrics(
     track_metrics_handler(metric_logic, payload).await
 }
 
-pub(crate) async fn track_metrics_handler(
-    metric_logic: web::Data<Box<dyn MetricLogic>>,
-    payload: web::Json<TrackMetricsRequest>,
-) -> Result<HttpResponse, RestError> {
-    let body = payload.into_inner();
-
-    let mut events = Vec::with_capacity(body.events.len());
-    for ev in body.events {
+fn map_track_metric_events(
+    event_requests: Vec<TrackMetricEventRequest>,
+) -> Result<Vec<crate::logic::metrics::TrackMetricInput>, RestError> {
+    let mut events = Vec::with_capacity(event_requests.len());
+    for ev in event_requests {
         let environment_id = match ev.environment_id {
             Some(ref env) if !env.is_empty() => Some(
                 Uuid::parse_str(env)
@@ -1902,12 +1905,55 @@ pub(crate) async fn track_metrics_handler(
             timestamp,
         });
     }
+    Ok(events)
+}
+
+pub(crate) async fn track_metrics_handler(
+    metric_logic: web::Data<Box<dyn MetricLogic>>,
+    payload: web::Json<TrackMetricsRequest>,
+) -> Result<HttpResponse, RestError> {
+    let body = payload.into_inner();
+    let events = map_track_metric_events(body.events)?;
 
     let processed = metric_logic
         .track_metrics(&body.client_id, &body.client_secret, events)
         .await
         .map_err(RestError::from)?;
 
+    Ok(HttpResponse::Ok().json(TrackMetricsResponse { processed }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/metrics/track/system",
+    request_body = TrackMetricsWithTokenRequest,
+    responses(
+        (status = 200, description = "Metrics tracked", body = TrackMetricsResponse),
+        (status = 400, description = "Invalid input", body = crate::rest::error::ErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::rest::error::ErrorResponse),
+        (status = 403, description = "Forbidden", body = crate::rest::error::ErrorResponse)
+    ),
+    tag = "Metrics"
+)]
+#[post("/metrics/track/system")]
+pub(crate) async fn track_metrics_with_system_token(
+    metric_logic: web::Data<Box<dyn MetricLogic>>,
+    req: HttpRequest,
+    payload: web::Json<TrackMetricsWithTokenRequest>,
+) -> Result<HttpResponse, RestError> {
+    let jwt = req
+        .extensions()
+        .get::<crate::JwtUser>()
+        .cloned()
+        .ok_or_else(|| RestError::unauthorized("User authentication not found"))?;
+    let team_id = jwt
+        .team_id
+        .ok_or_else(|| RestError::forbidden("system client team scope is required"))?;
+    let events = map_track_metric_events(payload.into_inner().events)?;
+    let processed = metric_logic
+        .track_metrics_for_team(team_id, events)
+        .await
+        .map_err(RestError::from)?;
     Ok(HttpResponse::Ok().json(TrackMetricsResponse { processed }))
 }
 
@@ -2042,7 +2088,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .service(analyze_canary_gate)
         .service(recent_activity)
         .service(system_metrics)
-        .service(track_metrics);
+        .service(track_metrics)
+        .service(track_metrics_with_system_token);
 }
 
 #[cfg(test)]
@@ -2121,6 +2168,22 @@ mod tests {
                 .push(RecordedTrackCall {
                     client_id: client_id.to_string(),
                     client_secret: client_secret.to_string(),
+                    events,
+                });
+            Ok(self.processed)
+        }
+
+        async fn track_metrics_for_team(
+            &self,
+            _team_id: Uuid,
+            events: Vec<TrackMetricInput>,
+        ) -> Result<usize, MetricLogicError> {
+            self.calls
+                .lock()
+                .expect("track call mutex poisoned")
+                .push(RecordedTrackCall {
+                    client_id: "system-token".to_string(),
+                    client_secret: String::new(),
                     events,
                 });
             Ok(self.processed)

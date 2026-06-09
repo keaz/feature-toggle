@@ -313,6 +313,7 @@ pub struct JwtUser {
     pub username: String,
     pub is_admin: bool,
     pub roles: Vec<String>,
+    pub team_id: Option<uuid::Uuid>,
     pub token_hash: String, // SHA256 hash of the current token for logout
 }
 

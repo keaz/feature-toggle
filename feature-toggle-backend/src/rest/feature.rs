@@ -1484,6 +1484,7 @@ mod tests {
             username: "user".to_string(),
             is_admin: false,
             roles: vec![],
+            team_id: None,
             token_hash: "hash".to_string(),
         };
 

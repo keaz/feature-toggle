@@ -3,8 +3,10 @@ pub mod auth;
 pub mod client;
 pub mod context;
 pub mod criteria;
+pub mod developer;
 pub mod environment;
 pub mod error;
+pub mod evaluation;
 pub mod feature;
 pub mod jwt_secret;
 pub mod metrics;
@@ -57,11 +59,13 @@ use crate::rest::criteria::{
     StageCriterionResponse, UpdateRuleGroupRequest, VariantAllocationResponse,
     VariantSelectionMode,
 };
+use crate::rest::developer::{CompatibilityCapability, OfrepStatusResponse};
 use crate::rest::environment::{
     CreateEnvironmentRequest, EnvironmentListQuery, EnvironmentResponse, EnvironmentsResponse,
     UpdateEnvironmentRequest,
 };
 use crate::rest::error::ErrorResponse;
+use crate::rest::evaluation::{EvaluateRequest, EvaluateResponse};
 use crate::rest::feature::{
     CreateFeatureRequest, CreateFeatureStageRequest, CreateFeatureVariantRequest,
     EmergencyDisableRequest, EmergencyEnableRequest, FeatureListQuery, FeatureRelationshipResponse,
@@ -82,7 +86,7 @@ use crate::rest::metrics::{
     ExperimentResultsQuery, FeatureGrowthQuery, FeatureGrowthResponse, MetricAnalysisResponse,
     MetricResponse, MetricResultResponse, MetricsByFeatureQuery, MetricsResponse,
     SetCanaryGatesRequest, SystemMetricsResponse, TrackMetricEventRequest, TrackMetricsRequest,
-    TrackMetricsResponse,
+    TrackMetricsResponse, TrackMetricsWithTokenRequest,
 };
 use crate::rest::notification::{
     NotificationChannelConfigResponse, NotificationPreferenceResponse,
@@ -109,7 +113,8 @@ use crate::rest::rollout_template::{
     RolloutTemplatesResponse,
 };
 use crate::rest::system_client::{
-    CreateSystemClientRequest, SystemClientListQuery, SystemClientResponse,
+    CreateSystemClientRequest, CreateSystemClientTokenRequest, SystemClientListQuery,
+    SystemClientResponse, SystemClientTokenResponse, SystemClientTokensResponse,
     SystemClientWithTokenResponse, SystemClientsResponse, UpdateSystemClientRequest,
 };
 use crate::rest::team::{CreateTeamRequest, TeamResponse, UpdateTeamRequest};
@@ -157,6 +162,11 @@ async fn health() -> impl Responder {
         system_client::create_system_client,
         system_client::update_system_client,
         system_client::regenerate_system_client_token,
+        system_client::list_system_client_tokens,
+        system_client::create_system_client_token,
+        system_client::revoke_system_client_token,
+        developer::ofrep_status,
+        evaluation::evaluate_feature,
         pipeline::list_pipelines,
         pipeline::get_pipeline,
         pipeline::create_pipeline,
@@ -227,6 +237,7 @@ async fn health() -> impl Responder {
         metrics::recent_activity,
         metrics::system_metrics,
         metrics::track_metrics,
+        metrics::track_metrics_with_system_token,
         metrics::list_canary_gates,
         metrics::replace_canary_gates,
         metrics::analyze_canary_gate,
@@ -266,12 +277,19 @@ async fn health() -> impl Responder {
         CreateClientRequest,
         UpdateClientRequest,
         ClientType,
+        CompatibilityCapability,
         SystemClientListQuery,
         SystemClientResponse,
         SystemClientsResponse,
         CreateSystemClientRequest,
+        CreateSystemClientTokenRequest,
         UpdateSystemClientRequest,
+        SystemClientTokenResponse,
+        SystemClientTokensResponse,
         SystemClientWithTokenResponse,
+        OfrepStatusResponse,
+        EvaluateRequest,
+        EvaluateResponse,
         PipelineListQuery,
         PipelineResponse,
         PipelinesResponse,
@@ -385,6 +403,7 @@ async fn health() -> impl Responder {
         TrackMetricsResponse,
         TrackMetricEventRequest,
         TrackMetricsRequest,
+        TrackMetricsWithTokenRequest,
         CanaryDirection,
         CanaryGateConfigRequest,
         SetCanaryGatesRequest,
@@ -424,6 +443,8 @@ async fn health() -> impl Responder {
         (name = "Contexts", description = "Context management"),
         (name = "Clients", description = "Client management"),
         (name = "System Clients", description = "System automation clients and JWT token management"),
+        (name = "Developer", description = "Developer integration metadata and compatibility"),
+        (name = "Evaluation", description = "Feature evaluation endpoints"),
         (name = "Pipelines", description = "Pipeline management"),
         (name = "Rollout Templates", description = "Reusable rollout templates"),
         (name = "Features", description = "Feature management and rollout"),
@@ -551,6 +572,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .configure(context::configure)
             .configure(client::configure)
             .configure(system_client::configure)
+            .configure(developer::configure)
+            .configure(evaluation::configure)
             .configure(pipeline::configure)
             .configure(rollout_template::configure)
             .configure(feature::configure)

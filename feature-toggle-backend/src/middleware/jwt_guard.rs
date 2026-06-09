@@ -27,6 +27,8 @@ pub struct Claims {
     pub token_type: String,
     #[serde(default)]
     pub team_id: Option<String>,
+    #[serde(default)]
+    pub scopes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +84,72 @@ fn policy_internal_error_response() -> HttpResponse {
 
 fn parse_uuid_claim(value: Option<&String>) -> Option<Uuid> {
     value.and_then(|raw| Uuid::parse_str(raw).ok())
+}
+
+fn has_scope(scopes: &[String], scope: &str) -> bool {
+    scopes.iter().any(|value| value == scope)
+}
+
+fn path_has_segment(path: &str, segment: &str) -> bool {
+    path.trim_matches('/')
+        .split('/')
+        .any(|part| part == segment)
+}
+
+fn system_client_scope_allowed(
+    scopes: &[String],
+    method: &actix_web::http::Method,
+    path: &str,
+) -> bool {
+    use crate::logic::system_client::{
+        SCOPE_ADMIN_READ, SCOPE_EVALUATE, SCOPE_FLAG_WRITE, SCOPE_METRICS_WRITE,
+    };
+
+    if path == "/api/v1/auth/logout" {
+        return true;
+    }
+
+    if path == "/api/v1/metrics/track/system" && method == actix_web::http::Method::POST {
+        return has_scope(scopes, SCOPE_METRICS_WRITE);
+    }
+
+    if path == "/api/v1/evaluate" && method == actix_web::http::Method::POST {
+        return has_scope(scopes, SCOPE_EVALUATE);
+    }
+
+    if path == "/api/v1/health"
+        || path == "/api/v1/developer/ofrep-status"
+        || path == "/api/v1/openapi.json"
+    {
+        return method == actix_web::http::Method::GET
+            && (has_scope(scopes, SCOPE_ADMIN_READ) || has_scope(scopes, SCOPE_EVALUATE));
+    }
+
+    let is_read = method == actix_web::http::Method::GET || method == actix_web::http::Method::HEAD;
+    if is_read {
+        if path_has_segment(path, "features") || path_has_segment(path, "environments") {
+            return has_scope(scopes, SCOPE_ADMIN_READ) || has_scope(scopes, SCOPE_EVALUATE);
+        }
+        return has_scope(scopes, SCOPE_ADMIN_READ);
+    }
+
+    if method == actix_web::http::Method::POST
+        || method == actix_web::http::Method::PATCH
+        || method == actix_web::http::Method::DELETE
+        || method == actix_web::http::Method::PUT
+    {
+        if path_has_segment(path, "features")
+            || path_has_segment(path, "stages")
+            || path_has_segment(path, "approval-requests")
+            || path_has_segment(path, "criteria")
+            || path_has_segment(path, "scheduled-changes")
+        {
+            return has_scope(scopes, SCOPE_FLAG_WRITE);
+        }
+        return false;
+    }
+
+    false
 }
 
 pub struct JwtGuard {
@@ -400,6 +468,7 @@ where
                                             username: token_data.claims.username.clone(),
                                             is_admin: token_data.claims.is_admin,
                                             roles: token_data.claims.roles.clone(),
+                                            team_id: None,
                                             token_hash: token_hash.clone(),
                                         });
 
@@ -419,9 +488,11 @@ where
                             }
                             TokenType::SystemClient => {
                                 let token_repo = crate::database::system_client_token::system_client_token_repository(pool.clone());
-                                match token_repo.is_token_valid(&token_hash).await {
-                                    Ok(is_valid) => {
-                                        if !is_valid {
+                                match token_repo.get_token_by_hash(&token_hash).await {
+                                    Ok(Some(stored_token)) => {
+                                        if stored_token.is_revoked
+                                            || stored_token.expires_at <= Utc::now()
+                                        {
                                             let res = unauthorized_response(&ui_origin)
                                                 .map_into_right_body();
                                             return Ok(req.into_response(res));
@@ -473,7 +544,31 @@ where
                                             return Ok(req.into_response(res));
                                         }
 
-                                        if path != "/api/v1/auth/logout" {
+                                        let effective_scopes = if stored_token.scopes.is_empty() {
+                                            token_data.claims.scopes.clone()
+                                        } else {
+                                            stored_token.scopes.clone()
+                                        };
+
+                                        if !system_client_scope_allowed(
+                                            &effective_scopes,
+                                            &method,
+                                            &path,
+                                        ) {
+                                            let res = forbidden_response(
+                                                "System client token scope does not allow this operation",
+                                            )
+                                            .map_into_right_body();
+                                            return Ok(req.into_response(res));
+                                        }
+
+                                        let needs_resource_scope = path != "/api/v1/auth/logout"
+                                            && path != "/api/v1/evaluate"
+                                            && path != "/api/v1/metrics/track/system"
+                                            && path != "/api/v1/developer/ofrep-status"
+                                            && path != "/api/v1/health"
+                                            && path != "/api/v1/openapi.json";
+                                        if needs_resource_scope {
                                             match scope_resolver
                                                 .resolve_team_id_for_request(&path)
                                                 .await
@@ -555,15 +650,22 @@ where
                                             username: token_data.claims.username.clone(),
                                             is_admin: token_data.claims.is_admin,
                                             roles: token_data.claims.roles.clone(),
+                                            team_id: Some(claim_team_id),
                                             token_hash: token_hash.clone(),
                                         });
 
                                         let _ = system_client_repo
                                             .touch_last_used(system_client_id)
                                             .await;
+                                        let _ = token_repo.touch_token_last_used(&token_hash).await;
 
                                         let res = service.call(req).await?;
                                         return Ok(res.map_into_left_body());
+                                    }
+                                    Ok(None) => {
+                                        let res =
+                                            unauthorized_response(&ui_origin).map_into_right_body();
+                                        return Ok(req.into_response(res));
                                     }
                                     Err(e) => {
                                         log::error!(
@@ -619,6 +721,7 @@ pub fn create_jwt_token(
         jti: Some(Uuid::new_v4().to_string()),
         token_type: "user".to_string(),
         team_id: None,
+        scopes: Vec::new(),
     };
 
     let header = jsonwebtoken::Header::new(Algorithm::HS256);
@@ -632,6 +735,7 @@ pub fn create_system_client_jwt_token(
     team_id: Uuid,
     username: &str,
     expires_at: DateTime<Utc>,
+    scopes: Vec<String>,
     secret: &str,
 ) -> Result<String, jsonwebtoken::errors::Error> {
     let now = Utc::now();
@@ -646,6 +750,7 @@ pub fn create_system_client_jwt_token(
         jti: Some(Uuid::new_v4().to_string()),
         token_type: "system_client".to_string(),
         team_id: Some(team_id.to_string()),
+        scopes,
     };
 
     let header = jsonwebtoken::Header::new(Algorithm::HS256);
@@ -905,6 +1010,7 @@ mod tests {
             team_id,
             "deploy-bot",
             expires_at,
+            vec!["evaluate".to_string()],
             secret,
         )
         .unwrap();
@@ -918,6 +1024,7 @@ mod tests {
         assert_eq!(token_data.claims.username, "deploy-bot");
         assert_eq!(token_data.claims.token_type, "system_client");
         assert_eq!(token_data.claims.team_id, Some(team_id.to_string()));
+        assert_eq!(token_data.claims.scopes, vec!["evaluate".to_string()]);
         assert!(token_data.claims.roles.contains(&"Requester".to_string()));
         assert!(token_data.claims.roles.contains(&"Approver".to_string()));
     }

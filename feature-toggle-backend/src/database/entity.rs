@@ -283,10 +283,13 @@ pub struct SystemClientToken {
     pub id: Uuid,
     pub system_client_id: Uuid,
     pub token_hash: String,
+    pub name: String,
+    pub scopes: Vec<String>,
     pub expires_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
     pub revoked_at: Option<DateTime<Utc>>,
     pub is_revoked: bool,
+    pub last_used_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]

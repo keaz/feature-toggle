@@ -55,6 +55,12 @@ pub trait MetricLogic: Send + Sync {
         events: Vec<TrackMetricInput>,
     ) -> Result<usize, MetricLogicError>;
 
+    async fn track_metrics_for_team(
+        &self,
+        team_id: Uuid,
+        events: Vec<TrackMetricInput>,
+    ) -> Result<usize, MetricLogicError>;
+
     async fn aggregate_metrics(
         &self,
         from: DateTime<Utc>,
@@ -195,7 +201,18 @@ impl MetricLogic for MetricLogicImpl {
             ));
         }
 
-        let team_id = client.team_id;
+        self.track_metrics_for_team(client.team_id, events).await
+    }
+
+    async fn track_metrics_for_team(
+        &self,
+        team_id: Uuid,
+        events: Vec<TrackMetricInput>,
+    ) -> Result<usize, MetricLogicError> {
+        if events.is_empty() {
+            return Ok(0);
+        }
+
         let mut metric_cache: HashMap<String, MetricRow> = HashMap::new();
         let mut to_store = Vec::with_capacity(events.len());
 
