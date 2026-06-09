@@ -259,6 +259,12 @@ struct ApprovalLogicImpl {
     notification_logic: Option<Box<dyn crate::logic::notification::NotificationLogic>>,
 }
 
+#[derive(Clone, Debug)]
+struct ApprovalRoutingDecision {
+    eligible_approver_ids: Vec<Uuid>,
+    reason: String,
+}
+
 impl ApprovalLogicImpl {
     fn dispatch_notification(&self, event: crate::logic::notification::NotificationEvent) {
         if let Some(logic) = &self.notification_logic {
@@ -337,32 +343,177 @@ impl ApprovalLogicImpl {
         &self,
         policy: &ApprovalPolicy,
     ) -> Result<Option<i64>, Error> {
-        if policy.approver_role_ids.is_empty() {
-            return Ok(Some(0));
-        }
-
-        let Some(pool) = &self.db_pool else {
+        let Some(_) = &self.db_pool else {
             return Ok(None);
         };
 
-        let count = sqlx::query_scalar::<_, i64>(
+        let routing = self.resolve_approval_routing(policy).await?;
+        Ok(Some(routing.eligible_approver_ids.len() as i64))
+    }
+
+    fn routing_reason(policy: &ApprovalPolicy) -> String {
+        match (
+            policy.approver_user_ids.is_empty(),
+            policy.approver_role_ids.is_empty(),
+            policy.fallback_to_roles,
+        ) {
+            (false, false, true) => "Explicit approvers plus role fallback".to_string(),
+            (false, _, false) => "Explicit approvers only".to_string(),
+            (true, false, _) => "Role-based approvers".to_string(),
+            _ => "No approver routing source configured".to_string(),
+        }
+    }
+
+    async fn resolve_approval_routing(
+        &self,
+        policy: &ApprovalPolicy,
+    ) -> Result<ApprovalRoutingDecision, Error> {
+        let Some(pool) = &self.db_pool else {
+            return Ok(ApprovalRoutingDecision {
+                eligible_approver_ids: Vec::new(),
+                reason: "Routing not resolved without database pool; legacy role checks apply"
+                    .to_string(),
+            });
+        };
+
+        let eligible_approver_ids = sqlx::query_scalar::<_, Vec<Uuid>>(
             r#"
-            SELECT COUNT(DISTINCT u.id)
+            SELECT COALESCE(ARRAY_AGG(DISTINCT u.id ORDER BY u.id), '{}'::uuid[])
             FROM users u
-            JOIN user_roles approver_ur ON approver_ur.user_id = u.id
-            JOIN roles approver_role ON approver_role.id = approver_ur.role_id
-            JOIN user_roles policy_ur ON policy_ur.user_id = u.id
-            WHERE u.enabled = TRUE
-              AND LOWER(approver_role.name) = LOWER('Approver')
-              AND policy_ur.role_id = ANY($1)
+            JOIN user_teams ut ON ut.user_id = u.id
+            WHERE ut.team_id = $1
+              AND u.enabled = TRUE
+              AND EXISTS (
+                  SELECT 1
+                  FROM user_roles approver_ur
+                  JOIN roles approver_role ON approver_role.id = approver_ur.role_id
+                  WHERE approver_ur.user_id = u.id
+                    AND LOWER(approver_role.name) = LOWER('Approver')
+              )
+              AND (
+                  (cardinality($3::uuid[]) > 0 AND u.id = ANY($3))
+                  OR (
+                      ($4::boolean OR cardinality($3::uuid[]) = 0)
+                      AND cardinality($2::uuid[]) > 0
+                      AND EXISTS (
+                          SELECT 1
+                          FROM user_roles policy_ur
+                          WHERE policy_ur.user_id = u.id
+                            AND policy_ur.role_id = ANY($2)
+                      )
+                  )
+              )
             "#,
         )
+        .bind(policy.team_id)
         .bind(&policy.approver_role_ids)
+        .bind(&policy.approver_user_ids)
+        .bind(policy.fallback_to_roles)
         .fetch_one(pool)
         .await
         .map_err(Error::DatabaseError)?;
 
-        Ok(Some(count))
+        Ok(ApprovalRoutingDecision {
+            eligible_approver_ids,
+            reason: Self::routing_reason(policy),
+        })
+    }
+
+    async fn ensure_request_has_eligible_approvers(
+        &self,
+        policy: &ApprovalPolicy,
+        routing: &ApprovalRoutingDecision,
+    ) -> Result<(), Error> {
+        if self.db_pool.is_none() {
+            return Ok(());
+        }
+
+        let eligible_count = routing.eligible_approver_ids.len() as i32;
+        if eligible_count < policy.required_approvers {
+            return Err(Error::InvalidInput(format!(
+                "Approval request cannot be created: only {eligible_count} eligible approver(s) found for {} required approval(s)",
+                policy.required_approvers
+            )));
+        }
+
+        Ok(())
+    }
+
+    async fn user_can_admin_override(&self, approver_id: Uuid) -> Result<bool, Error> {
+        if let Some(pool) = &self.db_pool {
+            let is_admin = sqlx::query_scalar::<_, bool>(
+                r#"
+                SELECT is_admin
+                FROM users
+                WHERE id = $1
+                  AND enabled = TRUE
+                "#,
+            )
+            .bind(approver_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(Error::DatabaseError)?
+            .unwrap_or(false);
+
+            if is_admin {
+                return Ok(true);
+            }
+        }
+
+        self.role_repository
+            .user_has_role(approver_id, "Team Admin")
+            .await
+    }
+
+    async fn ensure_user_can_vote(
+        &self,
+        request: &ApprovalRequest,
+        policy: &ApprovalPolicy,
+        approver_id: Uuid,
+    ) -> Result<(), Error> {
+        if request.admin_override_enabled
+            && policy.allow_admin_override
+            && self.user_can_admin_override(approver_id).await?
+        {
+            return Ok(());
+        }
+
+        let has_approver_role = self
+            .role_repository
+            .user_has_role(approver_id, "Approver")
+            .await?;
+
+        if !has_approver_role {
+            return Err(Error::InvalidInput(
+                "User does not have 'Approver' role required to vote on approval requests".into(),
+            ));
+        }
+
+        if !request.eligible_approver_ids.is_empty() {
+            if request.eligible_approver_ids.contains(&approver_id) {
+                return Ok(());
+            }
+
+            return Err(Error::InvalidInput(
+                "User is not an eligible approver for this approval request".into(),
+            ));
+        }
+
+        let user_roles = self.role_repository.get_user_roles(approver_id).await?;
+        let user_role_ids: Vec<Uuid> = user_roles.iter().map(|r| r.id).collect();
+        let has_policy_role = policy
+            .approver_role_ids
+            .iter()
+            .any(|policy_role_id| user_role_ids.contains(policy_role_id));
+
+        if !has_policy_role {
+            return Err(Error::InvalidInput(
+                "User does not have any of the required roles specified in this approval policy"
+                    .into(),
+            ));
+        }
+
+        Ok(())
     }
 
     async fn publish_event(&self, request: &ApprovalRequest, team_id: Uuid) -> Result<(), Error> {
@@ -727,6 +878,7 @@ impl ApprovalLogicImpl {
                 .to_string(),
             team_id: Some(team_id),
             actor_id,
+            recipient_user_ids: None,
             subject,
             message,
             metadata: Some(serde_json::json!({
@@ -766,35 +918,8 @@ impl ApprovalLogicImpl {
             .ok_or(Error::NotFound(request.policy_id))?;
         let team_id = policy.team_id;
 
-        // Authorization: Check if user has required roles
-        // 1. User must have the "Approver" system role for workflow permission
-        let has_approver_role = self
-            .role_repository
-            .user_has_role(approver_id, "Approver")
+        self.ensure_user_can_vote(&request, &policy, approver_id)
             .await?;
-
-        if !has_approver_role {
-            return Err(Error::InvalidInput(
-                "User does not have 'Approver' role required to vote on approval requests".into(),
-            ));
-        }
-
-        // 2. User must have at least one of the roles specified in the policy
-        let user_roles = self.role_repository.get_user_roles(approver_id).await?;
-
-        let user_role_ids: Vec<Uuid> = user_roles.iter().map(|r| r.id).collect();
-
-        let has_policy_role = policy
-            .approver_role_ids
-            .iter()
-            .any(|policy_role_id| user_role_ids.contains(policy_role_id));
-
-        if !has_policy_role {
-            return Err(Error::InvalidInput(
-                "User does not have any of the required roles specified in this approval policy"
-                    .into(),
-            ));
-        }
 
         let updated = self
             .approval_repository
@@ -887,31 +1012,8 @@ impl ApprovalLogicImpl {
             .ok_or(Error::NotFound(request.policy_id))?;
         let team_id = policy.team_id;
 
-        let has_approver_role = self
-            .role_repository
-            .user_has_role(approver_id, "Approver")
+        self.ensure_user_can_vote(&request, &policy, approver_id)
             .await?;
-
-        if !has_approver_role {
-            return Err(Error::InvalidInput(
-                "User does not have 'Approver' role required to vote on approval requests".into(),
-            ));
-        }
-
-        let user_roles = self.role_repository.get_user_roles(approver_id).await?;
-        let user_role_ids: Vec<Uuid> = user_roles.iter().map(|r| r.id).collect();
-
-        let has_policy_role = policy
-            .approver_role_ids
-            .iter()
-            .any(|policy_role_id| user_role_ids.contains(policy_role_id));
-
-        if !has_policy_role {
-            return Err(Error::InvalidInput(
-                "User does not have any of the required roles specified in this approval policy"
-                    .into(),
-            ));
-        }
 
         let pool = self
             .db_pool
@@ -1126,6 +1228,24 @@ impl ApprovalLogic for ApprovalLogicImpl {
         let (before_snapshot, after_snapshot, diff, risk_markers) = self
             .build_stage_change_snapshot_payload(feature, stage, next_status, after_status, &policy)
             .await?;
+        let routing = self.resolve_approval_routing(&policy).await?;
+        self.ensure_request_has_eligible_approvers(&policy, &routing)
+            .await?;
+        let eligible_approver_id_strings = routing
+            .eligible_approver_ids
+            .iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>();
+        let approver_user_id_strings = policy
+            .approver_user_ids
+            .iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>();
+        let approver_role_id_strings = policy
+            .approver_role_ids
+            .iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>();
 
         let change_payload = serde_json::json!({
             "stage_id": stage.id.to_string(),
@@ -1148,8 +1268,17 @@ impl ApprovalLogic for ApprovalLogicImpl {
                 "name": policy.name.clone(),
                 "applies_to": policy.applies_to.clone(),
                 "required_approvers": policy.required_approvers,
-                "approver_role_ids": policy.approver_role_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+                "approver_role_ids": approver_role_id_strings,
+                "approver_user_ids": approver_user_id_strings,
+                "allow_admin_override": policy.allow_admin_override,
+                "fallback_to_roles": policy.fallback_to_roles,
                 "auto_approve_after_hours": policy.auto_approve_after_hours,
+            },
+            "routing": {
+                "eligible_approver_ids": eligible_approver_id_strings,
+                "reason": routing.reason.clone(),
+                "admin_override_enabled": policy.allow_admin_override,
+                "fallback_to_roles": policy.fallback_to_roles,
             },
             "links": {
                 "feature": format!("/features/{}/edit", feature.id),
@@ -1171,6 +1300,9 @@ impl ApprovalLogic for ApprovalLogicImpl {
                     stage.status, next_status, feature.key
                 )),
                 requested_by,
+                eligible_approver_ids: routing.eligible_approver_ids.clone(),
+                routing_reason: Some(routing.reason.clone()),
+                admin_override_enabled: policy.allow_admin_override,
             })
             .await?;
 
@@ -1524,6 +1656,9 @@ mod tests {
             environment_ids,
             required_approvers: 1,
             approver_role_ids: vec![Uuid::new_v4()],
+            approver_user_ids: Vec::new(),
+            allow_admin_override: false,
+            fallback_to_roles: true,
             auto_approve_after_hours: None,
             enabled: true,
             created_at: Utc::now(),
@@ -1654,6 +1789,9 @@ mod tests {
             change_payload: serde_json::json!({}),
             change_description: None,
             requested_by: Uuid::new_v4(),
+            eligible_approver_ids: Vec::new(),
+            routing_reason: None,
+            admin_override_enabled: false,
             status: ApprovalStatus::Pending,
             approved_count: 0,
             rejected_count: 0,
@@ -1672,6 +1810,9 @@ mod tests {
             environment_ids: None,
             required_approvers: 1,
             approver_role_ids: vec![senior_engineer_role_id],
+            approver_user_ids: Vec::new(),
+            allow_admin_override: false,
+            fallback_to_roles: true,
             auto_approve_after_hours: None,
             enabled: true,
             created_at: Utc::now(),
@@ -1828,6 +1969,9 @@ mod tests {
             }),
             change_description: None,
             requested_by: Uuid::new_v4(),
+            eligible_approver_ids: Vec::new(),
+            routing_reason: None,
+            admin_override_enabled: false,
             status: ApprovalStatus::Approved,
             approved_count: 1,
             rejected_count: 0,
@@ -1876,6 +2020,9 @@ mod tests {
             change_payload: serde_json::json!({}),
             change_description: None,
             requested_by: Uuid::new_v4(),
+            eligible_approver_ids: Vec::new(),
+            routing_reason: None,
+            admin_override_enabled: false,
             status: ApprovalStatus::Pending,
             approved_count: 0,
             rejected_count: 0,
@@ -1894,6 +2041,9 @@ mod tests {
             environment_ids: None,
             required_approvers: 1,
             approver_role_ids: vec![senior_engineer_role_id],
+            approver_user_ids: Vec::new(),
+            allow_admin_override: false,
+            fallback_to_roles: true,
             auto_approve_after_hours: None,
             enabled: true,
             created_at: Utc::now(),
@@ -1966,6 +2116,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_approve_request_fails_when_not_in_frozen_eligible_set() {
+        let mut approval_repo = MockApprovalRepository::new();
+        let mut role_repo = MockRoleRepository::new();
+        let feature_repo = MockFeatureRepository::new();
+        let env_logic = MockEnvironmentLogic::new();
+
+        let request_id = Uuid::new_v4();
+        let approver_id = Uuid::new_v4();
+        let eligible_approver_id = Uuid::new_v4();
+        let policy_id = Uuid::new_v4();
+        let team_id = Uuid::new_v4();
+        let senior_engineer_role_id = Uuid::new_v4();
+
+        let request = ApprovalRequest {
+            id: request_id,
+            policy_id,
+            feature_id: Uuid::new_v4(),
+            environment_id: Some(Uuid::new_v4()),
+            change_type: "stage_change".into(),
+            change_payload: serde_json::json!({}),
+            change_description: None,
+            requested_by: Uuid::new_v4(),
+            eligible_approver_ids: vec![eligible_approver_id],
+            routing_reason: Some("Explicit approvers only".into()),
+            admin_override_enabled: false,
+            status: ApprovalStatus::Pending,
+            approved_count: 0,
+            rejected_count: 0,
+            executed_at: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let policy = ApprovalPolicy {
+            id: policy_id,
+            team_id,
+            name: "Production Approval".into(),
+            description: None,
+            applies_to: "all".into(),
+            environment_ids: None,
+            required_approvers: 1,
+            approver_role_ids: vec![senior_engineer_role_id],
+            approver_user_ids: vec![eligible_approver_id],
+            allow_admin_override: false,
+            fallback_to_roles: false,
+            auto_approve_after_hours: None,
+            enabled: true,
+            created_at: Utc::now(),
+        };
+
+        approval_repo
+            .expect_get_request_by_id()
+            .with(mockall::predicate::eq(request_id))
+            .times(1)
+            .returning(move |_| Ok(Some(request.clone())));
+
+        approval_repo
+            .expect_get_policy_by_id()
+            .with(mockall::predicate::eq(policy_id))
+            .times(1)
+            .returning(move |_| Ok(Some(policy.clone())));
+
+        role_repo
+            .expect_user_has_role()
+            .with(
+                mockall::predicate::eq(approver_id),
+                mockall::predicate::eq("Approver"),
+            )
+            .times(1)
+            .returning(|_, _| Ok(true));
+
+        let (tx, _rx) = tokio::sync::broadcast::channel(10);
+        let (updates_tx, _updates_rx) = tokio::sync::broadcast::channel(10);
+        let logic = approval_logic(
+            Box::new(approval_repo),
+            Box::new(feature_repo),
+            Box::new(env_logic),
+            Box::new(role_repo),
+            tx,
+            updates_tx,
+        );
+
+        let result = logic.approve_request(request_id, approver_id, None).await;
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("not an eligible approver")
+        );
+    }
+
+    #[tokio::test]
     async fn test_maybe_create_stage_change_request_emits_event() {
         let mut approval_repo = MockApprovalRepository::new();
         let mut feature_repo = MockFeatureRepository::new();
@@ -2024,6 +2268,9 @@ mod tests {
             environment_ids: None,
             required_approvers: 1,
             approver_role_ids: vec![Uuid::new_v4()],
+            approver_user_ids: Vec::new(),
+            allow_admin_override: false,
+            fallback_to_roles: true,
             auto_approve_after_hours: None,
             enabled: true,
             created_at: Utc::now(),
@@ -2041,6 +2288,9 @@ mod tests {
             }),
             change_description: Some("Stage NOT_DEPLOYED -> DEPLOYMENT_REQUESTED".into()),
             requested_by,
+            eligible_approver_ids: Vec::new(),
+            routing_reason: None,
+            admin_override_enabled: false,
             status: ApprovalStatus::Pending,
             approved_count: 0,
             rejected_count: 0,
@@ -2169,6 +2419,9 @@ mod tests {
             }),
             change_description: Some("Promote to prod".into()),
             requested_by: Uuid::new_v4(),
+            eligible_approver_ids: Vec::new(),
+            routing_reason: None,
+            admin_override_enabled: false,
             status: ApprovalStatus::Pending,
             approved_count: 0,
             rejected_count: 0,
@@ -2186,6 +2439,9 @@ mod tests {
             environment_ids: None,
             required_approvers: 1,
             approver_role_ids: vec![required_role_id],
+            approver_user_ids: Vec::new(),
+            allow_admin_override: false,
+            fallback_to_roles: true,
             auto_approve_after_hours: None,
             enabled: true,
             created_at: Utc::now(),

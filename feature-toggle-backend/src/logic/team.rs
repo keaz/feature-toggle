@@ -171,6 +171,7 @@ impl TeamLogic for TeamLogicImpl {
                 .to_string(),
             team_id: None,
             actor_id,
+            recipient_user_ids: None,
             subject: format!("Team created: {}", team.name),
             message,
             metadata: Some(serde_json::json!({

@@ -904,6 +904,7 @@ impl FeatureCrudLogic for FeatureLogicImpl {
                 .to_string(),
             team_id: Some(team_id),
             actor_id,
+            recipient_user_ids: None,
             subject: format!("Feature created: {feature_key}"),
             message,
             metadata: Some(serde_json::json!({
@@ -1201,6 +1202,7 @@ impl FeatureCrudLogic for FeatureLogicImpl {
                 .to_string(),
             team_id: Some(feature.team_id),
             actor_id,
+            recipient_user_ids: None,
             subject: format!("Kill switch activated: {}", feature.key),
             message,
             metadata: Some(serde_json::json!({
@@ -1315,6 +1317,7 @@ impl FeatureCrudLogic for FeatureLogicImpl {
                 .to_string(),
             team_id: Some(feature.team_id),
             actor_id,
+            recipient_user_ids: None,
             subject: format!("Scheduled kill switch executed: {}", feature.key),
             message,
             metadata: Some(serde_json::json!({
@@ -1541,6 +1544,7 @@ impl DeploymentLogic for FeatureLogicImpl {
                                 .to_string(),
                         team_id: Some(notification_team_id),
                         actor_id: Some(user_id),
+                        recipient_user_ids: Some(request.eligible_approver_ids.clone()),
                         subject,
                         message,
                         metadata: Some(serde_json::json!({
@@ -1553,6 +1557,13 @@ impl DeploymentLogic for FeatureLogicImpl {
                             "environment_name": environment_name,
                             "requested_by": requester_name,
                             "approval_request_id": request.id.to_string(),
+                            "eligible_approver_ids": request
+                                .eligible_approver_ids
+                                .iter()
+                                .map(|id| id.to_string())
+                                .collect::<Vec<_>>(),
+                            "routing_reason": request.routing_reason,
+                            "admin_override_enabled": request.admin_override_enabled,
                         })),
                     });
                 }
@@ -1745,6 +1756,7 @@ impl DeploymentLogic for FeatureLogicImpl {
                         .to_string(),
                 team_id: Some(db_feature.team_id),
                 actor_id: Some(user_id),
+                recipient_user_ids: None,
                 subject,
                 message,
                 metadata: Some(serde_json::json!({
@@ -1786,6 +1798,7 @@ impl DeploymentLogic for FeatureLogicImpl {
                     .to_string(),
                 team_id: Some(db_feature.team_id),
                 actor_id: Some(user_id),
+                recipient_user_ids: None,
                 subject,
                 message,
                 metadata: Some(serde_json::json!({
@@ -1829,6 +1842,7 @@ impl DeploymentLogic for FeatureLogicImpl {
                     crate::logic::notification::NOTIFICATION_TYPE_FEATURE_ROLLED_BACK.to_string(),
                 team_id: Some(db_feature.team_id),
                 actor_id: Some(user_id),
+                recipient_user_ids: None,
                 subject,
                 message,
                 metadata: Some(serde_json::json!({

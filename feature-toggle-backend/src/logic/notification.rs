@@ -87,6 +87,7 @@ pub struct NotificationEvent {
     pub notification_type: String,
     pub team_id: Option<Uuid>,
     pub actor_id: Option<Uuid>,
+    pub recipient_user_ids: Option<Vec<Uuid>>,
     pub subject: String,
     pub message: String,
     pub metadata: Option<serde_json::Value>,
@@ -509,6 +510,17 @@ impl NotificationLogicImpl {
         &self,
         event: &NotificationEvent,
     ) -> Result<Vec<NotificationRecipient>, Error> {
+        if let Some(user_ids) = event
+            .recipient_user_ids
+            .as_ref()
+            .filter(|ids| !ids.is_empty())
+        {
+            return self
+                .repository
+                .list_recipients_by_ids(user_ids.clone())
+                .await;
+        }
+
         match selector_for(&event.notification_type) {
             Some(RecipientSelector::SystemAdmins) => {
                 self.repository.list_system_admin_recipients().await
@@ -908,8 +920,72 @@ mod tests {
                 notification_type: NOTIFICATION_TYPE_FEATURE_CREATED.to_string(),
                 team_id: Some(team_id),
                 actor_id: None,
+                recipient_user_ids: None,
                 subject: "Feature created".to_string(),
                 message: "A feature was created".to_string(),
+                metadata: None,
+            })
+            .await
+            .expect("dispatch should succeed");
+    }
+
+    #[tokio::test]
+    async fn dispatch_event_uses_explicit_recipient_user_ids() {
+        let team_id = Uuid::new_v4();
+        let recipient_id = Uuid::new_v4();
+        let recipient = NotificationRecipient {
+            id: recipient_id,
+            username: "target-approver".to_string(),
+            first_name: "Target".to_string(),
+            last_name: "Approver".to_string(),
+            email: "target@example.com".to_string(),
+            mobile_number: None,
+        };
+
+        let mut mock_repo = MockNotificationRepository::new();
+
+        mock_repo.expect_get_preference().times(1).returning(|_| {
+            Ok(Some(NotificationPreference {
+                notification_type: NOTIFICATION_TYPE_STAGE_CHANGE_REQUESTED.to_string(),
+                enabled: true,
+                email_enabled: true,
+                sms_enabled: false,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            }))
+        });
+
+        mock_repo
+            .expect_list_recipients_by_ids()
+            .times(1)
+            .withf(move |ids| ids == &vec![recipient_id])
+            .returning(move |_| Ok(vec![recipient.clone()]));
+
+        mock_repo.expect_list_team_recipients_by_roles().times(0);
+
+        mock_repo
+            .expect_list_channel_configs()
+            .times(1)
+            .returning(|| Ok(vec![sample_channel("email", true)]));
+
+        mock_repo
+            .expect_create_delivery()
+            .times(1)
+            .returning(move |input| {
+                assert_eq!(input.recipient_user_id, Some(recipient_id));
+                Ok(sample_delivery(input))
+            });
+
+        let logic = notification_logic(Box::new(mock_repo));
+
+        logic
+            .dispatch_event(NotificationEvent {
+                notification_type: NOTIFICATION_TYPE_STAGE_CHANGE_REQUESTED.to_string(),
+                team_id: Some(team_id),
+                actor_id: None,
+                recipient_user_ids: Some(vec![recipient_id]),
+                subject: "Requested".to_string(),
+                message: "Deployment requested".to_string(),
                 metadata: None,
             })
             .await
@@ -970,6 +1046,7 @@ mod tests {
                 notification_type: NOTIFICATION_TYPE_STAGE_CHANGE_REQUESTED.to_string(),
                 team_id: Some(team_id),
                 actor_id: None,
+                recipient_user_ids: None,
                 subject: "Requested".to_string(),
                 message: "Deployment requested".to_string(),
                 metadata: None,
@@ -1031,6 +1108,7 @@ mod tests {
                 notification_type: NOTIFICATION_TYPE_FEATURE_CREATED.to_string(),
                 team_id: Some(Uuid::new_v4()),
                 actor_id: None,
+                recipient_user_ids: None,
                 subject: subject.clone(),
                 message: "background dispatch test".to_string(),
                 metadata: None,

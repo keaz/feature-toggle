@@ -119,6 +119,9 @@ pub struct ApprovalPolicySummaryResponse {
     pub applies_to: AppliesTo,
     pub required_approvers: i32,
     pub approver_role_ids: Vec<String>,
+    pub approver_user_ids: Vec<String>,
+    pub allow_admin_override: bool,
+    pub fallback_to_roles: bool,
     pub auto_approve_after_hours: Option<i32>,
 }
 
@@ -163,6 +166,9 @@ pub struct ApprovalRequestResponse {
     pub change_payload: serde_json::Value,
     pub change_description: Option<String>,
     pub requested_by: String,
+    pub eligible_approver_ids: Vec<String>,
+    pub routing_reason: Option<String>,
+    pub admin_override_enabled: bool,
     pub status: ApprovalRequestStatus,
     pub approved_count: i32,
     pub rejected_count: i32,
@@ -197,6 +203,9 @@ pub struct ApprovalPolicyResponse {
     pub environment_ids: Option<Vec<String>>,
     pub required_approvers: i32,
     pub approver_role_ids: Vec<String>,
+    pub approver_user_ids: Vec<String>,
+    pub allow_admin_override: bool,
+    pub fallback_to_roles: bool,
     pub auto_approve_after_hours: Option<i32>,
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
@@ -211,6 +220,9 @@ pub struct CreateApprovalPolicyRequest {
     pub environment_ids: Option<Vec<String>>,
     pub required_approvers: i32,
     pub approver_role_ids: Vec<String>,
+    pub approver_user_ids: Vec<String>,
+    pub allow_admin_override: Option<bool>,
+    pub fallback_to_roles: Option<bool>,
     pub auto_approve_after_hours: Option<i32>,
     pub enabled: Option<bool>,
 }
@@ -224,6 +236,9 @@ pub struct UpdateApprovalPolicyRequest {
     pub environment_ids: Option<Vec<String>>,
     pub required_approvers: Option<i32>,
     pub approver_role_ids: Option<Vec<String>>,
+    pub approver_user_ids: Option<Vec<String>>,
+    pub allow_admin_override: Option<bool>,
+    pub fallback_to_roles: Option<bool>,
     pub auto_approve_after_hours: Option<i32>,
     pub enabled: Option<bool>,
 }
@@ -261,10 +276,10 @@ fn validate_required_approvers(required: i32) -> Result<(), RestError> {
     Ok(())
 }
 
-fn validate_approver_roles(roles: &[String]) -> Result<(), RestError> {
-    if roles.is_empty() {
+fn validate_approver_routing(roles: &[String], users: &[String]) -> Result<(), RestError> {
+    if roles.is_empty() && users.is_empty() {
         return Err(RestError::invalid_input(
-            "At least one approver role is required",
+            "At least one approver role or explicit approver user is required",
         ));
     }
     Ok(())
@@ -381,6 +396,13 @@ fn map_policy_summary(policy: &ApprovalPolicy) -> ApprovalPolicySummaryResponse 
             .iter()
             .map(|id| id.to_string())
             .collect(),
+        approver_user_ids: policy
+            .approver_user_ids
+            .iter()
+            .map(|id| id.to_string())
+            .collect(),
+        allow_admin_override: policy.allow_admin_override,
+        fallback_to_roles: policy.fallback_to_roles,
         auto_approve_after_hours: policy.auto_approve_after_hours,
     }
 }
@@ -600,6 +622,13 @@ pub(crate) fn map_request_with_policy(
         change_payload: request.change_payload,
         change_description: request.change_description,
         requested_by: request.requested_by.to_string(),
+        eligible_approver_ids: request
+            .eligible_approver_ids
+            .iter()
+            .map(|id| id.to_string())
+            .collect(),
+        routing_reason: request.routing_reason,
+        admin_override_enabled: request.admin_override_enabled,
         status: ApprovalRequestStatus::from(request.status),
         approved_count: request.approved_count,
         rejected_count: request.rejected_count,
@@ -632,6 +661,13 @@ fn map_policy(policy: ApprovalPolicy) -> ApprovalPolicyResponse {
             .into_iter()
             .map(|id| id.to_string())
             .collect(),
+        approver_user_ids: policy
+            .approver_user_ids
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect(),
+        allow_admin_override: policy.allow_admin_override,
+        fallback_to_roles: policy.fallback_to_roles,
         auto_approve_after_hours: policy.auto_approve_after_hours,
         enabled: policy.enabled,
         created_at: policy.created_at,
@@ -949,12 +985,13 @@ pub(crate) async fn create_approval_policy(
 ) -> Result<impl Responder, RestError> {
     validate_policy_name(&payload.name)?;
     validate_required_approvers(payload.required_approvers)?;
-    validate_approver_roles(&payload.approver_role_ids)?;
+    validate_approver_routing(&payload.approver_role_ids, &payload.approver_user_ids)?;
     validate_auto_approve(payload.auto_approve_after_hours)?;
 
     let team_uuid = parse_uuid(&team_id, "team_id")?;
     let env_ids = normalize_environment_ids(payload.applies_to, payload.environment_ids.clone())?;
     let role_ids = parse_uuid_list(&payload.approver_role_ids, "role_id")?;
+    let user_ids = parse_uuid_list(&payload.approver_user_ids, "user_id")?;
 
     let actor = actor_from_request(&req);
     let repo = approval_repository_tx(db_pool.get_ref().clone());
@@ -975,6 +1012,9 @@ pub(crate) async fn create_approval_policy(
             environment_ids: env_ids,
             required_approvers: payload.required_approvers,
             approver_role_ids: role_ids,
+            approver_user_ids: user_ids,
+            allow_admin_override: payload.allow_admin_override.unwrap_or(false),
+            fallback_to_roles: payload.fallback_to_roles.unwrap_or(true),
             auto_approve_after_hours: payload.auto_approve_after_hours,
             enabled: payload.enabled.unwrap_or(true),
         },
@@ -1025,8 +1065,8 @@ pub(crate) async fn update_approval_policy(
     if let Some(required) = payload.required_approvers {
         validate_required_approvers(required)?;
     }
-    if let Some(ref roles) = payload.approver_role_ids {
-        validate_approver_roles(roles)?;
+    if let (Some(roles), Some(users)) = (&payload.approver_role_ids, &payload.approver_user_ids) {
+        validate_approver_routing(roles, users)?;
     }
     validate_auto_approve(payload.auto_approve_after_hours)?;
 
@@ -1050,6 +1090,11 @@ pub(crate) async fn update_approval_policy(
         .clone()
         .map(|ids| parse_uuid_list(&ids, "role_id"))
         .transpose()?;
+    let user_ids = payload
+        .approver_user_ids
+        .clone()
+        .map(|ids| parse_uuid_list(&ids, "user_id"))
+        .transpose()?;
 
     let actor = actor_from_request(&req);
     let repo = approval_repository_tx(db_pool.get_ref().clone());
@@ -1070,6 +1115,9 @@ pub(crate) async fn update_approval_policy(
             environment_ids: env_ids,
             required_approvers: payload.required_approvers,
             approver_role_ids: role_ids,
+            approver_user_ids: user_ids,
+            allow_admin_override: payload.allow_admin_override,
+            fallback_to_roles: payload.fallback_to_roles,
             auto_approve_after_hours: payload.auto_approve_after_hours,
             enabled: payload.enabled,
         },
@@ -1203,6 +1251,9 @@ mod tests {
             }),
             change_description: Some("Deploy".to_string()),
             requested_by: Uuid::new_v4(),
+            eligible_approver_ids: Vec::new(),
+            routing_reason: None,
+            admin_override_enabled: false,
             status: ApprovalStatus::Pending,
             approved_count: 0,
             rejected_count: 0,
@@ -1222,6 +1273,9 @@ mod tests {
             environment_ids: None,
             required_approvers: 2,
             approver_role_ids: vec![Uuid::new_v4()],
+            approver_user_ids: Vec::new(),
+            allow_admin_override: false,
+            fallback_to_roles: true,
             auto_approve_after_hours: None,
             enabled: true,
             created_at: Utc::now(),
@@ -1453,6 +1507,9 @@ mod tests {
                 environment_ids: None,
                 required_approvers: 1,
                 approver_role_ids: vec!["role-1".to_string()],
+                approver_user_ids: Vec::new(),
+                allow_admin_override: Some(false),
+                fallback_to_roles: Some(true),
                 auto_approve_after_hours: None,
                 enabled: Some(true),
             })

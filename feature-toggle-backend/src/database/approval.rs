@@ -16,6 +16,9 @@ pub struct CreateApprovalPolicyInput {
     pub environment_ids: Option<Vec<Uuid>>,
     pub required_approvers: i32,
     pub approver_role_ids: Vec<Uuid>,
+    pub approver_user_ids: Vec<Uuid>,
+    pub allow_admin_override: bool,
+    pub fallback_to_roles: bool,
     pub auto_approve_after_hours: Option<i32>,
     pub enabled: bool,
 }
@@ -27,6 +30,9 @@ pub struct UpdateApprovalPolicyInput {
     pub environment_ids: Option<Vec<Uuid>>,
     pub required_approvers: Option<i32>,
     pub approver_role_ids: Option<Vec<Uuid>>,
+    pub approver_user_ids: Option<Vec<Uuid>>,
+    pub allow_admin_override: Option<bool>,
+    pub fallback_to_roles: Option<bool>,
     pub auto_approve_after_hours: Option<i32>,
     pub enabled: Option<bool>,
 }
@@ -39,6 +45,9 @@ pub struct CreateApprovalRequestInput {
     pub change_payload: serde_json::Value,
     pub change_description: Option<String>,
     pub requested_by: Uuid,
+    pub eligible_approver_ids: Vec<Uuid>,
+    pub routing_reason: Option<String>,
+    pub admin_override_enabled: bool,
 }
 
 pub struct CreateApprovalVoteInput {
@@ -184,6 +193,9 @@ impl ApprovalRepositoryImpl {
             change_payload: row.get("change_payload"),
             change_description: row.get("change_description"),
             requested_by: row.get("requested_by"),
+            eligible_approver_ids: row.get("eligible_approver_ids"),
+            routing_reason: row.get("routing_reason"),
+            admin_override_enabled: row.get("admin_override_enabled"),
             status: ApprovalStatus::from_str(&status),
             approved_count: row.get::<i32, _>("approved_count"),
             rejected_count: row.get::<i32, _>("rejected_count"),
@@ -210,10 +222,15 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
                 environment_ids,
                 required_approvers,
                 approver_role_ids,
+                approver_user_ids,
+                allow_admin_override,
+                fallback_to_roles,
                 auto_approve_after_hours,
                 enabled
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-            RETURNING id, team_id, name, description, applies_to, environment_ids, required_approvers, approver_role_ids, auto_approve_after_hours, enabled, created_at
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+            RETURNING id, team_id, name, description, applies_to, environment_ids, required_approvers,
+                      approver_role_ids, approver_user_ids, allow_admin_override, fallback_to_roles,
+                      auto_approve_after_hours, enabled, created_at
             "#,
         )
         .bind(input.team_id)
@@ -223,6 +240,9 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
         .bind(input.environment_ids.as_deref())
         .bind(input.required_approvers)
         .bind(&input.approver_role_ids)
+        .bind(&input.approver_user_ids)
+        .bind(input.allow_admin_override)
+        .bind(input.fallback_to_roles)
         .bind(input.auto_approve_after_hours)
         .bind(input.enabled)
         .fetch_one(&self.pool)
@@ -235,7 +255,8 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
         let result = sqlx::query_as::<_, ApprovalPolicy>(
             r#"
             SELECT id, team_id, name, description, applies_to, environment_ids, required_approvers,
-                   approver_role_ids, auto_approve_after_hours, enabled, created_at
+                   approver_role_ids, approver_user_ids, allow_admin_override, fallback_to_roles,
+                   auto_approve_after_hours, enabled, created_at
             FROM approval_policies
             WHERE team_id = $1
             ORDER BY created_at DESC
@@ -252,7 +273,8 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
         let result = sqlx::query_as::<_, ApprovalPolicy>(
             r#"
             SELECT id, team_id, name, description, applies_to, environment_ids, required_approvers,
-                   approver_role_ids, auto_approve_after_hours, enabled, created_at
+                   approver_role_ids, approver_user_ids, allow_admin_override, fallback_to_roles,
+                   auto_approve_after_hours, enabled, created_at
             FROM approval_policies
             WHERE id = $1
             "#,
@@ -286,6 +308,15 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
         let approver_role_ids = input
             .approver_role_ids
             .unwrap_or(existing.approver_role_ids);
+        let approver_user_ids = input
+            .approver_user_ids
+            .unwrap_or(existing.approver_user_ids);
+        let allow_admin_override = input
+            .allow_admin_override
+            .unwrap_or(existing.allow_admin_override);
+        let fallback_to_roles = input
+            .fallback_to_roles
+            .unwrap_or(existing.fallback_to_roles);
         let auto_approve_after_hours = input
             .auto_approve_after_hours
             .or(existing.auto_approve_after_hours);
@@ -300,11 +331,15 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
                 environment_ids = $5,
                 required_approvers = $6,
                 approver_role_ids = $7,
-                auto_approve_after_hours = $8,
-                enabled = $9
+                approver_user_ids = $8,
+                allow_admin_override = $9,
+                fallback_to_roles = $10,
+                auto_approve_after_hours = $11,
+                enabled = $12
             WHERE id = $1
             RETURNING id, team_id, name, description, applies_to, environment_ids, required_approvers,
-                      approver_role_ids, auto_approve_after_hours, enabled, created_at
+                      approver_role_ids, approver_user_ids, allow_admin_override, fallback_to_roles,
+                      auto_approve_after_hours, enabled, created_at
             "#,
         )
         .bind(id)
@@ -314,6 +349,9 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
         .bind(environment_ids.as_deref())
         .bind(required_approvers)
         .bind(&approver_role_ids)
+        .bind(&approver_user_ids)
+        .bind(allow_admin_override)
+        .bind(fallback_to_roles)
         .bind(auto_approve_after_hours)
         .bind(enabled)
         .fetch_one(&self.pool)
@@ -346,12 +384,14 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
             r#"
             INSERT INTO approval_requests (
                 policy_id, feature_id, environment_id, change_type, change_payload,
-                change_description, requested_by
+                change_description, requested_by, eligible_approver_ids, routing_reason,
+                admin_override_enabled
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
             RETURNING id, policy_id, feature_id, environment_id, change_type, change_payload,
-                      change_description, requested_by, status, approved_count, rejected_count,
-                      executed_at, created_at, updated_at
+                      change_description, requested_by, eligible_approver_ids, routing_reason,
+                      admin_override_enabled, status, approved_count, rejected_count, executed_at,
+                      created_at, updated_at
             "#,
         )
         .bind(input.policy_id)
@@ -361,6 +401,9 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
         .bind(input.change_payload)
         .bind(input.change_description)
         .bind(input.requested_by)
+        .bind(&input.eligible_approver_ids)
+        .bind(input.routing_reason)
+        .bind(input.admin_override_enabled)
         .map(Self::map_request_row)
         .fetch_one(&self.pool)
         .await;
@@ -372,8 +415,9 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
         let result = sqlx::query(
             r#"
             SELECT id, policy_id, feature_id, environment_id, change_type, change_payload,
-                   change_description, requested_by, status, approved_count, rejected_count,
-                   executed_at, created_at, updated_at
+                   change_description, requested_by, eligible_approver_ids, routing_reason,
+                   admin_override_enabled, status, approved_count, rejected_count, executed_at,
+                   created_at, updated_at
             FROM approval_requests WHERE id = $1
             "#,
         )
@@ -432,8 +476,9 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
                 updated_at = NOW()
             WHERE id = $1
             RETURNING id, policy_id, feature_id, environment_id, change_type, change_payload,
-                      change_description, requested_by, status, approved_count, rejected_count,
-                      executed_at, created_at, updated_at
+                      change_description, requested_by, eligible_approver_ids, routing_reason,
+                      admin_override_enabled, status, approved_count, rejected_count, executed_at,
+                      created_at, updated_at
             "#,
         )
         .bind(input.request_id)
@@ -462,8 +507,9 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
                 updated_at = NOW()
             WHERE id = $1
             RETURNING id, policy_id, feature_id, environment_id, change_type, change_payload,
-                      change_description, requested_by, status, approved_count, rejected_count,
-                      executed_at, created_at, updated_at
+                      change_description, requested_by, eligible_approver_ids, routing_reason,
+                      admin_override_enabled, status, approved_count, rejected_count, executed_at,
+                      created_at, updated_at
             "#,
         )
         .bind(request_id)
@@ -732,10 +778,15 @@ impl ApprovalRepositoryImpl {
                 environment_ids,
                 required_approvers,
                 approver_role_ids,
+                approver_user_ids,
+                allow_admin_override,
+                fallback_to_roles,
                 auto_approve_after_hours,
                 enabled
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-            RETURNING id, team_id, name, description, applies_to, environment_ids, required_approvers, approver_role_ids, auto_approve_after_hours, enabled, created_at
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+            RETURNING id, team_id, name, description, applies_to, environment_ids, required_approvers,
+                      approver_role_ids, approver_user_ids, allow_admin_override, fallback_to_roles,
+                      auto_approve_after_hours, enabled, created_at
             "#,
         )
         .bind(input.team_id)
@@ -745,6 +796,9 @@ impl ApprovalRepositoryImpl {
         .bind(input.environment_ids.as_deref())
         .bind(input.required_approvers)
         .bind(&input.approver_role_ids)
+        .bind(&input.approver_user_ids)
+        .bind(input.allow_admin_override)
+        .bind(input.fallback_to_roles)
         .bind(input.auto_approve_after_hours)
         .bind(input.enabled)
         .fetch_one(&mut *conn)
@@ -761,12 +815,14 @@ impl ApprovalRepositoryImpl {
             r#"
             INSERT INTO approval_requests (
                 policy_id, feature_id, environment_id, change_type, change_payload,
-                change_description, requested_by
+                change_description, requested_by, eligible_approver_ids, routing_reason,
+                admin_override_enabled
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
             RETURNING id, policy_id, feature_id, environment_id, change_type, change_payload,
-                      change_description, requested_by, status, approved_count, rejected_count,
-                      executed_at, created_at, updated_at
+                      change_description, requested_by, eligible_approver_ids, routing_reason,
+                      admin_override_enabled, status, approved_count, rejected_count, executed_at,
+                      created_at, updated_at
             "#,
         )
         .bind(input.policy_id)
@@ -776,6 +832,9 @@ impl ApprovalRepositoryImpl {
         .bind(input.change_payload)
         .bind(input.change_description)
         .bind(input.requested_by)
+        .bind(&input.eligible_approver_ids)
+        .bind(input.routing_reason)
+        .bind(input.admin_override_enabled)
         .map(Self::map_request_row)
         .fetch_one(&mut *conn)
         .await;
@@ -797,8 +856,9 @@ impl ApprovalRepositoryImpl {
                 updated_at = NOW()
             WHERE id = $1
             RETURNING id, policy_id, feature_id, environment_id, change_type, change_payload,
-                      change_description, requested_by, status, approved_count, rejected_count,
-                      executed_at, created_at, updated_at
+                      change_description, requested_by, eligible_approver_ids, routing_reason,
+                      admin_override_enabled, status, approved_count, rejected_count, executed_at,
+                      created_at, updated_at
             "#,
         )
         .bind(request_id)
@@ -832,7 +892,8 @@ impl ApprovalRepositoryTx for ApprovalRepositoryImpl {
         let existing = sqlx::query_as::<_, ApprovalPolicy>(
             r#"
             SELECT id, team_id, name, description, applies_to, environment_ids, required_approvers,
-                   approver_role_ids, auto_approve_after_hours, enabled, created_at
+                   approver_role_ids, approver_user_ids, allow_admin_override, fallback_to_roles,
+                   auto_approve_after_hours, enabled, created_at
             FROM approval_policies
             WHERE id = $1
             "#,
@@ -854,6 +915,15 @@ impl ApprovalRepositoryTx for ApprovalRepositoryImpl {
         let approver_role_ids = input
             .approver_role_ids
             .unwrap_or(existing.approver_role_ids);
+        let approver_user_ids = input
+            .approver_user_ids
+            .unwrap_or(existing.approver_user_ids);
+        let allow_admin_override = input
+            .allow_admin_override
+            .unwrap_or(existing.allow_admin_override);
+        let fallback_to_roles = input
+            .fallback_to_roles
+            .unwrap_or(existing.fallback_to_roles);
         let auto_approve_after_hours = input
             .auto_approve_after_hours
             .or(existing.auto_approve_after_hours);
@@ -868,11 +938,15 @@ impl ApprovalRepositoryTx for ApprovalRepositoryImpl {
                 environment_ids = $5,
                 required_approvers = $6,
                 approver_role_ids = $7,
-                auto_approve_after_hours = $8,
-                enabled = $9
+                approver_user_ids = $8,
+                allow_admin_override = $9,
+                fallback_to_roles = $10,
+                auto_approve_after_hours = $11,
+                enabled = $12
             WHERE id = $1
             RETURNING id, team_id, name, description, applies_to, environment_ids, required_approvers,
-                      approver_role_ids, auto_approve_after_hours, enabled, created_at
+                      approver_role_ids, approver_user_ids, allow_admin_override, fallback_to_roles,
+                      auto_approve_after_hours, enabled, created_at
             "#,
         )
         .bind(policy_id)
@@ -882,6 +956,9 @@ impl ApprovalRepositoryTx for ApprovalRepositoryImpl {
         .bind(environment_ids.as_deref())
         .bind(required_approvers)
         .bind(&approver_role_ids)
+        .bind(&approver_user_ids)
+        .bind(allow_admin_override)
+        .bind(fallback_to_roles)
         .bind(auto_approve_after_hours)
         .bind(enabled)
         .fetch_one(&mut *conn)
@@ -969,8 +1046,9 @@ impl ApprovalRepositoryTx for ApprovalRepositoryImpl {
                 updated_at = NOW()
             WHERE id = $1
             RETURNING id, policy_id, feature_id, environment_id, change_type, change_payload,
-                      change_description, requested_by, status, approved_count, rejected_count,
-                      executed_at, created_at, updated_at
+                      change_description, requested_by, eligible_approver_ids, routing_reason,
+                      admin_override_enabled, status, approved_count, rejected_count, executed_at,
+                      created_at, updated_at
             "#,
         )
         .bind(input.request_id)

@@ -630,6 +630,7 @@ pub(crate) async fn assign_user_teams(
                                 .to_string(),
                         team_id: Some(*team_id),
                         actor_id,
+                        recipient_user_ids: None,
                         subject: format!("User added to team: {team_name}"),
                         message,
                         metadata: Some(serde_json::json!({

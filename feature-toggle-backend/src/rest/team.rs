@@ -237,6 +237,7 @@ pub(crate) async fn create_team(
                         .to_string(),
                     team_id: None,
                     actor_id: actor_for_notification.as_ref().map(|actor| actor.id),
+                    recipient_user_ids: None,
                     subject: format!("Team created: {}", team.name),
                     message,
                     metadata: Some(serde_json::json!({

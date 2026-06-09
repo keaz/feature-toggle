@@ -112,6 +112,10 @@ pub trait NotificationRepository: Send + Sync {
         team_id: Uuid,
         role_names: Vec<String>,
     ) -> Result<Vec<NotificationRecipient>, Error>;
+    async fn list_recipients_by_ids(
+        &self,
+        user_ids: Vec<Uuid>,
+    ) -> Result<Vec<NotificationRecipient>, Error>;
 
     async fn create_delivery(
         &self,
@@ -297,6 +301,30 @@ impl NotificationRepository for NotificationRepositoryImpl {
         )
         .bind(team_id)
         .bind(role_names)
+        .fetch_all(&self.pool)
+        .await;
+
+        handle_error(None, result)
+    }
+
+    async fn list_recipients_by_ids(
+        &self,
+        user_ids: Vec<Uuid>,
+    ) -> Result<Vec<NotificationRecipient>, Error> {
+        if user_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let result = sqlx::query_as::<_, NotificationRecipient>(
+            r#"
+            SELECT DISTINCT u.id, u.username, u.first_name, u.last_name, u.email, u.mobile_number
+            FROM users u
+            WHERE u.id = ANY($1)
+              AND u.enabled = TRUE
+            ORDER BY u.username
+            "#,
+        )
+        .bind(&user_ids)
         .fetch_all(&self.pool)
         .await;
 
