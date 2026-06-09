@@ -19,7 +19,7 @@ use crate::logic::feature_evaluation::{FeatureEvaluationEvent, FeatureEvaluation
 use crate::logic::pipeline::PipelineLogic;
 use crate::model::ID;
 use crate::rest::approval::{
-    ApprovalRequestResponse, ApprovalRequestStatus, ApprovalRequestsResponse, ApprovalVoteResponse,
+    ApprovalRequestResponse, ApprovalRequestsResponse, map_request_with_policy,
 };
 use crate::rest::error::ErrorResponse;
 use crate::rest::metrics::{
@@ -444,37 +444,11 @@ fn parse_statuses(
     Ok(Some(statuses))
 }
 
-fn map_vote(vote: crate::database::entity::ApprovalVote) -> ApprovalVoteResponse {
-    ApprovalVoteResponse {
-        id: vote.id.to_string(),
-        approver_id: vote.approver_id.to_string(),
-        vote: vote.vote.as_str().to_string(),
-        comment: vote.comment,
-        created_at: vote.created_at,
-    }
-}
-
 fn map_request(
     request: crate::database::entity::ApprovalRequest,
     votes: Vec<crate::database::entity::ApprovalVote>,
 ) -> ApprovalRequestResponse {
-    ApprovalRequestResponse {
-        id: request.id.to_string(),
-        policy_id: request.policy_id.to_string(),
-        feature_id: request.feature_id.to_string(),
-        environment_id: request.environment_id.map(|id| id.to_string()),
-        change_type: request.change_type,
-        change_payload: request.change_payload,
-        change_description: request.change_description,
-        requested_by: request.requested_by.to_string(),
-        status: ApprovalRequestStatus::from(request.status),
-        approved_count: request.approved_count,
-        rejected_count: request.rejected_count,
-        executed_at: request.executed_at,
-        created_at: request.created_at,
-        updated_at: request.updated_at,
-        votes: votes.into_iter().map(map_vote).collect(),
-    }
+    map_request_with_policy(request, votes, None)
 }
 
 async fn send_evaluation_summary(

@@ -5,15 +5,22 @@ use crate::database::approval::{
 };
 use crate::database::entity::{
     ApprovalPolicy, ApprovalRequest, ApprovalStatus, ApprovalVote, ApprovalVoteValue,
-    Feature as DbFeature, FeaturePipelineStage, SENTINEL_UUID,
+    Feature as DbFeature, FeaturePipelineStage, FeatureType, LogicOperator, SENTINEL_UUID,
+    VariantSelectionMode, VariantValueType,
 };
-use crate::database::feature::{FeatureRepository, FeatureRepositoryTx, feature_repository_tx};
+use crate::database::feature::{
+    FeatureConfigSnapshot, FeatureRepository, FeatureRepositoryTx, FeatureSnapshotMetadata,
+    FeatureStageSnapshot, FeatureVariantSnapshot, RuleConditionSnapshot, RuleGroupSnapshot,
+    StageCriterionSnapshot, VariantAllocationSnapshot, diff_entries_to_json,
+    diff_feature_snapshots, feature_repository_tx,
+};
 use crate::database::role::RoleRepository;
 use crate::logic::environment::EnvironmentLogic;
 use crate::model::ID;
 use chrono::Utc;
 use feature_toggle_shared::constants::StageStatus;
 use mockall::automock;
+use serde_json::Value as JsonValue;
 use sqlx::PgPool;
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -345,6 +352,226 @@ impl ApprovalLogicImpl {
             .await
             .ok()
             .map(|environment| environment.name)
+    }
+
+    fn feature_type_to_string(feature_type: &FeatureType) -> String {
+        match feature_type {
+            FeatureType::Simple => "Simple".to_string(),
+            FeatureType::Contextual => "Contextual".to_string(),
+        }
+    }
+
+    fn variant_value_type_to_string(value_type: VariantValueType) -> String {
+        match value_type {
+            VariantValueType::String => "string".to_string(),
+            VariantValueType::Number => "number".to_string(),
+            VariantValueType::Boolean => "boolean".to_string(),
+            VariantValueType::Json => "json".to_string(),
+        }
+    }
+
+    fn variant_selection_mode_to_string(mode: VariantSelectionMode) -> String {
+        match mode {
+            VariantSelectionMode::SpecificVariant => "SPECIFIC_VARIANT".to_string(),
+            VariantSelectionMode::WeightedSplit => "WEIGHTED_SPLIT".to_string(),
+        }
+    }
+
+    fn logic_operator_to_string(operator: LogicOperator) -> String {
+        match operator {
+            LogicOperator::Or => "OR".to_string(),
+            LogicOperator::And => "AND".to_string(),
+        }
+    }
+
+    async fn build_approval_snapshot(
+        &self,
+        feature: &DbFeature,
+        fallback_stage: &FeaturePipelineStage,
+    ) -> Result<FeatureConfigSnapshot, Error> {
+        let mut dependencies = feature
+            .dependencies
+            .iter()
+            .map(|dependency| dependency.depends_on_id)
+            .collect::<Vec<_>>();
+        dependencies.sort();
+
+        let mut stages = self
+            .feature_repository
+            .get_feature_stages(feature.id)
+            .await
+            .unwrap_or_else(|_| vec![fallback_stage.clone()]);
+        if !stages.iter().any(|stage| stage.id == fallback_stage.id) {
+            stages.push(fallback_stage.clone());
+        }
+        stages.sort_by_key(|stage| (stage.order_index, stage.id));
+
+        let stage_snapshots = stages
+            .iter()
+            .map(|stage| FeatureStageSnapshot {
+                id: stage.id,
+                environment_id: stage.environment_id,
+                order_index: stage.order_index,
+                parent_stage_id: stage.parent_stage_id,
+                position: stage.position.clone(),
+                status: stage.status.clone(),
+                enabled: stage.enabled,
+            })
+            .collect::<Vec<_>>();
+
+        let mut variants = self
+            .feature_repository
+            .get_feature_variants(feature.id)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|variant| FeatureVariantSnapshot {
+                control: variant.control,
+                value: variant.value,
+                value_type: Self::variant_value_type_to_string(variant.value_type),
+                description: variant.description,
+            })
+            .collect::<Vec<_>>();
+        variants.sort_by(|left, right| left.control.cmp(&right.control));
+
+        let mut criteria = Vec::new();
+        for stage in &stages {
+            let stage_criteria = self
+                .feature_repository
+                .get_stage_criteria(stage.id)
+                .await
+                .unwrap_or_default();
+            for criterion in stage_criteria {
+                let mut rule_groups = criterion
+                    .rule_groups
+                    .into_iter()
+                    .map(|group| {
+                        let mut conditions = group
+                            .conditions
+                            .into_iter()
+                            .map(|condition| RuleConditionSnapshot {
+                                id: condition.id,
+                                context_key: condition.context_key,
+                                operator: condition.operator,
+                                value: condition.value,
+                                order_index: condition.order_index,
+                            })
+                            .collect::<Vec<_>>();
+                        conditions.sort_by_key(|condition| (condition.order_index, condition.id));
+
+                        RuleGroupSnapshot {
+                            id: group.id,
+                            logic_operator: Self::logic_operator_to_string(group.logic_operator),
+                            conditions,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                rule_groups.sort_by_key(|group| group.id);
+
+                let mut allocations = criterion
+                    .variant_allocations
+                    .into_iter()
+                    .map(|allocation| VariantAllocationSnapshot {
+                        variant_control: allocation.variant_control,
+                        weight: allocation.weight,
+                    })
+                    .collect::<Vec<_>>();
+                allocations.sort_by(|left, right| left.variant_control.cmp(&right.variant_control));
+
+                criteria.push(StageCriterionSnapshot {
+                    id: criterion.id,
+                    stage_id: criterion.stage_id,
+                    priority: criterion.priority,
+                    variant_selection_mode: Self::variant_selection_mode_to_string(
+                        criterion.variant_selection_mode,
+                    ),
+                    selected_variant_control: criterion.selected_variant_control,
+                    variant_allocations: allocations,
+                    rule_groups,
+                });
+            }
+        }
+        criteria.sort_by_key(|criterion| (criterion.stage_id, criterion.priority, criterion.id));
+
+        Ok(FeatureConfigSnapshot {
+            schema_version: 1,
+            feature: FeatureSnapshotMetadata {
+                id: feature.id,
+                team_id: feature.team_id,
+                key: feature.key.clone(),
+                description: feature.description.clone(),
+                feature_type: Self::feature_type_to_string(&feature.feature_type),
+                enabled: feature.active,
+                created_at: feature.created_at,
+                kill_switch_enabled: feature.kill_switch_enabled,
+                kill_switch_activated_at: feature.kill_switch_activated_at,
+                rollback_scheduled_at: feature.rollback_scheduled_at,
+                lifecycle_stage: feature.lifecycle_stage.clone(),
+                owner: feature.owner.clone(),
+                expires_at: feature.expires_at,
+                cleanup_reason: feature.cleanup_reason.clone(),
+                archived_at: feature.archived_at,
+                deprecated_at: feature.deprecated_at,
+                deprecation_notice: feature.deprecation_notice.clone(),
+            },
+            dependencies,
+            stages: stage_snapshots,
+            variants,
+            criteria,
+        })
+    }
+
+    fn add_marker(markers: &mut Vec<String>, marker: &str) {
+        if !markers.iter().any(|existing| existing == marker) {
+            markers.push(marker.to_string());
+        }
+    }
+
+    fn stage_change_risk_markers(
+        policy: &ApprovalPolicy,
+        stage: &FeaturePipelineStage,
+        next_status: &str,
+    ) -> Vec<String> {
+        let mut markers = Vec::new();
+        if policy.applies_to == "production_only"
+            || stage.position.eq_ignore_ascii_case("production")
+        {
+            Self::add_marker(&mut markers, "production-impact");
+        }
+        if next_status.contains("ROLLBACK") {
+            Self::add_marker(&mut markers, "emergency-action");
+        }
+        markers
+    }
+
+    async fn build_stage_change_snapshot_payload(
+        &self,
+        feature: &DbFeature,
+        stage: &FeaturePipelineStage,
+        next_status: &str,
+        after_status: &str,
+        policy: &ApprovalPolicy,
+    ) -> Result<(JsonValue, JsonValue, JsonValue, Vec<String>), Error> {
+        let before_snapshot = self.build_approval_snapshot(feature, stage).await?;
+        let mut after_snapshot = before_snapshot.clone();
+        if let Some(target_stage) = after_snapshot
+            .stages
+            .iter_mut()
+            .find(|snapshot_stage| snapshot_stage.id == stage.id)
+        {
+            target_stage.status = after_status.to_string();
+        }
+
+        let before = serde_json::to_value(before_snapshot).map_err(|e| {
+            Error::InvalidInput(format!("Failed to serialize approval snapshot: {e}"))
+        })?;
+        let after = serde_json::to_value(after_snapshot).map_err(|e| {
+            Error::InvalidInput(format!("Failed to serialize approval snapshot: {e}"))
+        })?;
+        let diff = diff_entries_to_json(&diff_feature_snapshots(&before, &after));
+        let risk_markers = Self::stage_change_risk_markers(policy, stage, next_status);
+
+        Ok((before, after, diff, risk_markers))
     }
 
     async fn resolve_approver_name(&self, actor_id: Option<Uuid>) -> Option<String> {
@@ -825,6 +1052,10 @@ impl ApprovalLogic for ApprovalLogicImpl {
             other => other,
         };
         let after_status = approval_target_status;
+        let snapshot_id = Uuid::new_v4();
+        let (before_snapshot, after_snapshot, diff, risk_markers) = self
+            .build_stage_change_snapshot_payload(feature, stage, next_status, after_status, &policy)
+            .await?;
 
         let change_payload = serde_json::json!({
             "stage_id": stage.id.to_string(),
@@ -836,6 +1067,25 @@ impl ApprovalLogic for ApprovalLogicImpl {
             "environment_id": stage.environment_id.to_string(),
             "before": { "status": stage.status },
             "after": { "status": after_status },
+            "snapshot_id": snapshot_id.to_string(),
+            "snapshot_schema_version": 1,
+            "before_snapshot": before_snapshot,
+            "after_snapshot": after_snapshot,
+            "diff": diff,
+            "risk_markers": risk_markers,
+            "policy": {
+                "id": policy.id.to_string(),
+                "name": policy.name.clone(),
+                "applies_to": policy.applies_to.clone(),
+                "required_approvers": policy.required_approvers,
+                "approver_role_ids": policy.approver_role_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+                "auto_approve_after_hours": policy.auto_approve_after_hours,
+            },
+            "links": {
+                "feature": format!("/features/{}/edit", feature.id),
+                "metrics": format!("/dashboard/metrics?featureId={}", feature.id),
+                "audit_history": format!("/features/{}/edit?tab=history", feature.id),
+            },
         });
 
         let request = self
@@ -1445,7 +1695,7 @@ mod tests {
     #[tokio::test]
     async fn test_maybe_create_stage_change_request_emits_event() {
         let mut approval_repo = MockApprovalRepository::new();
-        let feature_repo = MockFeatureRepository::new();
+        let mut feature_repo = MockFeatureRepository::new();
         let mut env_logic = MockEnvironmentLogic::new();
         let role_repo = MockRoleRepository::new();
 
@@ -1544,6 +1794,23 @@ mod tests {
             .with(mockall::predicate::eq(team_id))
             .return_once(move |_| Ok(vec![policy.clone()]));
 
+        let stage_for_snapshot = stage.clone();
+        feature_repo
+            .expect_get_feature_stages()
+            .with(mockall::predicate::eq(feature.id))
+            .times(1)
+            .return_once(move |_| Ok(vec![stage_for_snapshot.clone()]));
+        feature_repo
+            .expect_get_feature_variants()
+            .with(mockall::predicate::eq(feature.id))
+            .times(1)
+            .returning(|_| Ok(vec![]));
+        feature_repo
+            .expect_get_stage_criteria()
+            .with(mockall::predicate::eq(stage_id))
+            .times(1)
+            .returning(|_| Ok(vec![]));
+
         approval_repo
             .expect_create_request()
             .times(1)
@@ -1552,6 +1819,21 @@ mod tests {
                 assert_eq!(input.feature_id, created_request.feature_id);
                 assert_eq!(input.environment_id, Some(environment_id));
                 assert_eq!(input.change_type, "stage_change");
+                assert!(input.change_payload["snapshot_id"].as_str().is_some());
+                assert_eq!(
+                    input.change_payload["before_snapshot"]["stages"][0]["status"],
+                    "NOT_DEPLOYED"
+                );
+                assert_eq!(
+                    input.change_payload["after_snapshot"]["stages"][0]["status"],
+                    "DEPLOYMENT_APPROVED"
+                );
+                assert_eq!(input.change_payload["policy"]["name"], "Prod approvals");
+                assert!(
+                    input.change_payload["diff"]
+                        .as_array()
+                        .is_some_and(|entries| !entries.is_empty())
+                );
                 Ok(created_request.clone())
             });
 

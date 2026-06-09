@@ -11,6 +11,7 @@ use crate::database::approval::{
     approval_repository_tx,
 };
 use crate::database::entity::{ApprovalPolicy, ApprovalRequest, ApprovalStatus, ApprovalVote};
+use crate::database::feature::{FeatureVersionDiffEntry, diff_feature_snapshots};
 use crate::logic::ActorContext;
 use crate::logic::approval::ApprovalLogic;
 use crate::rest::error::RestError;
@@ -82,7 +83,43 @@ pub struct ApprovalVoteResponse {
     pub approver_id: String,
     pub vote: String,
     pub comment: Option<String>,
+    pub reviewed_snapshot_id: Option<String>,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, ToSchema, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalDiffEntryResponse {
+    pub path: String,
+    pub section: String,
+    pub label: String,
+    pub change_type: String,
+    pub before: Option<serde_json::Value>,
+    pub after: Option<serde_json::Value>,
+    pub risk_markers: Vec<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalChangeDiffResponse {
+    pub snapshot_id: Option<String>,
+    pub before_snapshot: Option<serde_json::Value>,
+    pub after_snapshot: Option<serde_json::Value>,
+    pub entries: Vec<ApprovalDiffEntryResponse>,
+    pub risk_markers: Vec<String>,
+    pub raw_snapshot: serde_json::Value,
+    pub malformed: bool,
+}
+
+#[derive(Debug, Serialize, ToSchema, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalPolicySummaryResponse {
+    pub id: String,
+    pub name: String,
+    pub applies_to: AppliesTo,
+    pub required_approvers: i32,
+    pub approver_role_ids: Vec<String>,
+    pub auto_approve_after_hours: Option<i32>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -103,6 +140,8 @@ pub struct ApprovalRequestResponse {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub votes: Vec<ApprovalVoteResponse>,
+    pub change_diff: ApprovalChangeDiffResponse,
+    pub policy: Option<ApprovalPolicySummaryResponse>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -267,17 +306,228 @@ fn normalize_environment_ids(
     Ok(None)
 }
 
-fn map_vote(vote: ApprovalVote) -> ApprovalVoteResponse {
+fn payload_value<'a>(
+    payload: &'a serde_json::Value,
+    snake_case: &str,
+    camel_case: &str,
+) -> Option<&'a serde_json::Value> {
+    payload.get(snake_case).or_else(|| payload.get(camel_case))
+}
+
+fn snapshot_id_from_payload(payload: &serde_json::Value, fallback: Uuid) -> Option<String> {
+    payload_value(payload, "snapshot_id", "snapshotId")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .or_else(|| Some(fallback.to_string()))
+}
+
+fn applies_to_from_policy(policy: &ApprovalPolicy) -> AppliesTo {
+    match policy.applies_to.as_str() {
+        "production_only" => AppliesTo::ProductionOnly,
+        "specific_environments" => AppliesTo::SpecificEnvironments,
+        _ => AppliesTo::All,
+    }
+}
+
+fn map_vote(vote: ApprovalVote, reviewed_snapshot_id: Option<String>) -> ApprovalVoteResponse {
     ApprovalVoteResponse {
         id: vote.id.to_string(),
         approver_id: vote.approver_id.to_string(),
         vote: vote.vote.as_str().to_string(),
         comment: vote.comment,
+        reviewed_snapshot_id,
         created_at: vote.created_at,
     }
 }
 
-fn map_request(request: ApprovalRequest, votes: Vec<ApprovalVote>) -> ApprovalRequestResponse {
+fn map_policy_summary(policy: &ApprovalPolicy) -> ApprovalPolicySummaryResponse {
+    ApprovalPolicySummaryResponse {
+        id: policy.id.to_string(),
+        name: policy.name.clone(),
+        applies_to: applies_to_from_policy(policy),
+        required_approvers: policy.required_approvers,
+        approver_role_ids: policy
+            .approver_role_ids
+            .iter()
+            .map(|id| id.to_string())
+            .collect(),
+        auto_approve_after_hours: policy.auto_approve_after_hours,
+    }
+}
+
+fn diff_section(path: &str) -> String {
+    if path.starts_with("feature.") || path == "feature" {
+        "Metadata".to_string()
+    } else if path.starts_with("stages") {
+        "Stages".to_string()
+    } else if path.starts_with("criteria") {
+        "Criteria".to_string()
+    } else if path.starts_with("variants") {
+        "Variants".to_string()
+    } else if path.starts_with("dependencies") {
+        "Dependencies".to_string()
+    } else if path.to_lowercase().contains("environment") {
+        "Environments".to_string()
+    } else {
+        "Other".to_string()
+    }
+}
+
+fn diff_label(path: &str) -> String {
+    let label = path
+        .replace("feature.", "")
+        .replace('_', " ")
+        .replace('.', " / ")
+        .replace('[', " #")
+        .replace(']', "");
+    if label.is_empty() {
+        "Snapshot".to_string()
+    } else {
+        label
+    }
+}
+
+fn add_marker(markers: &mut Vec<String>, marker: &str) {
+    if !markers.iter().any(|existing| existing == marker) {
+        markers.push(marker.to_string());
+    }
+}
+
+fn number_value(value: &Option<serde_json::Value>) -> Option<f64> {
+    value.as_ref().and_then(|inner| match inner {
+        serde_json::Value::Number(number) => number.as_f64(),
+        _ => None,
+    })
+}
+
+fn entry_risk_markers(
+    entry: &FeatureVersionDiffEntry,
+    policy: Option<&ApprovalPolicy>,
+) -> Vec<String> {
+    let mut markers = Vec::new();
+    let path = entry.path.to_lowercase();
+
+    if path.starts_with("dependencies") {
+        add_marker(&mut markers, "dependency-change");
+    }
+
+    if path.contains("kill_switch") || path.contains("killswitch") || path.contains("rollback") {
+        add_marker(&mut markers, "emergency-action");
+    }
+
+    if path.contains("weight")
+        && let (Some(before), Some(after)) =
+            (number_value(&entry.before), number_value(&entry.after))
+        && after > before
+    {
+        add_marker(&mut markers, "rollout-increase");
+    }
+
+    let policy_is_production = policy
+        .map(|policy| policy.applies_to == "production_only")
+        .unwrap_or(false);
+    let status_targets_prod = entry
+        .after
+        .as_ref()
+        .and_then(|value| value.as_str())
+        .map(|value| value.contains("DEPLOY") || value.contains("ROLLBACK"))
+        .unwrap_or(false);
+    if policy_is_production || (path.contains("status") && status_targets_prod) {
+        add_marker(&mut markers, "production-impact");
+    }
+
+    markers
+}
+
+fn parse_payload_diff(
+    payload: &serde_json::Value,
+) -> (
+    Option<serde_json::Value>,
+    Option<serde_json::Value>,
+    Vec<FeatureVersionDiffEntry>,
+    bool,
+) {
+    if !payload.is_object() {
+        return (None, None, Vec::new(), true);
+    }
+
+    let before = payload_value(payload, "before_snapshot", "beforeSnapshot")
+        .or_else(|| payload.get("before"))
+        .cloned();
+    let after = payload_value(payload, "after_snapshot", "afterSnapshot")
+        .or_else(|| payload.get("after"))
+        .cloned();
+
+    if let (Some(before_snapshot), Some(after_snapshot)) = (&before, &after) {
+        let entries = diff_feature_snapshots(before_snapshot, after_snapshot);
+        return (before, after, entries, false);
+    }
+
+    if let Some(diff_value) = payload.get("diff") {
+        match serde_json::from_value::<Vec<FeatureVersionDiffEntry>>(diff_value.clone()) {
+            Ok(entries) => return (before, after, entries, false),
+            Err(_) => return (before, after, Vec::new(), true),
+        }
+    }
+
+    (before, after, Vec::new(), false)
+}
+
+fn build_change_diff(
+    request_id: Uuid,
+    payload: &serde_json::Value,
+    policy: Option<&ApprovalPolicy>,
+) -> ApprovalChangeDiffResponse {
+    let snapshot_id = snapshot_id_from_payload(payload, request_id);
+    let (before_snapshot, after_snapshot, entries, malformed) = parse_payload_diff(payload);
+    let mut risk_markers = Vec::new();
+    let entries = entries
+        .into_iter()
+        .map(|entry| {
+            let entry_markers = entry_risk_markers(&entry, policy);
+            for marker in &entry_markers {
+                add_marker(&mut risk_markers, marker);
+            }
+            ApprovalDiffEntryResponse {
+                section: diff_section(&entry.path),
+                label: diff_label(&entry.path),
+                path: entry.path,
+                change_type: entry.change_type,
+                before: entry.before,
+                after: entry.after,
+                risk_markers: entry_markers,
+            }
+        })
+        .collect();
+
+    if let Some(raw_markers) =
+        payload_value(payload, "risk_markers", "riskMarkers").and_then(|value| value.as_array())
+    {
+        for marker in raw_markers.iter().filter_map(|value| value.as_str()) {
+            add_marker(&mut risk_markers, marker);
+        }
+    }
+
+    ApprovalChangeDiffResponse {
+        snapshot_id,
+        before_snapshot,
+        after_snapshot,
+        entries,
+        risk_markers,
+        raw_snapshot: payload.clone(),
+        malformed,
+    }
+}
+
+pub(crate) fn map_request_with_policy(
+    request: ApprovalRequest,
+    votes: Vec<ApprovalVote>,
+    policy: Option<&ApprovalPolicy>,
+) -> ApprovalRequestResponse {
+    let reviewed_snapshot_id = snapshot_id_from_payload(&request.change_payload, request.id);
+    let change_diff = build_change_diff(request.id, &request.change_payload, policy);
+    let policy = policy.map(map_policy_summary);
+
     ApprovalRequestResponse {
         id: request.id.to_string(),
         policy_id: request.policy_id.to_string(),
@@ -293,17 +543,17 @@ fn map_request(request: ApprovalRequest, votes: Vec<ApprovalVote>) -> ApprovalRe
         executed_at: request.executed_at,
         created_at: request.created_at,
         updated_at: request.updated_at,
-        votes: votes.into_iter().map(map_vote).collect(),
+        votes: votes
+            .into_iter()
+            .map(|vote| map_vote(vote, reviewed_snapshot_id.clone()))
+            .collect(),
+        change_diff,
+        policy,
     }
 }
 
 fn map_policy(policy: ApprovalPolicy) -> ApprovalPolicyResponse {
-    let applies_to = match policy.applies_to.as_str() {
-        "production_only" => AppliesTo::ProductionOnly,
-        "specific_environments" => AppliesTo::SpecificEnvironments,
-        _ => AppliesTo::All,
-    };
-
+    let applies_to = applies_to_from_policy(&policy);
     ApprovalPolicyResponse {
         id: policy.id.to_string(),
         team_id: policy.team_id.to_string(),
@@ -362,11 +612,15 @@ pub(crate) async fn list_approval_requests(
 
     let mut items = Vec::with_capacity(requests.len());
     for request in requests {
+        let policy = repo
+            .get_policy_by_id(request.policy_id)
+            .await
+            .map_err(RestError::from)?;
         let votes = repo
             .list_votes_for_request(request.id)
             .await
             .map_err(RestError::from)?;
-        items.push(map_request(request, votes));
+        items.push(map_request_with_policy(request, votes, policy.as_ref()));
     }
 
     Ok(HttpResponse::Ok().json(ApprovalRequestsResponse {
@@ -413,8 +667,12 @@ pub(crate) async fn approve_request(
         .list_votes_for_request(request_uuid)
         .await
         .map_err(RestError::from)?;
+    let policy = repo
+        .get_policy_by_id(updated.policy_id)
+        .await
+        .map_err(RestError::from)?;
 
-    Ok(HttpResponse::Ok().json(map_request(updated, votes)))
+    Ok(HttpResponse::Ok().json(map_request_with_policy(updated, votes, policy.as_ref())))
 }
 
 #[utoipa::path(
@@ -451,8 +709,12 @@ pub(crate) async fn reject_request(
         .list_votes_for_request(request_uuid)
         .await
         .map_err(RestError::from)?;
+    let policy = repo
+        .get_policy_by_id(updated.policy_id)
+        .await
+        .map_err(RestError::from)?;
 
-    Ok(HttpResponse::Ok().json(map_request(updated, votes)))
+    Ok(HttpResponse::Ok().json(map_request_with_policy(updated, votes, policy.as_ref())))
 }
 
 #[utoipa::path(
@@ -487,8 +749,12 @@ pub(crate) async fn cancel_request(
         .list_votes_for_request(request_uuid)
         .await
         .map_err(RestError::from)?;
+    let policy = repo
+        .get_policy_by_id(updated.policy_id)
+        .await
+        .map_err(RestError::from)?;
 
-    Ok(HttpResponse::Ok().json(map_request(updated, votes)))
+    Ok(HttpResponse::Ok().json(map_request_with_policy(updated, votes, policy.as_ref())))
 }
 
 #[utoipa::path(
@@ -803,7 +1069,24 @@ mod tests {
             feature_id: Uuid::new_v4(),
             environment_id: Some(Uuid::new_v4()),
             change_type: "stage_change".to_string(),
-            change_payload: serde_json::json!({"stage_id": "stage-1"}),
+            change_payload: serde_json::json!({
+                "stage_id": "stage-1",
+                "snapshot_id": "snapshot-1",
+                "before_snapshot": {
+                    "feature": { "key": "checkout", "description": "old" },
+                    "stages": [{ "id": "stage-1", "status": "NOT_DEPLOYED" }],
+                    "criteria": [],
+                    "variants": [],
+                    "dependencies": []
+                },
+                "after_snapshot": {
+                    "feature": { "key": "checkout", "description": "new" },
+                    "stages": [{ "id": "stage-1", "status": "DEPLOYMENT_APPROVED" }],
+                    "criteria": [],
+                    "variants": [],
+                    "dependencies": []
+                }
+            }),
             change_description: Some("Deploy".to_string()),
             requested_by: Uuid::new_v4(),
             status: ApprovalStatus::Pending,
@@ -812,6 +1095,22 @@ mod tests {
             executed_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+        }
+    }
+
+    fn sample_policy(policy_id: Uuid) -> ApprovalPolicy {
+        ApprovalPolicy {
+            id: policy_id,
+            team_id: Uuid::new_v4(),
+            name: "Production approval".to_string(),
+            description: Some("Prod changes need review".to_string()),
+            applies_to: "production_only".to_string(),
+            environment_ids: None,
+            required_approvers: 2,
+            approver_role_ids: vec![Uuid::new_v4()],
+            auto_approve_after_hours: None,
+            enabled: true,
+            created_at: Utc::now(),
         }
     }
 
@@ -831,6 +1130,8 @@ mod tests {
         let team_id = Uuid::new_v4();
         let request_id = Uuid::new_v4();
         let request = sample_request(request_id);
+        let policy_id = request.policy_id;
+        let policy = sample_policy(policy_id);
 
         let mut mock_repo = MockApprovalRepository::new();
         mock_repo
@@ -846,6 +1147,11 @@ mod tests {
             })
             .times(1)
             .returning(move |_, _, _, _| Ok((vec![request.clone()], 1)));
+        mock_repo
+            .expect_get_policy_by_id()
+            .withf(move |id| *id == policy_id)
+            .times(1)
+            .returning(move |_| Ok(Some(policy.clone())));
         mock_repo
             .expect_list_votes_for_request()
             .withf(move |id| *id == request_id)
@@ -870,15 +1176,42 @@ mod tests {
         let body = test::read_body(resp).await;
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["items"][0]["id"], request_id.to_string());
+        assert_eq!(json["items"][0]["policy"]["name"], "Production approval");
+        assert_eq!(
+            json["items"][0]["votes"][0]["reviewedSnapshotId"],
+            "snapshot-1"
+        );
+        assert_eq!(
+            json["items"][0]["changeDiff"]["entries"][0]["section"],
+            "Metadata"
+        );
         assert_eq!(json["meta"]["offset"], 10);
         assert_eq!(json["meta"]["limit"], 5);
         assert_eq!(json["meta"]["total"], 1);
     }
 
     #[actix_web::test]
+    async fn map_request_handles_malformed_payload_without_panicking() {
+        let request_id = Uuid::new_v4();
+        let request = ApprovalRequest {
+            change_payload: serde_json::json!("not-a-json-object"),
+            ..sample_request(request_id)
+        };
+        let policy = sample_policy(request.policy_id);
+
+        let response = map_request_with_policy(request, vec![], Some(&policy));
+
+        assert!(response.change_diff.malformed);
+        assert!(response.change_diff.entries.is_empty());
+        assert_eq!(response.policy.unwrap().name, "Production approval");
+    }
+
+    #[actix_web::test]
     async fn approve_request_returns_updated() {
         let request_id = Uuid::new_v4();
         let request = sample_request(request_id);
+        let policy_id = request.policy_id;
+        let policy = sample_policy(policy_id);
 
         let mut mock_logic = MockApprovalLogic::new();
         mock_logic
@@ -891,6 +1224,11 @@ mod tests {
             .expect_list_votes_for_request()
             .times(1)
             .returning(move |_| Ok(vec![sample_vote(request_id)]));
+        mock_repo
+            .expect_get_policy_by_id()
+            .withf(move |id| *id == policy_id)
+            .times(1)
+            .returning(move |_| Ok(Some(policy.clone())));
 
         let app = test::init_service(
             App::new()
