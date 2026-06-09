@@ -402,6 +402,60 @@ describe('Feature API', () => {
         });
     });
 
+    describe('Feature version history and rollback', () => {
+        let testFeatureId: string;
+
+        beforeAll(async () => {
+            const fixture = createFeatureFixture({ environmentId: testEnvironmentId });
+            const response = await client.post(`/teams/${testTeamId}/features`, fixture);
+            expectStatus(response, 201);
+            testFeatureId = response.data.id;
+            createdIds.push(testFeatureId);
+        });
+
+        it('should record update snapshots, expose diffs, and rollback with a new audited version', async () => {
+            const firstDescription = 'Version one description';
+            const secondDescription = 'Version two description';
+
+            const firstUpdate = await updateFeature(client, testFeatureId, {
+                description: firstDescription,
+                owner: 'Release Team',
+            });
+            expectSuccess(firstUpdate);
+
+            const versionsAfterFirstUpdate = await client.get(`/features/${testFeatureId}/versions`);
+            expectSuccess(versionsAfterFirstUpdate);
+            expectPaginatedResponse(versionsAfterFirstUpdate);
+            expect(versionsAfterFirstUpdate.data.items.length).toBeGreaterThanOrEqual(1);
+            expect(versionsAfterFirstUpdate.data.items[0].versionNumber).toBe(1);
+            expect(versionsAfterFirstUpdate.data.items[0].source).toBe('update');
+            expect(versionsAfterFirstUpdate.data.items[0].snapshot.feature.description).toBe(firstDescription);
+
+            const firstVersionId = versionsAfterFirstUpdate.data.items[0].id;
+            const diff = await client.get(`/features/${testFeatureId}/versions/${firstVersionId}/diff`);
+            expectSuccess(diff);
+            expect(diff.data.entries.some((entry: { path: string }) => entry.path === 'feature.description')).toBe(true);
+
+            const secondUpdate = await updateFeature(client, testFeatureId, {
+                description: secondDescription,
+            });
+            expectSuccess(secondUpdate);
+
+            const rollback = await client.post(`/features/${testFeatureId}/versions/${firstVersionId}/rollback`, {
+                archiveConfirmation: true,
+            });
+            expectSuccess(rollback);
+            expect(rollback.data.description).toBe(firstDescription);
+            expect(rollback.data.owner).toBe('Release Team');
+
+            const versionsAfterRollback = await client.get(`/features/${testFeatureId}/versions`);
+            expectSuccess(versionsAfterRollback);
+            expect(versionsAfterRollback.data.items[0].versionNumber).toBe(3);
+            expect(versionsAfterRollback.data.items[0].source).toBe('rollback');
+            expect(versionsAfterRollback.data.items[0].snapshot.feature.description).toBe(firstDescription);
+        });
+    });
+
     describe('Toggle / Enable Feature', () => {
         let testFeatureId: string;
 

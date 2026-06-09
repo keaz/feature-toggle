@@ -5,6 +5,7 @@ use crate::database::compound_rules::{
 };
 use crate::database::feature::{
     CreateFeature, CreateFeatureStage, CreateStageCriterion, FeatureRepositoryTx, UpdateFeature,
+    diff_entries_to_json, diff_feature_snapshots, snapshot_dependencies, snapshot_feature_key,
 };
 use crate::database::variant_allocations::{
     CreateVariantAllocationInput, VariantAllocationsRepositoryTx,
@@ -502,6 +503,9 @@ where
     A: ActivityLogRepository + ?Sized,
 {
     let feature_uuid = id_to_uuid(id)?;
+    let before_snapshot = feature_repo
+        .build_feature_snapshot_tx(conn, feature_uuid)
+        .await?;
 
     // Map update input
     let feature_type = Some(map_api_to_entity_feature_type(input.feature_type));
@@ -606,7 +610,7 @@ where
         entity_type: "feature".to_string(),
         entity_id: feature_uuid.to_string(),
         actor_id,
-        actor_name,
+        actor_name: actor_name.clone(),
         description: format!("Updated feature '{}'", updated_feature.key),
         metadata: Some(serde_json::json!({
              "feature_id": feature_uuid.to_string(),
@@ -621,7 +625,115 @@ where
         .await
         .map_err(Error::DatabaseError)?;
 
+    let after_snapshot = feature_repo
+        .build_feature_snapshot_tx(conn, feature_uuid)
+        .await?;
+    let change_summary =
+        diff_entries_to_json(&diff_feature_snapshots(&before_snapshot, &after_snapshot));
+    feature_repo
+        .create_feature_version_tx(
+            conn,
+            feature_uuid,
+            after_snapshot,
+            change_summary,
+            actor_id,
+            actor_name,
+            "update",
+        )
+        .await?;
+
     Ok(map_entity_to_api_feature(updated_feature))
+}
+
+pub async fn rollback_feature_to_version_in_tx<R, A>(
+    conn: &mut PgConnection,
+    feature_repo: &R,
+    activity_repo: &A,
+    id: ID,
+    version_id: ID,
+    archive_confirmation: bool,
+    actor: Option<ActorContext>,
+) -> Result<ModelFeature, Error>
+where
+    R: FeatureRepositoryTx + ?Sized,
+    A: ActivityLogRepository + ?Sized,
+{
+    let feature_uuid = id_to_uuid(id)?;
+    let version_uuid = id_to_uuid(version_id)?;
+    let before_snapshot = feature_repo
+        .build_feature_snapshot_tx(conn, feature_uuid)
+        .await?;
+    let target_version = feature_repo
+        .get_feature_version_tx(conn, feature_uuid, version_uuid)
+        .await?;
+
+    let existing_feature = feature_repo.get_feature_by_id(feature_uuid).await?;
+    let target_key = snapshot_feature_key(&target_version.snapshot)?;
+    let dependencies = snapshot_dependencies(&target_version.snapshot)?;
+    crate::logic::dependency_graph::validate_dependency_graph_update(
+        feature_repo,
+        existing_feature.team_id,
+        feature_uuid,
+        target_key.as_str(),
+        &dependencies,
+    )
+    .await?;
+
+    let restored_feature = feature_repo
+        .restore_feature_snapshot_tx(
+            conn,
+            feature_uuid,
+            target_version.snapshot.clone(),
+            archive_confirmation,
+        )
+        .await?;
+
+    let (actor_id, actor_name) = actor
+        .as_ref()
+        .map(|a| a.as_option())
+        .unwrap_or((None, None));
+
+    let activity = CreateActivityLog {
+        activity_type: crate::utils::activity_logger::activity_types::FEATURE_UPDATED.to_string(),
+        entity_type: "feature".to_string(),
+        entity_id: feature_uuid.to_string(),
+        actor_id,
+        actor_name: actor_name.clone(),
+        description: format!(
+            "Rolled back feature '{}' to version {}",
+            restored_feature.key, target_version.version_number
+        ),
+        metadata: Some(serde_json::json!({
+            "feature_id": feature_uuid.to_string(),
+            "feature_key": restored_feature.key,
+            "target_version_id": version_uuid.to_string(),
+            "target_version_number": target_version.version_number,
+        })),
+    };
+
+    activity_repo
+        .create_activity_tx(conn, activity)
+        .await
+        .map_err(Error::DatabaseError)?;
+
+    let after_snapshot = feature_repo
+        .build_feature_snapshot_tx(conn, feature_uuid)
+        .await?;
+    let change_summary =
+        diff_entries_to_json(&diff_feature_snapshots(&before_snapshot, &after_snapshot));
+    feature_repo
+        .create_feature_version_tx(
+            conn,
+            feature_uuid,
+            after_snapshot,
+            change_summary,
+            actor_id,
+            actor_name,
+            "rollback",
+        )
+        .await?;
+
+    Ok(map_entity_to_api_feature(restored_feature))
 }
 
 pub async fn delete_feature_in_tx<R, A>(
@@ -679,6 +791,9 @@ where
     A: ActivityLogRepository + ?Sized,
 {
     let feature_uuid = id_to_uuid(id)?;
+    let before_snapshot = feature_repo
+        .build_feature_snapshot_tx(conn, feature_uuid)
+        .await?;
     let feature = feature_repo
         .emergency_disable_feature_tx(conn, feature_uuid, rollback_in_minutes)
         .await?;
@@ -708,7 +823,7 @@ where
         entity_type: "feature".to_string(),
         entity_id: feature.id.to_string(),
         actor_id,
-        actor_name,
+        actor_name: actor_name.clone(),
         description: log_message,
         metadata: Some(serde_json::json!({
             "feature_id": feature.id.to_string(),
@@ -721,6 +836,23 @@ where
         .create_activity_tx(conn, activity)
         .await
         .map_err(Error::DatabaseError)?;
+
+    let after_snapshot = feature_repo
+        .build_feature_snapshot_tx(conn, feature_uuid)
+        .await?;
+    let change_summary =
+        diff_entries_to_json(&diff_feature_snapshots(&before_snapshot, &after_snapshot));
+    feature_repo
+        .create_feature_version_tx(
+            conn,
+            feature_uuid,
+            after_snapshot,
+            change_summary,
+            actor_id,
+            actor_name,
+            "kill_switch",
+        )
+        .await?;
 
     Ok(map_entity_to_api_feature(feature))
 }
@@ -737,6 +869,9 @@ where
     A: ActivityLogRepository + ?Sized,
 {
     let feature_uuid = id_to_uuid(id)?;
+    let before_snapshot = feature_repo
+        .build_feature_snapshot_tx(conn, feature_uuid)
+        .await?;
     let feature = feature_repo
         .emergency_enable_feature_tx(conn, feature_uuid)
         .await?;
@@ -752,7 +887,7 @@ where
         entity_type: "feature".to_string(),
         entity_id: feature.id.to_string(),
         actor_id,
-        actor_name,
+        actor_name: actor_name.clone(),
         description: format!(
             "Feature is enabled and kill switch deactivated for '{}'",
             feature.key
@@ -767,6 +902,23 @@ where
         .create_activity_tx(conn, activity)
         .await
         .map_err(Error::DatabaseError)?;
+
+    let after_snapshot = feature_repo
+        .build_feature_snapshot_tx(conn, feature_uuid)
+        .await?;
+    let change_summary =
+        diff_entries_to_json(&diff_feature_snapshots(&before_snapshot, &after_snapshot));
+    feature_repo
+        .create_feature_version_tx(
+            conn,
+            feature_uuid,
+            after_snapshot,
+            change_summary,
+            actor_id,
+            actor_name,
+            "kill_switch",
+        )
+        .await?;
 
     Ok(map_entity_to_api_feature(feature))
 }

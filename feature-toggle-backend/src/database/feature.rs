@@ -3,9 +3,10 @@ use crate::database::{Error, handle_error};
 use chrono::{DateTime, Utc};
 use mockall::automock;
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use sqlx::postgres::PgQueryResult;
 use sqlx::{FromRow, PgConnection, PgPool, Postgres, Row, Transaction};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,6 +38,118 @@ pub struct RolloutMetricsData {
     pub pending_approvals: i64,
     pub bottleneck_stage: Option<String>,
     pub bottleneck_avg_wait_hours: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct FeatureVersion {
+    pub id: Uuid,
+    pub feature_id: Uuid,
+    pub version_number: i32,
+    pub snapshot: JsonValue,
+    pub change_summary: JsonValue,
+    pub actor_id: Option<Uuid>,
+    pub actor_name: Option<String>,
+    pub source: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeatureVersionDiffEntry {
+    pub path: String,
+    pub change_type: String,
+    pub before: Option<JsonValue>,
+    pub after: Option<JsonValue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeatureConfigSnapshot {
+    pub schema_version: i32,
+    pub feature: FeatureSnapshotMetadata,
+    pub dependencies: Vec<Uuid>,
+    pub stages: Vec<FeatureStageSnapshot>,
+    pub variants: Vec<FeatureVariantSnapshot>,
+    pub criteria: Vec<StageCriterionSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeatureSnapshotMetadata {
+    pub id: Uuid,
+    pub team_id: Uuid,
+    pub key: String,
+    pub description: Option<String>,
+    pub feature_type: String,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub kill_switch_enabled: bool,
+    pub kill_switch_activated_at: Option<DateTime<Utc>>,
+    pub rollback_scheduled_at: Option<DateTime<Utc>>,
+    pub lifecycle_stage: String,
+    pub owner: Option<String>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub cleanup_reason: Option<String>,
+    pub archived_at: Option<DateTime<Utc>>,
+    pub deprecated_at: Option<DateTime<Utc>>,
+    pub deprecation_notice: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeatureStageSnapshot {
+    pub id: Uuid,
+    pub environment_id: Uuid,
+    pub order_index: i32,
+    pub parent_stage_id: Option<Uuid>,
+    pub position: String,
+    pub status: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeatureVariantSnapshot {
+    pub control: String,
+    pub value: JsonValue,
+    pub value_type: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StageCriterionSnapshot {
+    pub id: Uuid,
+    pub stage_id: Uuid,
+    pub priority: i32,
+    pub variant_selection_mode: String,
+    pub selected_variant_control: Option<String>,
+    pub variant_allocations: Vec<VariantAllocationSnapshot>,
+    pub rule_groups: Vec<RuleGroupSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VariantAllocationSnapshot {
+    pub variant_control: String,
+    pub weight: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleGroupSnapshot {
+    pub id: Uuid,
+    pub logic_operator: String,
+    pub conditions: Vec<RuleConditionSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleConditionSnapshot {
+    pub id: Uuid,
+    pub context_key: String,
+    pub operator: String,
+    pub value: JsonValue,
+    pub order_index: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -198,6 +311,115 @@ const FEATURE_SELECT: &str = r#"SELECT f.id as feature_id, f.key as feature_key,
             f.evaluation_count_7d, f.evaluation_count_30d, f.evaluation_count_90d
 			FROM features f"#;
 
+pub fn diff_feature_snapshots(
+    before: &JsonValue,
+    after: &JsonValue,
+) -> Vec<FeatureVersionDiffEntry> {
+    let mut entries = Vec::new();
+    diff_json_value("", before, after, &mut entries);
+    entries
+}
+
+pub fn diff_entries_to_json(entries: &[FeatureVersionDiffEntry]) -> JsonValue {
+    serde_json::to_value(entries).unwrap_or_else(|_| JsonValue::Array(Vec::new()))
+}
+
+pub fn snapshot_feature_key(snapshot: &JsonValue) -> Result<String, Error> {
+    let parsed = parse_snapshot(snapshot)?;
+    Ok(parsed.feature.key)
+}
+
+pub fn snapshot_dependencies(snapshot: &JsonValue) -> Result<Vec<Uuid>, Error> {
+    let parsed = parse_snapshot(snapshot)?;
+    Ok(parsed.dependencies)
+}
+
+fn parse_snapshot(snapshot: &JsonValue) -> Result<FeatureConfigSnapshot, Error> {
+    serde_json::from_value(snapshot.clone())
+        .map_err(|e| Error::InvalidInput(format!("Invalid feature snapshot: {e}")))
+}
+
+fn diff_json_value(
+    path: &str,
+    before: &JsonValue,
+    after: &JsonValue,
+    entries: &mut Vec<FeatureVersionDiffEntry>,
+) {
+    if before == after {
+        return;
+    }
+
+    match (before, after) {
+        (JsonValue::Object(left), JsonValue::Object(right)) => {
+            let keys = left
+                .keys()
+                .chain(right.keys())
+                .cloned()
+                .collect::<BTreeSet<String>>();
+
+            for key in keys {
+                let next_path = if path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{path}.{key}")
+                };
+                match (left.get(&key), right.get(&key)) {
+                    (Some(before_value), Some(after_value)) => {
+                        diff_json_value(&next_path, before_value, after_value, entries);
+                    }
+                    (None, Some(after_value)) => entries.push(FeatureVersionDiffEntry {
+                        path: next_path,
+                        change_type: "added".to_string(),
+                        before: None,
+                        after: Some(after_value.clone()),
+                    }),
+                    (Some(before_value), None) => entries.push(FeatureVersionDiffEntry {
+                        path: next_path,
+                        change_type: "removed".to_string(),
+                        before: Some(before_value.clone()),
+                        after: None,
+                    }),
+                    (None, None) => {}
+                }
+            }
+        }
+        (JsonValue::Array(left), JsonValue::Array(right)) => {
+            let max_len = left.len().max(right.len());
+            for index in 0..max_len {
+                let next_path = format!("{path}[{index}]");
+                match (left.get(index), right.get(index)) {
+                    (Some(before_value), Some(after_value)) => {
+                        diff_json_value(&next_path, before_value, after_value, entries);
+                    }
+                    (None, Some(after_value)) => entries.push(FeatureVersionDiffEntry {
+                        path: next_path,
+                        change_type: "added".to_string(),
+                        before: None,
+                        after: Some(after_value.clone()),
+                    }),
+                    (Some(before_value), None) => entries.push(FeatureVersionDiffEntry {
+                        path: next_path,
+                        change_type: "removed".to_string(),
+                        before: Some(before_value.clone()),
+                        after: None,
+                    }),
+                    (None, None) => {}
+                }
+            }
+        }
+        _ => entries.push(FeatureVersionDiffEntry {
+            path: if path.is_empty() {
+                "$".to_string()
+            } else {
+                path.to_string()
+            },
+            change_type: "changed".to_string(),
+            before: Some(before.clone()),
+            after: Some(after.clone()),
+        }),
+    }
+}
+
 #[automock]
 #[async_trait::async_trait]
 pub trait FeatureRepository: Send + Sync {
@@ -247,6 +469,17 @@ pub trait FeatureRepository: Send + Sync {
     async fn create_feature(&self, input: CreateFeature) -> Result<Uuid, Error>;
     async fn update_feature(&self, input: UpdateFeature) -> Result<Feature, Error>;
     async fn delete_feature(&self, id: Uuid) -> Result<(), Error>;
+    async fn list_feature_versions(
+        &self,
+        feature_id: Uuid,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<FeatureVersion>, i64), Error>;
+    async fn get_feature_version(
+        &self,
+        feature_id: Uuid,
+        version_id: Uuid,
+    ) -> Result<FeatureVersion, Error>;
     // Stage-contexts (legacy)
     async fn get_stage_contexts(
         &self,
@@ -391,6 +624,34 @@ pub trait FeatureRepositoryTx: FeatureRepository {
         input: UpdateFeature,
     ) -> Result<Feature, Error>;
     async fn delete_feature_tx(&self, conn: &mut PgConnection, id: Uuid) -> Result<(), Error>;
+    async fn build_feature_snapshot_tx(
+        &self,
+        conn: &mut PgConnection,
+        feature_id: Uuid,
+    ) -> Result<JsonValue, Error>;
+    async fn create_feature_version_tx(
+        &self,
+        conn: &mut PgConnection,
+        feature_id: Uuid,
+        snapshot: JsonValue,
+        change_summary: JsonValue,
+        actor_id: Option<Uuid>,
+        actor_name: Option<String>,
+        source: &str,
+    ) -> Result<FeatureVersion, Error>;
+    async fn get_feature_version_tx(
+        &self,
+        conn: &mut PgConnection,
+        feature_id: Uuid,
+        version_id: Uuid,
+    ) -> Result<FeatureVersion, Error>;
+    async fn restore_feature_snapshot_tx(
+        &self,
+        conn: &mut PgConnection,
+        feature_id: Uuid,
+        snapshot: JsonValue,
+        archive_confirmation: bool,
+    ) -> Result<Feature, Error>;
 
     async fn get_stage_by_id_tx(
         &self,
@@ -1000,6 +1261,200 @@ impl FeatureRepositoryImpl {
                 .get(&feature.id)
                 .cloned()
                 .unwrap_or_default();
+        }
+
+        Ok(())
+    }
+
+    async fn get_feature_variants_conn(
+        &self,
+        conn: &mut PgConnection,
+        feature_id: Uuid,
+    ) -> Result<Vec<crate::database::entity::FeatureVariant>, Error> {
+        let variants = sqlx::query_as!(
+            crate::database::entity::FeatureVariant,
+            r#"
+            SELECT
+                id,
+                feature_id,
+                control,
+                value,
+                value_type AS "value_type: crate::database::entity::VariantValueType",
+                description,
+                created_at,
+                updated_at
+            FROM feature_variants
+            WHERE feature_id = $1
+            ORDER BY control
+            "#,
+            feature_id
+        )
+        .fetch_all(&mut *conn)
+        .await;
+        handle_error(Some(feature_id), variants)
+    }
+
+    fn feature_type_to_string(feature_type: &FeatureType) -> String {
+        match feature_type {
+            FeatureType::Simple => "Simple".to_string(),
+            FeatureType::Contextual => "Contextual".to_string(),
+        }
+    }
+
+    fn variant_value_type_to_string(
+        value_type: crate::database::entity::VariantValueType,
+    ) -> String {
+        match value_type {
+            crate::database::entity::VariantValueType::String => "string".to_string(),
+            crate::database::entity::VariantValueType::Number => "number".to_string(),
+            crate::database::entity::VariantValueType::Boolean => "boolean".to_string(),
+            crate::database::entity::VariantValueType::Json => "json".to_string(),
+        }
+    }
+
+    fn parse_variant_value_type(
+        value_type: &str,
+    ) -> Result<crate::database::entity::VariantValueType, Error> {
+        match value_type.to_lowercase().as_str() {
+            "string" => Ok(crate::database::entity::VariantValueType::String),
+            "number" => Ok(crate::database::entity::VariantValueType::Number),
+            "boolean" => Ok(crate::database::entity::VariantValueType::Boolean),
+            "json" => Ok(crate::database::entity::VariantValueType::Json),
+            other => Err(Error::InvalidInput(format!(
+                "Invalid snapshot variant value type: {other}"
+            ))),
+        }
+    }
+
+    fn variant_selection_mode_to_string(
+        mode: crate::database::entity::VariantSelectionMode,
+    ) -> String {
+        match mode {
+            crate::database::entity::VariantSelectionMode::SpecificVariant => {
+                "SPECIFIC_VARIANT".to_string()
+            }
+            crate::database::entity::VariantSelectionMode::WeightedSplit => {
+                "WEIGHTED_SPLIT".to_string()
+            }
+        }
+    }
+
+    fn logic_operator_to_string(operator: crate::database::entity::LogicOperator) -> String {
+        match operator {
+            crate::database::entity::LogicOperator::Or => "OR".to_string(),
+            crate::database::entity::LogicOperator::And => "AND".to_string(),
+        }
+    }
+
+    async fn insert_snapshot_stages(
+        &self,
+        conn: &mut PgConnection,
+        feature_id: Uuid,
+        stages: &[FeatureStageSnapshot],
+    ) -> Result<(), Error> {
+        if stages.is_empty() {
+            return Ok(());
+        }
+
+        let ids: Vec<Uuid> = stages.iter().map(|stage| stage.id).collect();
+        let feature_ids: Vec<Uuid> = vec![feature_id; stages.len()];
+        let environment_ids: Vec<Uuid> = stages.iter().map(|stage| stage.environment_id).collect();
+        let order_indices: Vec<i32> = stages.iter().map(|stage| stage.order_index).collect();
+        let parent_stage_ids: Vec<Option<Uuid>> =
+            stages.iter().map(|stage| stage.parent_stage_id).collect();
+        let positions: Vec<String> = stages.iter().map(|stage| stage.position.clone()).collect();
+        let statuses: Vec<String> = stages.iter().map(|stage| stage.status.clone()).collect();
+        let enabled_values: Vec<bool> = stages.iter().map(|stage| stage.enabled).collect();
+
+        sqlx::query(
+            r#"INSERT INTO features_pipeline_stages
+               (id, feature_id, environment_id, order_index, parent_stage_id, position, status, enabled)
+               SELECT unnest($1::uuid[]),
+                      unnest($2::uuid[]),
+                      unnest($3::uuid[]),
+                      unnest($4::int[]),
+                      unnest($5::uuid[]),
+                      unnest($6::varchar[]),
+                      unnest($7::text[]),
+                      unnest($8::bool[])"#,
+        )
+        .bind(&ids)
+        .bind(&feature_ids)
+        .bind(&environment_ids)
+        .bind(&order_indices)
+        .bind(&parent_stage_ids)
+        .bind(&positions)
+        .bind(&statuses)
+        .bind(&enabled_values)
+        .execute(&mut *conn)
+        .await
+        .map_err(Error::DatabaseError)?;
+
+        Ok(())
+    }
+
+    async fn restore_stage_criteria_from_snapshot(
+        &self,
+        conn: &mut PgConnection,
+        criteria: &[StageCriterionSnapshot],
+    ) -> Result<(), Error> {
+        for criterion in criteria {
+            sqlx::query(
+                r#"INSERT INTO feature_stage_criteria
+                   (id, stage_id, priority, variant_selection_mode, selected_variant_control)
+                   VALUES ($1, $2, $3, $4::variant_selection_mode, $5)"#,
+            )
+            .bind(criterion.id)
+            .bind(criterion.stage_id)
+            .bind(criterion.priority)
+            .bind(&criterion.variant_selection_mode)
+            .bind(&criterion.selected_variant_control)
+            .execute(&mut *conn)
+            .await
+            .map_err(Error::DatabaseError)?;
+
+            for allocation in &criterion.variant_allocations {
+                sqlx::query(
+                    r#"INSERT INTO variant_allocations (criteria_id, variant_control, weight)
+                       VALUES ($1, $2, $3)"#,
+                )
+                .bind(criterion.id)
+                .bind(&allocation.variant_control)
+                .bind(allocation.weight)
+                .execute(&mut *conn)
+                .await
+                .map_err(Error::DatabaseError)?;
+            }
+
+            for group in &criterion.rule_groups {
+                sqlx::query(
+                    r#"INSERT INTO rule_groups (id, criteria_id, logic_operator)
+                       VALUES ($1, $2, $3)"#,
+                )
+                .bind(group.id)
+                .bind(criterion.id)
+                .bind(&group.logic_operator)
+                .execute(&mut *conn)
+                .await
+                .map_err(Error::DatabaseError)?;
+
+                for condition in &group.conditions {
+                    sqlx::query(
+                        r#"INSERT INTO rule_conditions
+                           (id, group_id, context_key, operator, value, order_index)
+                           VALUES ($1, $2, $3, $4, $5, $6)"#,
+                    )
+                    .bind(condition.id)
+                    .bind(group.id)
+                    .bind(&condition.context_key)
+                    .bind(&condition.operator)
+                    .bind(&condition.value)
+                    .bind(condition.order_index)
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(Error::DatabaseError)?;
+                }
+            }
         }
 
         Ok(())
@@ -1846,6 +2301,57 @@ impl FeatureRepository for FeatureRepositoryImpl {
             .await;
         let _ = handle_error(Some(id), result)?;
         Ok(())
+    }
+
+    async fn list_feature_versions(
+        &self,
+        feature_id: Uuid,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<FeatureVersion>, i64), Error> {
+        let total: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM feature_versions WHERE feature_id = $1")
+                .bind(feature_id)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(Error::DatabaseError)?;
+
+        let versions = sqlx::query_as::<_, FeatureVersion>(
+            r#"SELECT id, feature_id, version_number, snapshot, change_summary,
+                      actor_id, actor_name, source, created_at
+               FROM feature_versions
+               WHERE feature_id = $1
+               ORDER BY version_number DESC
+               LIMIT $2 OFFSET $3"#,
+        )
+        .bind(feature_id)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Error::DatabaseError)?;
+
+        Ok((versions, total))
+    }
+
+    async fn get_feature_version(
+        &self,
+        feature_id: Uuid,
+        version_id: Uuid,
+    ) -> Result<FeatureVersion, Error> {
+        let version = sqlx::query_as::<_, FeatureVersion>(
+            r#"SELECT id, feature_id, version_number, snapshot, change_summary,
+                      actor_id, actor_name, source, created_at
+               FROM feature_versions
+               WHERE feature_id = $1 AND id = $2"#,
+        )
+        .bind(feature_id)
+        .bind(version_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Error::DatabaseError)?;
+
+        version.ok_or(Error::NotFound(version_id))
     }
 
     async fn get_stage_contexts(
@@ -2887,6 +3393,285 @@ impl FeatureRepositoryTx for FeatureRepositoryImpl {
             .await;
         let _ = handle_error(Some(id), result)?;
         Ok(())
+    }
+
+    async fn build_feature_snapshot_tx(
+        &self,
+        conn: &mut PgConnection,
+        feature_id: Uuid,
+    ) -> Result<JsonValue, Error> {
+        let feature = self.get_feature_by_id_conn(conn, feature_id).await?;
+        let mut dependencies = feature
+            .dependencies
+            .iter()
+            .map(|dependency| dependency.depends_on_id)
+            .collect::<Vec<_>>();
+        dependencies.sort();
+
+        let mut stages = self
+            .get_feature_stages_conn(conn, feature_id)
+            .await?
+            .into_iter()
+            .map(|stage| FeatureStageSnapshot {
+                id: stage.id,
+                environment_id: stage.environment_id,
+                order_index: stage.order_index,
+                parent_stage_id: stage.parent_stage_id,
+                position: stage.position,
+                status: stage.status,
+                enabled: stage.enabled,
+            })
+            .collect::<Vec<_>>();
+        stages.sort_by_key(|stage| (stage.order_index, stage.id));
+
+        let mut variants = self
+            .get_feature_variants_conn(conn, feature_id)
+            .await?
+            .into_iter()
+            .map(|variant| FeatureVariantSnapshot {
+                control: variant.control,
+                value: variant.value,
+                value_type: Self::variant_value_type_to_string(variant.value_type),
+                description: variant.description,
+            })
+            .collect::<Vec<_>>();
+        variants.sort_by(|left, right| left.control.cmp(&right.control));
+
+        let mut criteria = Vec::new();
+        for stage in &stages {
+            let stage_criteria = self.get_stage_criteria_tx(conn, stage.id).await?;
+            for criterion in stage_criteria {
+                let mut rule_groups = criterion
+                    .rule_groups
+                    .into_iter()
+                    .map(|group| {
+                        let mut conditions = group
+                            .conditions
+                            .into_iter()
+                            .map(|condition| RuleConditionSnapshot {
+                                id: condition.id,
+                                context_key: condition.context_key,
+                                operator: condition.operator,
+                                value: condition.value,
+                                order_index: condition.order_index,
+                            })
+                            .collect::<Vec<_>>();
+                        conditions.sort_by_key(|condition| (condition.order_index, condition.id));
+
+                        RuleGroupSnapshot {
+                            id: group.id,
+                            logic_operator: Self::logic_operator_to_string(group.logic_operator),
+                            conditions,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                rule_groups.sort_by_key(|group| group.id);
+
+                let mut allocations = criterion
+                    .variant_allocations
+                    .into_iter()
+                    .map(|allocation| VariantAllocationSnapshot {
+                        variant_control: allocation.variant_control,
+                        weight: allocation.weight,
+                    })
+                    .collect::<Vec<_>>();
+                allocations.sort_by(|left, right| left.variant_control.cmp(&right.variant_control));
+
+                criteria.push(StageCriterionSnapshot {
+                    id: criterion.id,
+                    stage_id: criterion.stage_id,
+                    priority: criterion.priority,
+                    variant_selection_mode: Self::variant_selection_mode_to_string(
+                        criterion.variant_selection_mode,
+                    ),
+                    selected_variant_control: criterion.selected_variant_control,
+                    variant_allocations: allocations,
+                    rule_groups,
+                });
+            }
+        }
+        criteria.sort_by_key(|criterion| (criterion.stage_id, criterion.priority, criterion.id));
+
+        let snapshot = FeatureConfigSnapshot {
+            schema_version: 1,
+            feature: FeatureSnapshotMetadata {
+                id: feature.id,
+                team_id: feature.team_id,
+                key: feature.key,
+                description: feature.description,
+                feature_type: Self::feature_type_to_string(&feature.feature_type),
+                enabled: feature.active,
+                created_at: feature.created_at,
+                kill_switch_enabled: feature.kill_switch_enabled,
+                kill_switch_activated_at: feature.kill_switch_activated_at,
+                rollback_scheduled_at: feature.rollback_scheduled_at,
+                lifecycle_stage: feature.lifecycle_stage,
+                owner: feature.owner,
+                expires_at: feature.expires_at,
+                cleanup_reason: feature.cleanup_reason,
+                archived_at: feature.archived_at,
+                deprecated_at: feature.deprecated_at,
+                deprecation_notice: feature.deprecation_notice,
+            },
+            dependencies,
+            stages,
+            variants,
+            criteria,
+        };
+
+        serde_json::to_value(snapshot)
+            .map_err(|e| Error::InvalidInput(format!("Failed to serialize feature snapshot: {e}")))
+    }
+
+    async fn create_feature_version_tx(
+        &self,
+        conn: &mut PgConnection,
+        feature_id: Uuid,
+        snapshot: JsonValue,
+        change_summary: JsonValue,
+        actor_id: Option<Uuid>,
+        actor_name: Option<String>,
+        source: &str,
+    ) -> Result<FeatureVersion, Error> {
+        let version = sqlx::query_as::<_, FeatureVersion>(
+            r#"INSERT INTO feature_versions
+               (feature_id, version_number, snapshot, change_summary, actor_id, actor_name, source)
+               SELECT $1,
+                      COALESCE(MAX(version_number), 0) + 1,
+                      $2,
+                      $3,
+                      $4,
+                      $5,
+                      $6
+               FROM feature_versions
+               WHERE feature_id = $1
+               RETURNING id, feature_id, version_number, snapshot, change_summary,
+                         actor_id, actor_name, source, created_at"#,
+        )
+        .bind(feature_id)
+        .bind(snapshot)
+        .bind(change_summary)
+        .bind(actor_id)
+        .bind(actor_name)
+        .bind(source)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(Error::DatabaseError)?;
+
+        Ok(version)
+    }
+
+    async fn get_feature_version_tx(
+        &self,
+        conn: &mut PgConnection,
+        feature_id: Uuid,
+        version_id: Uuid,
+    ) -> Result<FeatureVersion, Error> {
+        let version = sqlx::query_as::<_, FeatureVersion>(
+            r#"SELECT id, feature_id, version_number, snapshot, change_summary,
+                      actor_id, actor_name, source, created_at
+               FROM feature_versions
+               WHERE feature_id = $1 AND id = $2"#,
+        )
+        .bind(feature_id)
+        .bind(version_id)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(Error::DatabaseError)?;
+
+        version.ok_or(Error::NotFound(version_id))
+    }
+
+    async fn restore_feature_snapshot_tx(
+        &self,
+        conn: &mut PgConnection,
+        feature_id: Uuid,
+        snapshot: JsonValue,
+        archive_confirmation: bool,
+    ) -> Result<Feature, Error> {
+        let parsed = parse_snapshot(&snapshot)?;
+        if parsed.feature.id != feature_id {
+            return Err(Error::InvalidInput(
+                "Snapshot does not belong to this feature".to_string(),
+            ));
+        }
+
+        if parsed.feature.lifecycle_stage == "archived" && !archive_confirmation {
+            let blockers = self.archive_blockers_conn(conn, feature_id).await?;
+            if !blockers.is_empty() {
+                return Err(Error::InvalidInput(format!(
+                    "Archive confirmation required: {}",
+                    blockers.join(", ")
+                )));
+            }
+        }
+
+        sqlx::query(
+            r#"UPDATE features
+               SET key = $2,
+                   description = $3,
+                   feature_type = $4,
+                   active = $5,
+                   kill_switch_enabled = $6,
+                   kill_switch_activated_at = $7,
+                   rollback_scheduled_at = $8,
+                   lifecycle_stage = $9,
+                   owner = $10,
+                   expires_at = $11,
+                   cleanup_reason = $12,
+                   archived_at = $13,
+                   deprecated_at = $14,
+                   deprecation_notice = $15
+               WHERE id = $1"#,
+        )
+        .bind(feature_id)
+        .bind(&parsed.feature.key)
+        .bind(&parsed.feature.description)
+        .bind(&parsed.feature.feature_type)
+        .bind(parsed.feature.enabled)
+        .bind(parsed.feature.kill_switch_enabled)
+        .bind(parsed.feature.kill_switch_activated_at)
+        .bind(parsed.feature.rollback_scheduled_at)
+        .bind(&parsed.feature.lifecycle_stage)
+        .bind(&parsed.feature.owner)
+        .bind(parsed.feature.expires_at)
+        .bind(&parsed.feature.cleanup_reason)
+        .bind(parsed.feature.archived_at)
+        .bind(parsed.feature.deprecated_at)
+        .bind(&parsed.feature.deprecation_notice)
+        .execute(&mut *conn)
+        .await
+        .map_err(Error::DatabaseError)?;
+
+        self.delete_feature_dependencies_conn(conn, feature_id)
+            .await?;
+        self.create_feature_dependencies(&feature_id, parsed.dependencies, conn)
+            .await?;
+
+        self.delete_feature_stage_conn(conn, feature_id).await?;
+        self.insert_snapshot_stages(conn, feature_id, &parsed.stages)
+            .await?;
+
+        self.delete_feature_variants_conn(conn, feature_id).await?;
+        for variant in parsed.variants {
+            sqlx::query(
+                r#"INSERT INTO feature_variants (feature_id, control, value, value_type, description)
+                   VALUES ($1, $2, $3, $4, $5)"#,
+            )
+            .bind(feature_id)
+            .bind(variant.control)
+            .bind(variant.value)
+            .bind(Self::parse_variant_value_type(&variant.value_type)?)
+            .bind(variant.description)
+            .execute(&mut *conn)
+            .await
+            .map_err(Error::DatabaseError)?;
+        }
+
+        self.restore_stage_criteria_from_snapshot(conn, &parsed.criteria)
+            .await?;
+
+        self.get_feature_by_id_conn(conn, feature_id).await
     }
 
     async fn get_stage_by_id_tx(

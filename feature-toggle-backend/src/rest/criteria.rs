@@ -1,9 +1,12 @@
 use crate::model::ID;
-use actix_web::{HttpResponse, Responder, delete, get, patch, post, put, web};
+use actix_web::{
+    HttpMessage, HttpRequest, HttpResponse, Responder, delete, get, patch, post, put, web,
+};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use crate::JwtUser;
 use crate::database::compound_rules::{
     CompoundRulesRepository, CompoundRulesRepositoryTx,
     CreateRuleConditionInput as DbCreateRuleConditionInput,
@@ -11,7 +14,9 @@ use crate::database::compound_rules::{
     compound_rules_repository_tx,
 };
 use crate::database::entity::LogicOperator as DbLogicOperator;
-use crate::database::feature::FeatureRepository;
+use crate::database::feature::{
+    FeatureRepository, FeatureRepositoryTx, diff_entries_to_json, diff_feature_snapshots,
+};
 use crate::database::variant_allocations::{
     CreateVariantAllocationInput as DbCreateVariantAllocationInput, VariantAllocationsRepositoryTx,
     variant_allocations_repository_tx,
@@ -359,6 +364,12 @@ fn parse_uuid(value: &str, field: &str) -> Result<Uuid, RestError> {
     Uuid::parse_str(value).map_err(|_| RestError::invalid_input(format!("invalid {field}")))
 }
 
+fn actor_from_request(req: &HttpRequest) -> Option<crate::logic::ActorContext> {
+    req.extensions()
+        .get::<JwtUser>()
+        .map(|jwt| crate::logic::ActorContext::new(jwt.id, jwt.username.clone()))
+}
+
 fn validate_context_key(value: &str) -> Result<(), RestError> {
     let len = value.trim().len();
     if !(1..=100).contains(&len) {
@@ -549,6 +560,7 @@ pub(crate) async fn get_stage_criteria(
 #[put("/stages/{stage_id}/criteria")]
 pub(crate) async fn set_stage_criteria(
     pool: web::Data<sqlx::PgPool>,
+    req: HttpRequest,
     feature_repo: web::Data<Box<dyn FeatureRepository>>,
     updates_tx: web::Data<tokio::sync::broadcast::Sender<crate::grpc::pb::FeatureUpdate>>,
     stage_id: web::Path<String>,
@@ -558,6 +570,11 @@ pub(crate) async fn set_stage_criteria(
     let criteria = body.into_inner();
 
     validate_stage_criteria(&criteria)?;
+    let feature_id = feature_repo
+        .get_feature_id_by_stage_id(stage_uuid)
+        .await
+        .map_err(RestError::from)?
+        .ok_or_else(|| RestError::not_found("Feature stage not found"))?;
 
     let model_criteria: Vec<ModelCreateStageCriterionInput> =
         criteria.iter().map(map_create_stage_criterion).collect();
@@ -573,6 +590,10 @@ pub(crate) async fn set_stage_criteria(
     );
     let rules_repo_tx =
         crate::database::compound_rules::compound_rules_repository_tx(pool.get_ref().clone());
+    let before_snapshot = feature_repo_tx
+        .build_feature_snapshot_tx(&mut tx, feature_id)
+        .await
+        .map_err(RestError::from)?;
 
     let result = feature_tx::set_stage_criteria_in_tx(
         &mut tx,
@@ -586,15 +607,34 @@ pub(crate) async fn set_stage_criteria(
 
     match result {
         Ok(updated) => {
+            let after_snapshot = feature_repo_tx
+                .build_feature_snapshot_tx(&mut tx, feature_id)
+                .await
+                .map_err(RestError::from)?;
+            let change_summary =
+                diff_entries_to_json(&diff_feature_snapshots(&before_snapshot, &after_snapshot));
+            let (actor_id, actor_name) = actor_from_request(&req)
+                .as_ref()
+                .map(|actor| actor.as_option())
+                .unwrap_or((None, None));
+            feature_repo_tx
+                .create_feature_version_tx(
+                    &mut tx,
+                    feature_id,
+                    after_snapshot,
+                    change_summary,
+                    actor_id,
+                    actor_name,
+                    "update",
+                )
+                .await
+                .map_err(RestError::from)?;
+
             tx.commit()
                 .await
                 .map_err(|_| RestError::internal("Failed to commit transaction"))?;
 
-            if let Ok(Some(feature_id)) = feature_repo.get_feature_id_by_stage_id(stage_uuid).await
-            {
-                broadcast_feature_update(feature_repo.as_ref().as_ref(), &updates_tx, feature_id)
-                    .await;
-            }
+            broadcast_feature_update(feature_repo.as_ref().as_ref(), &updates_tx, feature_id).await;
 
             let response: Vec<StageCriterionResponse> = updated
                 .into_iter()

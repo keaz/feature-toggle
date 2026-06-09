@@ -9,7 +9,9 @@ use crate::JwtUser;
 use crate::broadcast::map_db_feature_to_full_for_broadcast;
 use crate::database::activity_log::ActivityLogRepository;
 use crate::database::entity::{DBStage, FeaturePipelineStage};
-use crate::database::feature::{FeatureRepository, feature_repository_tx};
+use crate::database::feature::{
+    FeatureRepository, FeatureVersion, FeatureVersionDiffEntry, feature_repository_tx,
+};
 use crate::logic::authorization::RoleAuthorizer;
 use crate::logic::environment::EnvironmentLogic;
 use crate::logic::feature::{FeatureLogic, StageChangeRequestType};
@@ -361,6 +363,37 @@ async fn build_feature_response(
     Ok(response)
 }
 
+fn map_version_diff_entry(entry: FeatureVersionDiffEntry) -> FeatureVersionDiffEntryResponse {
+    FeatureVersionDiffEntryResponse {
+        path: entry.path,
+        change_type: entry.change_type,
+        before: entry.before,
+        after: entry.after,
+    }
+}
+
+fn parse_change_summary(value: serde_json::Value) -> Vec<FeatureVersionDiffEntryResponse> {
+    serde_json::from_value::<Vec<FeatureVersionDiffEntry>>(value)
+        .unwrap_or_default()
+        .into_iter()
+        .map(map_version_diff_entry)
+        .collect()
+}
+
+fn map_feature_version(version: FeatureVersion) -> FeatureVersionResponse {
+    FeatureVersionResponse {
+        id: version.id.to_string(),
+        feature_id: version.feature_id.to_string(),
+        version_number: version.version_number,
+        snapshot: version.snapshot,
+        change_summary: parse_change_summary(version.change_summary),
+        actor_id: version.actor_id.map(|id| id.to_string()),
+        actor_name: version.actor_name,
+        source: version.source,
+        created_at: version.created_at,
+    }
+}
+
 async fn broadcast_feature_update(
     feature_repo: &dyn FeatureRepository,
     updates_tx: &tokio::sync::broadcast::Sender<crate::grpc::pb::FeatureUpdate>,
@@ -466,6 +499,165 @@ pub(crate) async fn get_feature(
 
     let response = build_feature_response(
         &feature,
+        feature_repo.as_ref().as_ref(),
+        env_logic.as_ref().as_ref(),
+        true,
+        true,
+        true,
+    )
+    .await?;
+
+    Ok(HttpResponse::Ok().json(response))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/features/{id}/versions",
+    params(
+        ("id" = String, Path, description = "Feature ID"),
+        ("offset" = Option<i64>, Query, description = "Pagination offset"),
+        ("limit" = Option<i64>, Query, description = "Pagination limit")
+    ),
+    responses(
+        (status = 200, description = "Feature version history", body = FeatureVersionsResponse),
+        (status = 400, description = "Invalid input", body = crate::rest::error::ErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::rest::error::ErrorResponse),
+        (status = 404, description = "Not found", body = crate::rest::error::ErrorResponse)
+    ),
+    tag = "Features"
+)]
+#[get("/features/{id}/versions")]
+pub(crate) async fn list_feature_versions(
+    feature_repo: web::Data<Box<dyn FeatureRepository>>,
+    feature_id: web::Path<String>,
+    query: web::Query<PaginationQuery>,
+) -> Result<impl Responder, RestError> {
+    let feature_uuid = parse_uuid(&feature_id, "feature id")?;
+    let (offset, limit) = normalize_pagination(&PaginationQuery {
+        offset: query.offset,
+        limit: query.limit,
+    });
+    let (versions, total) = feature_repo
+        .list_feature_versions(feature_uuid, offset, limit)
+        .await
+        .map_err(RestError::from)?;
+
+    Ok(HttpResponse::Ok().json(FeatureVersionsResponse {
+        items: versions.into_iter().map(map_feature_version).collect(),
+        meta: PageMeta {
+            offset,
+            limit,
+            total,
+        },
+    }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/features/{id}/versions/{version_id}/diff",
+    params(
+        ("id" = String, Path, description = "Feature ID"),
+        ("version_id" = String, Path, description = "Version ID")
+    ),
+    responses(
+        (status = 200, description = "Feature version diff", body = FeatureVersionDiffResponse),
+        (status = 400, description = "Invalid input", body = crate::rest::error::ErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::rest::error::ErrorResponse),
+        (status = 404, description = "Not found", body = crate::rest::error::ErrorResponse)
+    ),
+    tag = "Features"
+)]
+#[get("/features/{id}/versions/{version_id}/diff")]
+pub(crate) async fn get_feature_version_diff(
+    feature_repo: web::Data<Box<dyn FeatureRepository>>,
+    path: web::Path<(String, String)>,
+) -> Result<impl Responder, RestError> {
+    let (feature_id, version_id) = path.into_inner();
+    let feature_uuid = parse_uuid(&feature_id, "feature id")?;
+    let version_uuid = parse_uuid(&version_id, "version id")?;
+    let version = feature_repo
+        .get_feature_version(feature_uuid, version_uuid)
+        .await
+        .map_err(RestError::from)?;
+    let entries = parse_change_summary(version.change_summary);
+
+    Ok(HttpResponse::Ok().json(FeatureVersionDiffResponse {
+        version_id: version.id.to_string(),
+        version_number: version.version_number,
+        entries,
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/features/{id}/versions/{version_id}/rollback",
+    request_body = RollbackFeatureVersionRequest,
+    params(
+        ("id" = String, Path, description = "Feature ID"),
+        ("version_id" = String, Path, description = "Version ID")
+    ),
+    responses(
+        (status = 200, description = "Feature rolled back", body = FeatureResponse),
+        (status = 400, description = "Invalid input", body = crate::rest::error::ErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::rest::error::ErrorResponse),
+        (status = 404, description = "Not found", body = crate::rest::error::ErrorResponse)
+    ),
+    tag = "Features"
+)]
+#[post("/features/{id}/versions/{version_id}/rollback")]
+pub(crate) async fn rollback_feature_version(
+    db_pool: web::Data<sqlx::PgPool>,
+    activity_repo: web::Data<Box<dyn ActivityLogRepository>>,
+    req: HttpRequest,
+    feature_repo: web::Data<Box<dyn FeatureRepository>>,
+    env_logic: web::Data<Box<dyn EnvironmentLogic>>,
+    updates_tx: web::Data<tokio::sync::broadcast::Sender<crate::grpc::pb::FeatureUpdate>>,
+    path: web::Path<(String, String)>,
+    payload: web::Json<RollbackFeatureVersionRequest>,
+) -> Result<impl Responder, RestError> {
+    let (feature_id, version_id) = path.into_inner();
+    let feature_uuid = parse_uuid(&feature_id, "feature id")?;
+    let version_uuid = parse_uuid(&version_id, "version id")?;
+    let actor = actor_from_request(&req);
+    let repo_tx = feature_repository_tx(db_pool.get_ref().clone());
+    let mut tx = db_pool
+        .begin()
+        .await
+        .map_err(|e| RestError::internal(format!("Failed to start transaction: {e}")))?;
+
+    let result = feature_tx::rollback_feature_to_version_in_tx(
+        &mut tx,
+        &repo_tx,
+        activity_repo.as_ref().as_ref(),
+        ID::from(feature_uuid),
+        ID::from(version_uuid),
+        payload.archive_confirmation.unwrap_or(false),
+        actor,
+    )
+    .await;
+
+    let rolled_back = match result {
+        Ok(feature) => {
+            tx.commit()
+                .await
+                .map_err(|e| RestError::internal(format!("Failed to commit transaction: {e}")))?;
+            feature
+        }
+        Err(err) => {
+            let _ = tx.rollback().await;
+            return Err(RestError::from(err));
+        }
+    };
+
+    broadcast_feature_update(
+        feature_repo.as_ref().as_ref(),
+        updates_tx.get_ref(),
+        feature_uuid,
+    )
+    .await;
+
+    let response = build_feature_response(
+        &rolled_back,
         feature_repo.as_ref().as_ref(),
         env_logic.as_ref().as_ref(),
         true,
@@ -1113,6 +1305,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .service(rollout_metrics)
         .service(pending_approvals)
         .service(active_kill_switches)
+        .service(list_feature_versions)
+        .service(get_feature_version_diff)
+        .service(rollback_feature_version)
         .service(get_feature)
         .service(create_feature)
         .service(update_feature)

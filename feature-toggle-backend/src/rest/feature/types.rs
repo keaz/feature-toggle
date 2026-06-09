@@ -210,6 +210,49 @@ pub struct FeaturesResponse {
     pub meta: PageMeta,
 }
 
+#[derive(Debug, Serialize, Deserialize, ToSchema, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FeatureVersionDiffEntryResponse {
+    pub path: String,
+    pub change_type: String,
+    pub before: Option<serde_json::Value>,
+    pub after: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FeatureVersionResponse {
+    pub id: String,
+    pub feature_id: String,
+    pub version_number: i32,
+    pub snapshot: serde_json::Value,
+    pub change_summary: Vec<FeatureVersionDiffEntryResponse>,
+    pub actor_id: Option<String>,
+    pub actor_name: Option<String>,
+    pub source: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct FeatureVersionsResponse {
+    pub items: Vec<FeatureVersionResponse>,
+    pub meta: PageMeta,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FeatureVersionDiffResponse {
+    pub version_id: String,
+    pub version_number: i32,
+    pub entries: Vec<FeatureVersionDiffEntryResponse>,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RollbackFeatureVersionRequest {
+    pub archive_confirmation: Option<bool>,
+}
+
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateFeatureStageRequest {
