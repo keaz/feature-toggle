@@ -3,11 +3,13 @@ pub use types::*;
 
 use crate::model::ID;
 use actix_web::{HttpMessage, HttpRequest, HttpResponse, Responder, get, patch, post, web};
+use sqlx::Row;
+use std::collections::{HashMap, HashSet, VecDeque};
 use uuid::Uuid;
 
 use crate::JwtUser;
 use crate::broadcast::map_db_feature_to_full_for_broadcast;
-use crate::database::activity_log::ActivityLogRepository;
+use crate::database::activity_log::{ActivityLogRepository, CreateActivityLog};
 use crate::database::entity::{DBStage, FeaturePipelineStage};
 use crate::database::feature::{
     FeatureRepository, FeatureVersion, FeatureVersionDiffEntry, feature_repository_tx,
@@ -280,8 +282,11 @@ fn feature_base_response(feature: &ModelFeature) -> FeatureResponse {
         emergency_override_applied_at: feature.emergency_override_applied_at,
         lifecycle_stage: LifecycleStage::from(feature.lifecycle_stage),
         owner: feature.owner.clone(),
+        purpose: feature.purpose.clone(),
+        reference_url: feature.reference_url.clone(),
         expires_at: feature.expires_at,
         cleanup_reason: feature.cleanup_reason.clone(),
+        tags: feature.tags.clone(),
         archived_at: feature.archived_at,
         deprecated_at: feature.deprecated_at,
         deprecation_notice: feature.deprecation_notice.clone(),
@@ -458,6 +463,124 @@ async fn broadcast_feature_update(
     }
 }
 
+fn normalize_tags(tags: Vec<String>) -> Vec<String> {
+    let mut normalized = tags
+        .into_iter()
+        .map(|tag| tag.trim().to_lowercase())
+        .filter(|tag| !tag.is_empty())
+        .collect::<Vec<_>>();
+    normalized.sort();
+    normalized.dedup();
+    normalized
+}
+
+async fn archive_warnings(pool: &sqlx::PgPool, feature_id: Uuid) -> Result<Vec<String>, RestError> {
+    let dependent_count: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*)
+           FROM feature_dependencies fd
+           JOIN features f ON f.id = fd.feature_id
+           WHERE fd.depends_on_id = $1
+             AND f.lifecycle_stage <> 'archived'"#,
+    )
+    .bind(feature_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| RestError::internal(format!("Failed to check dependents: {e}")))?;
+
+    let active_stage_count: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*)
+           FROM features_pipeline_stages
+           WHERE feature_id = $1
+             AND status NOT IN ('NOT_DEPLOYED', 'ROLLBACKED')"#,
+    )
+    .bind(feature_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| RestError::internal(format!("Failed to check rollout stages: {e}")))?;
+
+    let mut warnings = Vec::new();
+    if dependent_count > 0 {
+        warnings.push(format!("{dependent_count} dependent feature(s)"));
+    }
+    if active_stage_count > 0 {
+        warnings.push(format!("{active_stage_count} active rollout stage(s)"));
+    }
+    Ok(warnings)
+}
+
+fn lifecycle_to_db(stage: LifecycleStage) -> &'static str {
+    match stage {
+        LifecycleStage::Draft => "draft",
+        LifecycleStage::Active => "active",
+        LifecycleStage::Deprecated => "deprecated",
+        LifecycleStage::Archived => "archived",
+    }
+}
+
+fn impact_severity(
+    action: &str,
+    direct_dependents: usize,
+    transitive_dependents: usize,
+    missing_dependencies: usize,
+    cycles: usize,
+) -> String {
+    let destructive = matches!(action, "archive" | "emergency-disable" | "rollback");
+    if cycles > 0 || missing_dependencies > 0 || (destructive && direct_dependents > 0) {
+        "high".to_string()
+    } else if direct_dependents > 0 || transitive_dependents > 0 {
+        "medium".to_string()
+    } else {
+        "low".to_string()
+    }
+}
+
+fn detect_cycles_for_impact(adjacency: &HashMap<Uuid, Vec<Uuid>>) -> Vec<Vec<Uuid>> {
+    fn visit(
+        node: Uuid,
+        adjacency: &HashMap<Uuid, Vec<Uuid>>,
+        states: &mut HashMap<Uuid, u8>,
+        stack: &mut Vec<Uuid>,
+        cycles: &mut Vec<Vec<Uuid>>,
+    ) {
+        states.insert(node, 1);
+        stack.push(node);
+
+        if let Some(next_nodes) = adjacency.get(&node) {
+            for next in next_nodes {
+                match states.get(next).copied().unwrap_or(0) {
+                    0 => visit(*next, adjacency, states, stack, cycles),
+                    1 => {
+                        if let Some(start) = stack.iter().position(|id| id == next) {
+                            let mut cycle = stack[start..].to_vec();
+                            cycle.push(*next);
+                            cycles.push(cycle);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        stack.pop();
+        states.insert(node, 2);
+    }
+
+    let mut nodes: HashSet<Uuid> = adjacency.keys().copied().collect();
+    for next_nodes in adjacency.values() {
+        nodes.extend(next_nodes.iter().copied());
+    }
+
+    let mut states = HashMap::new();
+    let mut stack = Vec::new();
+    let mut cycles = Vec::new();
+    for node in nodes {
+        if states.get(&node).copied().unwrap_or(0) == 0 {
+            visit(node, adjacency, &mut states, &mut stack, &mut cycles);
+        }
+    }
+    cycles
+}
+
 #[utoipa::path(
     get,
     path = "/api/v1/teams/{team_id}/features",
@@ -495,6 +618,11 @@ pub(crate) async fn list_features(
             query.lifecycle_stage.map(ModelLifecycleStage::from),
             query.stale,
             query.include_archived.unwrap_or(false),
+            query.owner.clone(),
+            query.expired,
+            query.tag.clone(),
+            query.dependency_status.clone(),
+            query.approval_status.clone(),
             offset,
             limit,
         )
@@ -554,6 +682,589 @@ pub(crate) async fn get_feature(
     .await?;
 
     Ok(HttpResponse::Ok().json(response))
+}
+
+#[post("/teams/{team_id}/features/bulk-actions")]
+pub(crate) async fn bulk_feature_action(
+    db_pool: web::Data<sqlx::PgPool>,
+    activity_repo: web::Data<Box<dyn ActivityLogRepository>>,
+    req: HttpRequest,
+    team_id: web::Path<String>,
+    payload: web::Json<BulkFeatureActionRequest>,
+) -> Result<impl Responder, RestError> {
+    let team_uuid = parse_uuid(&team_id, "team_id")?;
+    let actor = actor_from_request(&req);
+    let (actor_id, actor_name) = actor
+        .as_ref()
+        .map(|ctx| ctx.as_option())
+        .unwrap_or((None, None));
+
+    if payload.feature_ids.is_empty() {
+        return Err(RestError::invalid_input("featureIds is required"));
+    }
+
+    let requested_ids = payload
+        .feature_ids
+        .iter()
+        .map(|id| parse_uuid(id, "feature id"))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let rows = sqlx::query(
+        r#"SELECT id, key, lifecycle_stage, owner, purpose, reference_url, expires_at, tags
+           FROM features
+           WHERE team_id = $1 AND id = ANY($2)"#,
+    )
+    .bind(team_uuid)
+    .bind(&requested_ids)
+    .fetch_all(db_pool.get_ref())
+    .await
+    .map_err(|e| RestError::internal(format!("Failed to load bulk features: {e}")))?;
+
+    let mut feature_rows = HashMap::new();
+    for row in rows {
+        let id: Uuid = row.get("id");
+        feature_rows.insert(id, row);
+    }
+
+    let mut results = Vec::with_capacity(requested_ids.len());
+    let mut export_rows = Vec::new();
+
+    for feature_id in requested_ids {
+        let Some(row) = feature_rows.get(&feature_id) else {
+            results.push(BulkFeatureActionResult {
+                feature_id: feature_id.to_string(),
+                feature_key: None,
+                status: "failed".to_string(),
+                message: "Feature not found in team".to_string(),
+                warnings: vec![],
+            });
+            continue;
+        };
+
+        let feature_key: String = row.get("key");
+        let warnings = if matches!(payload.action, BulkFeatureAction::Archive | BulkFeatureAction::UpdateLifecycle)
+            && payload.lifecycle_stage == Some(LifecycleStage::Archived)
+        {
+            archive_warnings(db_pool.get_ref(), feature_id).await?
+        } else if matches!(payload.action, BulkFeatureAction::Archive) {
+            archive_warnings(db_pool.get_ref(), feature_id).await?
+        } else {
+            Vec::new()
+        };
+
+        if !warnings.is_empty()
+            && !payload.archive_confirmation.unwrap_or(false)
+            && matches!(payload.action, BulkFeatureAction::Archive | BulkFeatureAction::UpdateLifecycle)
+            && (matches!(payload.action, BulkFeatureAction::Archive)
+                || payload.lifecycle_stage == Some(LifecycleStage::Archived))
+        {
+            results.push(BulkFeatureActionResult {
+                feature_id: feature_id.to_string(),
+                feature_key: Some(feature_key),
+                status: "failed".to_string(),
+                message: "Confirmation required before archive".to_string(),
+                warnings,
+            });
+            continue;
+        }
+
+        let update_result = match payload.action {
+            BulkFeatureAction::UpdateOwner => {
+                let owner = payload
+                    .owner
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string);
+                sqlx::query("UPDATE features SET owner = $1 WHERE id = $2 AND team_id = $3")
+                    .bind(&owner)
+                    .bind(feature_id)
+                    .bind(team_uuid)
+                    .execute(db_pool.get_ref())
+                    .await
+            }
+            BulkFeatureAction::UpdateTags => {
+                let tags = normalize_tags(payload.tags.clone().unwrap_or_default());
+                sqlx::query("UPDATE features SET tags = $1 WHERE id = $2 AND team_id = $3")
+                    .bind(&tags)
+                    .bind(feature_id)
+                    .bind(team_uuid)
+                    .execute(db_pool.get_ref())
+                    .await
+            }
+            BulkFeatureAction::UpdateLifecycle | BulkFeatureAction::Archive => {
+                let lifecycle = if matches!(payload.action, BulkFeatureAction::Archive) {
+                    "archived"
+                } else {
+                    payload
+                        .lifecycle_stage
+                        .map(lifecycle_to_db)
+                        .unwrap_or("active")
+                };
+                let deprecated_at = if lifecycle == "deprecated" {
+                    Some(chrono::Utc::now())
+                } else {
+                    None
+                };
+                let archived_at = if lifecycle == "archived" {
+                    Some(chrono::Utc::now())
+                } else {
+                    None
+                };
+                sqlx::query(
+                    r#"UPDATE features
+                       SET lifecycle_stage = $1,
+                           deprecated_at = COALESCE($2, deprecated_at),
+                           archived_at = COALESCE($3, archived_at)
+                       WHERE id = $4 AND team_id = $5"#,
+                )
+                .bind(lifecycle)
+                .bind(deprecated_at)
+                .bind(archived_at)
+                .bind(feature_id)
+                .bind(team_uuid)
+                .execute(db_pool.get_ref())
+                .await
+            }
+            BulkFeatureAction::Export => {
+                let tags: Vec<String> = row.get("tags");
+                export_rows.push(BulkFeatureExportRow {
+                    id: feature_id.to_string(),
+                    key: feature_key.clone(),
+                    lifecycle_stage: row.get::<String, _>("lifecycle_stage"),
+                    owner: row.get("owner"),
+                    purpose: row.get("purpose"),
+                    reference_url: row.get("reference_url"),
+                    expires_at: row.get("expires_at"),
+                    tags,
+                });
+                Ok(sqlx::postgres::PgQueryResult::default())
+            }
+        };
+
+        match update_result {
+            Ok(_) => {
+                if !matches!(payload.action, BulkFeatureAction::Export) {
+                    let _ = activity_repo
+                        .create_activity(CreateActivityLog {
+                            activity_type: "feature_bulk_updated".to_string(),
+                            entity_type: "feature".to_string(),
+                            entity_id: feature_id.to_string(),
+                            actor_id,
+                            actor_name: actor_name.clone(),
+                            description: format!("Bulk updated feature '{}'", feature_key),
+                            metadata: Some(serde_json::json!({
+                                "feature_id": feature_id.to_string(),
+                                "feature_key": feature_key,
+                                "team_id": team_uuid.to_string(),
+                                "action": format!("{:?}", payload.action),
+                            })),
+                        })
+                        .await;
+                }
+                results.push(BulkFeatureActionResult {
+                    feature_id: feature_id.to_string(),
+                    feature_key: Some(feature_key),
+                    status: "success".to_string(),
+                    message: "Action applied".to_string(),
+                    warnings,
+                });
+            }
+            Err(err) => {
+                results.push(BulkFeatureActionResult {
+                    feature_id: feature_id.to_string(),
+                    feature_key: Some(feature_key),
+                    status: "failed".to_string(),
+                    message: err.to_string(),
+                    warnings,
+                });
+            }
+        }
+    }
+
+    Ok(HttpResponse::Ok().json(BulkFeatureActionResponse {
+        results,
+        export_rows: if export_rows.is_empty() {
+            None
+        } else {
+            Some(export_rows)
+        },
+    }))
+}
+
+#[get("/features/{id}/dependency-impact")]
+pub(crate) async fn dependency_impact(
+    db_pool: web::Data<sqlx::PgPool>,
+    feature_id: web::Path<String>,
+    query: web::Query<DependencyImpactQuery>,
+) -> Result<impl Responder, RestError> {
+    let feature_uuid = parse_uuid(&feature_id, "feature id")?;
+    let action = query.action.clone().unwrap_or_else(|| "update".to_string());
+
+    let root = sqlx::query("SELECT id, key, team_id FROM features WHERE id = $1")
+        .bind(feature_uuid)
+        .fetch_optional(db_pool.get_ref())
+        .await
+        .map_err(|e| RestError::internal(format!("Failed to load feature: {e}")))?
+        .ok_or_else(|| RestError::not_found("Feature not found"))?;
+    let team_id: Uuid = root.get("team_id");
+
+    let feature_rows = sqlx::query(
+        r#"SELECT id, key, lifecycle_stage, active
+           FROM features
+           WHERE team_id = $1"#,
+    )
+    .bind(team_id)
+    .fetch_all(db_pool.get_ref())
+    .await
+    .map_err(|e| RestError::internal(format!("Failed to load team features: {e}")))?;
+
+    let mut features = HashMap::new();
+    for row in feature_rows {
+        features.insert(row.get::<Uuid, _>("id"), row);
+    }
+
+    let dependency_rows = sqlx::query(
+        r#"SELECT fd.feature_id, fd.depends_on_id
+           FROM feature_dependencies fd
+           JOIN features f ON f.id = fd.feature_id
+           WHERE f.team_id = $1"#,
+    )
+    .bind(team_id)
+    .fetch_all(db_pool.get_ref())
+    .await
+    .map_err(|e| RestError::internal(format!("Failed to load dependencies: {e}")))?;
+
+    let mut adjacency: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+    let mut reverse: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+    for row in dependency_rows {
+        let feature_id: Uuid = row.get("feature_id");
+        let depends_on_id: Uuid = row.get("depends_on_id");
+        adjacency.entry(feature_id).or_default().push(depends_on_id);
+        reverse.entry(depends_on_id).or_default().push(feature_id);
+    }
+
+    let missing_dependencies = adjacency
+        .get(&feature_uuid)
+        .into_iter()
+        .flatten()
+        .filter(|id| !features.contains_key(id))
+        .map(Uuid::to_string)
+        .collect::<Vec<_>>();
+
+    let direct_dependencies = adjacency
+        .get(&feature_uuid)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|id| features.get(&id).map(|row| (id, row)))
+        .map(|(id, row)| DependencyImpactNode {
+            id: id.to_string(),
+            key: row.get("key"),
+            lifecycle_stage: row.get("lifecycle_stage"),
+            enabled: row.get("active"),
+            reason: "Feature depends on this flag".to_string(),
+            severity: "medium".to_string(),
+        })
+        .collect::<Vec<_>>();
+
+    let direct_dependent_ids = reverse.get(&feature_uuid).cloned().unwrap_or_default();
+    let direct_dependents = direct_dependent_ids
+        .iter()
+        .filter_map(|id| features.get(id).map(|row| (*id, row)))
+        .map(|(id, row)| DependencyImpactNode {
+            id: id.to_string(),
+            key: row.get("key"),
+            lifecycle_stage: row.get("lifecycle_stage"),
+            enabled: row.get("active"),
+            reason: "This feature depends on target flag".to_string(),
+            severity: if matches!(action.as_str(), "archive" | "emergency-disable" | "rollback") {
+                "high".to_string()
+            } else {
+                "medium".to_string()
+            },
+        })
+        .collect::<Vec<_>>();
+
+    let mut visited = HashSet::new();
+    let mut queue = direct_dependent_ids.into_iter().collect::<VecDeque<_>>();
+    let mut transitive_ids = Vec::new();
+    while let Some(id) = queue.pop_front() {
+        if !visited.insert(id) {
+            continue;
+        }
+        transitive_ids.push(id);
+        for next in reverse.get(&id).into_iter().flatten() {
+            queue.push_back(*next);
+        }
+    }
+    transitive_ids.retain(|id| *id != feature_uuid);
+
+    let transitive_dependents = transitive_ids
+        .iter()
+        .skip(direct_dependents.len())
+        .filter_map(|id| features.get(id).map(|row| (*id, row)))
+        .map(|(id, row)| DependencyImpactNode {
+            id: id.to_string(),
+            key: row.get("key"),
+            lifecycle_stage: row.get("lifecycle_stage"),
+            enabled: row.get("active"),
+            reason: "Transitively impacted dependent".to_string(),
+            severity: "medium".to_string(),
+        })
+        .collect::<Vec<_>>();
+
+    let cycles = detect_cycles_for_impact(&adjacency)
+        .into_iter()
+        .filter(|cycle| cycle.contains(&feature_uuid))
+        .map(|cycle| {
+            cycle
+                .into_iter()
+                .map(|id| {
+                    features
+                        .get(&id)
+                        .map(|row| row.get::<String, _>("key"))
+                        .unwrap_or_else(|| id.to_string())
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    let severity = impact_severity(
+        action.as_str(),
+        direct_dependents.len(),
+        transitive_dependents.len(),
+        missing_dependencies.len(),
+        cycles.len(),
+    );
+    let mut warnings = Vec::new();
+    if !direct_dependents.is_empty() {
+        warnings.push(format!(
+            "{} direct dependent feature(s) may be impacted",
+            direct_dependents.len()
+        ));
+    }
+    if !cycles.is_empty() {
+        warnings.push("Dependency cycle detected".to_string());
+    }
+    if !missing_dependencies.is_empty() {
+        warnings.push("Missing dependency references detected".to_string());
+    }
+
+    Ok(HttpResponse::Ok().json(DependencyImpactResponse {
+        feature_id: feature_uuid.to_string(),
+        action: action.clone(),
+        severity: severity.clone(),
+        summary: format!(
+            "{} risk for {}: {} direct dependencies, {} direct dependents",
+            severity,
+            root.get::<String, _>("key"),
+            direct_dependencies.len(),
+            direct_dependents.len()
+        ),
+        direct_dependencies,
+        direct_dependents,
+        transitive_dependents,
+        missing_dependencies,
+        cycles,
+        requires_confirmation: severity == "high",
+        warnings,
+    }))
+}
+
+#[get("/teams/{team_id}/audit-analytics")]
+pub(crate) async fn audit_analytics(
+    db_pool: web::Data<sqlx::PgPool>,
+    team_id: web::Path<String>,
+    query: web::Query<AuditAnalyticsQuery>,
+) -> Result<impl Responder, RestError> {
+    let team_uuid = parse_uuid(&team_id, "team_id")?;
+    let window_days = query.window_days.unwrap_or(30).clamp(1, 365);
+    let since = chrono::Utc::now() - chrono::Duration::days(window_days);
+    let actor_id = match query.actor_id.as_deref() {
+        Some(value) if !value.trim().is_empty() => Some(parse_uuid(value, "actor_id")?),
+        _ => None,
+    };
+    let action = query.action.as_deref().filter(|value| !value.is_empty());
+    let environment_id = query.environment_id.as_deref().filter(|value| !value.is_empty());
+
+    let base_sql = r#"FROM activity_log al
+            LEFT JOIN features f ON al.entity_type = 'feature' AND al.entity_id = f.id::text
+            WHERE al.created_at >= $2
+              AND (f.team_id = $1 OR al.metadata->>'team_id' = $1::text)
+              AND ($3::uuid IS NULL OR al.actor_id = $3)
+              AND ($4::text IS NULL OR al.activity_type = $4)
+              AND ($5::text IS NULL OR al.metadata->>'environment_id' = $5)"#;
+
+    let total_events: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) {base_sql}"))
+        .bind(team_uuid)
+        .bind(since)
+        .bind(actor_id)
+        .bind(action)
+        .bind(environment_id)
+        .fetch_one(db_pool.get_ref())
+        .await
+        .map_err(|e| RestError::internal(format!("Failed to count audit events: {e}")))?;
+
+    let emergency_actions: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) {base_sql} AND al.activity_type ILIKE '%kill_switch%'"
+    ))
+    .bind(team_uuid)
+    .bind(since)
+    .bind(actor_id)
+    .bind(action)
+    .bind(environment_id)
+    .fetch_one(db_pool.get_ref())
+    .await
+    .map_err(|e| RestError::internal(format!("Failed to count emergency actions: {e}")))?;
+
+    let rollback_events: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) {base_sql} AND (al.activity_type ILIKE '%rollback%' OR al.description ILIKE '%rollback%')"
+    ))
+    .bind(team_uuid)
+    .bind(since)
+    .bind(actor_id)
+    .bind(action)
+    .bind(environment_id)
+    .fetch_one(db_pool.get_ref())
+    .await
+    .map_err(|e| RestError::internal(format!("Failed to count rollback events: {e}")))?;
+
+    let approval_stats = sqlx::query(
+        r#"SELECT
+              COUNT(*) FILTER (WHERE r.status = 'rejected')::float8 AS rejected,
+              COUNT(*)::float8 AS total,
+              COALESCE(AVG(EXTRACT(EPOCH FROM (COALESCE(r.executed_at, r.updated_at) - r.created_at))) / 3600.0, 0)::float8 AS avg_hours
+           FROM approval_requests r
+           JOIN approval_policies p ON p.id = r.policy_id
+           WHERE p.team_id = $1
+             AND r.created_at >= $2"#,
+    )
+    .bind(team_uuid)
+    .bind(since)
+    .fetch_one(db_pool.get_ref())
+    .await
+    .map_err(|e| RestError::internal(format!("Failed to calculate approval analytics: {e}")))?;
+    let approval_total: f64 = approval_stats.get("total");
+    let approval_rejected: f64 = approval_stats.get("rejected");
+    let rejection_rate = if approval_total > 0.0 {
+        approval_rejected / approval_total
+    } else {
+        0.0
+    };
+    let approval_lead_time_hours: f64 = approval_stats.get("avg_hours");
+
+    let top_changed_features = sqlx::query(&format!(
+        r#"SELECT COALESCE(f.id::text, al.entity_id) AS feature_id,
+                  COALESCE(f.key, al.metadata->>'feature_key', al.entity_id) AS feature_key,
+                  COUNT(*) AS change_count,
+                  MAX(al.created_at) AS last_changed_at
+           {base_sql}
+           AND al.entity_type = 'feature'
+           GROUP BY COALESCE(f.id::text, al.entity_id), COALESCE(f.key, al.metadata->>'feature_key', al.entity_id)
+           ORDER BY change_count DESC, last_changed_at DESC
+           LIMIT 10"#
+    ))
+    .bind(team_uuid)
+    .bind(since)
+    .bind(actor_id)
+    .bind(action)
+    .bind(environment_id)
+    .fetch_all(db_pool.get_ref())
+    .await
+    .map_err(|e| RestError::internal(format!("Failed to load top changed features: {e}")))?
+    .into_iter()
+    .map(|row| AuditAnalyticsTopFeature {
+        feature_id: row.get("feature_id"),
+        feature_key: row.get("feature_key"),
+        change_count: row.get("change_count"),
+        last_changed_at: row.get("last_changed_at"),
+    })
+    .collect::<Vec<_>>();
+
+    let action_breakdown = sqlx::query(&format!(
+        r#"SELECT al.activity_type AS key, COUNT(*) AS count
+           {base_sql}
+           GROUP BY al.activity_type
+           ORDER BY count DESC
+           LIMIT 12"#
+    ))
+    .bind(team_uuid)
+    .bind(since)
+    .bind(actor_id)
+    .bind(action)
+    .bind(environment_id)
+    .fetch_all(db_pool.get_ref())
+    .await
+    .map_err(|e| RestError::internal(format!("Failed to load action breakdown: {e}")))?
+    .into_iter()
+    .map(|row| AuditAnalyticsBreakdownRow {
+        key: row.get("key"),
+        count: row.get("count"),
+    })
+    .collect::<Vec<_>>();
+
+    let actor_breakdown = sqlx::query(&format!(
+        r#"SELECT COALESCE(al.actor_name, al.actor_id::text, 'System') AS key, COUNT(*) AS count
+           {base_sql}
+           GROUP BY COALESCE(al.actor_name, al.actor_id::text, 'System')
+           ORDER BY count DESC
+           LIMIT 12"#
+    ))
+    .bind(team_uuid)
+    .bind(since)
+    .bind(actor_id)
+    .bind(action)
+    .bind(environment_id)
+    .fetch_all(db_pool.get_ref())
+    .await
+    .map_err(|e| RestError::internal(format!("Failed to load actor breakdown: {e}")))?
+    .into_iter()
+    .map(|row| AuditAnalyticsBreakdownRow {
+        key: row.get("key"),
+        count: row.get("count"),
+    })
+    .collect::<Vec<_>>();
+
+    let recent_events = sqlx::query(&format!(
+        r#"SELECT al.id, al.activity_type, al.entity_type, al.entity_id,
+                  al.actor_name, al.description, al.created_at
+           {base_sql}
+           ORDER BY al.created_at DESC
+           LIMIT 20"#
+    ))
+    .bind(team_uuid)
+    .bind(since)
+    .bind(actor_id)
+    .bind(action)
+    .bind(environment_id)
+    .fetch_all(db_pool.get_ref())
+    .await
+    .map_err(|e| RestError::internal(format!("Failed to load audit events: {e}")))?
+    .into_iter()
+    .map(|row| AuditAnalyticsEvent {
+        id: row.get::<Uuid, _>("id").to_string(),
+        activity_type: row.get("activity_type"),
+        entity_type: row.get("entity_type"),
+        entity_id: row.get("entity_id"),
+        actor_name: row.get("actor_name"),
+        description: row.get("description"),
+        created_at: row.get("created_at"),
+    })
+    .collect::<Vec<_>>();
+
+    Ok(HttpResponse::Ok().json(AuditAnalyticsResponse {
+        total_events,
+        emergency_actions,
+        rollback_events,
+        rejection_rate,
+        approval_lead_time_hours,
+        top_changed_features,
+        action_breakdown,
+        actor_breakdown,
+        recent_events,
+        generated_at: chrono::Utc::now(),
+    }))
 }
 
 #[utoipa::path(
@@ -787,8 +1498,11 @@ pub(crate) async fn create_feature(
         enabled: payload.enabled,
         lifecycle_stage: payload.lifecycle_stage.map(ModelLifecycleStage::from),
         owner: payload.owner.clone(),
+        purpose: payload.purpose.clone(),
+        reference_url: payload.reference_url.clone(),
         expires_at: payload.expires_at,
         cleanup_reason: payload.cleanup_reason.clone(),
+        tags: payload.tags.clone(),
         dependencies,
         relationships,
         stages,
@@ -937,8 +1651,11 @@ pub(crate) async fn update_feature(
         enabled: payload.enabled,
         lifecycle_stage: payload.lifecycle_stage.map(ModelLifecycleStage::from),
         owner: payload.owner.clone().map(Some),
+        purpose: payload.purpose.clone().map(Some),
+        reference_url: payload.reference_url.clone().map(Some),
         expires_at: payload.expires_at.map(Some),
         cleanup_reason: payload.cleanup_reason.clone().map(Some),
+        tags: payload.tags.clone(),
         archive_confirmation: payload.archive_confirmation.unwrap_or(false),
         dependencies,
         relationships,
@@ -1404,9 +2121,12 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .service(rollout_metrics)
         .service(pending_approvals)
         .service(active_kill_switches)
+        .service(audit_analytics)
+        .service(bulk_feature_action)
         .service(list_feature_versions)
         .service(get_feature_version_diff)
         .service(rollback_feature_version)
+        .service(dependency_impact)
         .service(get_feature)
         .service(create_feature)
         .service(update_feature)
@@ -1450,8 +2170,11 @@ mod tests {
             emergency_override_applied_at: None,
             lifecycle_stage: ModelLifecycleStage::Active,
             owner: None,
+            purpose: None,
+            reference_url: None,
             expires_at: None,
             cleanup_reason: None,
+            tags: vec![],
             archived_at: None,
             deprecated_at: None,
             deprecation_notice: None,
@@ -1557,6 +2280,11 @@ mod tests {
                       lifecycle_stage,
                       stale,
                       include_archived,
+                      owner,
+                      expired,
+                      tag,
+                      dependency_status,
+                      approval_status,
                       offset,
                       limit| {
                     id.to_string() == team_id.to_string()
@@ -1565,12 +2293,17 @@ mod tests {
                         && lifecycle_stage.is_none()
                         && stale.is_none()
                         && !*include_archived
+                        && owner.is_none()
+                        && expired.is_none()
+                        && tag.is_none()
+                        && dependency_status.is_none()
+                        && approval_status.is_none()
                         && *offset == 10
                         && *limit == 5
                 },
             )
             .times(1)
-            .returning(move |_, _, _, _, _, _, _, _| Ok((vec![feature.clone()], 1)));
+            .returning(move |_, _, _, _, _, _, _, _, _, _, _, _, _| Ok((vec![feature.clone()], 1)));
 
         let app = test::init_service(
             App::new()
@@ -1648,8 +2381,11 @@ mod tests {
                 enabled: Some(true),
                 lifecycle_stage: None,
                 owner: None,
+                purpose: None,
+                reference_url: None,
                 expires_at: None,
                 cleanup_reason: None,
+                tags: None,
                 dependencies: vec![],
                 relationships: vec![],
                 stages: vec![CreateFeatureStageRequest {
@@ -1731,8 +2467,11 @@ mod tests {
                 enabled: Some(true),
                 lifecycle_stage: None,
                 owner: None,
+                purpose: None,
+                reference_url: None,
                 expires_at: None,
                 cleanup_reason: None,
+                tags: None,
                 archive_confirmation: None,
                 dependencies: vec![],
                 relationships: vec![],

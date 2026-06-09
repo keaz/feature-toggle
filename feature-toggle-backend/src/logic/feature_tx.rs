@@ -51,6 +51,17 @@ fn normalize_optional_text(value: Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn normalize_tags(tags: Vec<String>) -> Vec<String> {
+    let mut normalized = tags
+        .into_iter()
+        .map(|tag| tag.trim().to_lowercase())
+        .filter(|tag| !tag.is_empty())
+        .collect::<Vec<_>>();
+    normalized.sort();
+    normalized.dedup();
+    normalized
+}
+
 fn stale_reasons(feature: &crate::database::entity::Feature) -> Vec<String> {
     let now = Utc::now();
     let mut reasons = Vec::new();
@@ -112,8 +123,11 @@ fn map_entity_to_api_feature(feature_entity: crate::database::entity::Feature) -
             _ => crate::model::LifecycleStage::Active,
         },
         owner: feature_entity.owner,
+        purpose: feature_entity.purpose,
+        reference_url: feature_entity.reference_url,
         expires_at: feature_entity.expires_at,
         cleanup_reason: feature_entity.cleanup_reason,
+        tags: feature_entity.tags,
         archived_at: feature_entity.archived_at,
         deprecated_at: feature_entity.deprecated_at,
         deprecation_notice: feature_entity.deprecation_notice,
@@ -457,8 +471,11 @@ where
             .unwrap_or("active")
             .to_string(),
         owner: normalize_optional_text(input.owner),
+        purpose: normalize_optional_text(input.purpose),
+        reference_url: normalize_optional_text(input.reference_url),
         expires_at: input.expires_at,
         cleanup_reason: normalize_optional_text(input.cleanup_reason),
+        tags: normalize_tags(input.tags.unwrap_or_default()),
         stages,
         dependencies,
         variants,
@@ -588,10 +605,17 @@ where
         owner: input
             .owner
             .map(|owner| owner.and_then(|value| normalize_optional_text(Some(value)))),
+        purpose: input
+            .purpose
+            .map(|purpose| purpose.and_then(|value| normalize_optional_text(Some(value)))),
+        reference_url: input
+            .reference_url
+            .map(|reference_url| reference_url.and_then(|value| normalize_optional_text(Some(value)))),
         expires_at: input.expires_at,
         cleanup_reason: input
             .cleanup_reason
             .map(|reason| reason.and_then(|value| normalize_optional_text(Some(value)))),
+        tags: input.tags.map(normalize_tags),
         archive_confirmation: input.archive_confirmation,
         stages,
         dependencies,

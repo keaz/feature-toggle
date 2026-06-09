@@ -91,8 +91,11 @@ pub struct FeatureSnapshotMetadata {
     pub emergency_override_applied_at: Option<DateTime<Utc>>,
     pub lifecycle_stage: String,
     pub owner: Option<String>,
+    pub purpose: Option<String>,
+    pub reference_url: Option<String>,
     pub expires_at: Option<DateTime<Utc>>,
     pub cleanup_reason: Option<String>,
+    pub tags: Vec<String>,
     pub archived_at: Option<DateTime<Utc>>,
     pub deprecated_at: Option<DateTime<Utc>>,
     pub deprecation_notice: Option<String>,
@@ -164,8 +167,11 @@ pub struct CreateFeature {
     pub feature_type: FeatureType,
     pub lifecycle_stage: String,
     pub owner: Option<String>,
+    pub purpose: Option<String>,
+    pub reference_url: Option<String>,
     pub expires_at: Option<DateTime<Utc>>,
     pub cleanup_reason: Option<String>,
+    pub tags: Vec<String>,
     pub stages: Vec<CreateFeatureStage>,
     pub dependencies: Vec<Uuid>,
     pub variants: Option<
@@ -224,8 +230,11 @@ pub struct UpdateFeature {
     pub feature_type: Option<FeatureType>,
     pub lifecycle_stage: Option<String>,
     pub owner: Option<Option<String>>,
+    pub purpose: Option<Option<String>>,
+    pub reference_url: Option<Option<String>>,
     pub expires_at: Option<Option<DateTime<Utc>>>,
     pub cleanup_reason: Option<Option<String>>,
+    pub tags: Option<Vec<String>>,
     pub archive_confirmation: bool,
     pub stages: Vec<CreateFeatureStage>,
     pub dependencies: Vec<Uuid>,
@@ -258,8 +267,11 @@ struct Features {
     feature_enabled: bool,
     lifecycle_stage: String,
     owner: Option<String>,
+    purpose: Option<String>,
+    reference_url: Option<String>,
     expires_at: Option<DateTime<Utc>>,
     cleanup_reason: Option<String>,
+    tags: Vec<String>,
     archived_at: Option<DateTime<Utc>>,
     deprecated_at: Option<DateTime<Utc>>,
     deprecation_notice: Option<String>,
@@ -287,8 +299,11 @@ struct FeatureWithStageRow {
     feature_enabled: bool,
     lifecycle_stage: String,
     owner: Option<String>,
+    purpose: Option<String>,
+    reference_url: Option<String>,
     expires_at: Option<DateTime<Utc>>,
     cleanup_reason: Option<String>,
+    tags: Vec<String>,
     archived_at: Option<DateTime<Utc>>,
     deprecated_at: Option<DateTime<Utc>>,
     deprecation_notice: Option<String>,
@@ -319,7 +334,7 @@ struct FeaturePipelineStageRow {
 const FEATURE_SELECT: &str = r#"SELECT f.id as feature_id, f.key as feature_key, f.description, f.feature_type, f.team_id, f.created_at, 
             f.kill_switch_enabled, f.kill_switch_activated_at, f.rollback_scheduled_at, f.active as feature_enabled,
             f.emergency_override_reason, f.emergency_override_expires_at, f.emergency_override_actor_id, f.emergency_override_applied_at,
-            f.lifecycle_stage, f.owner, f.expires_at, f.cleanup_reason, f.archived_at,
+            f.lifecycle_stage, f.owner, f.purpose, f.reference_url, f.expires_at, f.cleanup_reason, f.tags, f.archived_at,
             f.deprecated_at, f.deprecation_notice, f.last_evaluated_at,
             f.evaluation_count_7d, f.evaluation_count_30d, f.evaluation_count_90d
 			FROM features f"#;
@@ -451,6 +466,11 @@ pub trait FeatureRepository: Send + Sync {
         lifecycle_stage: Option<String>,
         stale: Option<bool>,
         include_archived: bool,
+        owner: Option<String>,
+        expired: Option<bool>,
+        tag: Option<String>,
+        dependency_status: Option<String>,
+        approval_status: Option<String>,
     ) -> Result<Vec<Feature>, Error>;
     async fn get_features_paginated(
         &self,
@@ -476,6 +496,11 @@ pub trait FeatureRepository: Send + Sync {
         lifecycle_stage: Option<String>,
         stale: Option<bool>,
         include_archived: bool,
+        owner: Option<String>,
+        expired: Option<bool>,
+        tag: Option<String>,
+        dependency_status: Option<String>,
+        approval_status: Option<String>,
         offset: i64,
         limit: i64,
     ) -> Result<(Vec<Feature>, i64), Error>;
@@ -1239,8 +1264,11 @@ impl FeatureRepositoryImpl {
             emergency_override_applied_at: feature.emergency_override_applied_at,
             lifecycle_stage: feature.lifecycle_stage.clone(),
             owner: feature.owner.clone(),
+            purpose: feature.purpose.clone(),
+            reference_url: feature.reference_url.clone(),
             expires_at: feature.expires_at,
             cleanup_reason: feature.cleanup_reason.clone(),
+            tags: feature.tags.clone(),
             archived_at: feature.archived_at,
             deprecated_at: feature.deprecated_at,
             deprecation_notice: feature.deprecation_notice.clone(),
@@ -1511,6 +1539,11 @@ impl FeatureRepositoryImpl {
         lifecycle_stage: Option<&str>,
         stale: Option<bool>,
         include_archived: bool,
+        owner: Option<&str>,
+        expired: Option<bool>,
+        tag: Option<&str>,
+        dependency_status: Option<&str>,
+        approval_status: Option<&str>,
     ) {
         if let Some(key) = key {
             query_builder.push(" AND f.key ILIKE ");
@@ -1542,6 +1575,55 @@ impl FeatureRepositoryImpl {
                     .push(" AND NOT ")
                     .push(Self::stale_predicate_sql());
             }
+        }
+        if let Some(owner) = owner {
+            query_builder.push(" AND f.owner ILIKE ");
+            query_builder.push_bind(format!("%{owner}%"));
+        }
+        if let Some(expired) = expired {
+            if expired {
+                query_builder.push(" AND f.expires_at IS NOT NULL AND f.expires_at < NOW()");
+            } else {
+                query_builder.push(" AND (f.expires_at IS NULL OR f.expires_at >= NOW())");
+            }
+        }
+        if let Some(tag) = tag {
+            let tags = tag
+                .split(',')
+                .map(|value| value.trim().to_lowercase())
+                .filter(|value| !value.is_empty())
+                .collect::<Vec<_>>();
+            if !tags.is_empty() {
+                query_builder.push(" AND f.tags && ");
+                query_builder.push_bind(tags);
+            }
+        }
+        if let Some(dependency_status) = dependency_status {
+            match dependency_status {
+                "has_dependencies" => {
+                    query_builder.push(
+                        " AND EXISTS (SELECT 1 FROM feature_dependencies fd WHERE fd.feature_id = f.id)",
+                    );
+                }
+                "blocked_by_dependencies" => {
+                    query_builder.push(
+                        " AND EXISTS (SELECT 1 FROM feature_dependencies fd WHERE fd.depends_on_id = f.id)",
+                    );
+                }
+                "independent" => {
+                    query_builder.push(
+                        " AND NOT EXISTS (SELECT 1 FROM feature_dependencies fd WHERE fd.feature_id = f.id OR fd.depends_on_id = f.id)",
+                    );
+                }
+                _ => {}
+            }
+        }
+        if let Some(approval_status) = approval_status {
+            query_builder.push(
+                " AND EXISTS (SELECT 1 FROM approval_requests ar WHERE ar.feature_id = f.id AND ar.status = ",
+            );
+            query_builder.push_bind(approval_status.to_lowercase());
+            query_builder.push(")");
         }
     }
 
@@ -1591,6 +1673,11 @@ impl FeatureRepositoryImpl {
         lifecycle_stage: Option<String>,
         stale: Option<bool>,
         include_archived: bool,
+        owner: Option<String>,
+        expired: Option<bool>,
+        tag: Option<String>,
+        dependency_status: Option<String>,
+        approval_status: Option<String>,
         limit: i64,
         offset: i64,
     ) -> Result<(Vec<FeatureWithStageRow>, i64), Error> {
@@ -1603,6 +1690,11 @@ impl FeatureRepositoryImpl {
                     lifecycle_stage.clone(),
                     stale,
                     include_archived,
+                    owner.clone(),
+                    expired,
+                    tag.clone(),
+                    dependency_status.clone(),
+                    approval_status.clone(),
                 )
                 .await?;
             return Ok((Vec::new(), total_count));
@@ -1615,7 +1707,7 @@ impl FeatureRepositoryImpl {
             r#"SELECT f.id as feature_id, f.key as feature_key, f.description, f.feature_type, f.team_id, f.created_at,
                f.kill_switch_enabled, f.kill_switch_activated_at, f.rollback_scheduled_at, f.active as feature_enabled,
                f.emergency_override_reason, f.emergency_override_expires_at, f.emergency_override_actor_id, f.emergency_override_applied_at,
-               f.lifecycle_stage, f.owner, f.expires_at, f.cleanup_reason, f.archived_at,
+               f.lifecycle_stage, f.owner, f.purpose, f.reference_url, f.expires_at, f.cleanup_reason, f.tags, f.archived_at,
                f.deprecated_at, f.deprecation_notice, f.last_evaluated_at,
                f.evaluation_count_7d, f.evaluation_count_30d, f.evaluation_count_90d,
                COUNT(*) OVER() as total_count
@@ -1629,6 +1721,11 @@ impl FeatureRepositoryImpl {
             lifecycle_stage.as_deref(),
             stale,
             include_archived,
+            owner.as_deref(),
+            expired,
+            tag.as_deref(),
+            dependency_status.as_deref(),
+            approval_status.as_deref(),
         );
         query_builder.push(" ORDER BY f.key");
         query_builder.push(" LIMIT ").push_bind(limit);
@@ -1647,6 +1744,11 @@ impl FeatureRepositoryImpl {
                 lifecycle_stage.clone(),
                 stale,
                 include_archived,
+                owner.clone(),
+                expired,
+                tag.clone(),
+                dependency_status.clone(),
+                approval_status.clone(),
             )
             .await?
         };
@@ -1667,6 +1769,11 @@ impl FeatureRepositoryImpl {
         lifecycle_stage: Option<String>,
         stale: Option<bool>,
         include_archived: bool,
+        owner: Option<String>,
+        expired: Option<bool>,
+        tag: Option<String>,
+        dependency_status: Option<String>,
+        approval_status: Option<String>,
     ) -> Result<i64, Error> {
         let mut count_query = sqlx::QueryBuilder::new("SELECT COUNT(*) FROM features f");
         count_query.push(" WHERE f.team_id = ").push_bind(team_id);
@@ -1677,6 +1784,11 @@ impl FeatureRepositoryImpl {
             lifecycle_stage.as_deref(),
             stale,
             include_archived,
+            owner.as_deref(),
+            expired,
+            tag.as_deref(),
+            dependency_status.as_deref(),
+            approval_status.as_deref(),
         );
 
         let total_count: i64 = count_query
@@ -1710,9 +1822,9 @@ impl FeatureRepositoryImpl {
         let result = sqlx::query(
             r#"INSERT INTO features (
                    id, key, description, feature_type, team_id, lifecycle_stage, owner,
-                   expires_at, cleanup_reason, deprecated_at, archived_at
+                   purpose, reference_url, expires_at, cleanup_reason, tags, deprecated_at, archived_at
                )
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                RETURNING id"#,
         )
         .bind(id)
@@ -1722,8 +1834,11 @@ impl FeatureRepositoryImpl {
         .bind(input.team_id)
         .bind(lifecycle_stage)
         .bind(&input.owner)
+        .bind(&input.purpose)
+        .bind(&input.reference_url)
         .bind(input.expires_at)
         .bind(&input.cleanup_reason)
+        .bind(&input.tags)
         .bind(deprecated_at)
         .bind(archived_at)
         .fetch_one(&mut *tx)
@@ -1792,12 +1907,23 @@ impl FeatureRepositoryImpl {
             Some(owner) => owner.clone(),
             None => existing_feature.owner,
         };
+        let purpose = match &input.purpose {
+            Some(Some(purpose)) if purpose.trim().is_empty() => None,
+            Some(purpose) => purpose.clone(),
+            None => existing_feature.purpose,
+        };
+        let reference_url = match &input.reference_url {
+            Some(Some(reference_url)) if reference_url.trim().is_empty() => None,
+            Some(reference_url) => reference_url.clone(),
+            None => existing_feature.reference_url,
+        };
         let expires_at = input.expires_at.unwrap_or(existing_feature.expires_at);
         let cleanup_reason = match &input.cleanup_reason {
             Some(Some(reason)) if reason.trim().is_empty() => None,
             Some(reason) => reason.clone(),
             None => existing_feature.cleanup_reason,
         };
+        let tags = input.tags.clone().unwrap_or(existing_feature.tags);
         let deprecated_at = if lifecycle_stage == "deprecated" {
             existing_feature.deprecated_at.or_else(|| Some(Utc::now()))
         } else {
@@ -1816,19 +1942,25 @@ impl FeatureRepositoryImpl {
                    feature_type = $3,
                    lifecycle_stage = $4,
                    owner = $5,
-                   expires_at = $6,
-                   cleanup_reason = $7,
-                   deprecated_at = $8,
-                   archived_at = $9
-               WHERE id = $10"#,
+                   purpose = $6,
+                   reference_url = $7,
+                   expires_at = $8,
+                   cleanup_reason = $9,
+                   tags = $10,
+                   deprecated_at = $11,
+                   archived_at = $12
+               WHERE id = $13"#,
         )
         .bind(key)
         .bind(description)
         .bind(feature_type_str)
         .bind(lifecycle_stage)
         .bind(owner)
+        .bind(purpose)
+        .bind(reference_url)
         .bind(expires_at)
         .bind(cleanup_reason)
+        .bind(tags)
         .bind(deprecated_at)
         .bind(archived_at)
         .bind(id)
@@ -2149,7 +2281,19 @@ impl FeatureRepository for FeatureRepositoryImpl {
         key: Option<String>,
         feature_type: Option<FeatureType>,
     ) -> Result<Vec<Feature>, Error> {
-        self.get_features_filtered(team_id, key, feature_type, None, None, true)
+        self.get_features_filtered(
+            team_id,
+            key,
+            feature_type,
+            None,
+            None,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
             .await
     }
 
@@ -2161,6 +2305,11 @@ impl FeatureRepository for FeatureRepositoryImpl {
         lifecycle_stage: Option<String>,
         stale: Option<bool>,
         include_archived: bool,
+        owner: Option<String>,
+        expired: Option<bool>,
+        tag: Option<String>,
+        dependency_status: Option<String>,
+        approval_status: Option<String>,
     ) -> Result<Vec<Feature>, Error> {
         let mut query_builder = sqlx::QueryBuilder::new(FEATURE_SELECT);
         query_builder.push(" WHERE f.team_id = ").push_bind(team_id);
@@ -2172,6 +2321,11 @@ impl FeatureRepository for FeatureRepositoryImpl {
             lifecycle_stage.as_deref(),
             stale,
             include_archived,
+            owner.as_deref(),
+            expired,
+            tag.as_deref(),
+            dependency_status.as_deref(),
+            approval_status.as_deref(),
         );
         query_builder.push(" ORDER BY f.key");
 
@@ -2204,6 +2358,11 @@ impl FeatureRepository for FeatureRepositoryImpl {
                 None,
                 None,
                 true,
+                None,
+                None,
+                None,
+                None,
+                None,
                 page_size as i64,
                 offset as i64,
             )
@@ -2223,7 +2382,21 @@ impl FeatureRepository for FeatureRepositoryImpl {
         limit: i64,
     ) -> Result<(Vec<Feature>, i64), Error> {
         let (feature_rows, total_count) = self
-            .get_features_windowed(team_id, key, feature_type, None, None, true, limit, offset)
+            .get_features_windowed(
+                team_id,
+                key,
+                feature_type,
+                None,
+                None,
+                true,
+                None,
+                None,
+                None,
+                None,
+                None,
+                limit,
+                offset,
+            )
             .await?;
         let mut features = Self::map_rows_to_feature_list(feature_rows);
         self.hydrate_feature_dependencies(&mut features).await?;
@@ -2239,6 +2412,11 @@ impl FeatureRepository for FeatureRepositoryImpl {
         lifecycle_stage: Option<String>,
         stale: Option<bool>,
         include_archived: bool,
+        owner: Option<String>,
+        expired: Option<bool>,
+        tag: Option<String>,
+        dependency_status: Option<String>,
+        approval_status: Option<String>,
         offset: i64,
         limit: i64,
     ) -> Result<(Vec<Feature>, i64), Error> {
@@ -2250,6 +2428,11 @@ impl FeatureRepository for FeatureRepositoryImpl {
                 lifecycle_stage,
                 stale,
                 include_archived,
+                owner,
+                expired,
+                tag,
+                dependency_status,
+                approval_status,
                 limit,
                 offset,
             )
@@ -3372,9 +3555,9 @@ impl FeatureRepositoryTx for FeatureRepositoryImpl {
         let result = sqlx::query(
             r#"INSERT INTO features (
                    id, key, description, feature_type, team_id, lifecycle_stage, owner,
-                   expires_at, cleanup_reason, deprecated_at, archived_at
+                   purpose, reference_url, expires_at, cleanup_reason, tags, deprecated_at, archived_at
                )
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)"#,
         )
         .bind(id)
         .bind(&input.key)
@@ -3383,8 +3566,11 @@ impl FeatureRepositoryTx for FeatureRepositoryImpl {
         .bind(input.team_id)
         .bind(lifecycle_stage)
         .bind(&input.owner)
+        .bind(&input.purpose)
+        .bind(&input.reference_url)
         .bind(input.expires_at)
         .bind(&input.cleanup_reason)
+        .bind(&input.tags)
         .bind(deprecated_at)
         .bind(archived_at)
         .execute(&mut *conn)
@@ -3605,8 +3791,11 @@ impl FeatureRepositoryTx for FeatureRepositoryImpl {
                 emergency_override_applied_at: feature.emergency_override_applied_at,
                 lifecycle_stage: feature.lifecycle_stage,
                 owner: feature.owner,
+                purpose: feature.purpose,
+                reference_url: feature.reference_url,
                 expires_at: feature.expires_at,
                 cleanup_reason: feature.cleanup_reason,
+                tags: feature.tags,
                 archived_at: feature.archived_at,
                 deprecated_at: feature.deprecated_at,
                 deprecation_notice: feature.deprecation_notice,
@@ -3719,11 +3908,14 @@ impl FeatureRepositoryTx for FeatureRepositoryImpl {
                    emergency_override_applied_at = $12,
                    lifecycle_stage = $13,
                    owner = $14,
-                   expires_at = $15,
-                   cleanup_reason = $16,
-                   archived_at = $17,
-                   deprecated_at = $18,
-                   deprecation_notice = $19
+                   purpose = $15,
+                   reference_url = $16,
+                   expires_at = $17,
+                   cleanup_reason = $18,
+                   tags = $19,
+                   archived_at = $20,
+                   deprecated_at = $21,
+                   deprecation_notice = $22
                WHERE id = $1"#,
         )
         .bind(feature_id)
@@ -3740,8 +3932,11 @@ impl FeatureRepositoryTx for FeatureRepositoryImpl {
         .bind(parsed.feature.emergency_override_applied_at)
         .bind(&parsed.feature.lifecycle_stage)
         .bind(&parsed.feature.owner)
+        .bind(&parsed.feature.purpose)
+        .bind(&parsed.feature.reference_url)
         .bind(parsed.feature.expires_at)
         .bind(&parsed.feature.cleanup_reason)
+        .bind(&parsed.feature.tags)
         .bind(parsed.feature.archived_at)
         .bind(parsed.feature.deprecated_at)
         .bind(&parsed.feature.deprecation_notice)

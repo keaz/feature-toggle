@@ -28,8 +28,11 @@ async fn create_isolated_feature_stage(
             feature_type: FeatureType::Simple,
             lifecycle_stage: "active".to_string(),
             owner: None,
+            purpose: None,
+            reference_url: None,
             expires_at: None,
             cleanup_reason: None,
+            tags: vec![],
             stages: vec![CreateFeatureStage {
                 id: stage_id,
                 environment_id,

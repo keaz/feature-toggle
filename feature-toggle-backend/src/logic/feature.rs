@@ -60,6 +60,11 @@ pub trait FeatureCrudLogic: Send + Sync {
         lifecycle_stage: Option<LifecycleStage>,
         stale: Option<bool>,
         include_archived: bool,
+        owner: Option<String>,
+        expired: Option<bool>,
+        tag: Option<String>,
+        dependency_status: Option<String>,
+        approval_status: Option<String>,
     ) -> Result<Vec<Feature>, Error>;
     async fn get_features_paginated(
         &self,
@@ -85,6 +90,11 @@ pub trait FeatureCrudLogic: Send + Sync {
         lifecycle_stage: Option<LifecycleStage>,
         stale: Option<bool>,
         include_archived: bool,
+        owner: Option<String>,
+        expired: Option<bool>,
+        tag: Option<String>,
+        dependency_status: Option<String>,
+        approval_status: Option<String>,
         offset: i64,
         limit: i64,
     ) -> Result<(Vec<Feature>, i64), Error>;
@@ -230,6 +240,11 @@ mockall::mock! {
             lifecycle_stage: Option<LifecycleStage>,
             stale: Option<bool>,
             include_archived: bool,
+            owner: Option<String>,
+            expired: Option<bool>,
+            tag: Option<String>,
+            dependency_status: Option<String>,
+            approval_status: Option<String>,
         ) -> Result<Vec<Feature>, Error>;
         async fn get_features_paginated(
             &self,
@@ -255,6 +270,11 @@ mockall::mock! {
             lifecycle_stage: Option<LifecycleStage>,
             stale: Option<bool>,
             include_archived: bool,
+            owner: Option<String>,
+            expired: Option<bool>,
+            tag: Option<String>,
+            dependency_status: Option<String>,
+            approval_status: Option<String>,
             offset: i64,
             limit: i64,
         ) -> Result<(Vec<Feature>, i64), Error>;
@@ -461,6 +481,17 @@ impl FeatureLogicImpl {
             .filter(|value| !value.is_empty())
     }
 
+    fn normalize_tags(tags: Vec<String>) -> Vec<String> {
+        let mut normalized = tags
+            .into_iter()
+            .map(|tag| tag.trim().to_lowercase())
+            .filter(|tag| !tag.is_empty())
+            .collect::<Vec<_>>();
+        normalized.sort();
+        normalized.dedup();
+        normalized
+    }
+
     fn map_to_create_feature(
         team_id: Uuid,
         input: CreateFeatureInput,
@@ -513,8 +544,11 @@ impl FeatureLogicImpl {
                 .unwrap_or("active")
                 .to_string(),
             owner: Self::normalize_optional_text(input.owner),
+            purpose: Self::normalize_optional_text(input.purpose),
+            reference_url: Self::normalize_optional_text(input.reference_url),
             expires_at: input.expires_at,
             cleanup_reason: Self::normalize_optional_text(input.cleanup_reason),
+            tags: Self::normalize_tags(input.tags.unwrap_or_default()),
             stages,
             dependencies,
             variants,
@@ -597,10 +631,17 @@ impl FeatureLogicImpl {
             owner: input
                 .owner
                 .map(|owner| owner.and_then(|value| Self::normalize_optional_text(Some(value)))),
+            purpose: input
+                .purpose
+                .map(|purpose| purpose.and_then(|value| Self::normalize_optional_text(Some(value)))),
+            reference_url: input.reference_url.map(|reference_url| {
+                reference_url.and_then(|value| Self::normalize_optional_text(Some(value)))
+            }),
             expires_at: input.expires_at,
             cleanup_reason: input
                 .cleanup_reason
                 .map(|reason| reason.and_then(|value| Self::normalize_optional_text(Some(value)))),
+            tags: input.tags.map(Self::normalize_tags),
             archive_confirmation: input.archive_confirmation,
             stages,
             dependencies,
@@ -661,8 +702,11 @@ impl FeatureLogicImpl {
             emergency_override_applied_at: feature.emergency_override_applied_at,
             lifecycle_stage: Self::map_db_lifecycle_stage(&feature.lifecycle_stage),
             owner: feature.owner.clone(),
+            purpose: feature.purpose.clone(),
+            reference_url: feature.reference_url.clone(),
             expires_at: feature.expires_at,
             cleanup_reason: feature.cleanup_reason.clone(),
+            tags: feature.tags.clone(),
             archived_at: feature.archived_at,
             deprecated_at: feature.deprecated_at,
             deprecation_notice: feature.deprecation_notice.clone(),
@@ -755,7 +799,19 @@ impl FeatureCrudLogic for FeatureLogicImpl {
         name: Option<String>,
         feature_type: Option<ModelFeatureType>,
     ) -> Result<Vec<Feature>, Error> {
-        self.get_features_filtered(team_id, name, feature_type, None, None, true)
+        self.get_features_filtered(
+            team_id,
+            name,
+            feature_type,
+            None,
+            None,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
             .await
     }
 
@@ -767,6 +823,11 @@ impl FeatureCrudLogic for FeatureLogicImpl {
         lifecycle_stage: Option<LifecycleStage>,
         stale: Option<bool>,
         include_archived: bool,
+        owner: Option<String>,
+        expired: Option<bool>,
+        tag: Option<String>,
+        dependency_status: Option<String>,
+        approval_status: Option<String>,
     ) -> Result<Vec<Feature>, Error> {
         let team_id = Uuid::try_from(team_id).map_err(|e| Error::InvalidInput(e.to_string()))?;
         let entity_feature_type = feature_type.map(Self::map_api_to_entity_feature_type);
@@ -780,6 +841,11 @@ impl FeatureCrudLogic for FeatureLogicImpl {
                 lifecycle_stage,
                 stale,
                 include_archived,
+                owner,
+                expired,
+                tag,
+                dependency_status,
+                approval_status,
             )
             .await?;
 
@@ -827,6 +893,11 @@ impl FeatureCrudLogic for FeatureLogicImpl {
             None,
             None,
             true,
+            None,
+            None,
+            None,
+            None,
+            None,
             offset,
             limit,
         )
@@ -841,6 +912,11 @@ impl FeatureCrudLogic for FeatureLogicImpl {
         lifecycle_stage: Option<LifecycleStage>,
         stale: Option<bool>,
         include_archived: bool,
+        owner: Option<String>,
+        expired: Option<bool>,
+        tag: Option<String>,
+        dependency_status: Option<String>,
+        approval_status: Option<String>,
         offset: i64,
         limit: i64,
     ) -> Result<(Vec<Feature>, i64), Error> {
@@ -856,6 +932,11 @@ impl FeatureCrudLogic for FeatureLogicImpl {
                 lifecycle_stage,
                 stale,
                 include_archived,
+                owner,
+                expired,
+                tag,
+                dependency_status,
+                approval_status,
                 offset,
                 limit,
             )
@@ -2261,8 +2342,11 @@ mod test {
                     emergency_override_applied_at: None,
                     lifecycle_stage: "active".to_string(),
                     owner: None,
+                    purpose: None,
+                    reference_url: None,
                     expires_at: None,
                     cleanup_reason: None,
+                    tags: vec![],
                     archived_at: None,
                     deprecated_at: None,
                     deprecation_notice: None,
@@ -2327,8 +2411,11 @@ mod test {
             enabled: Some(true),
             lifecycle_stage: None,
             owner: None,
+            purpose: None,
+            reference_url: None,
             expires_at: None,
             cleanup_reason: None,
+            tags: None,
             dependencies: vec![],
             relationships: vec![],
             stages: vec![],
@@ -2377,8 +2464,11 @@ mod test {
             enabled: Some(true),
             lifecycle_stage: None,
             owner: None,
+            purpose: None,
+            reference_url: None,
             expires_at: None,
             cleanup_reason: None,
+            tags: None,
             archive_confirmation: false,
             dependencies: vec![],
             relationships: vec![],
@@ -2410,8 +2500,11 @@ mod test {
                     emergency_override_applied_at: None,
                     lifecycle_stage: "active".to_string(),
                     owner: None,
+                    purpose: None,
+                    reference_url: None,
                     expires_at: None,
                     cleanup_reason: None,
+                    tags: vec![],
                     archived_at: None,
                     deprecated_at: None,
                     deprecation_notice: None,
@@ -2469,16 +2562,31 @@ mod test {
         repository
             .expect_get_features_filtered()
             .withf(
-                |_, name, feature_type, lifecycle_stage, stale, include_archived| {
+                |_,
+                 name,
+                 feature_type,
+                 lifecycle_stage,
+                 stale,
+                 include_archived,
+                 owner,
+                 expired,
+                 tag,
+                 dependency_status,
+                 approval_status| {
                     name.is_none()
                         && feature_type.is_none()
                         && lifecycle_stage.is_none()
                         && stale.is_none()
                         && *include_archived
+                        && owner.is_none()
+                        && expired.is_none()
+                        && tag.is_none()
+                        && dependency_status.is_none()
+                        && approval_status.is_none()
                 },
             )
             .times(1)
-            .returning(move |_, _, _, _, _, _| {
+            .returning(move |_, _, _, _, _, _, _, _, _, _, _| {
                 Ok(vec![
                     EntityFeature {
                         id: Uuid::new_v4(),
@@ -2497,8 +2605,11 @@ mod test {
                         emergency_override_applied_at: None,
                         lifecycle_stage: "active".to_string(),
                         owner: None,
+                        purpose: None,
+                        reference_url: None,
                         expires_at: None,
                         cleanup_reason: None,
+                        tags: vec![],
                         archived_at: None,
                         deprecated_at: None,
                         deprecation_notice: None,
@@ -2525,8 +2636,11 @@ mod test {
                         emergency_override_applied_at: None,
                         lifecycle_stage: "active".to_string(),
                         owner: None,
+                        purpose: None,
+                        reference_url: None,
                         expires_at: None,
                         cleanup_reason: None,
+                        tags: vec![],
                         archived_at: None,
                         deprecated_at: None,
                         deprecation_notice: None,
@@ -3453,8 +3567,11 @@ mod test {
             emergency_override_applied_at: None,
             lifecycle_stage: "active".to_string(),
             owner: None,
+            purpose: None,
+            reference_url: None,
             expires_at: None,
             cleanup_reason: None,
+            tags: vec![],
             archived_at: None,
             deprecated_at: None,
             deprecation_notice: None,
@@ -3509,8 +3626,11 @@ mod test {
                 emergency_override_applied_at: None,
                 lifecycle_stage: "active".to_string(),
                 owner: None,
+                purpose: None,
+                reference_url: None,
                 expires_at: None,
                 cleanup_reason: None,
+                tags: vec![],
                 archived_at: None,
                 deprecated_at: None,
                 deprecation_notice: None,
@@ -3537,8 +3657,11 @@ mod test {
                 emergency_override_applied_at: None,
                 lifecycle_stage: "active".to_string(),
                 owner: None,
+                purpose: None,
+                reference_url: None,
                 expires_at: None,
                 cleanup_reason: None,
+                tags: vec![],
                 archived_at: None,
                 deprecated_at: None,
                 deprecation_notice: None,

@@ -117,6 +117,11 @@ pub struct FeatureListQuery {
     pub lifecycle_stage: Option<LifecycleStage>,
     pub stale: Option<bool>,
     pub include_archived: Option<bool>,
+    pub owner: Option<String>,
+    pub expired: Option<bool>,
+    pub tag: Option<String>,
+    pub dependency_status: Option<String>,
+    pub approval_status: Option<String>,
     pub offset: Option<i64>,
     pub limit: Option<i64>,
 }
@@ -185,8 +190,11 @@ pub struct FeatureResponse {
     pub emergency_override_applied_at: Option<DateTime<Utc>>,
     pub lifecycle_stage: LifecycleStage,
     pub owner: Option<String>,
+    pub purpose: Option<String>,
+    pub reference_url: Option<String>,
     pub expires_at: Option<DateTime<Utc>>,
     pub cleanup_reason: Option<String>,
+    pub tags: Vec<String>,
     pub archived_at: Option<DateTime<Utc>>,
     pub deprecated_at: Option<DateTime<Utc>>,
     pub deprecation_notice: Option<String>,
@@ -285,8 +293,11 @@ pub struct CreateFeatureRequest {
     pub enabled: Option<bool>,
     pub lifecycle_stage: Option<LifecycleStage>,
     pub owner: Option<String>,
+    pub purpose: Option<String>,
+    pub reference_url: Option<String>,
     pub expires_at: Option<DateTime<Utc>>,
     pub cleanup_reason: Option<String>,
+    pub tags: Option<Vec<String>>,
     pub dependencies: Vec<String>,
     pub relationships: Vec<CreateRelationshipRequest>,
     pub stages: Vec<CreateFeatureStageRequest>,
@@ -302,8 +313,11 @@ pub struct UpdateFeatureRequest {
     pub enabled: Option<bool>,
     pub lifecycle_stage: Option<LifecycleStage>,
     pub owner: Option<String>,
+    pub purpose: Option<String>,
+    pub reference_url: Option<String>,
     pub expires_at: Option<DateTime<Utc>>,
     pub cleanup_reason: Option<String>,
+    pub tags: Option<Vec<String>>,
     pub archive_confirmation: Option<bool>,
     pub dependencies: Vec<String>,
     pub relationships: Vec<CreateRelationshipRequest>,
@@ -381,4 +395,141 @@ pub struct RolloutMetricsResponse {
     pub bottleneck_stage: String,
     pub bottleneck_duration: f64,
     pub total_pending_approvals: i32,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BulkFeatureAction {
+    UpdateOwner,
+    UpdateTags,
+    UpdateLifecycle,
+    Archive,
+    Export,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkFeatureActionRequest {
+    pub feature_ids: Vec<String>,
+    pub action: BulkFeatureAction,
+    pub owner: Option<String>,
+    pub tags: Option<Vec<String>>,
+    pub lifecycle_stage: Option<LifecycleStage>,
+    pub archive_confirmation: Option<bool>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkFeatureActionResult {
+    pub feature_id: String,
+    pub feature_key: Option<String>,
+    pub status: String,
+    pub message: String,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkFeatureExportRow {
+    pub id: String,
+    pub key: String,
+    pub lifecycle_stage: String,
+    pub owner: Option<String>,
+    pub purpose: Option<String>,
+    pub reference_url: Option<String>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkFeatureActionResponse {
+    pub results: Vec<BulkFeatureActionResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub export_rows: Option<Vec<BulkFeatureExportRow>>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DependencyImpactQuery {
+    pub action: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DependencyImpactNode {
+    pub id: String,
+    pub key: String,
+    pub lifecycle_stage: String,
+    pub enabled: bool,
+    pub reason: String,
+    pub severity: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DependencyImpactResponse {
+    pub feature_id: String,
+    pub action: String,
+    pub severity: String,
+    pub summary: String,
+    pub direct_dependencies: Vec<DependencyImpactNode>,
+    pub direct_dependents: Vec<DependencyImpactNode>,
+    pub transitive_dependents: Vec<DependencyImpactNode>,
+    pub missing_dependencies: Vec<String>,
+    pub cycles: Vec<Vec<String>>,
+    pub requires_confirmation: bool,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditAnalyticsQuery {
+    pub window_days: Option<i64>,
+    pub actor_id: Option<String>,
+    pub action: Option<String>,
+    pub environment_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditAnalyticsBreakdownRow {
+    pub key: String,
+    pub count: i64,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditAnalyticsTopFeature {
+    pub feature_id: String,
+    pub feature_key: String,
+    pub change_count: i64,
+    pub last_changed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditAnalyticsEvent {
+    pub id: String,
+    pub activity_type: String,
+    pub entity_type: String,
+    pub entity_id: String,
+    pub actor_name: Option<String>,
+    pub description: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditAnalyticsResponse {
+    pub total_events: i64,
+    pub emergency_actions: i64,
+    pub rollback_events: i64,
+    pub rejection_rate: f64,
+    pub approval_lead_time_hours: f64,
+    pub top_changed_features: Vec<AuditAnalyticsTopFeature>,
+    pub action_breakdown: Vec<AuditAnalyticsBreakdownRow>,
+    pub actor_breakdown: Vec<AuditAnalyticsBreakdownRow>,
+    pub recent_events: Vec<AuditAnalyticsEvent>,
+    pub generated_at: DateTime<Utc>,
 }
