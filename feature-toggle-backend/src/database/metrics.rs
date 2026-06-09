@@ -115,6 +115,7 @@ pub trait MetricRepository: Send + Sync {
     async fn get_metric_results(
         &self,
         feature_key: &str,
+        team_id: Option<Uuid>,
         environment_id: Option<Uuid>,
         from: DateTime<Utc>,
         to: DateTime<Utc>,
@@ -425,6 +426,7 @@ impl MetricRepository for PgMetricRepository {
     async fn get_metric_results(
         &self,
         feature_key: &str,
+        team_id: Option<Uuid>,
         environment_id: Option<Uuid>,
         from: DateTime<Utc>,
         to: DateTime<Utc>,
@@ -453,12 +455,14 @@ impl MetricRepository for PgMetricRepository {
             FROM metric_aggregations ma
             JOIN metrics m ON ma.metric_id = m.id
             WHERE ma.feature_key = $1
-              AND ($2::UUID IS NULL OR ma.environment_id = $2)
-              AND ma.time_bucket >= date_trunc('hour', $3::timestamptz)
-              AND ma.time_bucket < date_trunc('hour', $4::timestamptz) + INTERVAL '1 hour'
+              AND ($2::UUID IS NULL OR m.team_id = $2)
+              AND ($3::UUID IS NULL OR ma.environment_id = $3)
+              AND ma.time_bucket >= date_trunc('hour', $4::timestamptz)
+              AND ma.time_bucket < date_trunc('hour', $5::timestamptz) + INTERVAL '1 hour'
             ORDER BY ma.time_bucket DESC, ma.metric_id, COALESCE(ma.variant, '')
             "#,
             feature_key,
+            team_id,
             environment_id,
             from,
             to

@@ -65,6 +65,7 @@ pub trait MetricLogic: Send + Sync {
     async fn get_metric_results(
         &self,
         feature_key: &str,
+        team_id: Option<Uuid>,
         environment_id: Option<Uuid>,
         from: DateTime<Utc>,
         to: DateTime<Utc>,
@@ -293,6 +294,7 @@ impl MetricLogic for MetricLogicImpl {
     async fn get_metric_results(
         &self,
         feature_key: &str,
+        team_id: Option<Uuid>,
         environment_id: Option<Uuid>,
         from: DateTime<Utc>,
         to: DateTime<Utc>,
@@ -304,7 +306,7 @@ impl MetricLogic for MetricLogicImpl {
         }
 
         self.metric_repo
-            .get_metric_results(feature_key, environment_id, from, to)
+            .get_metric_results(feature_key, team_id, environment_id, from, to)
             .await
             .map_err(MetricLogicError::Database)
     }

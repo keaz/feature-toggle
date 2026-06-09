@@ -34,6 +34,7 @@ pub struct ExperimentResultsQuery {
     pub feature_key: String,
     #[serde(default, deserialize_with = "deserialize_string_or_vec")]
     pub metric_keys: Vec<String>,
+    pub team_id: Option<String>,
     pub environment_id: Option<String>,
     pub time_period: Option<String>,
 }
@@ -166,13 +167,15 @@ pub struct CreateMetricRequest {
     pub success_criteria: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MetricResultResponse {
     pub metric_key: String,
     pub variant: Option<String>,
     pub sample_size: i32,
     pub conversion_rate: Option<f64>,
+    pub lift: Option<f64>,
+    pub confidence: Option<f64>,
     pub mean_value: Option<f64>,
     pub p95_value: Option<f64>,
     pub time_bucket: DateTime<Utc>,
@@ -186,6 +189,8 @@ pub struct MetricAnalysisResponse {
     pub results: Vec<MetricResultResponse>,
     pub winner: Option<String>,
     pub statistical_significance: Option<f64>,
+    pub recommendation: String,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -268,6 +273,30 @@ pub struct ActivityLogResponse {
     pub description: String,
     pub metadata: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
+}
+
+const MIN_EXPERIMENT_VARIANT_SAMPLE: i64 = 100;
+const MIN_EXPERIMENT_TOTAL_SAMPLE: i64 = 200;
+const MIN_EXPERIMENT_CONFIDENCE: f64 = 0.95;
+const SAMPLE_RATIO_MISMATCH_THRESHOLD: f64 = 0.15;
+
+#[derive(Debug, Clone)]
+struct ExperimentVariantAggregate {
+    variant: Option<String>,
+    metric_type: DbMetricType,
+    sample_size: i64,
+    conversion_count: i64,
+    sum_value: f64,
+    p95_value: Option<f64>,
+    latest_bucket: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+struct ExperimentAnalysisDetails {
+    winner: Option<String>,
+    p_value: Option<f64>,
+    recommendation: String,
+    warnings: Vec<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -774,10 +803,254 @@ fn map_metric_result(row: crate::database::metrics::MetricAggregationRow) -> Met
         variant: row.variant,
         sample_size,
         conversion_rate,
+        lift: None,
+        confidence: None,
         mean_value,
         p95_value,
         time_bucket: row.time_bucket,
         confidence_interval: None,
+    }
+}
+
+fn variant_display_name(variant: &Option<String>) -> String {
+    variant.clone().unwrap_or_else(|| "control".to_string())
+}
+
+fn variant_score(metric_type: DbMetricType, result: &MetricResultResponse) -> Option<f64> {
+    match metric_type {
+        DbMetricType::Conversion => result.conversion_rate,
+        DbMetricType::Numeric => result.mean_value,
+        DbMetricType::Duration => result.mean_value.map(|value| -value),
+    }
+}
+
+fn lift_against_baseline(
+    metric_type: DbMetricType,
+    baseline: &MetricResultResponse,
+    candidate: &MetricResultResponse,
+) -> Option<f64> {
+    let baseline_value = match metric_type {
+        DbMetricType::Conversion => baseline.conversion_rate,
+        DbMetricType::Numeric | DbMetricType::Duration => baseline.mean_value,
+    }?;
+    let candidate_value = match metric_type {
+        DbMetricType::Conversion => candidate.conversion_rate,
+        DbMetricType::Numeric | DbMetricType::Duration => candidate.mean_value,
+    }?;
+
+    if baseline_value.abs() < f64::EPSILON {
+        return None;
+    }
+
+    if metric_type == DbMetricType::Duration {
+        Some((baseline_value - candidate_value) / baseline_value)
+    } else {
+        Some((candidate_value - baseline_value) / baseline_value)
+    }
+}
+
+fn normal_cdf(value: f64) -> f64 {
+    0.5 * (1.0 + erf_approx(value / std::f64::consts::SQRT_2))
+}
+
+fn erf_approx(value: f64) -> f64 {
+    let sign = if value < 0.0 { -1.0 } else { 1.0 };
+    let x = value.abs();
+    let t = 1.0 / (1.0 + 0.3275911 * x);
+    let y = 1.0
+        - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t
+            + 0.254829592)
+            * t
+            * (-x * x).exp();
+    sign * y
+}
+
+fn two_proportion_p_value(
+    a_success: i64,
+    a_total: i64,
+    b_success: i64,
+    b_total: i64,
+) -> Option<f64> {
+    if a_total <= 0 || b_total <= 0 {
+        return None;
+    }
+
+    let p1 = a_success as f64 / a_total as f64;
+    let p2 = b_success as f64 / b_total as f64;
+    let pooled = (a_success + b_success) as f64 / (a_total + b_total) as f64;
+    let se = (pooled * (1.0 - pooled) * (1.0 / a_total as f64 + 1.0 / b_total as f64)).sqrt();
+    if se <= f64::EPSILON {
+        return None;
+    }
+
+    let z = (p1 - p2) / se;
+    let p = 2.0 * (1.0 - normal_cdf(z.abs()));
+    Some(p.clamp(0.0, 1.0))
+}
+
+fn wilson_interval(success: i64, total: i64) -> Option<Vec<f64>> {
+    if total <= 0 {
+        return None;
+    }
+
+    let z = 1.96;
+    let n = total as f64;
+    let p = success as f64 / n;
+    let denom = 1.0 + z * z / n;
+    let center = (p + z * z / (2.0 * n)) / denom;
+    let margin = z * ((p * (1.0 - p) / n + z * z / (4.0 * n * n)).sqrt()) / denom;
+    Some(vec![(center - margin).max(0.0), (center + margin).min(1.0)])
+}
+
+fn analyze_experiment_results(
+    metric_type: DbMetricType,
+    results: &mut [MetricResultResponse],
+) -> ExperimentAnalysisDetails {
+    let mut warnings = Vec::new();
+    if results.is_empty() {
+        warnings
+            .push("Missing metric data for this feature, metric, or analysis window.".to_string());
+        return ExperimentAnalysisDetails {
+            winner: None,
+            p_value: None,
+            recommendation: "No winner: metric data is missing for the selected window."
+                .to_string(),
+            warnings,
+        };
+    }
+
+    results.sort_by(|a, b| variant_display_name(&a.variant).cmp(&variant_display_name(&b.variant)));
+    let total_samples: i64 = results.iter().map(|result| result.sample_size as i64).sum();
+    let low_sample = total_samples < MIN_EXPERIMENT_TOTAL_SAMPLE
+        || results
+            .iter()
+            .any(|result| (result.sample_size as i64) < MIN_EXPERIMENT_VARIANT_SAMPLE);
+    if low_sample {
+        warnings.push(format!(
+            "Low sample size: need at least {MIN_EXPERIMENT_VARIANT_SAMPLE} samples per variant and {MIN_EXPERIMENT_TOTAL_SAMPLE} total before recommending a winner."
+        ));
+    }
+
+    if results.len() < 2 {
+        warnings.push(
+            "Need at least two variants before experiment comparison is meaningful.".to_string(),
+        );
+    } else if total_samples >= MIN_EXPERIMENT_TOTAL_SAMPLE {
+        let expected = total_samples as f64 / results.len() as f64;
+        let mismatch = results.iter().any(|result| {
+            ((result.sample_size as f64 - expected).abs() / expected)
+                > SAMPLE_RATIO_MISMATCH_THRESHOLD
+        });
+        if mismatch {
+            warnings.push(
+                "Sample-ratio mismatch: observed samples differ materially from an even split."
+                    .to_string(),
+            );
+        }
+    }
+
+    let baseline_index = results
+        .iter()
+        .position(|result| variant_display_name(&result.variant).eq_ignore_ascii_case("control"))
+        .unwrap_or(0);
+    let baseline = results[baseline_index].clone();
+    let baseline_successes = baseline
+        .conversion_rate
+        .map(|rate| (rate * baseline.sample_size as f64).round() as i64);
+
+    let mut best_index: Option<usize> = None;
+    let mut best_score = f64::MIN;
+    for (index, result) in results.iter().enumerate() {
+        if let Some(score) = variant_score(metric_type, result)
+            && score > best_score
+        {
+            best_score = score;
+            best_index = Some(index);
+        }
+    }
+
+    let mut best_p_value = None;
+    for result in results.iter_mut() {
+        result.lift = lift_against_baseline(metric_type, &baseline, result);
+        if metric_type == DbMetricType::Conversion {
+            if let Some(rate) = result.conversion_rate {
+                let successes = (rate * result.sample_size as f64).round() as i64;
+                result.confidence_interval = wilson_interval(successes, result.sample_size as i64);
+                if let Some(baseline_successes) = baseline_successes {
+                    let p_value = two_proportion_p_value(
+                        successes,
+                        result.sample_size as i64,
+                        baseline_successes,
+                        baseline.sample_size as i64,
+                    );
+                    result.confidence = p_value.map(|p| 1.0 - p);
+                }
+            }
+        }
+    }
+
+    if metric_type != DbMetricType::Conversion {
+        warnings.push(
+            "Confidence unavailable: numeric and duration metrics need variance data before statistical winner recommendation."
+                .to_string(),
+        );
+    }
+
+    let candidate = best_index.map(|index| results[index].clone());
+    if let Some(candidate) = candidate.as_ref()
+        && metric_type == DbMetricType::Conversion
+        && candidate.variant != baseline.variant
+        && let (Some(candidate_successes), Some(baseline_successes)) = (
+            candidate
+                .conversion_rate
+                .map(|rate| (rate * candidate.sample_size as f64).round() as i64),
+            baseline_successes,
+        )
+    {
+        best_p_value = two_proportion_p_value(
+            candidate_successes,
+            candidate.sample_size as i64,
+            baseline_successes,
+            baseline.sample_size as i64,
+        );
+    }
+
+    let confidence = best_p_value.map(|p| 1.0 - p);
+    let confidence_pass = confidence
+        .map(|value| value >= MIN_EXPERIMENT_CONFIDENCE)
+        .unwrap_or(false);
+    if metric_type == DbMetricType::Conversion && !confidence_pass && results.len() >= 2 {
+        warnings.push(format!(
+            "Confidence below {:.0}%: treat current leader as directional only.",
+            MIN_EXPERIMENT_CONFIDENCE * 100.0
+        ));
+    }
+
+    let winner = if !low_sample && confidence_pass {
+        candidate.as_ref().and_then(|result| result.variant.clone())
+    } else {
+        None
+    };
+
+    let recommendation = if let Some(winner) = winner.as_ref() {
+        format!(
+            "Recommend {winner}: minimum sample size passed and confidence is {:.1}%.",
+            confidence.unwrap_or_default() * 100.0
+        )
+    } else if let Some(candidate) = candidate {
+        format!(
+            "No winner yet: {} is leading, but guardrails have not passed.",
+            variant_display_name(&candidate.variant)
+        )
+    } else {
+        "No winner: no comparable variant results found.".to_string()
+    };
+
+    ExperimentAnalysisDetails {
+        winner,
+        p_value: best_p_value,
+        recommendation,
+        warnings,
     }
 }
 
@@ -977,7 +1250,7 @@ pub(crate) async fn metrics_by_feature(
     let (from, to) = resolve_time_range_with_period(period);
 
     let rows = logic
-        .get_metric_results(&query.feature_key, Some(env_uuid), from, to)
+        .get_metric_results(&query.feature_key, None, Some(env_uuid), from, to)
         .await
         .map_err(RestError::from)?;
 
@@ -990,6 +1263,7 @@ pub(crate) async fn metrics_by_feature(
     params(
         ("featureKey" = String, Query, description = "Feature key"),
         ("metricKeys" = [String], Query, description = "Metric keys"),
+        ("teamId" = Option<String>, Query, description = "Team ID"),
         ("environmentId" = Option<String>, Query, description = "Environment ID"),
         ("timePeriod" = Option<String>, Query, description = "Time period")
     ),
@@ -1013,10 +1287,8 @@ pub(crate) async fn experiment_results(
     };
     validate_metric_keys(&metric_keys)?;
 
-    let env_uuid = match &query.environment_id {
-        Some(value) if !value.trim().is_empty() => Some(parse_uuid(value, "environment_id")?),
-        _ => None,
-    };
+    let team_uuid = parse_opt_uuid(query.team_id.as_ref(), "team_id")?;
+    let env_uuid = parse_opt_uuid(query.environment_id.as_ref(), "environment_id")?;
 
     let period = match query.time_period.as_ref() {
         Some(period) => parse_time_period(period)?,
@@ -1026,7 +1298,7 @@ pub(crate) async fn experiment_results(
     let (from, to) = resolve_time_range_with_period(period);
 
     let rows = logic
-        .get_metric_results(&query.feature_key, env_uuid, from, to)
+        .get_metric_results(&query.feature_key, team_uuid, env_uuid, from, to)
         .await
         .map_err(RestError::from)?;
 
@@ -1034,7 +1306,7 @@ pub(crate) async fn experiment_results(
 
     let mut aggregated: std::collections::HashMap<
         String,
-        std::collections::HashMap<Option<String>, (i64, i64, f64, Option<f64>, DateTime<Utc>)>,
+        std::collections::HashMap<Option<String>, ExperimentVariantAggregate>,
     > = std::collections::HashMap::new();
 
     for row in rows
@@ -1045,66 +1317,70 @@ pub(crate) async fn experiment_results(
         let entry =
             metric_entry
                 .entry(row.variant.clone())
-                .or_insert((0, 0, 0.0, None, row.time_bucket));
+                .or_insert_with(|| ExperimentVariantAggregate {
+                    variant: row.variant.clone(),
+                    metric_type: row.metric_type,
+                    sample_size: 0,
+                    conversion_count: 0,
+                    sum_value: 0.0,
+                    p95_value: None,
+                    latest_bucket: row.time_bucket,
+                });
 
-        entry.0 += row.sample_size;
-        entry.1 += row.conversion_count.unwrap_or(0);
-        entry.2 += row.sum_value.unwrap_or(0.0);
+        entry.sample_size += row.sample_size;
+        entry.conversion_count += row.conversion_count.unwrap_or(0);
+        entry.sum_value += row.sum_value.unwrap_or(0.0);
         if row.p95_value.is_some() {
-            entry.3 = row.p95_value;
+            entry.p95_value = row.p95_value;
         }
-        if row.time_bucket > entry.4 {
-            entry.4 = row.time_bucket;
+        if row.time_bucket > entry.latest_bucket {
+            entry.latest_bucket = row.time_bucket;
         }
     }
 
     let mut analyses = Vec::new();
     for key in &metric_keys {
         let mut results = Vec::new();
+        let mut metric_type = DbMetricType::Conversion;
         if let Some(variants) = aggregated.get(key) {
-            for (variant, (sample_size, conversion_count, sum_value, p95_value, time_bucket)) in
-                variants.iter()
-            {
-                let sample_size_i32 = std::cmp::min(*sample_size, i32::MAX as i64) as i32;
-                let conversion_rate = if *sample_size > 0 {
-                    Some(*conversion_count as f64 / *sample_size as f64)
+            for aggregate in variants.values() {
+                metric_type = aggregate.metric_type;
+                let sample_size_i32 = std::cmp::min(aggregate.sample_size, i32::MAX as i64) as i32;
+                let conversion_rate = if aggregate.sample_size > 0 {
+                    Some(aggregate.conversion_count as f64 / aggregate.sample_size as f64)
                 } else {
                     None
                 };
-                let mean_value = if *sample_size > 0 {
-                    Some(*sum_value / *sample_size as f64)
+                let mean_value = if aggregate.sample_size > 0 {
+                    Some(aggregate.sum_value / aggregate.sample_size as f64)
                 } else {
                     None
                 };
 
                 results.push(MetricResultResponse {
                     metric_key: key.clone(),
-                    variant: variant.clone(),
+                    variant: aggregate.variant.clone(),
                     sample_size: sample_size_i32,
                     conversion_rate,
+                    lift: None,
+                    confidence: None,
                     mean_value,
-                    p95_value: *p95_value,
-                    time_bucket: *time_bucket,
+                    p95_value: aggregate.p95_value,
+                    time_bucket: aggregate.latest_bucket,
                     confidence_interval: None,
                 });
             }
         }
 
-        let mut winner: Option<String> = None;
-        let mut best_score = f64::MIN;
-        for r in &results {
-            let score = r.conversion_rate.or(r.mean_value).unwrap_or(f64::MIN / 2.0);
-            if score > best_score {
-                best_score = score;
-                winner = r.variant.clone();
-            }
-        }
+        let details = analyze_experiment_results(metric_type, &mut results);
 
         analyses.push(MetricAnalysisResponse {
             metric_key: key.clone(),
             results,
-            winner,
-            statistical_significance: None,
+            winner: details.winner,
+            statistical_significance: details.p_value,
+            recommendation: details.recommendation,
+            warnings: details.warnings,
         });
     }
 
@@ -1862,6 +2138,7 @@ mod tests {
         async fn get_metric_results(
             &self,
             _feature_key: &str,
+            _team_id: Option<Uuid>,
             _environment_id: Option<Uuid>,
             _from: DateTime<Utc>,
             _to: DateTime<Utc>,
@@ -2191,5 +2468,101 @@ mod tests {
         assert_eq!(first_event.user_context, "user-123");
         assert!(first_event.environment_id.is_some());
         assert!(first_event.timestamp.is_some());
+    }
+
+    #[::std::prelude::v1::test]
+    fn experiment_analysis_recommends_winner_only_after_sample_and_confidence_pass() {
+        let now = Utc::now();
+        let mut results = vec![
+            MetricResultResponse {
+                metric_key: "signup".to_string(),
+                variant: Some("control".to_string()),
+                sample_size: 1_000,
+                conversion_rate: Some(0.10),
+                lift: None,
+                confidence: None,
+                mean_value: Some(0.10),
+                p95_value: None,
+                time_bucket: now,
+                confidence_interval: None,
+            },
+            MetricResultResponse {
+                metric_key: "signup".to_string(),
+                variant: Some("treatment".to_string()),
+                sample_size: 1_000,
+                conversion_rate: Some(0.16),
+                lift: None,
+                confidence: None,
+                mean_value: Some(0.16),
+                p95_value: None,
+                time_bucket: now,
+                confidence_interval: None,
+            },
+        ];
+
+        let details = analyze_experiment_results(DbMetricType::Conversion, &mut results);
+
+        assert_eq!(details.winner.as_deref(), Some("treatment"));
+        assert!(details.p_value.is_some_and(|p| p < 0.05));
+        assert!(details.warnings.is_empty());
+        let treatment = results
+            .iter()
+            .find(|result| result.variant.as_deref() == Some("treatment"))
+            .expect("treatment result missing");
+        assert!(treatment.lift.is_some_and(|lift| lift > 0.5));
+        assert!(
+            treatment
+                .confidence
+                .is_some_and(|confidence| confidence > 0.95)
+        );
+        assert!(treatment.confidence_interval.is_some());
+    }
+
+    #[::std::prelude::v1::test]
+    fn experiment_analysis_warns_for_low_sample_and_sample_ratio_mismatch() {
+        let now = Utc::now();
+        let mut results = vec![
+            MetricResultResponse {
+                metric_key: "signup".to_string(),
+                variant: Some("control".to_string()),
+                sample_size: 180,
+                conversion_rate: Some(0.20),
+                lift: None,
+                confidence: None,
+                mean_value: Some(0.20),
+                p95_value: None,
+                time_bucket: now,
+                confidence_interval: None,
+            },
+            MetricResultResponse {
+                metric_key: "signup".to_string(),
+                variant: Some("treatment".to_string()),
+                sample_size: 20,
+                conversion_rate: Some(0.25),
+                lift: None,
+                confidence: None,
+                mean_value: Some(0.25),
+                p95_value: None,
+                time_bucket: now,
+                confidence_interval: None,
+            },
+        ];
+
+        let details = analyze_experiment_results(DbMetricType::Conversion, &mut results);
+
+        assert!(details.winner.is_none());
+        assert!(
+            details
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("Low sample size"))
+        );
+        assert!(
+            details
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("Sample-ratio mismatch"))
+        );
+        assert!(details.recommendation.contains("No winner yet"));
     }
 }

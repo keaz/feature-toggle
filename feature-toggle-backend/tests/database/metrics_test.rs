@@ -122,6 +122,7 @@ async fn test_metric_aggregation_round_trip() {
     let results = repo
         .get_metric_results(
             &feature_key,
+            Some(seeded_team()),
             Some(seed_environment()),
             now - Duration::hours(1),
             now + Duration::hours(1),
@@ -138,5 +139,20 @@ async fn test_metric_aggregation_round_trip() {
         total_sample >= 2,
         "expected at least two samples aggregated, got {}",
         total_sample
+    );
+
+    let wrong_team_results = repo
+        .get_metric_results(
+            &feature_key,
+            Some(Uuid::new_v4()),
+            Some(seed_environment()),
+            now - Duration::hours(1),
+            now + Duration::hours(1),
+        )
+        .await
+        .expect("failed to fetch wrong-team results");
+    assert!(
+        wrong_team_results.is_empty(),
+        "expected team filter to hide metric rows from other teams"
     );
 }

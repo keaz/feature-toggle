@@ -388,7 +388,7 @@ impl CanaryLogicImpl {
 
         let rows = self
             .metric_logic
-            .get_metric_results(&feature.key, Some(gate.environment_id), from, now)
+            .get_metric_results(&feature.key, None, Some(gate.environment_id), from, now)
             .await?;
 
         let baseline = Self::aggregate_variant(&rows, &gate.metric_key, &gate.baseline_variant);
@@ -728,6 +728,7 @@ mod tests {
         async fn get_metric_results(
             &self,
             _feature_key: &str,
+            _team_id: Option<Uuid>,
             _environment_id: Option<Uuid>,
             _from: DateTime<Utc>,
             _to: DateTime<Utc>,

@@ -106,6 +106,7 @@ impl crate::logic::metrics::MetricLogic for NoopMetricLogic {
     async fn get_metric_results(
         &self,
         _feature_key: &str,
+        _team_id: Option<Uuid>,
         _environment_id: Option<Uuid>,
         _from: DateTime<Utc>,
         _to: DateTime<Utc>,
