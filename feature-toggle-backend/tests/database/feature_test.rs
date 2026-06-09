@@ -1,5 +1,6 @@
 use std::vec;
 
+use chrono::{Duration, Utc};
 use feature_toggle_backend::database::entity::FeatureType;
 use feature_toggle_backend::database::feature::{CreateFeature, CreateFeatureStage, UpdateFeature};
 use feature_toggle_backend::database::{feature, init_pg_pool};
@@ -56,6 +57,188 @@ async fn test_feature_lifecycle_defaults() {
 }
 
 #[tokio::test]
+async fn test_lifecycle_metadata_filters_and_archive_guard() {
+    let pool = init_pg_pool().await;
+    let repository = feature::feature_repository(pool);
+    let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+    let environment_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+
+    let expired_key = format!("expired-lifecycle-{}", Uuid::new_v4());
+    let expired_id = repository
+        .create_feature(CreateFeature {
+            team_id,
+            key: expired_key.clone(),
+            description: Some("Expired draft flag".to_string()),
+            feature_type: FeatureType::Simple,
+            lifecycle_stage: "draft".to_string(),
+            owner: Some("Platform".to_string()),
+            expires_at: Some(Utc::now() - Duration::days(1)),
+            cleanup_reason: Some("Remove after launch".to_string()),
+            stages: vec![],
+            dependencies: vec![],
+            variants: None,
+        })
+        .await
+        .unwrap();
+
+    let expired = repository.get_feature_by_id(expired_id).await.unwrap();
+    assert_eq!(expired.lifecycle_stage, "draft");
+    assert_eq!(expired.owner.as_deref(), Some("Platform"));
+    assert!(expired.expires_at.is_some());
+    assert_eq!(
+        expired.cleanup_reason.as_deref(),
+        Some("Remove after launch")
+    );
+
+    let (stale_features, stale_total) = repository
+        .get_features_with_offset_filtered(
+            team_id,
+            Some(expired_key.clone()),
+            None,
+            None,
+            Some(true),
+            false,
+            0,
+            10,
+        )
+        .await
+        .unwrap();
+    assert_eq!(stale_total, 1);
+    assert_eq!(stale_features[0].id, expired_id);
+
+    let archived_key = format!("archived-lifecycle-{}", Uuid::new_v4());
+    let archived_id = repository
+        .create_feature(CreateFeature {
+            team_id,
+            key: archived_key.clone(),
+            description: Some("Archived flag".to_string()),
+            feature_type: FeatureType::Simple,
+            lifecycle_stage: "archived".to_string(),
+            owner: None,
+            expires_at: None,
+            cleanup_reason: Some("Cleanup complete".to_string()),
+            stages: vec![],
+            dependencies: vec![],
+            variants: None,
+        })
+        .await
+        .unwrap();
+
+    let (default_features, _) = repository
+        .get_features_with_offset_filtered(
+            team_id,
+            Some(archived_key.clone()),
+            None,
+            None,
+            None,
+            false,
+            0,
+            10,
+        )
+        .await
+        .unwrap();
+    assert!(default_features.is_empty());
+
+    let (archived_features, archived_total) = repository
+        .get_features_with_offset_filtered(
+            team_id,
+            Some(archived_key),
+            None,
+            Some("archived".to_string()),
+            None,
+            false,
+            0,
+            10,
+        )
+        .await
+        .unwrap();
+    assert_eq!(archived_total, 1);
+    assert_eq!(archived_features[0].id, archived_id);
+
+    let stage_id = Uuid::new_v4();
+    let active_key = format!("archive-guard-{}", Uuid::new_v4());
+    let active_feature_id = repository
+        .create_feature(CreateFeature {
+            team_id,
+            key: active_key.clone(),
+            description: Some("Active rollout flag".to_string()),
+            feature_type: FeatureType::Simple,
+            lifecycle_stage: "active".to_string(),
+            owner: None,
+            expires_at: None,
+            cleanup_reason: None,
+            stages: vec![CreateFeatureStage {
+                id: stage_id,
+                environment_id,
+                order_index: 0,
+                parent_stage: None,
+                position: "{ \"x\": 250, \"y\": 250 }".to_string(),
+                enabled: true,
+            }],
+            dependencies: vec![],
+            variants: None,
+        })
+        .await
+        .unwrap();
+
+    let archive_without_confirmation = repository
+        .update_feature(UpdateFeature {
+            id: active_feature_id,
+            key: Some(active_key.clone()),
+            description: Some("Active rollout flag".to_string()),
+            feature_type: Some(FeatureType::Simple),
+            lifecycle_stage: Some("archived".to_string()),
+            owner: None,
+            expires_at: None,
+            cleanup_reason: Some(Some("No longer needed".to_string())),
+            archive_confirmation: false,
+            stages: vec![CreateFeatureStage {
+                id: stage_id,
+                environment_id,
+                order_index: 0,
+                parent_stage: None,
+                position: "{ \"x\": 250, \"y\": 250 }".to_string(),
+                enabled: true,
+            }],
+            dependencies: vec![],
+            variants: None,
+        })
+        .await;
+    assert!(matches!(
+        archive_without_confirmation,
+        Err(feature_toggle_backend::Error::InvalidInput(_))
+    ));
+
+    let archived = repository
+        .update_feature(UpdateFeature {
+            id: active_feature_id,
+            key: Some(active_key),
+            description: Some("Active rollout flag".to_string()),
+            feature_type: Some(FeatureType::Simple),
+            lifecycle_stage: Some("archived".to_string()),
+            owner: None,
+            expires_at: None,
+            cleanup_reason: Some(Some("No longer needed".to_string())),
+            archive_confirmation: true,
+            stages: vec![CreateFeatureStage {
+                id: stage_id,
+                environment_id,
+                order_index: 0,
+                parent_stage: None,
+                position: "{ \"x\": 250, \"y\": 250 }".to_string(),
+                enabled: true,
+            }],
+            dependencies: vec![],
+            variants: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(archived.lifecycle_stage, "archived");
+    assert_eq!(archived.cleanup_reason.as_deref(), Some("No longer needed"));
+    assert!(archived.archived_at.is_some());
+}
+
+#[tokio::test]
 async fn test_get_non_existing_feature() {
     let pool = init_pg_pool().await;
     let repository = feature::feature_repository(pool);
@@ -80,6 +263,10 @@ async fn test_create_feature_without_stages() {
         key: random_key.clone(),
         description: Some("Test feature without stages".to_string()),
         feature_type: FeatureType::Simple,
+        lifecycle_stage: "active".to_string(),
+        owner: None,
+        expires_at: None,
+        cleanup_reason: None,
         stages: vec![],
         dependencies: vec![],
         variants: None,
@@ -109,6 +296,10 @@ async fn test_create_feature_with_stages() {
         key: random_key.clone(),
         description: Some("Test feature with stages".to_string()),
         feature_type: FeatureType::Simple,
+        lifecycle_stage: "active".to_string(),
+        owner: None,
+        expires_at: None,
+        cleanup_reason: None,
         stages: vec![
             parent.clone(),
             CreateFeatureStage {
@@ -141,6 +332,10 @@ async fn test_create_feature_with_dependencies() {
         key: dependency_key.clone(),
         description: Some("Dependency feature".to_string()),
         feature_type: FeatureType::Simple,
+        lifecycle_stage: "active".to_string(),
+        owner: None,
+        expires_at: None,
+        cleanup_reason: None,
         stages: vec![],
         dependencies: vec![],
         variants: None,
@@ -156,6 +351,10 @@ async fn test_create_feature_with_dependencies() {
         key: feature_key.clone(),
         description: Some("Test feature with dependencies".to_string()),
         feature_type: FeatureType::Simple,
+        lifecycle_stage: "active".to_string(),
+        owner: None,
+        expires_at: None,
+        cleanup_reason: None,
         stages: vec![],
         dependencies: vec![dependency_id],
         variants: None,
@@ -181,6 +380,10 @@ async fn test_create_existing_feature() {
         key: "Existing Feature".to_string(),
         description: Some("Test feature".to_string()),
         feature_type: FeatureType::Simple,
+        lifecycle_stage: "active".to_string(),
+        owner: None,
+        expires_at: None,
+        cleanup_reason: None,
         stages: vec![],
         dependencies: vec![],
         variants: None,
@@ -205,6 +408,11 @@ async fn test_update_feature() {
         key: Some("Updated Feature".to_string()),
         description: Some("Updated description".to_string()),
         feature_type: Some(FeatureType::Contextual),
+        lifecycle_stage: None,
+        owner: None,
+        expires_at: None,
+        cleanup_reason: None,
+        archive_confirmation: false,
         stages: vec![],
         dependencies: vec![],
         variants: None,
@@ -233,6 +441,11 @@ async fn test_update_feature_with_existing_stages() {
         key: Some("Another feature Updated Feature".to_string()),
         description: Some("Updated description".to_string()),
         feature_type: Some(FeatureType::Contextual),
+        lifecycle_stage: None,
+        owner: None,
+        expires_at: None,
+        cleanup_reason: None,
+        archive_confirmation: false,
         stages: vec![CreateFeatureStage {
             id: Uuid::parse_str("4eef17bc-9e06-411d-b5f4-7a786e68bb98").unwrap(),
             environment_id: Uuid::parse_str("78ccc5d7-e1bb-4e41-b6ef-02adf5c0d017").unwrap(),
@@ -280,6 +493,11 @@ async fn test_update_non_existing_feature() {
         key: Some("Non-existing Feature".to_string()),
         description: Some("This feature doesn't exist".to_string()),
         feature_type: Some(FeatureType::Simple),
+        lifecycle_stage: None,
+        owner: None,
+        expires_at: None,
+        cleanup_reason: None,
+        archive_confirmation: false,
         stages: vec![],
         dependencies: vec![],
         variants: None,
@@ -303,6 +521,10 @@ async fn test_delete_feature() {
             key: format!("Delete me {}", Uuid::new_v4()),
             description: Some("temp feature".to_string()),
             feature_type: FeatureType::Simple,
+            lifecycle_stage: "active".to_string(),
+            owner: None,
+            expires_at: None,
+            cleanup_reason: None,
             stages: vec![],
             dependencies: vec![],
             variants: None,
@@ -433,6 +655,10 @@ async fn test_create_feature_with_stages_verification() {
         key: random_key.clone(),
         description: Some("Test feature with stages verification".to_string()),
         feature_type: FeatureType::Simple,
+        lifecycle_stage: "active".to_string(),
+        owner: None,
+        expires_at: None,
+        cleanup_reason: None,
         stages: vec![parent.clone(), child],
         dependencies: vec![],
         variants: None,
@@ -521,6 +747,10 @@ async fn test_update_feature_with_stages() {
         key: random_key.clone(),
         description: Some("Test feature for update stages".to_string()),
         feature_type: FeatureType::Simple,
+        lifecycle_stage: "active".to_string(),
+        owner: None,
+        expires_at: None,
+        cleanup_reason: None,
         stages: vec![stage1.clone(), stage2.clone()],
         dependencies: vec![],
         variants: None,
@@ -571,6 +801,11 @@ async fn test_update_feature_with_stages() {
         key: Some(format!("{random_key} - Updated")),
         description: Some("Updated description".to_string()),
         feature_type: Some(FeatureType::Contextual),
+        lifecycle_stage: None,
+        owner: None,
+        expires_at: None,
+        cleanup_reason: None,
+        archive_confirmation: false,
         stages: vec![updated_stage1, new_stage3],
         dependencies: vec![],
         variants: None,
@@ -637,6 +872,10 @@ async fn test_emergency_disable_feature_integration() {
             key: format!("kill-switch-{}", Uuid::new_v4()),
             description: Some("temp for kill switch".into()),
             feature_type: FeatureType::Simple,
+            lifecycle_stage: "active".to_string(),
+            owner: None,
+            expires_at: None,
+            cleanup_reason: None,
             stages: vec![],
             dependencies: vec![],
             variants: None,
@@ -791,6 +1030,10 @@ async fn test_get_features_pending_rollback_integration() {
         description: Some("Test feature for rollback".to_string()),
         feature_type: FeatureType::Simple,
         team_id,
+        lifecycle_stage: "active".to_string(),
+        owner: None,
+        expires_at: None,
+        cleanup_reason: None,
         dependencies: vec![],
         variants: None,
         stages: vec![],

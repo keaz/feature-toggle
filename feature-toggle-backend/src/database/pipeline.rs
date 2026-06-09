@@ -69,7 +69,7 @@ struct PipelineWithStageRow {
     environment_id: Option<Uuid>,
     order_index: Option<i32>,
     parent_stage_id: Option<Uuid>,
-    position: String,
+    position: Option<String>,
 }
 
 #[automock]
@@ -322,7 +322,7 @@ impl PipelineRepositoryImpl {
                     environment_id: row.environment_id.unwrap(),
                     order_index: row.order_index.unwrap(),
                     parent_stage_id: row.parent_stage_id,
-                    position: row.position,
+                    position: row.position.unwrap_or_default(),
                 })
             })
             .collect::<Vec<PipelineStage>>();
@@ -355,7 +355,7 @@ impl PipelineRepositoryImpl {
                     environment_id: row.environment_id.unwrap(),
                     order_index: row.order_index.unwrap(),
                     parent_stage_id: row.parent_stage_id,
-                    position: row.position,
+                    position: row.position.unwrap_or_default(),
                 });
             }
         }

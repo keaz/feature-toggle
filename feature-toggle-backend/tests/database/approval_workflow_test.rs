@@ -26,6 +26,10 @@ async fn create_isolated_feature_stage(
             key: format!("approval-workflow-feature-{}", Uuid::new_v4()),
             description: Some("Feature for isolated approval workflow tests".to_string()),
             feature_type: FeatureType::Simple,
+            lifecycle_stage: "active".to_string(),
+            owner: None,
+            expires_at: None,
+            cleanup_reason: None,
             stages: vec![CreateFeatureStage {
                 id: stage_id,
                 environment_id,

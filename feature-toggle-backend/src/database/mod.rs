@@ -72,6 +72,24 @@ pub fn handle_error<T>(id: Option<Uuid>, result: Result<T, sqlx::Error>) -> Resu
                 };
                 return Err(Error::RecordAlreadyExists(field.to_string()));
             }
+            if let Some(code) = db_err.code()
+                && (code == "23503" || code == "23514")
+            {
+                let message = db_err.message();
+                if message.contains("feature_stage_criteria selected variant") {
+                    return Err(Error::InvalidInput(
+                        "Selected variant must exist for the feature".to_string(),
+                    ));
+                }
+                if message.contains("feature_stage_contexts requires")
+                    || message.contains("feature_stage_contexts references missing")
+                {
+                    return Err(Error::InvalidInput(
+                        "Stage contexts must belong to the same team as the feature stage"
+                            .to_string(),
+                    ));
+                }
+            }
             Err(Error::DatabaseError(error))
         }
         _ => Err(Error::DatabaseError(error)),

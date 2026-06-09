@@ -415,10 +415,24 @@ describe('Extended Criteria', () => {
                     conditions: [{ contextKey: 'userId', operator: 'EQUALS', value: 'specific-user' }],
                 }],
                 variantSelectionMode: 'SPECIFIC_VARIANT',
-                selectedVariantControl: 'variant-a',
+                selectedVariantControl: 'true',
             };
             const response = await createCriterion(fixture);
             expectSuccess(response);
+        });
+
+        it('should reject SPECIFIC_VARIANT selection for an unknown variant', async () => {
+            const fixture = {
+                priority: 1,
+                ruleGroups: [{
+                    logicOperator: 'AND',
+                    conditions: [{ contextKey: 'userId', operator: 'EQUALS', value: 'unknown-variant-user' }],
+                }],
+                variantSelectionMode: 'SPECIFIC_VARIANT',
+                selectedVariantControl: 'missing-variant',
+            };
+            const response = await createCriterion(fixture);
+            expect(response.status).toBe(400);
         });
 
         it('should create criterion with WEIGHTED_SPLIT selection', async () => {

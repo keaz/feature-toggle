@@ -15,9 +15,10 @@ use crate::model::ID;
 use crate::model::{
     Context as ModelContext, ContextEntry as ModelContextEntry, CreateFeatureInput,
     CreateStageCriterionInput, Feature as ModelFeature, FeatureType as ModelFeatureType,
-    RuleOperator, StageCriterion as ModelStageCriterion, UpdateFeatureInput,
-    VariantValueType as ModelVariantValueType,
+    LifecycleStage as ModelLifecycleStage, RuleOperator, StageCriterion as ModelStageCriterion,
+    UpdateFeatureInput, VariantValueType as ModelVariantValueType,
 };
+use chrono::{Duration, Utc};
 use sqlx::PgConnection;
 use uuid::Uuid;
 
@@ -34,7 +35,58 @@ fn map_api_to_entity_feature_type(ft: ModelFeatureType) -> crate::database::enti
     }
 }
 
+fn map_api_to_db_lifecycle_stage(stage: ModelLifecycleStage) -> &'static str {
+    match stage {
+        ModelLifecycleStage::Draft => "draft",
+        ModelLifecycleStage::Active => "active",
+        ModelLifecycleStage::Deprecated => "deprecated",
+        ModelLifecycleStage::Archived => "archived",
+    }
+}
+
+fn normalize_optional_text(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn stale_reasons(feature: &crate::database::entity::Feature) -> Vec<String> {
+    let now = Utc::now();
+    let mut reasons = Vec::new();
+
+    if feature
+        .expires_at
+        .is_some_and(|expires_at| expires_at < now)
+    {
+        reasons.push("Expired".to_string());
+    }
+
+    let lifecycle = feature.lifecycle_stage.to_lowercase();
+    let lifecycle_can_stale = lifecycle == "active" || lifecycle == "deprecated";
+    if lifecycle_can_stale {
+        let older_than_30_days = feature.created_at < now - Duration::days(30);
+        let no_recent_evaluations = feature
+            .last_evaluated_at
+            .map(|last| last < now - Duration::days(30))
+            .unwrap_or(true);
+        if older_than_30_days && no_recent_evaluations {
+            reasons.push("No recent evaluations".to_string());
+        }
+
+        if feature.created_at < now - Duration::days(90) && feature.evaluation_count_90d == 0 {
+            reasons.push("No evaluations in 90 days".to_string());
+        }
+
+        if feature.created_at < now - Duration::days(90) && !feature.active {
+            reasons.push("Disabled for 90+ days".to_string());
+        }
+    }
+
+    reasons
+}
+
 fn map_entity_to_api_feature(feature_entity: crate::database::entity::Feature) -> ModelFeature {
+    let stale_reasons = stale_reasons(&feature_entity);
     ModelFeature {
         id: feature_entity.id.into(),
         key: feature_entity.key,
@@ -44,21 +96,28 @@ fn map_entity_to_api_feature(feature_entity: crate::database::entity::Feature) -
             crate::database::entity::FeatureType::Contextual => ModelFeatureType::Contextual,
         },
         enabled: feature_entity.active,
+        created_at: feature_entity.created_at,
         kill_switch_enabled: feature_entity.kill_switch_enabled,
         kill_switch_activated_at: feature_entity.kill_switch_activated_at,
         rollback_scheduled_at: feature_entity.rollback_scheduled_at,
         lifecycle_stage: match feature_entity.lifecycle_stage.to_lowercase().as_str() {
+            "draft" => crate::model::LifecycleStage::Draft,
             "deprecated" => crate::model::LifecycleStage::Deprecated,
             "archived" => crate::model::LifecycleStage::Archived,
-            "permanent" => crate::model::LifecycleStage::Permanent,
             _ => crate::model::LifecycleStage::Active,
         },
+        owner: feature_entity.owner,
+        expires_at: feature_entity.expires_at,
+        cleanup_reason: feature_entity.cleanup_reason,
+        archived_at: feature_entity.archived_at,
         deprecated_at: feature_entity.deprecated_at,
         deprecation_notice: feature_entity.deprecation_notice,
         last_evaluated_at: feature_entity.last_evaluated_at,
         evaluation_count_7d: feature_entity.evaluation_count_7d,
         evaluation_count_30d: feature_entity.evaluation_count_30d,
         evaluation_count_90d: feature_entity.evaluation_count_90d,
+        is_stale: !stale_reasons.is_empty(),
+        stale_reasons,
         team_id: feature_entity.team_id.into(),
         dependencies: feature_entity
             .dependencies
@@ -387,6 +446,14 @@ where
         key: input.key,
         description: input.description,
         feature_type: map_api_to_entity_feature_type(input.feature_type),
+        lifecycle_stage: input
+            .lifecycle_stage
+            .map(map_api_to_db_lifecycle_stage)
+            .unwrap_or("active")
+            .to_string(),
+        owner: normalize_optional_text(input.owner),
+        expires_at: input.expires_at,
+        cleanup_reason: normalize_optional_text(input.cleanup_reason),
         stages,
         dependencies,
         variants,
@@ -506,6 +573,18 @@ where
         key: Some(input.key),
         description: input.description,
         feature_type,
+        lifecycle_stage: input
+            .lifecycle_stage
+            .map(map_api_to_db_lifecycle_stage)
+            .map(str::to_string),
+        owner: input
+            .owner
+            .map(|owner| owner.and_then(|value| normalize_optional_text(Some(value)))),
+        expires_at: input.expires_at,
+        cleanup_reason: input
+            .cleanup_reason
+            .map(|reason| reason.and_then(|value| normalize_optional_text(Some(value)))),
+        archive_confirmation: input.archive_confirmation,
         stages,
         dependencies,
         variants,
@@ -519,7 +598,11 @@ where
         .unwrap_or((None, None));
 
     let activity = CreateActivityLog {
-        activity_type: crate::utils::activity_logger::activity_types::FEATURE_UPDATED.to_string(),
+        activity_type: if existing_feature.lifecycle_stage != updated_feature.lifecycle_stage {
+            crate::utils::activity_logger::activity_types::FEATURE_LIFECYCLE_UPDATED.to_string()
+        } else {
+            crate::utils::activity_logger::activity_types::FEATURE_UPDATED.to_string()
+        },
         entity_type: "feature".to_string(),
         entity_id: feature_uuid.to_string(),
         actor_id,
@@ -527,7 +610,9 @@ where
         description: format!("Updated feature '{}'", updated_feature.key),
         metadata: Some(serde_json::json!({
              "feature_id": feature_uuid.to_string(),
-             "feature_key": updated_feature.key
+             "feature_key": updated_feature.key,
+             "old_lifecycle_stage": existing_feature.lifecycle_stage,
+             "new_lifecycle_stage": updated_feature.lifecycle_stage,
         })),
     };
 

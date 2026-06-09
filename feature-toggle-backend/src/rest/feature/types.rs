@@ -39,19 +39,30 @@ impl From<FeatureType> for ModelFeatureType {
 #[derive(Debug, Serialize, Deserialize, ToSchema, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum LifecycleStage {
+    Draft,
     Active,
     Deprecated,
     Archived,
-    Permanent,
 }
 
 impl From<ModelLifecycleStage> for LifecycleStage {
     fn from(value: ModelLifecycleStage) -> Self {
         match value {
+            ModelLifecycleStage::Draft => LifecycleStage::Draft,
             ModelLifecycleStage::Active => LifecycleStage::Active,
             ModelLifecycleStage::Deprecated => LifecycleStage::Deprecated,
             ModelLifecycleStage::Archived => LifecycleStage::Archived,
-            ModelLifecycleStage::Permanent => LifecycleStage::Permanent,
+        }
+    }
+}
+
+impl From<LifecycleStage> for ModelLifecycleStage {
+    fn from(value: LifecycleStage) -> Self {
+        match value {
+            LifecycleStage::Draft => ModelLifecycleStage::Draft,
+            LifecycleStage::Active => ModelLifecycleStage::Active,
+            LifecycleStage::Deprecated => ModelLifecycleStage::Deprecated,
+            LifecycleStage::Archived => ModelLifecycleStage::Archived,
         }
     }
 }
@@ -103,6 +114,9 @@ impl From<DbVariantValueType> for VariantValueType {
 pub struct FeatureListQuery {
     pub name: Option<String>,
     pub feature_type: Option<FeatureType>,
+    pub lifecycle_stage: Option<LifecycleStage>,
+    pub stale: Option<bool>,
+    pub include_archived: Option<bool>,
     pub offset: Option<i64>,
     pub limit: Option<i64>,
 }
@@ -161,16 +175,23 @@ pub struct FeatureResponse {
     pub description: Option<String>,
     pub feature_type: FeatureType,
     pub enabled: bool,
+    pub created_at: DateTime<Utc>,
     pub kill_switch_enabled: bool,
     pub kill_switch_activated_at: Option<DateTime<Utc>>,
     pub rollback_scheduled_at: Option<DateTime<Utc>>,
     pub lifecycle_stage: LifecycleStage,
+    pub owner: Option<String>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub cleanup_reason: Option<String>,
+    pub archived_at: Option<DateTime<Utc>>,
     pub deprecated_at: Option<DateTime<Utc>>,
     pub deprecation_notice: Option<String>,
     pub last_evaluated_at: Option<DateTime<Utc>>,
     pub evaluation_count_7d: i64,
     pub evaluation_count_30d: i64,
     pub evaluation_count_90d: i64,
+    pub is_stale: bool,
+    pub stale_reasons: Vec<String>,
     pub dependencies: Vec<String>,
     pub team_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -215,6 +236,10 @@ pub struct CreateFeatureRequest {
     pub description: Option<String>,
     pub feature_type: FeatureType,
     pub enabled: Option<bool>,
+    pub lifecycle_stage: Option<LifecycleStage>,
+    pub owner: Option<String>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub cleanup_reason: Option<String>,
     pub dependencies: Vec<String>,
     pub relationships: Vec<CreateRelationshipRequest>,
     pub stages: Vec<CreateFeatureStageRequest>,
@@ -228,6 +253,11 @@ pub struct UpdateFeatureRequest {
     pub description: Option<String>,
     pub feature_type: FeatureType,
     pub enabled: Option<bool>,
+    pub lifecycle_stage: Option<LifecycleStage>,
+    pub owner: Option<String>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub cleanup_reason: Option<String>,
+    pub archive_confirmation: Option<bool>,
     pub dependencies: Vec<String>,
     pub relationships: Vec<CreateRelationshipRequest>,
     pub stages: Vec<CreateFeatureStageRequest>,

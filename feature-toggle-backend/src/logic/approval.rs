@@ -39,6 +39,23 @@ pub(crate) fn policy_applies(policy: &ApprovalPolicy, env_id: Uuid, env_type: &s
     }
 }
 
+fn policy_scope_rank(policy: &ApprovalPolicy, env_id: Uuid, env_type: &str) -> u8 {
+    match policy.applies_to.as_str() {
+        "specific_environments"
+            if policy
+                .environment_ids
+                .as_ref()
+                .map(|ids| ids.contains(&env_id))
+                .unwrap_or(false) =>
+        {
+            3
+        }
+        "production_only" if env_type.eq_ignore_ascii_case("production") => 2,
+        "all" => 1,
+        _ => 0,
+    }
+}
+
 #[derive(Clone)]
 pub struct ApprovalRequestEvent {
     pub request: ApprovalRequest,
@@ -238,7 +255,7 @@ impl ApprovalLogicImpl {
             .approval_repository
             .list_policies_for_team(team_id)
             .await?;
-        let applicable: Vec<ApprovalPolicy> = policies
+        let mut applicable: Vec<ApprovalPolicy> = policies
             .into_iter()
             .filter(|policy| {
                 policy_applies(
@@ -253,12 +270,20 @@ impl ApprovalLogicImpl {
             return Ok(None);
         }
 
-        if let Some(manual_policy) = applicable
-            .iter()
-            .find(|policy| policy.auto_approve_after_hours.is_none())
-        {
-            return Ok(Some(manual_policy.clone()));
-        }
+        applicable.sort_by(|left, right| {
+            let left_scope = policy_scope_rank(left, environment_id, env.environment_type.as_str());
+            let right_scope =
+                policy_scope_rank(right, environment_id, env.environment_type.as_str());
+            right_scope
+                .cmp(&left_scope)
+                .then_with(|| {
+                    right
+                        .auto_approve_after_hours
+                        .is_none()
+                        .cmp(&left.auto_approve_after_hours.is_none())
+                })
+                .then_with(|| right.created_at.cmp(&left.created_at))
+        });
 
         Ok(applicable.into_iter().next())
     }
@@ -1228,6 +1253,10 @@ mod tests {
                     deprecated_at: None,
                     deprecation_notice: None,
                     lifecycle_stage: "Active".to_string(),
+                    owner: None,
+                    expires_at: None,
+                    cleanup_reason: None,
+                    archived_at: None,
                     created_at: Utc::now(),
                     dependencies: vec![],
                     last_evaluated_at: None,
@@ -1439,6 +1468,10 @@ mod tests {
             kill_switch_activated_at: None,
             rollback_scheduled_at: None,
             lifecycle_stage: "active".into(),
+            owner: None,
+            expires_at: None,
+            cleanup_reason: None,
+            archived_at: None,
             deprecated_at: None,
             deprecation_notice: None,
             last_evaluated_at: None,
@@ -1691,6 +1724,10 @@ mod tests {
                     kill_switch_activated_at: None,
                     rollback_scheduled_at: None,
                     lifecycle_stage: "active".into(),
+                    owner: None,
+                    expires_at: None,
+                    cleanup_reason: None,
+                    archived_at: None,
                     deprecated_at: None,
                     deprecation_notice: None,
                     last_evaluated_at: None,

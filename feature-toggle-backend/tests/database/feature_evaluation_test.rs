@@ -12,6 +12,27 @@ async fn repo()
     feature_evaluation_repository(pool)
 }
 
+fn seeded_client_id() -> Uuid {
+    Uuid::parse_str("a1b2c3d4-0000-4000-8000-000000000001").unwrap()
+}
+
+fn evaluation_fixture(feature_key: String, environment_id: String) -> CreateFeatureEvaluation {
+    CreateFeatureEvaluation {
+        feature_key,
+        environment_id,
+        client_id: seeded_client_id(),
+        evaluated_at: Utc::now(),
+        #[allow(deprecated)]
+        evaluation_result: true,
+        evaluation_context: Some(json!({"source": "integration-test"})),
+        user_context: Some(format!("user-{}", Uuid::new_v4())),
+        prior_assignment: false,
+        evaluation_success: true,
+        evaluation_value: Some(json!(true)),
+        variant: None,
+    }
+}
+
 #[tokio::test]
 async fn test_create_evaluation() {
     let repo = repo().await;
@@ -168,12 +189,20 @@ async fn test_get_evaluation_count() {
 #[tokio::test]
 async fn test_get_evaluation_rates_and_summary() {
     let repo = repo().await;
+    let feature_key = format!("test-feature-rates-{}", Uuid::new_v4());
+    repo.create_evaluation(evaluation_fixture(
+        feature_key.clone(),
+        "env-123".to_string(),
+    ))
+    .await
+    .unwrap();
+
     let now = Utc::now();
     let from_time = now - chrono::Duration::days(1);
     let to_time = now + chrono::Duration::days(1);
     let rates = repo
         .get_evaluation_rates(
-            Some("test-feature-create".to_string()),
+            Some(feature_key.clone()),
             None,
             None,
             None,
@@ -188,14 +217,7 @@ async fn test_get_evaluation_rates_and_summary() {
     }));
 
     let summary = repo
-        .get_evaluation_summary(
-            Some("test-feature-create".to_string()),
-            None,
-            None,
-            None,
-            from_time,
-            to_time,
-        )
+        .get_evaluation_summary(Some(feature_key), None, None, None, from_time, to_time)
         .await
         .unwrap();
     assert!(summary.total_evaluations >= 1);
@@ -207,6 +229,14 @@ async fn test_team_and_canonical_environment_scoped_analytics() {
     let repo = repo().await;
     let seeded_team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
     let seeded_environment_id = seeded_team_id.to_string();
+    let feature_key = format!("test-feature-scoped-{}", Uuid::new_v4());
+    repo.create_evaluation(evaluation_fixture(
+        feature_key.clone(),
+        seeded_environment_id.clone(),
+    ))
+    .await
+    .unwrap();
+
     let now = Utc::now();
     let from_time = now - chrono::Duration::days(1);
     let to_time = now + chrono::Duration::days(1);
@@ -214,7 +244,7 @@ async fn test_team_and_canonical_environment_scoped_analytics() {
     let scoped_count = repo
         .get_evaluation_count(FeatureEvaluationFilter {
             team_id: Some(seeded_team_id),
-            feature_key: Some("test-feature-create".to_string()),
+            feature_key: Some(feature_key.clone()),
             environment_id: Some(seeded_environment_id.clone()),
             client_id: None,
             user_context: None,
@@ -231,7 +261,7 @@ async fn test_team_and_canonical_environment_scoped_analytics() {
 
     let summary = repo
         .get_evaluation_summary(
-            Some("test-feature-create".to_string()),
+            Some(feature_key),
             Some(seeded_environment_id),
             None,
             Some(seeded_team_id),

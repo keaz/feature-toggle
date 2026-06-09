@@ -19,7 +19,8 @@ use crate::logic::{ActorContext, create_relationships, get_environment_map};
 use crate::model::{
     CreateFeatureInput, CreateFeatureStageInput, CreateFeatureVariantInput,
     CreateRelationshipInput, Feature as ModelFeature, FeatureType as ModelFeatureType,
-    UpdateFeatureInput, VariantValueType as ModelVariantValueType,
+    LifecycleStage as ModelLifecycleStage, UpdateFeatureInput,
+    VariantValueType as ModelVariantValueType,
 };
 use crate::rest::environment::EnvironmentResponse;
 use crate::rest::error::RestError;
@@ -225,16 +226,23 @@ fn feature_base_response(feature: &ModelFeature) -> FeatureResponse {
         description: feature.description.clone(),
         feature_type: FeatureType::from(feature.feature_type),
         enabled: feature.enabled,
+        created_at: feature.created_at,
         kill_switch_enabled: feature.kill_switch_enabled,
         kill_switch_activated_at: feature.kill_switch_activated_at,
         rollback_scheduled_at: feature.rollback_scheduled_at,
         lifecycle_stage: LifecycleStage::from(feature.lifecycle_stage),
+        owner: feature.owner.clone(),
+        expires_at: feature.expires_at,
+        cleanup_reason: feature.cleanup_reason.clone(),
+        archived_at: feature.archived_at,
         deprecated_at: feature.deprecated_at,
         deprecation_notice: feature.deprecation_notice.clone(),
         last_evaluated_at: feature.last_evaluated_at,
         evaluation_count_7d: feature.evaluation_count_7d,
         evaluation_count_30d: feature.evaluation_count_30d,
         evaluation_count_90d: feature.evaluation_count_90d,
+        is_stale: feature.is_stale,
+        stale_reasons: feature.stale_reasons.clone(),
         dependencies: feature
             .dependencies
             .iter()
@@ -401,10 +409,13 @@ pub(crate) async fn list_features(
     });
 
     let (features, total) = logic
-        .get_features_with_offset(
+        .get_features_with_offset_filtered(
             ID::from(team_uuid),
             query.name.clone(),
             query.feature_type.map(ModelFeatureType::from),
+            query.lifecycle_stage.map(ModelLifecycleStage::from),
+            query.stale,
+            query.include_archived.unwrap_or(false),
             offset,
             limit,
         )
@@ -536,6 +547,10 @@ pub(crate) async fn create_feature(
         description: payload.description.clone(),
         feature_type: ModelFeatureType::from(payload.feature_type),
         enabled: payload.enabled,
+        lifecycle_stage: payload.lifecycle_stage.map(ModelLifecycleStage::from),
+        owner: payload.owner.clone(),
+        expires_at: payload.expires_at,
+        cleanup_reason: payload.cleanup_reason.clone(),
         dependencies,
         relationships,
         stages,
@@ -660,6 +675,11 @@ pub(crate) async fn update_feature(
         description: payload.description.clone(),
         feature_type: ModelFeatureType::from(payload.feature_type),
         enabled: payload.enabled,
+        lifecycle_stage: payload.lifecycle_stage.map(ModelLifecycleStage::from),
+        owner: payload.owner.clone().map(Some),
+        expires_at: payload.expires_at.map(Some),
+        cleanup_reason: payload.cleanup_reason.clone().map(Some),
+        archive_confirmation: payload.archive_confirmation.unwrap_or(false),
         dependencies,
         relationships,
         stages,
@@ -1126,16 +1146,23 @@ mod tests {
             description: Some("Test feature".to_string()),
             feature_type: ModelFeatureType::Simple,
             enabled: true,
+            created_at: chrono::Utc::now(),
             kill_switch_enabled: true,
             kill_switch_activated_at: None,
             rollback_scheduled_at: None,
             lifecycle_stage: ModelLifecycleStage::Active,
+            owner: None,
+            expires_at: None,
+            cleanup_reason: None,
+            archived_at: None,
             deprecated_at: None,
             deprecation_notice: None,
             last_evaluated_at: None,
             evaluation_count_7d: 0,
             evaluation_count_30d: 0,
             evaluation_count_90d: 0,
+            is_stale: false,
+            stale_reasons: vec![],
             dependencies: vec![],
             team_id: ID::from(team_id),
             pending_approval_request_id: None,
@@ -1192,16 +1219,28 @@ mod tests {
 
         let mut mock_logic = MockFeatureLogic::new();
         mock_logic
-            .expect_get_features_with_offset()
-            .withf(move |id, name, feature_type, offset, limit| {
-                id.to_string() == team_id.to_string()
-                    && name.as_deref() == Some("check")
-                    && matches!(feature_type, Some(ModelFeatureType::Simple))
-                    && *offset == 10
-                    && *limit == 5
-            })
+            .expect_get_features_with_offset_filtered()
+            .withf(
+                move |id,
+                      name,
+                      feature_type,
+                      lifecycle_stage,
+                      stale,
+                      include_archived,
+                      offset,
+                      limit| {
+                    id.to_string() == team_id.to_string()
+                        && name.as_deref() == Some("check")
+                        && matches!(feature_type, Some(ModelFeatureType::Simple))
+                        && lifecycle_stage.is_none()
+                        && stale.is_none()
+                        && !*include_archived
+                        && *offset == 10
+                        && *limit == 5
+                },
+            )
             .times(1)
-            .returning(move |_, _, _, _, _| Ok((vec![feature.clone()], 1)));
+            .returning(move |_, _, _, _, _, _, _, _| Ok((vec![feature.clone()], 1)));
 
         let app = test::init_service(
             App::new()
@@ -1277,6 +1316,10 @@ mod tests {
                 description: Some("Test feature".to_string()),
                 feature_type: FeatureType::Simple,
                 enabled: Some(true),
+                lifecycle_stage: None,
+                owner: None,
+                expires_at: None,
+                cleanup_reason: None,
                 dependencies: vec![],
                 relationships: vec![],
                 stages: vec![CreateFeatureStageRequest {
@@ -1356,6 +1399,11 @@ mod tests {
                 description: None,
                 feature_type: FeatureType::Simple,
                 enabled: Some(true),
+                lifecycle_stage: None,
+                owner: None,
+                expires_at: None,
+                cleanup_reason: None,
+                archive_confirmation: None,
                 dependencies: vec![],
                 relationships: vec![],
                 stages: vec![CreateFeatureStageRequest {

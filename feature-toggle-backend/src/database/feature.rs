@@ -45,6 +45,10 @@ pub struct CreateFeature {
     pub key: String,
     pub description: Option<String>,
     pub feature_type: FeatureType,
+    pub lifecycle_stage: String,
+    pub owner: Option<String>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub cleanup_reason: Option<String>,
     pub stages: Vec<CreateFeatureStage>,
     pub dependencies: Vec<Uuid>,
     pub variants: Option<
@@ -101,6 +105,11 @@ pub struct UpdateFeature {
     pub key: Option<String>,
     pub description: Option<String>,
     pub feature_type: Option<FeatureType>,
+    pub lifecycle_stage: Option<String>,
+    pub owner: Option<Option<String>>,
+    pub expires_at: Option<Option<DateTime<Utc>>>,
+    pub cleanup_reason: Option<Option<String>>,
+    pub archive_confirmation: bool,
     pub stages: Vec<CreateFeatureStage>,
     pub dependencies: Vec<Uuid>,
     pub variants: Option<
@@ -127,6 +136,10 @@ struct Features {
     rollback_scheduled_at: Option<DateTime<Utc>>,
     feature_enabled: bool,
     lifecycle_stage: String,
+    owner: Option<String>,
+    expires_at: Option<DateTime<Utc>>,
+    cleanup_reason: Option<String>,
+    archived_at: Option<DateTime<Utc>>,
     deprecated_at: Option<DateTime<Utc>>,
     deprecation_notice: Option<String>,
     last_evaluated_at: Option<DateTime<Utc>>,
@@ -148,6 +161,10 @@ struct FeatureWithStageRow {
     rollback_scheduled_at: Option<DateTime<Utc>>,
     feature_enabled: bool,
     lifecycle_stage: String,
+    owner: Option<String>,
+    expires_at: Option<DateTime<Utc>>,
+    cleanup_reason: Option<String>,
+    archived_at: Option<DateTime<Utc>>,
     deprecated_at: Option<DateTime<Utc>>,
     deprecation_notice: Option<String>,
     last_evaluated_at: Option<DateTime<Utc>>,
@@ -176,7 +193,8 @@ struct FeaturePipelineStageRow {
 
 const FEATURE_SELECT: &str = r#"SELECT f.id as feature_id, f.key as feature_key, f.description, f.feature_type, f.team_id, f.created_at, 
             f.kill_switch_enabled, f.kill_switch_activated_at, f.rollback_scheduled_at, f.active as feature_enabled,
-            f.lifecycle_stage, f.deprecated_at, f.deprecation_notice, f.last_evaluated_at,
+            f.lifecycle_stage, f.owner, f.expires_at, f.cleanup_reason, f.archived_at,
+            f.deprecated_at, f.deprecation_notice, f.last_evaluated_at,
             f.evaluation_count_7d, f.evaluation_count_30d, f.evaluation_count_90d
 			FROM features f"#;
 
@@ -189,6 +207,15 @@ pub trait FeatureRepository: Send + Sync {
         team_id: Uuid,
         key: Option<String>,
         feature_type: Option<FeatureType>,
+    ) -> Result<Vec<Feature>, Error>;
+    async fn get_features_filtered(
+        &self,
+        team_id: Uuid,
+        key: Option<String>,
+        feature_type: Option<FeatureType>,
+        lifecycle_stage: Option<String>,
+        stale: Option<bool>,
+        include_archived: bool,
     ) -> Result<Vec<Feature>, Error>;
     async fn get_features_paginated(
         &self,
@@ -203,6 +230,17 @@ pub trait FeatureRepository: Send + Sync {
         team_id: Uuid,
         key: Option<String>,
         feature_type: Option<FeatureType>,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<Feature>, i64), Error>;
+    async fn get_features_with_offset_filtered(
+        &self,
+        team_id: Uuid,
+        key: Option<String>,
+        feature_type: Option<FeatureType>,
+        lifecycle_stage: Option<String>,
+        stale: Option<bool>,
+        include_archived: bool,
         offset: i64,
         limit: i64,
     ) -> Result<(Vec<Feature>, i64), Error>;
@@ -914,6 +952,10 @@ impl FeatureRepositoryImpl {
             kill_switch_activated_at: feature.kill_switch_activated_at,
             rollback_scheduled_at: feature.rollback_scheduled_at,
             lifecycle_stage: feature.lifecycle_stage.clone(),
+            owner: feature.owner.clone(),
+            expires_at: feature.expires_at,
+            cleanup_reason: feature.cleanup_reason.clone(),
+            archived_at: feature.archived_at,
             deprecated_at: feature.deprecated_at,
             deprecation_notice: feature.deprecation_notice.clone(),
             last_evaluated_at: feature.last_evaluated_at,
@@ -963,17 +1005,125 @@ impl FeatureRepositoryImpl {
         Ok(())
     }
 
+    fn stale_predicate_sql() -> &'static str {
+        r#"((
+            f.expires_at IS NOT NULL
+            AND f.expires_at < NOW()
+        ) OR (
+            f.lifecycle_stage IN ('active', 'deprecated')
+            AND COALESCE(f.created_at, NOW()) < NOW() - INTERVAL '30 days'
+            AND (f.last_evaluated_at IS NULL OR f.last_evaluated_at < NOW() - INTERVAL '30 days')
+        ) OR (
+            f.lifecycle_stage IN ('active', 'deprecated')
+            AND COALESCE(f.created_at, NOW()) < NOW() - INTERVAL '90 days'
+            AND f.evaluation_count_90d = 0
+        ) OR (
+            f.lifecycle_stage IN ('active', 'deprecated')
+            AND COALESCE(f.created_at, NOW()) < NOW() - INTERVAL '90 days'
+            AND f.active = false
+        ))"#
+    }
+
+    fn push_feature_filters<'a>(
+        query_builder: &mut sqlx::QueryBuilder<'a, Postgres>,
+        key: Option<&str>,
+        feature_type: Option<&FeatureType>,
+        lifecycle_stage: Option<&str>,
+        stale: Option<bool>,
+        include_archived: bool,
+    ) {
+        if let Some(key) = key {
+            query_builder.push(" AND f.key ILIKE ");
+            query_builder.push_bind(format!("%{key}%"));
+        }
+        if let Some(feature_type_value) = feature_type {
+            let feature_type_str = match feature_type_value {
+                FeatureType::Simple => "Simple",
+                FeatureType::Contextual => "Contextual",
+            };
+            query_builder
+                .push(" AND f.feature_type = ")
+                .push_bind(feature_type_str);
+        }
+        if let Some(lifecycle_stage) = lifecycle_stage {
+            query_builder
+                .push(" AND f.lifecycle_stage = ")
+                .push_bind(lifecycle_stage.to_lowercase());
+        } else if !include_archived {
+            query_builder.push(" AND f.lifecycle_stage <> 'archived'");
+        }
+        if let Some(stale) = stale {
+            if stale {
+                query_builder
+                    .push(" AND ")
+                    .push(Self::stale_predicate_sql());
+            } else {
+                query_builder
+                    .push(" AND NOT ")
+                    .push(Self::stale_predicate_sql());
+            }
+        }
+    }
+
+    async fn archive_blockers_conn(
+        &self,
+        conn: &mut PgConnection,
+        feature_id: Uuid,
+    ) -> Result<Vec<String>, Error> {
+        let dependent_count: i64 = sqlx::query_scalar(
+            r#"SELECT COUNT(*)
+               FROM feature_dependencies fd
+               JOIN features f ON f.id = fd.feature_id
+               WHERE fd.depends_on_id = $1
+                 AND f.lifecycle_stage <> 'archived'"#,
+        )
+        .bind(feature_id)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(Error::DatabaseError)?;
+
+        let active_stage_count: i64 = sqlx::query_scalar(
+            r#"SELECT COUNT(*)
+               FROM features_pipeline_stages
+               WHERE feature_id = $1
+                 AND status NOT IN ('NOT_DEPLOYED', 'ROLLBACKED')"#,
+        )
+        .bind(feature_id)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(Error::DatabaseError)?;
+
+        let mut blockers = Vec::new();
+        if dependent_count > 0 {
+            blockers.push(format!("{dependent_count} active dependent feature(s)"));
+        }
+        if active_stage_count > 0 {
+            blockers.push(format!("{active_stage_count} active rollout stage(s)"));
+        }
+        Ok(blockers)
+    }
+
     async fn get_features_windowed(
         &self,
         team_id: Uuid,
         key: Option<String>,
         feature_type: Option<FeatureType>,
+        lifecycle_stage: Option<String>,
+        stale: Option<bool>,
+        include_archived: bool,
         limit: i64,
         offset: i64,
     ) -> Result<(Vec<FeatureWithStageRow>, i64), Error> {
         if limit <= 0 {
             let total_count = self
-                .count_filtered_features(team_id, key.clone(), feature_type.clone())
+                .count_filtered_features(
+                    team_id,
+                    key.clone(),
+                    feature_type.clone(),
+                    lifecycle_stage.clone(),
+                    stale,
+                    include_archived,
+                )
                 .await?;
             return Ok((Vec::new(), total_count));
         }
@@ -984,26 +1134,21 @@ impl FeatureRepositoryImpl {
         let mut query_builder = sqlx::QueryBuilder::new(
             r#"SELECT f.id as feature_id, f.key as feature_key, f.description, f.feature_type, f.team_id, f.created_at,
                f.kill_switch_enabled, f.kill_switch_activated_at, f.rollback_scheduled_at, f.active as feature_enabled,
-               f.lifecycle_stage, f.deprecated_at, f.deprecation_notice, f.last_evaluated_at,
+               f.lifecycle_stage, f.owner, f.expires_at, f.cleanup_reason, f.archived_at,
+               f.deprecated_at, f.deprecation_notice, f.last_evaluated_at,
                f.evaluation_count_7d, f.evaluation_count_30d, f.evaluation_count_90d,
                COUNT(*) OVER() as total_count
                FROM features f"#,
         );
         query_builder.push(" WHERE f.team_id = ").push_bind(team_id);
-
-        if let Some(key) = key_for_query {
-            query_builder.push(" AND f.key ILIKE ");
-            query_builder.push_bind(format!("%{key}%"));
-        }
-        if let Some(feature_type_value) = feature_type_for_query {
-            let feature_type_str = match feature_type_value {
-                FeatureType::Simple => "Simple",
-                FeatureType::Contextual => "Contextual",
-            };
-            query_builder
-                .push(" AND f.feature_type = ")
-                .push_bind(feature_type_str);
-        }
+        Self::push_feature_filters(
+            &mut query_builder,
+            key_for_query.as_deref(),
+            feature_type_for_query.as_ref(),
+            lifecycle_stage.as_deref(),
+            stale,
+            include_archived,
+        );
         query_builder.push(" ORDER BY f.key");
         query_builder.push(" LIMIT ").push_bind(limit);
         query_builder.push(" OFFSET ").push_bind(offset);
@@ -1014,8 +1159,15 @@ impl FeatureRepositoryImpl {
         let total_count = if let Some(row) = rows.first() {
             row.get::<i64, _>("total_count")
         } else {
-            self.count_filtered_features(team_id, key.clone(), feature_type.clone())
-                .await?
+            self.count_filtered_features(
+                team_id,
+                key.clone(),
+                feature_type.clone(),
+                lifecycle_stage.clone(),
+                stale,
+                include_archived,
+            )
+            .await?
         };
 
         let mut feature_rows = Vec::with_capacity(rows.len());
@@ -1031,23 +1183,20 @@ impl FeatureRepositoryImpl {
         team_id: Uuid,
         key: Option<String>,
         feature_type: Option<FeatureType>,
+        lifecycle_stage: Option<String>,
+        stale: Option<bool>,
+        include_archived: bool,
     ) -> Result<i64, Error> {
         let mut count_query = sqlx::QueryBuilder::new("SELECT COUNT(*) FROM features f");
         count_query.push(" WHERE f.team_id = ").push_bind(team_id);
-
-        if let Some(key) = key {
-            count_query.push(" AND f.key ILIKE ");
-            count_query.push_bind(format!("%{key}%"));
-        }
-        if let Some(feature_type_value) = feature_type {
-            let feature_type_str = match feature_type_value {
-                FeatureType::Simple => "Simple",
-                FeatureType::Contextual => "Contextual",
-            };
-            count_query
-                .push(" AND f.feature_type = ")
-                .push_bind(feature_type_str);
-        }
+        Self::push_feature_filters(
+            &mut count_query,
+            key.as_deref(),
+            feature_type.as_ref(),
+            lifecycle_stage.as_deref(),
+            stale,
+            include_archived,
+        );
 
         let total_count: i64 = count_query
             .build_query_scalar()
@@ -1065,15 +1214,37 @@ impl FeatureRepositoryImpl {
             FeatureType::Contextual => "Contextual",
         };
 
-        let result = sqlx::query!(
-            r#"INSERT INTO features (id, key, description, feature_type, team_id)
-               VALUES ($1, $2, $3, $4, $5) RETURNING id"#,
-            id,
-            input.key,
-            input.description,
-            feature_type_str,
-            input.team_id
+        let lifecycle_stage = input.lifecycle_stage.to_lowercase();
+        let deprecated_at = if lifecycle_stage == "deprecated" {
+            Some(Utc::now())
+        } else {
+            None
+        };
+        let archived_at = if lifecycle_stage == "archived" {
+            Some(Utc::now())
+        } else {
+            None
+        };
+
+        let result = sqlx::query(
+            r#"INSERT INTO features (
+                   id, key, description, feature_type, team_id, lifecycle_stage, owner,
+                   expires_at, cleanup_reason, deprecated_at, archived_at
+               )
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+               RETURNING id"#,
         )
+        .bind(id)
+        .bind(&input.key)
+        .bind(&input.description)
+        .bind(feature_type_str)
+        .bind(input.team_id)
+        .bind(lifecycle_stage)
+        .bind(&input.owner)
+        .bind(input.expires_at)
+        .bind(&input.cleanup_reason)
+        .bind(deprecated_at)
+        .bind(archived_at)
         .fetch_one(&mut *tx)
         .await;
 
@@ -1114,16 +1285,72 @@ impl FeatureRepositoryImpl {
             FeatureType::Contextual => "Contextual",
         };
 
+        let previous_lifecycle_stage = existing_feature.lifecycle_stage.clone();
+        let lifecycle_stage = input
+            .lifecycle_stage
+            .clone()
+            .unwrap_or(previous_lifecycle_stage.clone())
+            .to_lowercase();
+        if lifecycle_stage == "archived"
+            && previous_lifecycle_stage.to_lowercase() != "archived"
+            && !input.archive_confirmation
+        {
+            let blockers = self.archive_blockers_conn(tx, input.id).await?;
+            if !blockers.is_empty() {
+                return Err(Error::InvalidInput(format!(
+                    "Archive requires confirmation because this feature has {}",
+                    blockers.join(" and ")
+                )));
+            }
+        }
+
         let key = input.key.clone().unwrap_or(existing_feature.key);
         let description = input.description.clone().or(existing_feature.description);
+        let owner = match &input.owner {
+            Some(Some(owner)) if owner.trim().is_empty() => None,
+            Some(owner) => owner.clone(),
+            None => existing_feature.owner,
+        };
+        let expires_at = input.expires_at.unwrap_or(existing_feature.expires_at);
+        let cleanup_reason = match &input.cleanup_reason {
+            Some(Some(reason)) if reason.trim().is_empty() => None,
+            Some(reason) => reason.clone(),
+            None => existing_feature.cleanup_reason,
+        };
+        let deprecated_at = if lifecycle_stage == "deprecated" {
+            existing_feature.deprecated_at.or_else(|| Some(Utc::now()))
+        } else {
+            None
+        };
+        let archived_at = if lifecycle_stage == "archived" {
+            existing_feature.archived_at.or_else(|| Some(Utc::now()))
+        } else {
+            None
+        };
         let id = input.id;
-        let result = sqlx::query!(
-            r#"UPDATE features SET key = $1, description = $2, feature_type = $3 WHERE id = $4"#,
-            key,
-            description,
-            feature_type_str,
-            id
+        let result = sqlx::query(
+            r#"UPDATE features
+               SET key = $1,
+                   description = $2,
+                   feature_type = $3,
+                   lifecycle_stage = $4,
+                   owner = $5,
+                   expires_at = $6,
+                   cleanup_reason = $7,
+                   deprecated_at = $8,
+                   archived_at = $9
+               WHERE id = $10"#,
         )
+        .bind(key)
+        .bind(description)
+        .bind(feature_type_str)
+        .bind(lifecycle_stage)
+        .bind(owner)
+        .bind(expires_at)
+        .bind(cleanup_reason)
+        .bind(deprecated_at)
+        .bind(archived_at)
+        .bind(id)
         .execute(&mut *tx)
         .await;
 
@@ -1441,22 +1668,30 @@ impl FeatureRepository for FeatureRepositoryImpl {
         key: Option<String>,
         feature_type: Option<FeatureType>,
     ) -> Result<Vec<Feature>, Error> {
+        self.get_features_filtered(team_id, key, feature_type, None, None, true)
+            .await
+    }
+
+    async fn get_features_filtered(
+        &self,
+        team_id: Uuid,
+        key: Option<String>,
+        feature_type: Option<FeatureType>,
+        lifecycle_stage: Option<String>,
+        stale: Option<bool>,
+        include_archived: bool,
+    ) -> Result<Vec<Feature>, Error> {
         let mut query_builder = sqlx::QueryBuilder::new(FEATURE_SELECT);
         query_builder.push(" WHERE f.team_id = ").push_bind(team_id);
 
-        if let Some(key) = key {
-            query_builder.push(" AND f.key ILIKE ");
-            query_builder.push_bind(format!("%{key}%"));
-        }
-        if let Some(feature_type_value) = feature_type {
-            let feature_type_str = match feature_type_value {
-                FeatureType::Simple => "Simple",
-                FeatureType::Contextual => "Contextual",
-            };
-            query_builder
-                .push(" AND f.feature_type = ")
-                .push_bind(feature_type_str);
-        }
+        Self::push_feature_filters(
+            &mut query_builder,
+            key.as_deref(),
+            feature_type.as_ref(),
+            lifecycle_stage.as_deref(),
+            stale,
+            include_archived,
+        );
         query_builder.push(" ORDER BY f.key");
 
         let result = query_builder
@@ -1481,7 +1716,16 @@ impl FeatureRepository for FeatureRepositoryImpl {
     ) -> Result<(Vec<Feature>, i64), Error> {
         let offset = (page_number - 1) * page_size;
         let (feature_rows, total_count) = self
-            .get_features_windowed(team_id, key, feature_type, page_size as i64, offset as i64)
+            .get_features_windowed(
+                team_id,
+                key,
+                feature_type,
+                None,
+                None,
+                true,
+                page_size as i64,
+                offset as i64,
+            )
             .await?;
         let mut features = Self::map_rows_to_feature_list(feature_rows);
         self.hydrate_feature_dependencies(&mut features).await?;
@@ -1498,7 +1742,36 @@ impl FeatureRepository for FeatureRepositoryImpl {
         limit: i64,
     ) -> Result<(Vec<Feature>, i64), Error> {
         let (feature_rows, total_count) = self
-            .get_features_windowed(team_id, key, feature_type, limit, offset)
+            .get_features_windowed(team_id, key, feature_type, None, None, true, limit, offset)
+            .await?;
+        let mut features = Self::map_rows_to_feature_list(feature_rows);
+        self.hydrate_feature_dependencies(&mut features).await?;
+
+        Ok((features, total_count))
+    }
+
+    async fn get_features_with_offset_filtered(
+        &self,
+        team_id: Uuid,
+        key: Option<String>,
+        feature_type: Option<FeatureType>,
+        lifecycle_stage: Option<String>,
+        stale: Option<bool>,
+        include_archived: bool,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<Feature>, i64), Error> {
+        let (feature_rows, total_count) = self
+            .get_features_windowed(
+                team_id,
+                key,
+                feature_type,
+                lifecycle_stage,
+                stale,
+                include_archived,
+                limit,
+                offset,
+            )
             .await?;
         let mut features = Self::map_rows_to_feature_list(feature_rows);
         self.hydrate_feature_dependencies(&mut features).await?;
@@ -2483,16 +2756,37 @@ impl FeatureRepositoryTx for FeatureRepositoryImpl {
             FeatureType::Contextual => "Contextual",
         };
 
+        let lifecycle_stage = input.lifecycle_stage.to_lowercase();
+        let deprecated_at = if lifecycle_stage == "deprecated" {
+            Some(Utc::now())
+        } else {
+            None
+        };
+        let archived_at = if lifecycle_stage == "archived" {
+            Some(Utc::now())
+        } else {
+            None
+        };
+
         // Insert feature
-        let result = sqlx::query!(
-            r#"INSERT INTO features (id, key, description, feature_type, team_id)
-               VALUES ($1, $2, $3, $4, $5)"#,
-            id,
-            input.key,
-            input.description,
-            feature_type_str,
-            input.team_id
+        let result = sqlx::query(
+            r#"INSERT INTO features (
+                   id, key, description, feature_type, team_id, lifecycle_stage, owner,
+                   expires_at, cleanup_reason, deprecated_at, archived_at
+               )
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
         )
+        .bind(id)
+        .bind(&input.key)
+        .bind(&input.description)
+        .bind(feature_type_str)
+        .bind(input.team_id)
+        .bind(lifecycle_stage)
+        .bind(&input.owner)
+        .bind(input.expires_at)
+        .bind(&input.cleanup_reason)
+        .bind(deprecated_at)
+        .bind(archived_at)
         .execute(&mut *conn)
         .await;
         handle_error(None, result)?;

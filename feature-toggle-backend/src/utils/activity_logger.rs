@@ -11,6 +11,7 @@ pub mod activity_types {
     // Feature activities
     pub const FEATURE_CREATED: &str = "feature_created";
     pub const FEATURE_UPDATED: &str = "feature_updated";
+    pub const FEATURE_LIFECYCLE_UPDATED: &str = "feature_lifecycle_updated";
     pub const FEATURE_DELETED: &str = "feature_deleted";
     pub const FEATURE_DEPLOYED: &str = "feature_deployed";
     pub const FEATURE_ENABLED: &str = "feature_enabled";

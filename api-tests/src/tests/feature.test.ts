@@ -164,6 +164,67 @@ describe('Feature API', () => {
             createdIds.push(response.data.id);
         });
 
+        it('should create feature with lifecycle metadata and expose stale filter', async () => {
+            const expiresAt = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+            const fixture = {
+                ...createFeatureFixture({
+                    environmentId: testEnvironmentId
+                }),
+                lifecycleStage: 'DRAFT',
+                owner: 'Platform',
+                expiresAt,
+                cleanupReason: 'Remove after launch',
+            };
+
+            const response = await client.post(`/teams/${testTeamId}/features`, fixture);
+
+            expectStatus(response, 201);
+            expectIsoDate(response.data.createdAt);
+            expect(response.data.lifecycleStage).toBe('DRAFT');
+            expect(response.data.owner).toBe('Platform');
+            expect(response.data.cleanupReason).toBe('Remove after launch');
+            expectIsoDate(response.data.expiresAt);
+            expect(new Date(response.data.expiresAt).getTime()).toBe(new Date(expiresAt).getTime());
+            expect(response.data.isStale).toBe(true);
+            expect(response.data.staleReasons).toContain('Expired');
+
+            createdIds.push(response.data.id);
+
+            const staleList = await client.get(`/teams/${testTeamId}/features`, {
+                name: fixture.key,
+                stale: true,
+            });
+            expectSuccess(staleList);
+            expect(staleList.data.items.map((feature: { id: string }) => feature.id)).toContain(response.data.id);
+        });
+
+        it('should hide archived features by default and show them through lifecycle filter', async () => {
+            const fixture = {
+                ...createFeatureFixture({
+                    environmentId: testEnvironmentId
+                }),
+                lifecycleStage: 'ARCHIVED',
+                cleanupReason: 'Cleanup complete',
+            };
+
+            const response = await client.post(`/teams/${testTeamId}/features`, fixture);
+            expectStatus(response, 201);
+            createdIds.push(response.data.id);
+
+            const defaultList = await client.get(`/teams/${testTeamId}/features`, {
+                name: fixture.key,
+            });
+            expectSuccess(defaultList);
+            expect(defaultList.data.items).toHaveLength(0);
+
+            const archivedList = await client.get(`/teams/${testTeamId}/features`, {
+                name: fixture.key,
+                lifecycleStage: 'ARCHIVED',
+            });
+            expectSuccess(archivedList);
+            expect(archivedList.data.items.map((feature: { id: string }) => feature.id)).toContain(response.data.id);
+        });
+
         it('should reject duplicate feature keys', async () => {
             const fixture = createFeatureFixture({
                 environmentId: testEnvironmentId
@@ -290,6 +351,19 @@ describe('Feature API', () => {
 
             expectSuccess(response);
             expect(response.data.enabled).toBe(true);
+        });
+
+        it('should update lifecycle metadata', async () => {
+            const response = await updateFeature(client, testFeatureId, {
+                lifecycleStage: 'DEPRECATED',
+                owner: 'Runtime Team',
+                cleanupReason: 'Superseded by rollout v2',
+            });
+
+            expectSuccess(response);
+            expect(response.data.lifecycleStage).toBe('DEPRECATED');
+            expect(response.data.owner).toBe('Runtime Team');
+            expect(response.data.cleanupReason).toBe('Superseded by rollout v2');
         });
 
         it('should return 404 for non-existent ID', async () => {

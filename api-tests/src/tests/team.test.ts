@@ -122,13 +122,17 @@ describe('Team API', () => {
         });
 
         it('should reject name with special characters', async () => {
+            const uniqueName = `<script>alert("xss-${Date.now().toString(36)}-${Math.random()
+                .toString(36)
+                .slice(2, 8)}")</script>`;
             const response = await client.post('/teams', {
-                name: '<script>alert("xss")</script>',
+                name: uniqueName,
             });
 
             // Current API validates length only; special characters may be accepted.
             expect([201, 400]).toContain(response.status);
             if (response.status === 201) {
+                expect(response.data.name).toBe(uniqueName);
                 createdTeamIds.push(response.data.id);
             }
         });

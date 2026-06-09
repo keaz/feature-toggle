@@ -11,6 +11,7 @@ use crate::model::{
     CreateFeatureInput, CreateFeatureStageInput, CreateRelationshipInput, Feature,
     FeatureType as ModelFeatureType, LifecycleStage, UpdateFeatureInput,
 };
+use chrono::{Duration, Utc};
 use feature_toggle_shared::constants::StageStatus;
 use uuid::Uuid;
 
@@ -51,6 +52,15 @@ pub trait FeatureCrudLogic: Send + Sync {
         name: Option<String>,
         feature_type: Option<ModelFeatureType>,
     ) -> Result<Vec<Feature>, Error>;
+    async fn get_features_filtered(
+        &self,
+        team_id: ID,
+        name: Option<String>,
+        feature_type: Option<ModelFeatureType>,
+        lifecycle_stage: Option<LifecycleStage>,
+        stale: Option<bool>,
+        include_archived: bool,
+    ) -> Result<Vec<Feature>, Error>;
     async fn get_features_paginated(
         &self,
         team_id: ID,
@@ -64,6 +74,17 @@ pub trait FeatureCrudLogic: Send + Sync {
         team_id: ID,
         name: Option<String>,
         feature_type: Option<ModelFeatureType>,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<Feature>, i64), Error>;
+    async fn get_features_with_offset_filtered(
+        &self,
+        team_id: ID,
+        name: Option<String>,
+        feature_type: Option<ModelFeatureType>,
+        lifecycle_stage: Option<LifecycleStage>,
+        stale: Option<bool>,
+        include_archived: bool,
         offset: i64,
         limit: i64,
     ) -> Result<(Vec<Feature>, i64), Error>;
@@ -196,6 +217,15 @@ mockall::mock! {
             name: Option<String>,
             feature_type: Option<ModelFeatureType>,
         ) -> Result<Vec<Feature>, Error>;
+        async fn get_features_filtered(
+            &self,
+            team_id: ID,
+            name: Option<String>,
+            feature_type: Option<ModelFeatureType>,
+            lifecycle_stage: Option<LifecycleStage>,
+            stale: Option<bool>,
+            include_archived: bool,
+        ) -> Result<Vec<Feature>, Error>;
         async fn get_features_paginated(
             &self,
             team_id: ID,
@@ -209,6 +239,17 @@ mockall::mock! {
             team_id: ID,
             name: Option<String>,
             feature_type: Option<ModelFeatureType>,
+            offset: i64,
+            limit: i64,
+        ) -> Result<(Vec<Feature>, i64), Error>;
+        async fn get_features_with_offset_filtered(
+            &self,
+            team_id: ID,
+            name: Option<String>,
+            feature_type: Option<ModelFeatureType>,
+            lifecycle_stage: Option<LifecycleStage>,
+            stale: Option<bool>,
+            include_archived: bool,
             offset: i64,
             limit: i64,
         ) -> Result<(Vec<Feature>, i64), Error>;
@@ -392,6 +433,25 @@ impl FeatureLogicImpl {
         }
     }
 
+    fn map_api_to_db_lifecycle_stage(stage: LifecycleStage) -> &'static str {
+        match stage {
+            LifecycleStage::Draft => "draft",
+            LifecycleStage::Active => "active",
+            LifecycleStage::Deprecated => "deprecated",
+            LifecycleStage::Archived => "archived",
+        }
+    }
+
+    fn map_lifecycle_filter(stage: LifecycleStage) -> String {
+        Self::map_api_to_db_lifecycle_stage(stage).to_string()
+    }
+
+    fn normalize_optional_text(value: Option<String>) -> Option<String> {
+        value
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
+
     fn map_to_create_feature(
         team_id: Uuid,
         input: CreateFeatureInput,
@@ -438,6 +498,14 @@ impl FeatureLogicImpl {
             key: input.key,
             description: input.description,
             feature_type,
+            lifecycle_stage: input
+                .lifecycle_stage
+                .map(Self::map_api_to_db_lifecycle_stage)
+                .unwrap_or("active")
+                .to_string(),
+            owner: Self::normalize_optional_text(input.owner),
+            expires_at: input.expires_at,
+            cleanup_reason: Self::normalize_optional_text(input.cleanup_reason),
             stages,
             dependencies,
             variants,
@@ -513,29 +581,84 @@ impl FeatureLogicImpl {
             key: Some(input.key),
             description: input.description,
             feature_type,
+            lifecycle_stage: input
+                .lifecycle_stage
+                .map(Self::map_api_to_db_lifecycle_stage)
+                .map(str::to_string),
+            owner: input
+                .owner
+                .map(|owner| owner.and_then(|value| Self::normalize_optional_text(Some(value)))),
+            expires_at: input.expires_at,
+            cleanup_reason: input
+                .cleanup_reason
+                .map(|reason| reason.and_then(|value| Self::normalize_optional_text(Some(value)))),
+            archive_confirmation: input.archive_confirmation,
             stages,
             dependencies,
             variants,
         })
     }
 
+    fn stale_reasons(feature: &crate::database::entity::Feature) -> Vec<String> {
+        let now = Utc::now();
+        let mut reasons = Vec::new();
+
+        if feature
+            .expires_at
+            .is_some_and(|expires_at| expires_at < now)
+        {
+            reasons.push("Expired".to_string());
+        }
+
+        let lifecycle = feature.lifecycle_stage.to_lowercase();
+        let lifecycle_can_stale = lifecycle == "active" || lifecycle == "deprecated";
+        if lifecycle_can_stale {
+            let older_than_30_days = feature.created_at < now - Duration::days(30);
+            let no_recent_evaluations = feature
+                .last_evaluated_at
+                .map(|last| last < now - Duration::days(30))
+                .unwrap_or(true);
+            if older_than_30_days && no_recent_evaluations {
+                reasons.push("No recent evaluations".to_string());
+            }
+
+            if feature.created_at < now - Duration::days(90) && feature.evaluation_count_90d == 0 {
+                reasons.push("No evaluations in 90 days".to_string());
+            }
+
+            if feature.created_at < now - Duration::days(90) && !feature.active {
+                reasons.push("Disabled for 90+ days".to_string());
+            }
+        }
+
+        reasons
+    }
+
     fn map_entity_to_api_feature(feature: crate::database::entity::Feature) -> Feature {
+        let stale_reasons = Self::stale_reasons(&feature);
         Feature {
             id: feature.id.into(),
             key: feature.key,
             description: feature.description,
             feature_type: Self::map_entity_to_api_feature_type(feature.feature_type),
             enabled: feature.active,
+            created_at: feature.created_at,
             kill_switch_enabled: feature.kill_switch_enabled,
             kill_switch_activated_at: feature.kill_switch_activated_at,
             rollback_scheduled_at: feature.rollback_scheduled_at,
             lifecycle_stage: Self::map_db_lifecycle_stage(&feature.lifecycle_stage),
+            owner: feature.owner.clone(),
+            expires_at: feature.expires_at,
+            cleanup_reason: feature.cleanup_reason.clone(),
+            archived_at: feature.archived_at,
             deprecated_at: feature.deprecated_at,
             deprecation_notice: feature.deprecation_notice.clone(),
             last_evaluated_at: feature.last_evaluated_at,
             evaluation_count_7d: feature.evaluation_count_7d,
             evaluation_count_30d: feature.evaluation_count_30d,
             evaluation_count_90d: feature.evaluation_count_90d,
+            is_stale: !stale_reasons.is_empty(),
+            stale_reasons,
             team_id: feature.team_id.into(),
             dependencies: feature
                 .dependencies
@@ -548,9 +671,9 @@ impl FeatureLogicImpl {
 
     fn map_db_lifecycle_stage(stage: &str) -> LifecycleStage {
         match stage.to_lowercase().as_str() {
+            "draft" => LifecycleStage::Draft,
             "deprecated" => LifecycleStage::Deprecated,
             "archived" => LifecycleStage::Archived,
-            "permanent" => LifecycleStage::Permanent,
             _ => LifecycleStage::Active,
         }
     }
@@ -619,11 +742,32 @@ impl FeatureCrudLogic for FeatureLogicImpl {
         name: Option<String>,
         feature_type: Option<ModelFeatureType>,
     ) -> Result<Vec<Feature>, Error> {
+        self.get_features_filtered(team_id, name, feature_type, None, None, true)
+            .await
+    }
+
+    async fn get_features_filtered(
+        &self,
+        team_id: ID,
+        name: Option<String>,
+        feature_type: Option<ModelFeatureType>,
+        lifecycle_stage: Option<LifecycleStage>,
+        stale: Option<bool>,
+        include_archived: bool,
+    ) -> Result<Vec<Feature>, Error> {
         let team_id = Uuid::try_from(team_id).map_err(|e| Error::InvalidInput(e.to_string()))?;
         let entity_feature_type = feature_type.map(Self::map_api_to_entity_feature_type);
+        let lifecycle_stage = lifecycle_stage.map(Self::map_lifecycle_filter);
         let features = self
             .repository
-            .get_features(team_id, name, entity_feature_type)
+            .get_features_filtered(
+                team_id,
+                name,
+                entity_feature_type,
+                lifecycle_stage,
+                stale,
+                include_archived,
+            )
             .await?;
 
         Ok(features
@@ -663,11 +807,45 @@ impl FeatureCrudLogic for FeatureLogicImpl {
         offset: i64,
         limit: i64,
     ) -> Result<(Vec<Feature>, i64), Error> {
+        self.get_features_with_offset_filtered(
+            team_id,
+            name,
+            feature_type,
+            None,
+            None,
+            true,
+            offset,
+            limit,
+        )
+        .await
+    }
+
+    async fn get_features_with_offset_filtered(
+        &self,
+        team_id: ID,
+        name: Option<String>,
+        feature_type: Option<ModelFeatureType>,
+        lifecycle_stage: Option<LifecycleStage>,
+        stale: Option<bool>,
+        include_archived: bool,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<Feature>, i64), Error> {
         let team_id = Uuid::try_from(team_id).map_err(|e| Error::InvalidInput(e.to_string()))?;
         let entity_feature_type = feature_type.map(Self::map_api_to_entity_feature_type);
+        let lifecycle_stage = lifecycle_stage.map(Self::map_lifecycle_filter);
         let (features, total) = self
             .repository
-            .get_features_with_offset(team_id, name, entity_feature_type, offset, limit)
+            .get_features_with_offset_filtered(
+                team_id,
+                name,
+                entity_feature_type,
+                lifecycle_stage,
+                stale,
+                include_archived,
+                offset,
+                limit,
+            )
             .await?;
 
         let mapped_features = features
@@ -1948,6 +2126,10 @@ mod test {
                     kill_switch_activated_at: None,
                     rollback_scheduled_at: None,
                     lifecycle_stage: "active".to_string(),
+                    owner: None,
+                    expires_at: None,
+                    cleanup_reason: None,
+                    archived_at: None,
                     deprecated_at: None,
                     deprecation_notice: None,
                     last_evaluated_at: None,
@@ -2009,6 +2191,10 @@ mod test {
             description: Some("New feature description".to_string()),
             feature_type: ModelFeatureType::Simple,
             enabled: Some(true),
+            lifecycle_stage: None,
+            owner: None,
+            expires_at: None,
+            cleanup_reason: None,
             dependencies: vec![],
             relationships: vec![],
             stages: vec![],
@@ -2055,6 +2241,11 @@ mod test {
             description: Some("Updated description".to_string()),
             feature_type: ModelFeatureType::Contextual,
             enabled: Some(true),
+            lifecycle_stage: None,
+            owner: None,
+            expires_at: None,
+            cleanup_reason: None,
+            archive_confirmation: false,
             dependencies: vec![],
             relationships: vec![],
             stages: vec![],
@@ -2080,6 +2271,10 @@ mod test {
                     kill_switch_activated_at: None,
                     rollback_scheduled_at: None,
                     lifecycle_stage: "active".to_string(),
+                    owner: None,
+                    expires_at: None,
+                    cleanup_reason: None,
+                    archived_at: None,
                     deprecated_at: None,
                     deprecation_notice: None,
                     last_evaluated_at: None,
@@ -2134,10 +2329,18 @@ mod test {
         let environment_logic = MockEnvironmentLogic::new();
 
         repository
-            .expect_get_features()
-            .withf(|_, name, feature_type| name.is_none() && feature_type.is_none())
+            .expect_get_features_filtered()
+            .withf(
+                |_, name, feature_type, lifecycle_stage, stale, include_archived| {
+                    name.is_none()
+                        && feature_type.is_none()
+                        && lifecycle_stage.is_none()
+                        && stale.is_none()
+                        && *include_archived
+                },
+            )
             .times(1)
-            .returning(move |_, _, _| {
+            .returning(move |_, _, _, _, _, _| {
                 Ok(vec![
                     EntityFeature {
                         id: Uuid::new_v4(),
@@ -2151,6 +2354,10 @@ mod test {
                         kill_switch_activated_at: None,
                         rollback_scheduled_at: None,
                         lifecycle_stage: "active".to_string(),
+                        owner: None,
+                        expires_at: None,
+                        cleanup_reason: None,
+                        archived_at: None,
                         deprecated_at: None,
                         deprecation_notice: None,
                         last_evaluated_at: None,
@@ -2171,6 +2378,10 @@ mod test {
                         kill_switch_activated_at: None,
                         rollback_scheduled_at: None,
                         lifecycle_stage: "active".to_string(),
+                        owner: None,
+                        expires_at: None,
+                        cleanup_reason: None,
+                        archived_at: None,
                         deprecated_at: None,
                         deprecation_notice: None,
                         last_evaluated_at: None,
@@ -3091,6 +3302,10 @@ mod test {
             kill_switch_activated_at: None,
             rollback_scheduled_at: Some(chrono::Utc::now() + chrono::Duration::minutes(30)),
             lifecycle_stage: "active".to_string(),
+            owner: None,
+            expires_at: None,
+            cleanup_reason: None,
+            archived_at: None,
             deprecated_at: None,
             deprecation_notice: None,
             last_evaluated_at: None,
@@ -3139,6 +3354,10 @@ mod test {
                 kill_switch_activated_at: None,
                 rollback_scheduled_at: None,
                 lifecycle_stage: "active".to_string(),
+                owner: None,
+                expires_at: None,
+                cleanup_reason: None,
+                archived_at: None,
                 deprecated_at: None,
                 deprecation_notice: None,
                 last_evaluated_at: None,
@@ -3159,6 +3378,10 @@ mod test {
                 kill_switch_activated_at: None,
                 rollback_scheduled_at: None,
                 lifecycle_stage: "active".to_string(),
+                owner: None,
+                expires_at: None,
+                cleanup_reason: None,
+                archived_at: None,
                 deprecated_at: None,
                 deprecation_notice: None,
                 last_evaluated_at: None,

@@ -90,7 +90,10 @@ async fn test_set_stage_contexts_rejects_cross_team_context() {
     let invalid = feature_repo
         .set_stage_contexts(stage_id, vec![foreign_context.id])
         .await;
-    assert!(matches!(invalid, Err(Error::DatabaseError(_))));
+    assert!(matches!(
+        invalid,
+        Err(Error::InvalidInput(message)) if message.contains("Stage contexts")
+    ));
 
     let after = feature_repo
         .get_stage_contexts(stage_id)

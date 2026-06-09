@@ -56,6 +56,10 @@ async fn test_set_stage_criteria_replaces_existing() {
             key: format!("criteria-replace-{}", Uuid::new_v4()),
             description: None,
             feature_type: FeatureType::Simple,
+            lifecycle_stage: "active".to_string(),
+            owner: None,
+            expires_at: None,
+            cleanup_reason: None,
             stages: vec![CreateFeatureStage {
                 id: stage_id,
                 environment_id: env_id,
@@ -144,6 +148,10 @@ async fn test_set_stage_criteria_rejects_variant_from_other_feature() {
             key: format!("criteria-variant-primary-{}", Uuid::new_v4()),
             description: Some("feature with a valid local variant".to_string()),
             feature_type: FeatureType::Contextual,
+            lifecycle_stage: "active".to_string(),
+            owner: None,
+            expires_at: None,
+            cleanup_reason: None,
             stages: vec![CreateFeatureStage {
                 id: stage_id,
                 environment_id: env_id,
@@ -169,6 +177,10 @@ async fn test_set_stage_criteria_rejects_variant_from_other_feature() {
             key: format!("criteria-variant-foreign-{}", Uuid::new_v4()),
             description: Some("feature with a foreign variant".to_string()),
             feature_type: FeatureType::Contextual,
+            lifecycle_stage: "active".to_string(),
+            owner: None,
+            expires_at: None,
+            cleanup_reason: None,
             stages: vec![],
             dependencies: vec![],
             variants: Some(vec![(
@@ -208,7 +220,10 @@ async fn test_set_stage_criteria_rejects_variant_from_other_feature() {
             }],
         )
         .await;
-    assert!(matches!(invalid, Err(Error::DatabaseError(_))));
+    assert!(matches!(
+        invalid,
+        Err(Error::InvalidInput(message)) if message.contains("Selected variant")
+    ));
 
     let after = repo
         .get_stage_criteria(stage_id)
