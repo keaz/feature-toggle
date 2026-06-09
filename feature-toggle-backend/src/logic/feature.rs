@@ -145,19 +145,24 @@ pub trait FeatureCrudLogic: Send + Sync {
         &self,
         id: ID,
         rollback_in_minutes: Option<i32>,
+        reason: String,
+        expires_at: Option<chrono::DateTime<Utc>>,
         actor: Option<crate::logic::ActorContext>,
     ) -> Result<Feature, Error>;
     async fn emergency_enable_feature(
         &self,
         id: ID,
+        reason: String,
         actor: Option<crate::logic::ActorContext>,
     ) -> Result<Feature, Error>;
     async fn get_features_pending_rollback(&self) -> Result<Vec<Feature>, Error>;
+    async fn get_features_pending_emergency_expiry(&self) -> Result<Vec<Feature>, Error>;
     async fn execute_scheduled_disable(
         &self,
         id: ID,
         actor: Option<crate::logic::ActorContext>,
     ) -> Result<Feature, Error>;
+    async fn expire_emergency_override(&self, id: ID) -> Result<Feature, Error>;
 }
 
 /// Stage context and criteria management operations
@@ -286,11 +291,15 @@ mockall::mock! {
             &self,
             id: ID,
             rollback_in_minutes: Option<i32>,
+            reason: String,
+            expires_at: Option<chrono::DateTime<Utc>>,
             actor: Option<crate::logic::ActorContext>,
         ) -> Result<Feature, Error>;
-        async fn emergency_enable_feature(&self, id: ID, actor: Option<crate::logic::ActorContext>) -> Result<Feature, Error>;
+        async fn emergency_enable_feature(&self, id: ID, reason: String, actor: Option<crate::logic::ActorContext>) -> Result<Feature, Error>;
         async fn get_features_pending_rollback(&self) -> Result<Vec<Feature>, Error>;
+        async fn get_features_pending_emergency_expiry(&self) -> Result<Vec<Feature>, Error>;
         async fn execute_scheduled_disable(&self, id: ID, actor: Option<crate::logic::ActorContext>) -> Result<Feature, Error>;
+        async fn expire_emergency_override(&self, id: ID) -> Result<Feature, Error>;
     }
 
     #[async_trait::async_trait]
@@ -646,6 +655,10 @@ impl FeatureLogicImpl {
             kill_switch_enabled: feature.kill_switch_enabled,
             kill_switch_activated_at: feature.kill_switch_activated_at,
             rollback_scheduled_at: feature.rollback_scheduled_at,
+            emergency_override_reason: feature.emergency_override_reason.clone(),
+            emergency_override_expires_at: feature.emergency_override_expires_at,
+            emergency_override_actor_id: feature.emergency_override_actor_id.map(ID::from),
+            emergency_override_applied_at: feature.emergency_override_applied_at,
             lifecycle_stage: Self::map_db_lifecycle_stage(&feature.lifecycle_stage),
             owner: feature.owner.clone(),
             expires_at: feature.expires_at,
@@ -1117,19 +1130,26 @@ impl FeatureCrudLogic for FeatureLogicImpl {
         &self,
         id: ID,
         rollback_in_minutes: Option<i32>,
+        reason: String,
+        expires_at: Option<chrono::DateTime<Utc>>,
         actor: Option<crate::logic::ActorContext>,
     ) -> Result<Feature, Error> {
         let feature_id = id_to_uuid(id)?;
-        let feature = self
-            .repository
-            .emergency_disable_feature(feature_id, rollback_in_minutes)
-            .await?;
-
-        // Extract actor information
+        let previous = self.repository.get_feature_by_id(feature_id).await?;
         let (actor_id, actor_name) = actor
             .as_ref()
             .map(|a| a.as_option())
             .unwrap_or((None, None));
+        let feature = self
+            .repository
+            .emergency_disable_feature(
+                feature_id,
+                rollback_in_minutes,
+                reason.clone(),
+                expires_at,
+                actor_id,
+            )
+            .await?;
 
         let log_message = match rollback_in_minutes {
             Some(minutes) if minutes > 0 => {
@@ -1157,6 +1177,16 @@ impl FeatureCrudLogic for FeatureLogicImpl {
                 "feature_id": feature.id.to_string(),
                 "feature_key": feature.key.clone(),
                 "rollback_in_minutes": rollback_in_minutes,
+                "reason": reason,
+                "expires_at": expires_at.map(|value| value.to_rfc3339()),
+                "old_state": {
+                    "kill_switch_enabled": previous.kill_switch_enabled,
+                    "active": previous.active,
+                },
+                "new_state": {
+                    "kill_switch_enabled": feature.kill_switch_enabled,
+                    "active": feature.active,
+                },
             })),
         )
         .await;
@@ -1212,6 +1242,8 @@ impl FeatureCrudLogic for FeatureLogicImpl {
                 "rollback_in_minutes": rollback_in_minutes,
                 "rollback_scheduled_at": scheduled_at,
                 "activated_by": actor_display_name,
+                "reason": feature.emergency_override_reason.clone(),
+                "expires_at": feature.emergency_override_expires_at.map(|value| value.to_rfc3339()),
             })),
         });
 
@@ -1221,9 +1253,11 @@ impl FeatureCrudLogic for FeatureLogicImpl {
     async fn emergency_enable_feature(
         &self,
         id: ID,
+        reason: String,
         actor: Option<crate::logic::ActorContext>,
     ) -> Result<Feature, Error> {
         let feature_id = id_to_uuid(id)?;
+        let previous = self.repository.get_feature_by_id(feature_id).await?;
         let feature = self.repository.emergency_enable_feature(feature_id).await?;
 
         // Extract actor information
@@ -1246,6 +1280,15 @@ impl FeatureCrudLogic for FeatureLogicImpl {
             Some(serde_json::json!({
                 "feature_id": feature.id.to_string(),
                 "feature_key": feature.key.clone(),
+                "reason": reason,
+                "old_state": {
+                    "kill_switch_enabled": previous.kill_switch_enabled,
+                    "active": previous.active,
+                },
+                "new_state": {
+                    "kill_switch_enabled": feature.kill_switch_enabled,
+                    "active": feature.active,
+                },
             })),
         )
         .await;
@@ -1255,6 +1298,17 @@ impl FeatureCrudLogic for FeatureLogicImpl {
 
     async fn get_features_pending_rollback(&self) -> Result<Vec<Feature>, Error> {
         let features = self.repository.get_features_pending_rollback().await?;
+        Ok(features
+            .into_iter()
+            .map(Self::map_entity_to_api_feature)
+            .collect())
+    }
+
+    async fn get_features_pending_emergency_expiry(&self) -> Result<Vec<Feature>, Error> {
+        let features = self
+            .repository
+            .get_features_pending_emergency_expiry()
+            .await?;
         Ok(features
             .into_iter()
             .map(Self::map_entity_to_api_feature)
@@ -1326,6 +1380,68 @@ impl FeatureCrudLogic for FeatureLogicImpl {
                 "team_id": feature.team_id.to_string(),
                 "scheduled_execution": true,
                 "executed_by": actor_display_name,
+            })),
+        });
+
+        Ok(Self::map_entity_to_api_feature(feature))
+    }
+
+    async fn expire_emergency_override(&self, id: ID) -> Result<Feature, Error> {
+        let feature_id = id_to_uuid(id)?;
+        let previous = self.repository.get_feature_by_id(feature_id).await?;
+        let feature = self
+            .repository
+            .expire_emergency_override(feature_id)
+            .await?;
+        let expired_reason = previous.emergency_override_reason.clone();
+        let expired_at = previous.emergency_override_expires_at;
+
+        let _ = crate::utils::activity_logger::log_feature_activity(
+            &self.activity_log_repository,
+            crate::utils::activity_logger::activity_types::KILL_SWITCH_DEACTIVATED,
+            &feature.id.to_string(),
+            None,
+            Some("System".to_string()),
+            format!(
+                "Emergency override expired for feature '{}'; feature was restored",
+                feature.key
+            ),
+            Some(serde_json::json!({
+                "feature_id": feature.id.to_string(),
+                "feature_key": feature.key.clone(),
+                "expired_override": true,
+                "reason": expired_reason.clone(),
+                "expired_at": expired_at.map(|value| value.to_rfc3339()),
+                "old_state": {
+                    "kill_switch_enabled": previous.kill_switch_enabled,
+                    "active": previous.active,
+                },
+                "new_state": {
+                    "kill_switch_enabled": feature.kill_switch_enabled,
+                    "active": feature.active,
+                },
+            })),
+        )
+        .await;
+
+        self.dispatch_notification(crate::logic::notification::NotificationEvent {
+            notification_type:
+                crate::logic::notification::NOTIFICATION_TYPE_KILL_SWITCH_DEACTIVATED.to_string(),
+            team_id: Some(feature.team_id),
+            actor_id: None,
+            recipient_user_ids: None,
+            subject: format!("Emergency override expired: {}", feature.key),
+            message: format!(
+                "Emergency override expired for feature '{}'; the feature was restored.",
+                feature.key
+            ),
+            metadata: Some(serde_json::json!({
+                "feature_id": feature.id.to_string(),
+                "feature_key": feature.key.clone(),
+                "team_id": feature.team_id.to_string(),
+                "expired_override": true,
+                "reason": expired_reason,
+                "expired_at": expired_at.map(|value| value.to_rfc3339()),
             })),
         });
 
@@ -2139,6 +2255,10 @@ mod test {
                     kill_switch_enabled: true,
                     kill_switch_activated_at: None,
                     rollback_scheduled_at: None,
+                    emergency_override_reason: None,
+                    emergency_override_expires_at: None,
+                    emergency_override_actor_id: None,
+                    emergency_override_applied_at: None,
                     lifecycle_stage: "active".to_string(),
                     owner: None,
                     expires_at: None,
@@ -2284,6 +2404,10 @@ mod test {
                     kill_switch_enabled: true,
                     kill_switch_activated_at: None,
                     rollback_scheduled_at: None,
+                    emergency_override_reason: None,
+                    emergency_override_expires_at: None,
+                    emergency_override_actor_id: None,
+                    emergency_override_applied_at: None,
                     lifecycle_stage: "active".to_string(),
                     owner: None,
                     expires_at: None,
@@ -2367,6 +2491,10 @@ mod test {
                         kill_switch_enabled: true,
                         kill_switch_activated_at: None,
                         rollback_scheduled_at: None,
+                        emergency_override_reason: None,
+                        emergency_override_expires_at: None,
+                        emergency_override_actor_id: None,
+                        emergency_override_applied_at: None,
                         lifecycle_stage: "active".to_string(),
                         owner: None,
                         expires_at: None,
@@ -2391,6 +2519,10 @@ mod test {
                         kill_switch_enabled: true,
                         kill_switch_activated_at: None,
                         rollback_scheduled_at: None,
+                        emergency_override_reason: None,
+                        emergency_override_expires_at: None,
+                        emergency_override_actor_id: None,
+                        emergency_override_applied_at: None,
                         lifecycle_stage: "active".to_string(),
                         owner: None,
                         expires_at: None,
@@ -3315,6 +3447,10 @@ mod test {
             kill_switch_enabled: true,
             kill_switch_activated_at: None,
             rollback_scheduled_at: Some(chrono::Utc::now() + chrono::Duration::minutes(30)),
+            emergency_override_reason: None,
+            emergency_override_expires_at: None,
+            emergency_override_actor_id: None,
+            emergency_override_applied_at: None,
             lifecycle_stage: "active".to_string(),
             owner: None,
             expires_at: None,
@@ -3367,6 +3503,10 @@ mod test {
                 kill_switch_enabled: true,
                 kill_switch_activated_at: None,
                 rollback_scheduled_at: None,
+                emergency_override_reason: None,
+                emergency_override_expires_at: None,
+                emergency_override_actor_id: None,
+                emergency_override_applied_at: None,
                 lifecycle_stage: "active".to_string(),
                 owner: None,
                 expires_at: None,
@@ -3391,6 +3531,10 @@ mod test {
                 kill_switch_enabled: true,
                 kill_switch_activated_at: None,
                 rollback_scheduled_at: None,
+                emergency_override_reason: None,
+                emergency_override_expires_at: None,
+                emergency_override_actor_id: None,
+                emergency_override_applied_at: None,
                 lifecycle_stage: "active".to_string(),
                 owner: None,
                 expires_at: None,

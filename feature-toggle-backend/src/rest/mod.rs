@@ -63,12 +63,12 @@ use crate::rest::environment::{
 use crate::rest::error::ErrorResponse;
 use crate::rest::feature::{
     CreateFeatureRequest, CreateFeatureStageRequest, CreateFeatureVariantRequest,
-    EmergencyDisableRequest, FeatureListQuery, FeatureRelationshipResponse, FeatureResponse,
-    FeatureRolloutQuery, FeatureStageResponse, FeatureType, FeatureVariantResponse,
-    FeatureVersionDiffEntryResponse, FeatureVersionDiffResponse, FeatureVersionResponse,
-    FeatureVersionsResponse, FeaturesResponse, LifecycleStage, RollbackFeatureVersionRequest,
-    RolloutMetricsQuery, RolloutMetricsResponse, StageChangeRequest, StageChangeRequestBody,
-    UpdateFeatureRequest, VariantValueType,
+    EmergencyDisableRequest, EmergencyEnableRequest, FeatureListQuery, FeatureRelationshipResponse,
+    FeatureResponse, FeatureRolloutQuery, FeatureStageResponse, FeatureType,
+    FeatureVariantResponse, FeatureVersionDiffEntryResponse, FeatureVersionDiffResponse,
+    FeatureVersionResponse, FeatureVersionsResponse, FeaturesResponse, LifecycleStage,
+    RollbackFeatureVersionRequest, RolloutMetricsQuery, RolloutMetricsResponse, StageChangeRequest,
+    StageChangeRequestBody, UpdateFeatureRequest, VariantValueType,
 };
 use crate::rest::jwt_secret::JwtSecretResponse;
 use crate::rest::metrics::{
@@ -288,6 +288,7 @@ async fn health() -> impl Responder {
         CreateFeatureStageRequest,
         CreateFeatureVariantRequest,
         EmergencyDisableRequest,
+        EmergencyEnableRequest,
         StageChangeRequestBody,
         StageChangeRequest,
         FeatureType,

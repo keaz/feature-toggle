@@ -457,6 +457,8 @@ impl CanaryLogicImpl {
                 .emergency_disable_feature(
                     ID::from(gate.feature_id),
                     gate.rollback_in_minutes,
+                    "Canary gate failed; automatic rollback triggered".to_string(),
+                    None,
                     None,
                 )
                 .await
@@ -783,6 +785,10 @@ mod tests {
             kill_switch_enabled: true,
             kill_switch_activated_at: None,
             rollback_scheduled_at: None,
+            emergency_override_reason: None,
+            emergency_override_expires_at: None,
+            emergency_override_actor_id: None,
+            emergency_override_applied_at: None,
             lifecycle_stage: "active".to_string(),
             owner: None,
             expires_at: None,
@@ -967,7 +973,7 @@ mod tests {
         feature_logic
             .expect_emergency_disable_feature()
             .times(1)
-            .returning(|_, _, _| {
+            .returning(|_, _, _, _, _| {
                 Ok(crate::model::Feature {
                     id: ID::from(Uuid::new_v4()),
                     key: "checkout_redesign".to_string(),
@@ -978,6 +984,12 @@ mod tests {
                     kill_switch_enabled: false,
                     kill_switch_activated_at: Some(Utc::now()),
                     rollback_scheduled_at: None,
+                    emergency_override_reason: Some(
+                        "Canary gate failed; automatic rollback triggered".to_string(),
+                    ),
+                    emergency_override_expires_at: None,
+                    emergency_override_actor_id: None,
+                    emergency_override_applied_at: Some(Utc::now()),
                     lifecycle_stage: crate::model::LifecycleStage::Active,
                     owner: None,
                     expires_at: None,

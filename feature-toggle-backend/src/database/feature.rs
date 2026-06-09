@@ -85,6 +85,10 @@ pub struct FeatureSnapshotMetadata {
     pub kill_switch_enabled: bool,
     pub kill_switch_activated_at: Option<DateTime<Utc>>,
     pub rollback_scheduled_at: Option<DateTime<Utc>>,
+    pub emergency_override_reason: Option<String>,
+    pub emergency_override_expires_at: Option<DateTime<Utc>>,
+    pub emergency_override_actor_id: Option<Uuid>,
+    pub emergency_override_applied_at: Option<DateTime<Utc>>,
     pub lifecycle_stage: String,
     pub owner: Option<String>,
     pub expires_at: Option<DateTime<Utc>>,
@@ -247,6 +251,10 @@ struct Features {
     kill_switch_enabled: bool,
     kill_switch_activated_at: Option<DateTime<Utc>>,
     rollback_scheduled_at: Option<DateTime<Utc>>,
+    emergency_override_reason: Option<String>,
+    emergency_override_expires_at: Option<DateTime<Utc>>,
+    emergency_override_actor_id: Option<Uuid>,
+    emergency_override_applied_at: Option<DateTime<Utc>>,
     feature_enabled: bool,
     lifecycle_stage: String,
     owner: Option<String>,
@@ -272,6 +280,10 @@ struct FeatureWithStageRow {
     kill_switch_enabled: bool,
     kill_switch_activated_at: Option<DateTime<Utc>>,
     rollback_scheduled_at: Option<DateTime<Utc>>,
+    emergency_override_reason: Option<String>,
+    emergency_override_expires_at: Option<DateTime<Utc>>,
+    emergency_override_actor_id: Option<Uuid>,
+    emergency_override_applied_at: Option<DateTime<Utc>>,
     feature_enabled: bool,
     lifecycle_stage: String,
     owner: Option<String>,
@@ -306,6 +318,7 @@ struct FeaturePipelineStageRow {
 
 const FEATURE_SELECT: &str = r#"SELECT f.id as feature_id, f.key as feature_key, f.description, f.feature_type, f.team_id, f.created_at, 
             f.kill_switch_enabled, f.kill_switch_activated_at, f.rollback_scheduled_at, f.active as feature_enabled,
+            f.emergency_override_reason, f.emergency_override_expires_at, f.emergency_override_actor_id, f.emergency_override_applied_at,
             f.lifecycle_stage, f.owner, f.expires_at, f.cleanup_reason, f.archived_at,
             f.deprecated_at, f.deprecation_notice, f.last_evaluated_at,
             f.evaluation_count_7d, f.evaluation_count_30d, f.evaluation_count_90d
@@ -542,14 +555,19 @@ pub trait FeatureRepository: Send + Sync {
         &self,
         feature_id: Uuid,
         rollback_in_minutes: Option<i32>,
+        reason: String,
+        expires_at: Option<DateTime<Utc>>,
+        actor_id: Option<Uuid>,
     ) -> Result<Feature, Error>;
 
     async fn emergency_enable_feature(&self, feature_id: Uuid) -> Result<Feature, Error>;
 
     async fn get_features_pending_rollback(&self) -> Result<Vec<Feature>, Error>;
+    async fn get_features_pending_emergency_expiry(&self) -> Result<Vec<Feature>, Error>;
 
     // Execute the actual disable for scheduled rollback (called by scheduler)
     async fn execute_scheduled_disable(&self, feature_id: Uuid) -> Result<Feature, Error>;
+    async fn expire_emergency_override(&self, feature_id: Uuid) -> Result<Feature, Error>;
 
     // Helper: find owning feature id for a stage
     async fn get_feature_id_by_stage_id(&self, stage_id: Uuid) -> Result<Option<Uuid>, Error>;
@@ -710,6 +728,9 @@ pub trait FeatureRepositoryTx: FeatureRepository {
         conn: &mut PgConnection,
         feature_id: Uuid,
         rollback_in_minutes: Option<i32>,
+        reason: String,
+        expires_at: Option<DateTime<Utc>>,
+        actor_id: Option<Uuid>,
     ) -> Result<Feature, Error>;
     async fn emergency_enable_feature_tx(
         &self,
@@ -1212,6 +1233,10 @@ impl FeatureRepositoryImpl {
             kill_switch_enabled: feature.kill_switch_enabled,
             kill_switch_activated_at: feature.kill_switch_activated_at,
             rollback_scheduled_at: feature.rollback_scheduled_at,
+            emergency_override_reason: feature.emergency_override_reason.clone(),
+            emergency_override_expires_at: feature.emergency_override_expires_at,
+            emergency_override_actor_id: feature.emergency_override_actor_id,
+            emergency_override_applied_at: feature.emergency_override_applied_at,
             lifecycle_stage: feature.lifecycle_stage.clone(),
             owner: feature.owner.clone(),
             expires_at: feature.expires_at,
@@ -1589,6 +1614,7 @@ impl FeatureRepositoryImpl {
         let mut query_builder = sqlx::QueryBuilder::new(
             r#"SELECT f.id as feature_id, f.key as feature_key, f.description, f.feature_type, f.team_id, f.created_at,
                f.kill_switch_enabled, f.kill_switch_activated_at, f.rollback_scheduled_at, f.active as feature_enabled,
+               f.emergency_override_reason, f.emergency_override_expires_at, f.emergency_override_actor_id, f.emergency_override_applied_at,
                f.lifecycle_stage, f.owner, f.expires_at, f.cleanup_reason, f.archived_at,
                f.deprecated_at, f.deprecation_notice, f.last_evaluated_at,
                f.evaluation_count_7d, f.evaluation_count_30d, f.evaluation_count_90d,
@@ -2590,6 +2616,9 @@ impl FeatureRepository for FeatureRepositoryImpl {
         &self,
         feature_id: Uuid,
         rollback_in_minutes: Option<i32>,
+        reason: String,
+        expires_at: Option<DateTime<Utc>>,
+        actor_id: Option<Uuid>,
     ) -> Result<Feature, Error> {
         let now = chrono::Utc::now();
 
@@ -2608,12 +2637,20 @@ impl FeatureRepository for FeatureRepositoryImpl {
                 SET kill_switch_enabled = $1,
                 kill_switch_activated_at = $2,
                 rollback_scheduled_at = $3,
-                active = $4
-               WHERE id = $5"#,
+                active = $4,
+                emergency_override_reason = $5,
+                emergency_override_expires_at = $6,
+                emergency_override_actor_id = $7,
+                emergency_override_applied_at = $8
+               WHERE id = $9"#,
             kill_switch_enabled,
             activated_at,
             rollback_at,
             active,
+            reason,
+            expires_at,
+            actor_id,
+            now,
             feature_id
         )
         .execute(&self.pool)
@@ -2626,10 +2663,14 @@ impl FeatureRepository for FeatureRepositoryImpl {
     async fn emergency_enable_feature(&self, feature_id: Uuid) -> Result<Feature, Error> {
         let result = sqlx::query!(
             r#"UPDATE features
-                SET kill_switch_enabled = false,
+                SET kill_switch_enabled = true,
                 active = true,
                 kill_switch_activated_at = NULL,
-                rollback_scheduled_at = NULL
+                rollback_scheduled_at = NULL,
+                emergency_override_reason = NULL,
+                emergency_override_expires_at = NULL,
+                emergency_override_actor_id = NULL,
+                emergency_override_applied_at = NULL
                 WHERE id = $1"#,
             feature_id
         )
@@ -2663,6 +2704,29 @@ impl FeatureRepository for FeatureRepositoryImpl {
         Ok(features)
     }
 
+    async fn get_features_pending_emergency_expiry(&self) -> Result<Vec<Feature>, Error> {
+        let now = chrono::Utc::now();
+        let result = sqlx::query_as::<_, FeatureWithStageRow>(
+            format!(
+                r#"{} WHERE f.emergency_override_expires_at IS NOT NULL
+                AND f.emergency_override_expires_at <= $1
+                AND (f.active = false OR f.kill_switch_enabled = false OR f.rollback_scheduled_at IS NOT NULL)
+                ORDER BY f.emergency_override_expires_at ASC"#,
+                FEATURE_SELECT
+            )
+            .as_str(),
+        )
+        .bind(now)
+        .fetch_all(&self.pool)
+        .await;
+
+        let rows = handle_error(None, result)?;
+        let mut features = Self::map_rows_to_feature_list(rows);
+        self.hydrate_feature_dependencies(&mut features).await?;
+
+        Ok(features)
+    }
+
     async fn execute_scheduled_disable(&self, feature_id: Uuid) -> Result<Feature, Error> {
         let now = chrono::Utc::now();
 
@@ -2675,7 +2739,8 @@ impl FeatureRepository for FeatureRepositoryImpl {
                SET kill_switch_enabled = false,
                    active = false,
                    kill_switch_activated_at = $1,
-                   rollback_scheduled_at = NULL
+                   rollback_scheduled_at = NULL,
+                   emergency_override_applied_at = COALESCE(emergency_override_applied_at, $1)
                WHERE id = $2"#,
             now,
             feature_id
@@ -2686,6 +2751,27 @@ impl FeatureRepository for FeatureRepositoryImpl {
         handle_error(Some(feature_id), result)?;
         tx.commit().await.map_err(Error::DatabaseError)?;
 
+        self.get_feature_by_id(feature_id).await
+    }
+
+    async fn expire_emergency_override(&self, feature_id: Uuid) -> Result<Feature, Error> {
+        let result = sqlx::query!(
+            r#"UPDATE features
+               SET kill_switch_enabled = true,
+                   active = true,
+                   kill_switch_activated_at = NULL,
+                   rollback_scheduled_at = NULL,
+                   emergency_override_reason = NULL,
+                   emergency_override_expires_at = NULL,
+                   emergency_override_actor_id = NULL,
+                   emergency_override_applied_at = NULL
+               WHERE id = $1"#,
+            feature_id
+        )
+        .execute(&self.pool)
+        .await;
+
+        handle_error(Some(feature_id), result)?;
         self.get_feature_by_id(feature_id).await
     }
 
@@ -3027,7 +3113,9 @@ impl FeatureRepository for FeatureRepositoryImpl {
             r#"SELECT DISTINCT ON (f.id) f.id as feature_id, f.key as feature_key, f.description,
                f.feature_type, f.team_id, f.created_at, f.kill_switch_enabled,
                f.kill_switch_activated_at, f.rollback_scheduled_at, f.active as feature_enabled,
-               f.lifecycle_stage, f.deprecated_at, f.deprecation_notice, f.last_evaluated_at,
+               f.emergency_override_reason, f.emergency_override_expires_at, f.emergency_override_actor_id, f.emergency_override_applied_at,
+               f.lifecycle_stage, f.owner, f.expires_at, f.cleanup_reason, f.archived_at,
+               f.deprecated_at, f.deprecation_notice, f.last_evaluated_at,
                f.evaluation_count_7d, f.evaluation_count_30d, f.evaluation_count_90d,
                s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
                s.parent_stage_id, s.position, s.status, s.enabled
@@ -3082,7 +3170,9 @@ impl FeatureRepository for FeatureRepositoryImpl {
             r#"SELECT DISTINCT ON (f.id) f.id as feature_id, f.key as feature_key, f.description,
                f.feature_type, f.team_id, f.created_at, f.kill_switch_enabled,
                f.kill_switch_activated_at, f.rollback_scheduled_at, f.active as feature_enabled,
-               f.lifecycle_stage, f.deprecated_at, f.deprecation_notice, f.last_evaluated_at,
+               f.emergency_override_reason, f.emergency_override_expires_at, f.emergency_override_actor_id, f.emergency_override_applied_at,
+               f.lifecycle_stage, f.owner, f.expires_at, f.cleanup_reason, f.archived_at,
+               f.deprecated_at, f.deprecation_notice, f.last_evaluated_at,
                f.evaluation_count_7d, f.evaluation_count_30d, f.evaluation_count_90d,
                s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
                s.parent_stage_id, s.position, s.status, s.enabled
@@ -3146,7 +3236,9 @@ impl FeatureRepository for FeatureRepositoryImpl {
             r#"SELECT DISTINCT ON (f.id) f.id as feature_id, f.key as feature_key, f.description,
                f.feature_type, f.team_id, f.created_at, f.kill_switch_enabled,
                f.kill_switch_activated_at, f.rollback_scheduled_at, f.active as feature_enabled,
-               f.lifecycle_stage, f.deprecated_at, f.deprecation_notice, f.last_evaluated_at,
+               f.emergency_override_reason, f.emergency_override_expires_at, f.emergency_override_actor_id, f.emergency_override_applied_at,
+               f.lifecycle_stage, f.owner, f.expires_at, f.cleanup_reason, f.archived_at,
+               f.deprecated_at, f.deprecation_notice, f.last_evaluated_at,
                f.evaluation_count_7d, f.evaluation_count_30d, f.evaluation_count_90d,
                s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
                s.parent_stage_id, s.position, s.status, s.enabled
@@ -3200,7 +3292,9 @@ impl FeatureRepository for FeatureRepositoryImpl {
             r#"SELECT DISTINCT ON (f.id) f.id as feature_id, f.key as feature_key, f.description,
                f.feature_type, f.team_id, f.created_at, f.kill_switch_enabled,
                f.kill_switch_activated_at, f.rollback_scheduled_at, f.active as feature_enabled,
-               f.lifecycle_stage, f.deprecated_at, f.deprecation_notice, f.last_evaluated_at,
+               f.emergency_override_reason, f.emergency_override_expires_at, f.emergency_override_actor_id, f.emergency_override_applied_at,
+               f.lifecycle_stage, f.owner, f.expires_at, f.cleanup_reason, f.archived_at,
+               f.deprecated_at, f.deprecation_notice, f.last_evaluated_at,
                f.evaluation_count_7d, f.evaluation_count_30d, f.evaluation_count_90d,
                s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
                s.parent_stage_id, s.position, s.status, s.enabled
@@ -3505,6 +3599,10 @@ impl FeatureRepositoryTx for FeatureRepositoryImpl {
                 kill_switch_enabled: feature.kill_switch_enabled,
                 kill_switch_activated_at: feature.kill_switch_activated_at,
                 rollback_scheduled_at: feature.rollback_scheduled_at,
+                emergency_override_reason: feature.emergency_override_reason,
+                emergency_override_expires_at: feature.emergency_override_expires_at,
+                emergency_override_actor_id: feature.emergency_override_actor_id,
+                emergency_override_applied_at: feature.emergency_override_applied_at,
                 lifecycle_stage: feature.lifecycle_stage,
                 owner: feature.owner,
                 expires_at: feature.expires_at,
@@ -3615,13 +3713,17 @@ impl FeatureRepositoryTx for FeatureRepositoryImpl {
                    kill_switch_enabled = $6,
                    kill_switch_activated_at = $7,
                    rollback_scheduled_at = $8,
-                   lifecycle_stage = $9,
-                   owner = $10,
-                   expires_at = $11,
-                   cleanup_reason = $12,
-                   archived_at = $13,
-                   deprecated_at = $14,
-                   deprecation_notice = $15
+                   emergency_override_reason = $9,
+                   emergency_override_expires_at = $10,
+                   emergency_override_actor_id = $11,
+                   emergency_override_applied_at = $12,
+                   lifecycle_stage = $13,
+                   owner = $14,
+                   expires_at = $15,
+                   cleanup_reason = $16,
+                   archived_at = $17,
+                   deprecated_at = $18,
+                   deprecation_notice = $19
                WHERE id = $1"#,
         )
         .bind(feature_id)
@@ -3632,6 +3734,10 @@ impl FeatureRepositoryTx for FeatureRepositoryImpl {
         .bind(parsed.feature.kill_switch_enabled)
         .bind(parsed.feature.kill_switch_activated_at)
         .bind(parsed.feature.rollback_scheduled_at)
+        .bind(&parsed.feature.emergency_override_reason)
+        .bind(parsed.feature.emergency_override_expires_at)
+        .bind(parsed.feature.emergency_override_actor_id)
+        .bind(parsed.feature.emergency_override_applied_at)
         .bind(&parsed.feature.lifecycle_stage)
         .bind(&parsed.feature.owner)
         .bind(parsed.feature.expires_at)
@@ -4156,6 +4262,9 @@ impl FeatureRepositoryTx for FeatureRepositoryImpl {
         conn: &mut PgConnection,
         feature_id: Uuid,
         rollback_in_minutes: Option<i32>,
+        reason: String,
+        expires_at: Option<DateTime<Utc>>,
+        actor_id: Option<Uuid>,
     ) -> Result<Feature, Error> {
         let now = chrono::Utc::now();
 
@@ -4172,12 +4281,20 @@ impl FeatureRepositoryTx for FeatureRepositoryImpl {
                 SET kill_switch_enabled = $1,
                 kill_switch_activated_at = $2,
                 rollback_scheduled_at = $3,
-                active = $4
-               WHERE id = $5"#,
+                active = $4,
+                emergency_override_reason = $5,
+                emergency_override_expires_at = $6,
+                emergency_override_actor_id = $7,
+                emergency_override_applied_at = $8
+               WHERE id = $9"#,
             kill_switch_enabled,
             activated_at,
             rollback_at,
             active,
+            reason,
+            expires_at,
+            actor_id,
+            now,
             feature_id
         )
         .execute(&mut *conn)
@@ -4194,10 +4311,14 @@ impl FeatureRepositoryTx for FeatureRepositoryImpl {
     ) -> Result<Feature, Error> {
         let result = sqlx::query!(
             r#"UPDATE features
-                SET kill_switch_enabled = false,
+                SET kill_switch_enabled = true,
                 active = true,
                 kill_switch_activated_at = NULL,
-                rollback_scheduled_at = NULL
+                rollback_scheduled_at = NULL,
+                emergency_override_reason = NULL,
+                emergency_override_expires_at = NULL,
+                emergency_override_actor_id = NULL,
+                emergency_override_applied_at = NULL
                 WHERE id = $1"#,
             feature_id
         )
@@ -4742,7 +4863,15 @@ mod tests {
         let feature_id = setup_test_feature(&pool, team_id).await;
 
         // Emergency disable without rollback schedule
-        let result = repo.emergency_disable_feature(feature_id, None).await;
+        let result = repo
+            .emergency_disable_feature(
+                feature_id,
+                None,
+                "test emergency reason".to_string(),
+                None,
+                None,
+            )
+            .await;
         assert!(result.is_ok(), "Emergency disable should succeed");
 
         let feature = result.unwrap();
@@ -4774,7 +4903,13 @@ mod tests {
 
         // Emergency disable with rollback schedule
         let result = repo
-            .emergency_disable_feature(feature_id, Some(rollback_minutes))
+            .emergency_disable_feature(
+                feature_id,
+                Some(rollback_minutes),
+                "test emergency reason".to_string(),
+                None,
+                None,
+            )
             .await;
         assert!(
             result.is_ok(),
@@ -4817,7 +4952,15 @@ mod tests {
         let nonexistent_id = Uuid::new_v4();
 
         // Try to disable nonexistent feature
-        let result = repo.emergency_disable_feature(nonexistent_id, None).await;
+        let result = repo
+            .emergency_disable_feature(
+                nonexistent_id,
+                None,
+                "test emergency reason".to_string(),
+                None,
+                None,
+            )
+            .await;
         assert!(result.is_err(), "Disabling nonexistent feature should fail");
 
         match result {
@@ -4835,9 +4978,15 @@ mod tests {
         let feature_id = setup_test_feature(&pool, team_id).await;
 
         // First disable the feature
-        repo.emergency_disable_feature(feature_id, Some(60))
-            .await
-            .expect("Should disable feature first");
+        repo.emergency_disable_feature(
+            feature_id,
+            Some(60),
+            "test emergency reason".to_string(),
+            None,
+            None,
+        )
+        .await
+        .expect("Should disable feature first");
 
         // Now enable it
         let result = repo.emergency_enable_feature(feature_id).await;
@@ -4845,8 +4994,8 @@ mod tests {
 
         let feature = result.unwrap();
         assert!(
-            !feature.kill_switch_enabled,
-            "Kill switch should be deactivated (feature enabled, kill_switch_enabled=false)"
+            feature.kill_switch_enabled,
+            "Kill switch should be deactivated (feature enabled, kill_switch_enabled=true)"
         );
         assert!(
             feature.kill_switch_activated_at.is_none(),
@@ -4970,7 +5119,13 @@ mod tests {
 
         // 1. Schedule disable with rollback window
         let scheduled = repo
-            .emergency_disable_feature(feature_id, Some(120))
+            .emergency_disable_feature(
+                feature_id,
+                Some(120),
+                "test emergency reason".to_string(),
+                None,
+                None,
+            )
             .await
             .expect("Should schedule feature disable");
 
@@ -4994,9 +5149,15 @@ mod tests {
         );
 
         // 3. Simulate scheduler executing the disable now
-        repo.emergency_disable_feature(feature_id, None)
-            .await
-            .expect("Scheduler disable should succeed");
+        repo.emergency_disable_feature(
+            feature_id,
+            None,
+            "test emergency reason".to_string(),
+            None,
+            None,
+        )
+        .await
+        .expect("Scheduler disable should succeed");
 
         let disabled_feature = repo
             .get_feature_by_id(feature_id)
@@ -5023,7 +5184,7 @@ mod tests {
             .await
             .expect("Should retrieve enabled feature");
 
-        assert!(!enabled_feature.kill_switch_enabled);
+        assert!(enabled_feature.kill_switch_enabled);
         assert!(enabled_feature.kill_switch_activated_at.is_none());
         assert!(enabled_feature.rollback_scheduled_at.is_none());
 
@@ -5038,7 +5199,15 @@ mod tests {
 
         // Test with zero minutes (should work - immediate rollback)
         let feature1_id = setup_test_feature(&pool, team_id).await;
-        let result = repo.emergency_disable_feature(feature1_id, Some(0)).await;
+        let result = repo
+            .emergency_disable_feature(
+                feature1_id,
+                Some(0),
+                "test emergency reason".to_string(),
+                None,
+                None,
+            )
+            .await;
         assert!(result.is_ok(), "Zero minute rollback should work");
 
         let feature = result.unwrap();
@@ -5060,7 +5229,13 @@ mod tests {
         let feature2_id = setup_test_feature(&pool, team_id).await;
         let large_minutes = 1440; // 24 hours
         let result = repo
-            .emergency_disable_feature(feature2_id, Some(large_minutes))
+            .emergency_disable_feature(
+                feature2_id,
+                Some(large_minutes),
+                "test emergency reason".to_string(),
+                None,
+                None,
+            )
             .await;
         assert!(result.is_ok(), "Large minute rollback should work");
 

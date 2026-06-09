@@ -179,6 +179,10 @@ pub struct FeatureResponse {
     pub kill_switch_enabled: bool,
     pub kill_switch_activated_at: Option<DateTime<Utc>>,
     pub rollback_scheduled_at: Option<DateTime<Utc>>,
+    pub emergency_override_reason: Option<String>,
+    pub emergency_override_expires_at: Option<DateTime<Utc>>,
+    pub emergency_override_actor_id: Option<String>,
+    pub emergency_override_applied_at: Option<DateTime<Utc>>,
     pub lifecycle_stage: LifecycleStage,
     pub owner: Option<String>,
     pub expires_at: Option<DateTime<Utc>>,
@@ -310,7 +314,15 @@ pub struct UpdateFeatureRequest {
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct EmergencyDisableRequest {
+    pub reason: String,
     pub rollback_in_minutes: Option<i32>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct EmergencyEnableRequest {
+    pub reason: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema, Clone, Copy, PartialEq, Eq)]

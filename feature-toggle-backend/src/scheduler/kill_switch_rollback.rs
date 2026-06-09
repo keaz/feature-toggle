@@ -37,7 +37,7 @@ impl KillSwitchRollbackScheduler {
             match self.check_and_process_rollbacks().await {
                 Ok(count) => {
                     if count > 0 {
-                        info!("Processed {} feature rollbacks", count);
+                        info!("Processed {} kill switch scheduler item(s)", count);
                     }
                 }
                 Err(e) => {
@@ -105,6 +105,51 @@ impl KillSwitchRollbackScheduler {
                 Err(e) => {
                     warn!(
                         "Failed to auto-disable feature {} ({:?}): {}",
+                        feature.key, feature.id, e
+                    );
+                }
+            }
+        }
+
+        let features_with_expired_overrides = self
+            .feature_logic
+            .get_features_pending_emergency_expiry()
+            .await?;
+
+        for feature in features_with_expired_overrides {
+            match self
+                .feature_logic
+                .expire_emergency_override(feature.id.clone())
+                .await
+            {
+                Ok(_) => {
+                    info!(
+                        "Expired emergency override and restored feature: {} ({:?})",
+                        feature.key, feature.id
+                    );
+                    processed_count += 1;
+
+                    if let Ok(feature_uuid) = uuid::Uuid::try_from(feature.id.clone())
+                        && let Ok(db_feature) =
+                            self.feature_repo.get_feature_by_id(feature_uuid).await
+                        && let Ok(full) = Self::map_db_feature_to_full_for_broadcast(
+                            self.pool.clone(),
+                            db_feature,
+                        )
+                        .await
+                    {
+                        let _ = self.updates_tx.send(crate::grpc::pb::FeatureUpdate {
+                            message_id: uuid::Uuid::new_v4().to_string(),
+                            action: crate::grpc::pb::feature_update::Action::Upsert as i32,
+                            feature: Some(full),
+                            feature_key: String::new(),
+                            error: String::new(),
+                        });
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to expire emergency override for feature {} ({:?}): {}",
                         feature.key, feature.id, e
                     );
                 }
@@ -265,6 +310,10 @@ mod tests {
             kill_switch_enabled: true, // Kill switch is enabled (not activated yet)
             kill_switch_activated_at: None, // Not activated yet
             rollback_scheduled_at: Some(Utc::now() - chrono::Duration::minutes(5)), // Scheduled in the past
+            emergency_override_reason: Some("Incident mitigation".to_string()),
+            emergency_override_expires_at: None,
+            emergency_override_actor_id: None,
+            emergency_override_applied_at: Some(Utc::now() - chrono::Duration::minutes(10)),
             lifecycle_stage: LifecycleStage::Active,
             owner: None,
             expires_at: None,
@@ -295,6 +344,10 @@ mod tests {
             kill_switch_enabled: false, // Kill switch is now activated (disabled)
             kill_switch_activated_at: Some(Utc::now()), // Activation timestamp set
             rollback_scheduled_at: None, // Cleared after execution
+            emergency_override_reason: Some("Incident mitigation".to_string()),
+            emergency_override_expires_at: None,
+            emergency_override_actor_id: None,
+            emergency_override_applied_at: Some(Utc::now()),
             lifecycle_stage: LifecycleStage::Active,
             owner: None,
             expires_at: None,
@@ -314,6 +367,29 @@ mod tests {
         }
     }
 
+    fn sample_feature_expired_override() -> ModelFeature {
+        ModelFeature {
+            emergency_override_reason: Some("Incident mitigation".to_string()),
+            emergency_override_expires_at: Some(Utc::now() - chrono::Duration::minutes(1)),
+            emergency_override_actor_id: None,
+            emergency_override_applied_at: Some(Utc::now() - chrono::Duration::minutes(30)),
+            ..sample_feature_after_disable()
+        }
+    }
+
+    fn sample_feature_after_expiry() -> ModelFeature {
+        ModelFeature {
+            enabled: true,
+            kill_switch_enabled: true,
+            kill_switch_activated_at: None,
+            emergency_override_reason: None,
+            emergency_override_expires_at: None,
+            emergency_override_actor_id: None,
+            emergency_override_applied_at: None,
+            ..sample_feature_after_disable()
+        }
+    }
+
     #[tokio::test]
     async fn scheduler_disables_due_features() {
         let mut logic = MockFeatureLogic::new();
@@ -326,6 +402,10 @@ mod tests {
             .times(1)
             .withf(|id, actor| id == &ID::from(FEATURE_ID) && actor.is_none())
             .returning(|_, _| Ok(sample_feature_after_disable()));
+        logic
+            .expect_get_features_pending_emergency_expiry()
+            .times(1)
+            .returning(|| Ok(vec![]));
 
         let mut repo = MockFeatureRepository::new();
         repo.expect_get_feature_by_id()
@@ -350,6 +430,10 @@ mod tests {
             .expect_get_features_pending_rollback()
             .times(1)
             .returning(|| Ok(vec![]));
+        logic
+            .expect_get_features_pending_emergency_expiry()
+            .times(1)
+            .returning(|| Ok(vec![]));
 
         let repo = MockFeatureRepository::new();
         let pool = sqlx::PgPool::connect_lazy("postgres://unused").unwrap();
@@ -368,6 +452,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scheduler_expires_due_emergency_overrides() {
+        let mut logic = MockFeatureLogic::new();
+        logic
+            .expect_get_features_pending_rollback()
+            .times(1)
+            .returning(|| Ok(vec![]));
+        logic
+            .expect_get_features_pending_emergency_expiry()
+            .times(1)
+            .returning(|| Ok(vec![sample_feature_expired_override()]));
+        logic
+            .expect_expire_emergency_override()
+            .times(1)
+            .withf(|id| id == &ID::from(FEATURE_ID))
+            .returning(|_| Ok(sample_feature_after_expiry()));
+
+        let mut repo = MockFeatureRepository::new();
+        repo.expect_get_feature_by_id()
+            .returning(|_| Err(crate::Error::NotFound(uuid::Uuid::new_v4())));
+
+        let pool = sqlx::PgPool::connect_lazy("postgres://unused").unwrap();
+        let (tx, _rx) = tokio::sync::broadcast::channel(4);
+
+        let scheduler = KillSwitchRollbackScheduler::new(Box::new(logic), Box::new(repo), pool, tx);
+
+        let processed = scheduler
+            .check_and_process_rollbacks()
+            .await
+            .expect("scheduler should succeed");
+        assert_eq!(processed, 1);
+    }
+
+    #[tokio::test]
     async fn scheduler_handles_execute_disable_error() {
         let mut logic = MockFeatureLogic::new();
         logic
@@ -379,6 +496,10 @@ mod tests {
             .times(1)
             .withf(|id, actor| id == &ID::from(FEATURE_ID) && actor.is_none())
             .returning(|_, _| Err(crate::Error::NotFound(uuid::Uuid::new_v4())));
+        logic
+            .expect_get_features_pending_emergency_expiry()
+            .times(1)
+            .returning(|| Ok(vec![]));
 
         let repo = MockFeatureRepository::new();
         let pool = sqlx::PgPool::connect_lazy("postgres://unused").unwrap();

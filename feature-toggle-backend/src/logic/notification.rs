@@ -25,6 +25,7 @@ pub const NOTIFICATION_TYPE_FEATURE_ROLLED_BACK: &str = "feature_rolled_back";
 pub const NOTIFICATION_TYPE_TEAM_CREATED: &str = "team_created";
 pub const NOTIFICATION_TYPE_USER_ADDED_TO_TEAM: &str = "user_added_to_team";
 pub const NOTIFICATION_TYPE_KILL_SWITCH_ACTIVATED: &str = "kill_switch_activated";
+pub const NOTIFICATION_TYPE_KILL_SWITCH_DEACTIVATED: &str = "kill_switch_deactivated";
 
 #[derive(Debug, Clone)]
 pub struct NotificationDefinition {
@@ -207,6 +208,15 @@ fn definitions() -> &'static [NotificationDefinition] {
             default_email_enabled: true,
             default_sms_enabled: false,
         },
+        NotificationDefinition {
+            notification_type: NOTIFICATION_TYPE_KILL_SWITCH_DEACTIVATED,
+            label: "Kill Switch Deactivated",
+            description: "When a feature kill switch is deactivated or expires",
+            recipient_scope: "Team Admin",
+            default_enabled: true,
+            default_email_enabled: true,
+            default_sms_enabled: false,
+        },
     ]
 }
 
@@ -225,7 +235,8 @@ fn selector_for(notification_type: &str) -> Option<RecipientSelector> {
         | NOTIFICATION_TYPE_FEATURE_DEPLOYED
         | NOTIFICATION_TYPE_FEATURE_ROLLED_BACK
         | NOTIFICATION_TYPE_USER_ADDED_TO_TEAM
-        | NOTIFICATION_TYPE_KILL_SWITCH_ACTIVATED => Some(RecipientSelector::TeamRoles),
+        | NOTIFICATION_TYPE_KILL_SWITCH_ACTIVATED
+        | NOTIFICATION_TYPE_KILL_SWITCH_DEACTIVATED => Some(RecipientSelector::TeamRoles),
         _ => None,
     }
 }
@@ -250,7 +261,9 @@ fn role_names_for(notification_type: &str) -> Vec<String> {
             REQUESTER_ROLE.to_string(),
         ],
         NOTIFICATION_TYPE_USER_ADDED_TO_TEAM => vec![TEAM_ADMIN_ROLE.to_string()],
-        NOTIFICATION_TYPE_KILL_SWITCH_ACTIVATED => vec![TEAM_ADMIN_ROLE.to_string()],
+        NOTIFICATION_TYPE_KILL_SWITCH_ACTIVATED | NOTIFICATION_TYPE_KILL_SWITCH_DEACTIVATED => {
+            vec![TEAM_ADMIN_ROLE.to_string()]
+        }
         _ => Vec::new(),
     }
 }

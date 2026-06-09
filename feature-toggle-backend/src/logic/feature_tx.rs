@@ -101,6 +101,10 @@ fn map_entity_to_api_feature(feature_entity: crate::database::entity::Feature) -
         kill_switch_enabled: feature_entity.kill_switch_enabled,
         kill_switch_activated_at: feature_entity.kill_switch_activated_at,
         rollback_scheduled_at: feature_entity.rollback_scheduled_at,
+        emergency_override_reason: feature_entity.emergency_override_reason,
+        emergency_override_expires_at: feature_entity.emergency_override_expires_at,
+        emergency_override_actor_id: feature_entity.emergency_override_actor_id.map(ID::from),
+        emergency_override_applied_at: feature_entity.emergency_override_applied_at,
         lifecycle_stage: match feature_entity.lifecycle_stage.to_lowercase().as_str() {
             "draft" => crate::model::LifecycleStage::Draft,
             "deprecated" => crate::model::LifecycleStage::Deprecated,
@@ -784,6 +788,8 @@ pub async fn emergency_disable_feature_in_tx<R, A>(
     activity_repo: &A,
     id: ID,
     rollback_in_minutes: Option<i32>,
+    reason: String,
+    expires_at: Option<chrono::DateTime<Utc>>,
     actor: Option<ActorContext>,
 ) -> Result<ModelFeature, Error>
 where
@@ -794,14 +800,20 @@ where
     let before_snapshot = feature_repo
         .build_feature_snapshot_tx(conn, feature_uuid)
         .await?;
-    let feature = feature_repo
-        .emergency_disable_feature_tx(conn, feature_uuid, rollback_in_minutes)
-        .await?;
-
     let (actor_id, actor_name) = actor
         .as_ref()
         .map(|a| a.as_option())
         .unwrap_or((None, None));
+    let feature = feature_repo
+        .emergency_disable_feature_tx(
+            conn,
+            feature_uuid,
+            rollback_in_minutes,
+            reason.clone(),
+            expires_at,
+            actor_id,
+        )
+        .await?;
 
     let log_message = match rollback_in_minutes {
         Some(minutes) if minutes > 0 => {
@@ -829,6 +841,22 @@ where
             "feature_id": feature.id.to_string(),
             "feature_key": feature.key.clone(),
             "rollback_in_minutes": rollback_in_minutes,
+            "reason": reason,
+            "old_state": {
+                "kill_switch_enabled": before_snapshot
+                    .get("feature")
+                    .and_then(|feature| feature.get("kill_switch_enabled"))
+                    .cloned(),
+                "active": before_snapshot
+                    .get("feature")
+                    .and_then(|feature| feature.get("active"))
+                    .cloned(),
+            },
+            "new_state": {
+                "kill_switch_enabled": feature.kill_switch_enabled,
+                "active": feature.active,
+            },
+            "expires_at": expires_at.map(|value| value.to_rfc3339()),
         })),
     };
 
@@ -862,6 +890,7 @@ pub async fn emergency_enable_feature_in_tx<R, A>(
     feature_repo: &R,
     activity_repo: &A,
     id: ID,
+    reason: String,
     actor: Option<ActorContext>,
 ) -> Result<ModelFeature, Error>
 where
@@ -895,6 +924,21 @@ where
         metadata: Some(serde_json::json!({
             "feature_id": feature.id.to_string(),
             "feature_key": feature.key.clone(),
+            "reason": reason,
+            "old_state": {
+                "kill_switch_enabled": before_snapshot
+                    .get("feature")
+                    .and_then(|feature| feature.get("kill_switch_enabled"))
+                    .cloned(),
+                "active": before_snapshot
+                    .get("feature")
+                    .and_then(|feature| feature.get("active"))
+                    .cloned(),
+            },
+            "new_state": {
+                "kill_switch_enabled": feature.kill_switch_enabled,
+                "active": feature.active,
+            },
         })),
     };
 

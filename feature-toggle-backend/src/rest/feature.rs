@@ -42,6 +42,45 @@ fn actor_from_request(req: &HttpRequest) -> Option<ActorContext> {
         .map(|jwt| ActorContext::new(jwt.id, jwt.username.clone()))
 }
 
+fn ensure_emergency_override_allowed(jwt: &JwtUser) -> Result<(), RestError> {
+    let is_team_admin = jwt.roles.iter().any(|role| role == "Team Admin");
+    if jwt.is_admin || is_team_admin {
+        Ok(())
+    } else {
+        Err(RestError::forbidden(
+            "Only system admins or Team Admins can apply emergency overrides",
+        ))
+    }
+}
+
+fn validate_emergency_reason(reason: &str) -> Result<String, RestError> {
+    let trimmed = reason.trim();
+    if trimmed.len() < 5 {
+        return Err(RestError::invalid_input(
+            "Emergency reason must be at least 5 characters",
+        ));
+    }
+    if trimmed.len() > 500 {
+        return Err(RestError::invalid_input(
+            "Emergency reason must be at most 500 characters",
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn validate_emergency_expiry(
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<(), RestError> {
+    if let Some(expires_at) = expires_at
+        && expires_at <= chrono::Utc::now()
+    {
+        return Err(RestError::invalid_input(
+            "Emergency override expiry must be in the future",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_feature_key_create(key: &str) -> Result<(), RestError> {
     let trimmed = key.trim();
     if trimmed.len() < 3 || trimmed.len() > 40 {
@@ -232,6 +271,13 @@ fn feature_base_response(feature: &ModelFeature) -> FeatureResponse {
         kill_switch_enabled: feature.kill_switch_enabled,
         kill_switch_activated_at: feature.kill_switch_activated_at,
         rollback_scheduled_at: feature.rollback_scheduled_at,
+        emergency_override_reason: feature.emergency_override_reason.clone(),
+        emergency_override_expires_at: feature.emergency_override_expires_at,
+        emergency_override_actor_id: feature
+            .emergency_override_actor_id
+            .as_ref()
+            .map(|id| id.to_string()),
+        emergency_override_applied_at: feature.emergency_override_applied_at,
         lifecycle_stage: LifecycleStage::from(feature.lifecycle_stage),
         owner: feature.owner.clone(),
         expires_at: feature.expires_at,
@@ -952,7 +998,15 @@ pub(crate) async fn emergency_disable_feature(
     payload: web::Json<EmergencyDisableRequest>,
 ) -> Result<impl Responder, RestError> {
     let feature_uuid = parse_uuid(&feature_id, "feature id")?;
-    let actor = actor_from_request(&req);
+    let jwt_user = req
+        .extensions()
+        .get::<JwtUser>()
+        .cloned()
+        .ok_or_else(|| RestError::unauthorized("User authentication not found"))?;
+    ensure_emergency_override_allowed(&jwt_user)?;
+    let actor = Some(ActorContext::new(jwt_user.id, jwt_user.username.clone()));
+    let reason = validate_emergency_reason(&payload.reason)?;
+    validate_emergency_expiry(payload.expires_at)?;
 
     let repo_tx = feature_repository_tx(db_pool.get_ref().clone());
     let mut tx = db_pool
@@ -966,6 +1020,8 @@ pub(crate) async fn emergency_disable_feature(
         activity_repo.as_ref().as_ref(),
         ID::from(feature_uuid),
         payload.rollback_in_minutes,
+        reason,
+        payload.expires_at,
         actor,
     )
     .await;
@@ -1006,6 +1062,7 @@ pub(crate) async fn emergency_disable_feature(
 #[utoipa::path(
     post,
     path = "/api/v1/features/{id}/emergency-enable",
+    request_body = EmergencyEnableRequest,
     params(
         ("id" = String, Path, description = "Feature ID")
     ),
@@ -1026,9 +1083,17 @@ pub(crate) async fn emergency_enable_feature(
     env_logic: web::Data<Box<dyn EnvironmentLogic>>,
     updates_tx: web::Data<tokio::sync::broadcast::Sender<crate::grpc::pb::FeatureUpdate>>,
     feature_id: web::Path<String>,
+    payload: web::Json<EmergencyEnableRequest>,
 ) -> Result<impl Responder, RestError> {
     let feature_uuid = parse_uuid(&feature_id, "feature id")?;
-    let actor = actor_from_request(&req);
+    let jwt_user = req
+        .extensions()
+        .get::<JwtUser>()
+        .cloned()
+        .ok_or_else(|| RestError::unauthorized("User authentication not found"))?;
+    ensure_emergency_override_allowed(&jwt_user)?;
+    let actor = Some(ActorContext::new(jwt_user.id, jwt_user.username.clone()));
+    let reason = validate_emergency_reason(&payload.reason)?;
 
     let repo_tx = feature_repository_tx(db_pool.get_ref().clone());
     let mut tx = db_pool
@@ -1041,6 +1106,7 @@ pub(crate) async fn emergency_enable_feature(
         &repo_tx,
         activity_repo.as_ref().as_ref(),
         ID::from(feature_uuid),
+        reason,
         actor,
     )
     .await;
@@ -1345,6 +1411,10 @@ mod tests {
             kill_switch_enabled: true,
             kill_switch_activated_at: None,
             rollback_scheduled_at: None,
+            emergency_override_reason: None,
+            emergency_override_expires_at: None,
+            emergency_override_actor_id: None,
+            emergency_override_applied_at: None,
             lifecycle_stage: ModelLifecycleStage::Active,
             owner: None,
             expires_at: None,
@@ -1362,6 +1432,37 @@ mod tests {
             team_id: ID::from(team_id),
             pending_approval_request_id: None,
         }
+    }
+
+    #[actix_web::test]
+    async fn emergency_reason_validation_requires_clear_reason() {
+        assert!(validate_emergency_reason("    ").is_err());
+        assert!(validate_emergency_reason("fix").is_err());
+        assert_eq!(
+            validate_emergency_reason("  Incident mitigation  ").unwrap(),
+            "Incident mitigation"
+        );
+    }
+
+    #[actix_web::test]
+    async fn emergency_override_requires_admin_or_team_admin() {
+        let base_user = JwtUser {
+            id: Uuid::new_v4(),
+            username: "user".to_string(),
+            is_admin: false,
+            roles: vec![],
+            token_hash: "hash".to_string(),
+        };
+
+        assert!(ensure_emergency_override_allowed(&base_user).is_err());
+
+        let mut team_admin = base_user.clone();
+        team_admin.roles = vec!["Team Admin".to_string()];
+        assert!(ensure_emergency_override_allowed(&team_admin).is_ok());
+
+        let mut system_admin = base_user;
+        system_admin.is_admin = true;
+        assert!(ensure_emergency_override_allowed(&system_admin).is_ok());
     }
 
     async fn test_pool() -> sqlx::PgPool {
