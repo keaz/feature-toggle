@@ -253,7 +253,7 @@ pub struct RollbackFeatureVersionRequest {
     pub archive_confirmation: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Deserialize, Serialize, ToSchema, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateFeatureStageRequest {
     pub id: Option<String>,

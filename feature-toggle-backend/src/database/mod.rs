@@ -14,6 +14,7 @@ pub mod metrics;
 pub mod notification;
 pub mod pipeline;
 pub mod role;
+pub mod rollout_template;
 pub mod system_client;
 pub mod system_client_token;
 pub mod team;

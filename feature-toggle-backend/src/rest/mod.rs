@@ -12,6 +12,7 @@ pub mod notification;
 pub mod pagination;
 pub mod pipeline;
 pub mod role;
+pub mod rollout_template;
 pub mod serde;
 pub mod stream;
 pub mod system_client;
@@ -92,6 +93,11 @@ use crate::rest::pipeline::{
     UpdatePipelineRequest,
 };
 use crate::rest::role::{CreateRoleRequest, RoleResponse};
+use crate::rest::rollout_template::{
+    CreateRolloutTemplateRequest, RolloutTemplateConfig, RolloutTemplatePreviewRequest,
+    RolloutTemplatePreviewResponse, RolloutTemplateResponse, RolloutTemplateVariables,
+    RolloutTemplatesResponse,
+};
 use crate::rest::system_client::{
     CreateSystemClientRequest, SystemClientListQuery, SystemClientResponse,
     SystemClientWithTokenResponse, SystemClientsResponse, UpdateSystemClientRequest,
@@ -145,6 +151,9 @@ async fn health() -> impl Responder {
         pipeline::get_pipeline,
         pipeline::create_pipeline,
         pipeline::update_pipeline,
+        rollout_template::list_rollout_templates,
+        rollout_template::preview_rollout_template,
+        rollout_template::create_rollout_template,
         feature::list_features,
         feature::get_feature,
         feature::list_feature_versions,
@@ -251,6 +260,13 @@ async fn health() -> impl Responder {
         UpdatePipelineRequest,
         CreateStageRequest,
         CreateRelationshipRequest,
+        RolloutTemplateVariables,
+        RolloutTemplateConfig,
+        RolloutTemplateResponse,
+        RolloutTemplatesResponse,
+        CreateRolloutTemplateRequest,
+        RolloutTemplatePreviewRequest,
+        RolloutTemplatePreviewResponse,
         FeatureListQuery,
         FeatureRolloutQuery,
         RolloutMetricsQuery,
@@ -368,6 +384,7 @@ async fn health() -> impl Responder {
         (name = "Clients", description = "Client management"),
         (name = "System Clients", description = "System automation clients and JWT token management"),
         (name = "Pipelines", description = "Pipeline management"),
+        (name = "Rollout Templates", description = "Reusable rollout templates"),
         (name = "Features", description = "Feature management and rollout"),
         (name = "Criteria", description = "Stage criteria and rule groups"),
         (name = "Approvals", description = "Approval requests and policies"),
@@ -493,6 +510,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .configure(client::configure)
             .configure(system_client::configure)
             .configure(pipeline::configure)
+            .configure(rollout_template::configure)
             .configure(feature::configure)
             .configure(criteria::configure)
             .configure(metrics::configure)

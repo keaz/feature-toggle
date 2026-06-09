@@ -20,6 +20,7 @@
         "test:user": "jest user.test.ts",
         "test:client": "jest client.test.ts",
         "test:feature": "jest feature.test.ts",
+        "test:rollout-template": "jest rollout-template.test.ts",
         "test:pipeline": "jest pipeline.test.ts",
         "test:criteria": "jest criteria.test.ts",
         "test:approval": "jest approval.test.ts",

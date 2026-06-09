@@ -69,7 +69,7 @@ pub struct CreateStageRequest {
     pub position: String,
 }
 
-#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Deserialize, Serialize, ToSchema, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateRelationshipRequest {
     pub source_id: i32,
