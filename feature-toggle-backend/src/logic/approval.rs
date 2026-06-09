@@ -799,6 +799,94 @@ impl ApprovalLogicImpl {
         Ok((before, after, diff, risk_markers))
     }
 
+    async fn build_stage_change_blast_radius(
+        &self,
+        feature: &DbFeature,
+        stage: &FeaturePipelineStage,
+        next_status: &str,
+    ) -> Result<JsonValue, Error> {
+        let environment = self
+            .environment_logic
+            .get_environment_by_id(ID::from(stage.environment_id))
+            .await?;
+        let production = environment
+            .environment_type
+            .eq_ignore_ascii_case("production");
+        let dependency_count = feature.dependencies.len() as i64;
+        let evaluation_volume_7d = feature.evaluation_count_7d;
+        let mut affected_clients = 0_i64;
+        let mut affected_contexts = 0_i64;
+
+        if let Some(pool) = &self.db_pool {
+            affected_clients = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM clients WHERE team_id = $1 AND environment_id = $2",
+            )
+            .bind(feature.team_id)
+            .bind(stage.environment_id)
+            .fetch_one(pool)
+            .await
+            .map_err(Error::DatabaseError)?;
+
+            affected_contexts =
+                sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM contexts WHERE team_id = $1")
+                    .bind(feature.team_id)
+                    .fetch_one(pool)
+                    .await
+                    .map_err(Error::DatabaseError)?;
+        }
+
+        let mut score = 0;
+        let mut risk_markers = Vec::new();
+        if production {
+            score += 3;
+            risk_markers.push("production-impact");
+        }
+        if dependency_count >= 3 {
+            score += 2;
+            risk_markers.push("dependency-heavy");
+        }
+        if evaluation_volume_7d >= 10_000 {
+            score += 2;
+            risk_markers.push("high-traffic");
+        }
+        if next_status.contains("ROLLBACK") {
+            score += 1;
+            risk_markers.push("rollback-impact");
+        }
+
+        let risk_level = if score >= 5 {
+            "high"
+        } else if score >= 2 {
+            "medium"
+        } else {
+            "low"
+        };
+
+        let warnings = if evaluation_volume_7d == 0 {
+            vec!["No recent traffic data is available; impact estimate may be incomplete"]
+        } else {
+            Vec::new()
+        };
+
+        Ok(serde_json::json!({
+            "riskLevel": risk_level,
+            "summary": format!(
+                "{risk_level} risk: 1 environment, {affected_clients} client(s), {affected_contexts} context(s), {dependency_count} dependent feature link(s), {evaluation_volume_7d} evaluations in 7d"
+            ),
+            "affectedEnvironments": [{
+                "id": stage.environment_id.to_string(),
+                "name": environment.name,
+                "environmentType": environment.environment_type,
+            }],
+            "affectedClients": affected_clients,
+            "affectedContexts": affected_contexts,
+            "dependencyCount": dependency_count,
+            "evaluationVolume7d": evaluation_volume_7d,
+            "warnings": warnings,
+            "riskMarkers": risk_markers,
+        }))
+    }
+
     async fn resolve_approver_name(&self, actor_id: Option<Uuid>) -> Option<String> {
         let approver_id = actor_id?;
 
@@ -1232,6 +1320,18 @@ impl ApprovalLogic for ApprovalLogicImpl {
         let (before_snapshot, after_snapshot, diff, risk_markers) = self
             .build_stage_change_snapshot_payload(feature, stage, next_status, after_status, &policy)
             .await?;
+        let blast_radius = self
+            .build_stage_change_blast_radius(feature, stage, next_status)
+            .await?;
+        let mut risk_markers = risk_markers;
+        if let Some(markers) = blast_radius
+            .get("riskMarkers")
+            .and_then(|value| value.as_array())
+        {
+            for marker in markers.iter().filter_map(|value| value.as_str()) {
+                Self::add_marker(&mut risk_markers, marker);
+            }
+        }
         let routing = self.resolve_approval_routing(&policy).await?;
         self.ensure_request_has_eligible_approvers(&policy, &routing)
             .await?;
@@ -1267,6 +1367,7 @@ impl ApprovalLogic for ApprovalLogicImpl {
             "after_snapshot": after_snapshot,
             "diff": diff,
             "risk_markers": risk_markers,
+            "blast_radius": blast_radius,
             "policy": {
                 "id": policy.id.to_string(),
                 "name": policy.name.clone(),

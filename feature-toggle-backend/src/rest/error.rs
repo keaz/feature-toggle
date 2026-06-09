@@ -197,6 +197,15 @@ impl From<crate::Error> for RestError {
     }
 }
 
+impl From<sqlx::Error> for RestError {
+    fn from(err: sqlx::Error) -> Self {
+        match err {
+            sqlx::Error::RowNotFound => RestError::not_found("Record not found"),
+            _ => RestError::internal("Internal server error"),
+        }
+    }
+}
+
 impl From<crate::logic::metrics::MetricLogicError> for RestError {
     fn from(err: crate::logic::metrics::MetricLogicError) -> Self {
         match err {

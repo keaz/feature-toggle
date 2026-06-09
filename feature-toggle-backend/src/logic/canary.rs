@@ -394,7 +394,7 @@ impl CanaryLogicImpl {
         let baseline = Self::aggregate_variant(&rows, &gate.metric_key, &gate.baseline_variant);
         let canary = Self::aggregate_variant(&rows, &gate.metric_key, &gate.canary_variant);
 
-        let (passed, reason, regression_pct, rollback_eligible) = if baseline.sample_size
+        let (passed, mut reason, regression_pct, rollback_eligible) = if baseline.sample_size
             < gate.min_sample_size
             || canary.sample_size < gate.min_sample_size
         {
@@ -452,22 +452,28 @@ impl CanaryLogicImpl {
         let mut rollback_error = None;
 
         if !passed && rollback_eligible && should_rollback {
-            match self
-                .feature_logic
-                .emergency_disable_feature(
-                    ID::from(gate.feature_id),
-                    gate.rollback_in_minutes,
-                    "Canary gate failed; automatic rollback triggered".to_string(),
-                    None,
-                    None,
-                )
-                .await
-            {
-                Ok(_) => {
-                    rollback_triggered = true;
-                }
-                Err(err) => {
-                    rollback_error = Some(err.to_string());
+            if !feature.active || !feature.kill_switch_enabled {
+                reason = format!(
+                    "{reason}; rollback skipped because feature is already in a safe disabled state"
+                );
+            } else {
+                match self
+                    .feature_logic
+                    .emergency_disable_feature(
+                        ID::from(gate.feature_id),
+                        gate.rollback_in_minutes,
+                        "Canary gate failed; automatic rollback triggered".to_string(),
+                        None,
+                        None,
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        rollback_triggered = true;
+                    }
+                    Err(err) => {
+                        rollback_error = Some(err.to_string());
+                    }
                 }
             }
         }
@@ -1033,5 +1039,65 @@ mod tests {
             .expect("analysis should fail with rollback");
         assert!(!result.passed);
         assert!(result.rollback_triggered);
+    }
+
+    #[tokio::test]
+    async fn analyze_gate_failure_skips_rollback_when_already_disabled() {
+        let gate = sample_gate(true);
+        let mut feature = sample_feature(gate.feature_id);
+        feature.active = false;
+        feature.kill_switch_enabled = false;
+
+        let mut canary_repo = MockCanaryRepository::new();
+        let gate_for_lookup = gate.clone();
+        canary_repo
+            .expect_get_gate_by_id()
+            .times(1)
+            .returning(move |_| Ok(Some(gate_for_lookup.clone())));
+
+        let gate_for_result = gate.clone();
+        canary_repo
+            .expect_insert_gate_result()
+            .times(1)
+            .withf(|input| {
+                !input.passed
+                    && !input.rollback_triggered
+                    && input.reason.contains("already in a safe disabled state")
+            })
+            .returning(move |_| Ok(sample_result_row(&gate_for_result, false, false)));
+
+        let mut feature_repo = MockFeatureRepository::new();
+        feature_repo
+            .expect_get_feature_by_id()
+            .times(1)
+            .returning(move |_| Ok(feature.clone()));
+
+        let mut feature_logic = MockFeatureLogic::new();
+        feature_logic.expect_emergency_disable_feature().times(0);
+
+        let metric_logic = StubMetricLogic {
+            rows: sample_metric_rows(40),
+        };
+
+        let mut activity_repo = MockActivityLogRepository::new();
+        activity_repo
+            .expect_create_activity()
+            .times(1)
+            .returning(|_| Ok(sample_activity_row()));
+
+        let logic = canary_logic(
+            Box::new(canary_repo),
+            Box::new(metric_logic),
+            Box::new(feature_repo),
+            Box::new(feature_logic),
+            Box::new(activity_repo),
+        );
+
+        let result = logic
+            .analyze_gate(gate.id, None)
+            .await
+            .expect("analysis should fail without duplicate rollback");
+        assert!(!result.passed);
+        assert!(!result.rollback_triggered);
     }
 }

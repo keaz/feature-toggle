@@ -230,6 +230,16 @@ pub async fn run() -> std::io::Result<()> {
         canary_scheduler.start().await;
     });
 
+    let scheduled_change_scheduler = scheduler::ScheduledChangeScheduler::new(
+        db_pool.clone(),
+        feature_logic.clone(),
+        activity_log_repository.clone_box(),
+        Duration::from_secs(30),
+    );
+    tokio::spawn(async move {
+        scheduled_change_scheduler.start().await;
+    });
+
     // Clone values for use in the HttpServer closure
     let jwt_secret_logic_for_server = jwt_secret_logic.clone();
     let jwt_token_logic_for_server = jwt_token_logic.clone();

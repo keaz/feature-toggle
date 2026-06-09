@@ -309,6 +309,7 @@ pub struct UpdateFeatureRequest {
     pub relationships: Vec<CreateRelationshipRequest>,
     pub stages: Vec<CreateFeatureStageRequest>,
     pub variants: Option<Vec<CreateFeatureVariantRequest>>,
+    pub freeze_override_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
@@ -366,6 +367,7 @@ impl From<StageChangeRequest> for StageChangeRequestType {
 #[serde(rename_all = "camelCase")]
 pub struct StageChangeRequestBody {
     pub request: StageChangeRequest,
+    pub freeze_override_reason: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]

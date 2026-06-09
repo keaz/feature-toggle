@@ -908,6 +908,28 @@ pub(crate) async fn update_feature(
         ));
     }
 
+    let jwt_user = req
+        .extensions()
+        .get::<JwtUser>()
+        .cloned()
+        .ok_or_else(|| RestError::unauthorized("User authentication not found"))?;
+    let team_uuid = Uuid::try_from(existing_feature.team_id.clone())
+        .map_err(|_| RestError::invalid_input("invalid feature team id"))?;
+    for stage in &payload.stages {
+        let environment_uuid = parse_uuid(&stage.environment_id, "environment_id")?;
+        crate::rest::operational_safety::enforce_freeze_for_feature_environment(
+            db_pool.get_ref(),
+            activity_repo.as_ref().as_ref(),
+            team_uuid,
+            feature_uuid,
+            existing_feature.key.as_str(),
+            environment_uuid,
+            &jwt_user,
+            payload.freeze_override_reason.as_deref(),
+        )
+        .await?;
+    }
+
     let input = UpdateFeatureInput {
         key: payload.key.clone(),
         description: payload.description.clone(),
@@ -1162,6 +1184,8 @@ pub(crate) async fn emergency_enable_feature(
 )]
 #[post("/stages/{id}/request-change")]
 pub(crate) async fn request_stage_change(
+    db_pool: web::Data<sqlx::PgPool>,
+    activity_repo: web::Data<Box<dyn ActivityLogRepository>>,
     req: HttpRequest,
     feature_logic: web::Data<Box<dyn FeatureLogic>>,
     feature_repo: web::Data<Box<dyn FeatureRepository>>,
@@ -1179,6 +1203,15 @@ pub(crate) async fn request_stage_change(
 
     RoleAuthorizer::authorize_stage_change_request(&jwt_user.roles, payload.request.as_str())
         .map_err(|e| RestError::forbidden(e.to_string()))?;
+
+    crate::rest::operational_safety::enforce_freeze_for_stage(
+        db_pool.get_ref(),
+        activity_repo.as_ref().as_ref(),
+        stage_uuid,
+        &jwt_user,
+        payload.freeze_override_reason.as_deref(),
+    )
+    .await?;
 
     let request_type = StageChangeRequestType::from(payload.request);
     let feature = feature_logic
@@ -1710,6 +1743,7 @@ mod tests {
                     bucketing_key: None,
                 }],
                 variants: None,
+                freeze_override_reason: None,
             })
             .to_request();
         let resp = test::call_service(&app, req).await;

@@ -9,6 +9,7 @@ pub mod feature;
 pub mod jwt_secret;
 pub mod metrics;
 pub mod notification;
+pub mod operational_safety;
 pub mod pagination;
 pub mod pipeline;
 pub mod role;
@@ -87,6 +88,13 @@ use crate::rest::notification::{
     NotificationChannelConfigResponse, NotificationPreferenceResponse,
     NotificationSettingsResponse, UpdateNotificationChannelConfigRequest,
     UpdateNotificationPreferenceRequest,
+};
+use crate::rest::operational_safety::{
+    ActiveFreezeQuery, ActiveFreezeResponse, BlastRadiusEnvironmentResponse,
+    BlastRadiusPreviewRequest, BlastRadiusPreviewResponse, CreateFreezeWindowRequest,
+    CreateScheduledChangeRequest, FreezeRecurrence, FreezeWindowResponse, FreezeWindowsResponse,
+    RescheduleScheduledChangeRequest, ScheduledChangeAction, ScheduledChangeResponse,
+    ScheduledChangeStatus, ScheduledChangesResponse, UpdateFreezeWindowRequest,
 };
 use crate::rest::pagination::{PageMeta, PaginationQuery};
 use crate::rest::pipeline::{
@@ -224,7 +232,17 @@ async fn health() -> impl Responder {
         metrics::analyze_canary_gate,
         notification::get_notification_settings,
         notification::update_notification_channel,
-        notification::update_notification_preference
+        notification::update_notification_preference,
+        operational_safety::list_freeze_windows,
+        operational_safety::active_freeze_window,
+        operational_safety::create_freeze_window,
+        operational_safety::update_freeze_window,
+        operational_safety::delete_freeze_window,
+        operational_safety::preview_feature_impact,
+        operational_safety::list_scheduled_changes,
+        operational_safety::create_scheduled_change,
+        operational_safety::cancel_scheduled_change,
+        operational_safety::reschedule_scheduled_change
     ),
     components(schemas(
         HealthResponse,
@@ -378,7 +396,23 @@ async fn health() -> impl Responder {
         NotificationPreferenceResponse,
         NotificationSettingsResponse,
         UpdateNotificationChannelConfigRequest,
-        UpdateNotificationPreferenceRequest
+        UpdateNotificationPreferenceRequest,
+        FreezeRecurrence,
+        FreezeWindowResponse,
+        FreezeWindowsResponse,
+        CreateFreezeWindowRequest,
+        UpdateFreezeWindowRequest,
+        ActiveFreezeQuery,
+        ActiveFreezeResponse,
+        BlastRadiusPreviewRequest,
+        BlastRadiusPreviewResponse,
+        BlastRadiusEnvironmentResponse,
+        ScheduledChangeAction,
+        ScheduledChangeStatus,
+        ScheduledChangeResponse,
+        ScheduledChangesResponse,
+        CreateScheduledChangeRequest,
+        RescheduleScheduledChangeRequest
     )),
     modifiers(&SecurityAddon),
     security(
@@ -401,7 +435,8 @@ async fn health() -> impl Responder {
         (name = "Auth", description = "Authentication"),
         (name = "Metrics", description = "Metrics and analytics"),
         (name = "Activity", description = "Activity logs"),
-        (name = "Notifications", description = "Notification settings and delivery preferences")
+        (name = "Notifications", description = "Notification settings and delivery preferences"),
+        (name = "Operational Safety", description = "Freeze windows, blast radius previews, and scheduled changes")
     )
 )]
 pub struct ApiDoc;
@@ -528,6 +563,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .configure(auth::configure)
             .configure(jwt_secret::configure)
             .configure(notification::configure)
+            .configure(operational_safety::configure)
             .configure(stream::configure),
     );
 }

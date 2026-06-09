@@ -690,6 +690,7 @@ fn map_policy(policy: ApprovalPolicy) -> ApprovalPolicyResponse {
 )]
 #[post("/teams/{team_id}/approval-policy-preview")]
 pub(crate) async fn preview_approval_policy(
+    pool: Option<web::Data<sqlx::PgPool>>,
     logic: web::Data<Box<dyn ApprovalLogic>>,
     team_id: web::Path<String>,
     payload: web::Json<ApprovalPolicyPreviewRequest>,
@@ -716,10 +717,26 @@ pub(crate) async fn preview_approval_policy(
         .filter(|status| !status.is_empty())
         .unwrap_or("DEPLOYMENT_REQUESTED");
 
-    let preview = logic
+    let mut preview = logic
         .preview_stage_change_policy(team_uuid, environment_uuid, requested_status)
         .await
         .map_err(RestError::from)?;
+    if let Some(pool) = pool {
+        if let Some(window) = crate::rest::operational_safety::active_freeze_for_environment(
+            pool.get_ref(),
+            team_uuid,
+            environment_uuid,
+            Utc::now(),
+        )
+        .await
+        .map_err(RestError::from)?
+        {
+            preview.warnings.push(format!(
+                "Active freeze window '{}' applies to this environment",
+                window.name
+            ));
+        }
+    }
 
     Ok(HttpResponse::Ok().json(map_policy_preview(preview, change_type.to_string())))
 }
