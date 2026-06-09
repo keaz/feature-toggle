@@ -13,7 +13,7 @@ use crate::database::approval::{
 use crate::database::entity::{ApprovalPolicy, ApprovalRequest, ApprovalStatus, ApprovalVote};
 use crate::database::feature::{FeatureVersionDiffEntry, diff_feature_snapshots};
 use crate::logic::ActorContext;
-use crate::logic::approval::ApprovalLogic;
+use crate::logic::approval::{ApprovalLogic, ApprovalPolicyPreview, ApprovalPolicyPreviewOutcome};
 use crate::rest::error::RestError;
 use crate::rest::pagination::{PageMeta, PaginationQuery, normalize_pagination};
 
@@ -120,6 +120,36 @@ pub struct ApprovalPolicySummaryResponse {
     pub required_approvers: i32,
     pub approver_role_ids: Vec<String>,
     pub auto_approve_after_hours: Option<i32>,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalPolicyPreviewRequest {
+    pub change_type: String,
+    pub environment_id: String,
+    pub requested_status: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalPolicyPreviewOutcomeResponse {
+    NotRequired,
+    RequiresApproval,
+    AutoApproved,
+    Blocked,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalPolicyPreviewResponse {
+    pub change_type: String,
+    pub requested_status: Option<String>,
+    pub environment_id: String,
+    pub outcome: ApprovalPolicyPreviewOutcomeResponse,
+    pub policy: Option<ApprovalPolicySummaryResponse>,
+    pub eligible_approvers_count: Option<i64>,
+    pub warnings: Vec<String>,
+    pub reason: String,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -355,6 +385,39 @@ fn map_policy_summary(policy: &ApprovalPolicy) -> ApprovalPolicySummaryResponse 
     }
 }
 
+fn map_preview_outcome(
+    outcome: ApprovalPolicyPreviewOutcome,
+) -> ApprovalPolicyPreviewOutcomeResponse {
+    match outcome {
+        ApprovalPolicyPreviewOutcome::NotRequired => {
+            ApprovalPolicyPreviewOutcomeResponse::NotRequired
+        }
+        ApprovalPolicyPreviewOutcome::RequiresApproval => {
+            ApprovalPolicyPreviewOutcomeResponse::RequiresApproval
+        }
+        ApprovalPolicyPreviewOutcome::AutoApproved => {
+            ApprovalPolicyPreviewOutcomeResponse::AutoApproved
+        }
+        ApprovalPolicyPreviewOutcome::Blocked => ApprovalPolicyPreviewOutcomeResponse::Blocked,
+    }
+}
+
+fn map_policy_preview(
+    preview: ApprovalPolicyPreview,
+    change_type: String,
+) -> ApprovalPolicyPreviewResponse {
+    ApprovalPolicyPreviewResponse {
+        change_type,
+        requested_status: preview.requested_status,
+        environment_id: preview.environment_id.to_string(),
+        outcome: map_preview_outcome(preview.outcome),
+        policy: preview.policy.as_ref().map(map_policy_summary),
+        eligible_approvers_count: preview.eligible_approvers_count,
+        warnings: preview.warnings,
+        reason: preview.reason,
+    }
+}
+
 fn diff_section(path: &str) -> String {
     if path.starts_with("feature.") || path == "feature" {
         "Metadata".to_string()
@@ -573,6 +636,56 @@ fn map_policy(policy: ApprovalPolicy) -> ApprovalPolicyResponse {
         enabled: policy.enabled,
         created_at: policy.created_at,
     }
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/teams/{team_id}/approval-policy-preview",
+    request_body = ApprovalPolicyPreviewRequest,
+    params(
+        ("team_id" = String, Path, description = "Team ID")
+    ),
+    responses(
+        (status = 200, description = "Approval policy preview", body = ApprovalPolicyPreviewResponse),
+        (status = 400, description = "Invalid input", body = crate::rest::error::ErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::rest::error::ErrorResponse)
+    ),
+    tag = "Approvals"
+)]
+#[post("/teams/{team_id}/approval-policy-preview")]
+pub(crate) async fn preview_approval_policy(
+    logic: web::Data<Box<dyn ApprovalLogic>>,
+    team_id: web::Path<String>,
+    payload: web::Json<ApprovalPolicyPreviewRequest>,
+) -> Result<impl Responder, RestError> {
+    let team_uuid = parse_uuid(&team_id, "team_id")?;
+    let environment_uuid = parse_uuid(&payload.environment_id, "environment_id")?;
+    let change_type = payload.change_type.trim();
+    if change_type.is_empty() {
+        return Err(RestError::invalid_input("changeType is required"));
+    }
+    if !matches!(
+        change_type,
+        "stage_change" | "feature_change" | "emergency_action"
+    ) {
+        return Err(RestError::invalid_input(
+            "changeType must be stage_change, feature_change, or emergency_action",
+        ));
+    }
+
+    let requested_status = payload
+        .requested_status
+        .as_deref()
+        .map(str::trim)
+        .filter(|status| !status.is_empty())
+        .unwrap_or("DEPLOYMENT_REQUESTED");
+
+    let preview = logic
+        .preview_stage_change_policy(team_uuid, environment_uuid, requested_status)
+        .await
+        .map_err(RestError::from)?;
+
+    Ok(HttpResponse::Ok().json(map_policy_preview(preview, change_type.to_string())))
 }
 
 #[utoipa::path(
@@ -1041,6 +1154,7 @@ pub(crate) async fn delete_approval_policy(
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(list_approval_requests)
+        .service(preview_approval_policy)
         .service(approve_request)
         .service(reject_request)
         .service(cancel_request)
@@ -1123,6 +1237,57 @@ mod tests {
             comment: Some("ok".to_string()),
             created_at: Utc::now(),
         }
+    }
+
+    #[actix_web::test]
+    async fn preview_approval_policy_returns_policy_decision() {
+        let team_id = Uuid::new_v4();
+        let environment_id = Uuid::new_v4();
+        let policy_id = Uuid::new_v4();
+        let policy = sample_policy(policy_id);
+
+        let mut logic = MockApprovalLogic::new();
+        logic
+            .expect_preview_stage_change_policy()
+            .withf(move |team, environment, status| {
+                *team == team_id
+                    && *environment == environment_id
+                    && status == "DEPLOYMENT_REQUESTED"
+            })
+            .times(1)
+            .returning(move |_, _, _| {
+                Ok(ApprovalPolicyPreview {
+                    change_type: "stage_change".to_string(),
+                    requested_status: Some("DEPLOYMENT_REQUESTED".to_string()),
+                    environment_id,
+                    outcome: ApprovalPolicyPreviewOutcome::RequiresApproval,
+                    policy: Some(policy.clone()),
+                    eligible_approvers_count: Some(3),
+                    warnings: Vec::new(),
+                    reason: "Matched policy requires manual approval".to_string(),
+                })
+            });
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(Box::new(logic) as Box<dyn ApprovalLogic>))
+                .service(preview_approval_policy),
+        )
+        .await;
+
+        let req = test::TestRequest::post()
+            .uri(&format!("/teams/{team_id}/approval-policy-preview"))
+            .set_json(ApprovalPolicyPreviewRequest {
+                change_type: "stage_change".to_string(),
+                environment_id: environment_id.to_string(),
+                requested_status: Some("DEPLOYMENT_REQUESTED".to_string()),
+            })
+            .to_request();
+
+        let response: serde_json::Value = test::call_and_read_body_json(&app, req).await;
+        assert_eq!(response["outcome"], "requires_approval");
+        assert_eq!(response["policy"]["name"], "Production approval");
+        assert_eq!(response["eligibleApproversCount"], 3);
     }
 
     #[actix_web::test]

@@ -70,6 +70,37 @@ pub struct ApprovalRequestEvent {
     pub votes: Vec<ApprovalVote>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ApprovalPolicyPreviewOutcome {
+    NotRequired,
+    RequiresApproval,
+    AutoApproved,
+    Blocked,
+}
+
+impl ApprovalPolicyPreviewOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ApprovalPolicyPreviewOutcome::NotRequired => "not_required",
+            ApprovalPolicyPreviewOutcome::RequiresApproval => "requires_approval",
+            ApprovalPolicyPreviewOutcome::AutoApproved => "auto_approved",
+            ApprovalPolicyPreviewOutcome::Blocked => "blocked",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ApprovalPolicyPreview {
+    pub change_type: String,
+    pub requested_status: Option<String>,
+    pub environment_id: Uuid,
+    pub outcome: ApprovalPolicyPreviewOutcome,
+    pub policy: Option<ApprovalPolicy>,
+    pub eligible_approvers_count: Option<i64>,
+    pub warnings: Vec<String>,
+    pub reason: String,
+}
+
 #[automock]
 #[async_trait::async_trait]
 pub trait ApprovalLogic: Send + Sync {
@@ -116,6 +147,13 @@ pub trait ApprovalLogic: Send + Sync {
         &self,
         request: ApprovalRequest,
     ) -> Result<ApprovalRequest, Error>;
+
+    async fn preview_stage_change_policy(
+        &self,
+        team_id: Uuid,
+        environment_id: Uuid,
+        requested_status: &str,
+    ) -> Result<ApprovalPolicyPreview, Error>;
 
     fn clone_box(&self) -> Box<dyn ApprovalLogic>;
 }
@@ -293,6 +331,38 @@ impl ApprovalLogicImpl {
         });
 
         Ok(applicable.into_iter().next())
+    }
+
+    async fn count_eligible_approvers(
+        &self,
+        policy: &ApprovalPolicy,
+    ) -> Result<Option<i64>, Error> {
+        if policy.approver_role_ids.is_empty() {
+            return Ok(Some(0));
+        }
+
+        let Some(pool) = &self.db_pool else {
+            return Ok(None);
+        };
+
+        let count = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(DISTINCT u.id)
+            FROM users u
+            JOIN user_roles approver_ur ON approver_ur.user_id = u.id
+            JOIN roles approver_role ON approver_role.id = approver_ur.role_id
+            JOIN user_roles policy_ur ON policy_ur.user_id = u.id
+            WHERE u.enabled = TRUE
+              AND LOWER(approver_role.name) = LOWER('Approver')
+              AND policy_ur.role_id = ANY($1)
+            "#,
+        )
+        .bind(&policy.approver_role_ids)
+        .fetch_one(pool)
+        .await
+        .map_err(Error::DatabaseError)?;
+
+        Ok(Some(count))
     }
 
     async fn publish_event(&self, request: &ApprovalRequest, team_id: Uuid) -> Result<(), Error> {
@@ -1300,6 +1370,86 @@ impl ApprovalLogic for ApprovalLogicImpl {
         Ok(updated)
     }
 
+    async fn preview_stage_change_policy(
+        &self,
+        team_id: Uuid,
+        environment_id: Uuid,
+        requested_status: &str,
+    ) -> Result<ApprovalPolicyPreview, Error> {
+        if !status_requires_interception(requested_status) {
+            return Ok(ApprovalPolicyPreview {
+                change_type: "stage_change".to_string(),
+                requested_status: Some(requested_status.to_string()),
+                environment_id,
+                outcome: ApprovalPolicyPreviewOutcome::NotRequired,
+                policy: None,
+                eligible_approvers_count: None,
+                warnings: Vec::new(),
+                reason: format!("{requested_status} does not require approval interception"),
+            });
+        }
+
+        let Some(policy) = self.get_applicable_policy(team_id, environment_id).await? else {
+            return Ok(ApprovalPolicyPreview {
+                change_type: "stage_change".to_string(),
+                requested_status: Some(requested_status.to_string()),
+                environment_id,
+                outcome: ApprovalPolicyPreviewOutcome::NotRequired,
+                policy: None,
+                eligible_approvers_count: None,
+                warnings: Vec::new(),
+                reason: "No enabled approval policy matches this environment".to_string(),
+            });
+        };
+
+        let eligible_approvers_count = self.count_eligible_approvers(&policy).await?;
+        let missing_approvers = eligible_approvers_count
+            .map(|count| count < i64::from(policy.required_approvers))
+            .unwrap_or(false);
+
+        let mut warnings = Vec::new();
+        if missing_approvers {
+            warnings.push(format!(
+                "Only {} eligible approver(s) found for {} required approval(s)",
+                eligible_approvers_count.unwrap_or_default(),
+                policy.required_approvers
+            ));
+        }
+
+        let outcome = if missing_approvers {
+            ApprovalPolicyPreviewOutcome::Blocked
+        } else if policy.auto_approve_after_hours.is_some() {
+            ApprovalPolicyPreviewOutcome::AutoApproved
+        } else {
+            ApprovalPolicyPreviewOutcome::RequiresApproval
+        };
+
+        let reason = match outcome {
+            ApprovalPolicyPreviewOutcome::Blocked => {
+                "Matched policy cannot be satisfied with current approvers".to_string()
+            }
+            ApprovalPolicyPreviewOutcome::AutoApproved => format!(
+                "Matched policy will auto-approve after {} hour(s) if still pending",
+                policy.auto_approve_after_hours.unwrap_or_default()
+            ),
+            ApprovalPolicyPreviewOutcome::RequiresApproval => {
+                "Matched policy requires manual approval".to_string()
+            }
+            ApprovalPolicyPreviewOutcome::NotRequired => unreachable!(),
+        };
+
+        Ok(ApprovalPolicyPreview {
+            change_type: "stage_change".to_string(),
+            requested_status: Some(requested_status.to_string()),
+            environment_id,
+            outcome,
+            policy: Some(policy),
+            eligible_approvers_count,
+            warnings,
+            reason,
+        })
+    }
+
     fn clone_box(&self) -> Box<dyn ApprovalLogic> {
         Box::new(self.clone())
     }
@@ -1356,6 +1506,129 @@ mod tests {
         fn clone_box(&self) -> Box<dyn crate::logic::notification::NotificationLogic> {
             Box::new(self.clone())
         }
+    }
+
+    fn policy_for_test(
+        id: Uuid,
+        team_id: Uuid,
+        name: &str,
+        applies_to: &str,
+        environment_ids: Option<Vec<Uuid>>,
+    ) -> ApprovalPolicy {
+        ApprovalPolicy {
+            id,
+            team_id,
+            name: name.to_string(),
+            description: None,
+            applies_to: applies_to.to_string(),
+            environment_ids,
+            required_approvers: 1,
+            approver_role_ids: vec![Uuid::new_v4()],
+            auto_approve_after_hours: None,
+            enabled: true,
+            created_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn preview_stage_change_policy_uses_policy_precedence() {
+        let team_id = Uuid::new_v4();
+        let production_env_id = Uuid::new_v4();
+        let staging_env_id = Uuid::new_v4();
+        let qa_env_id = Uuid::new_v4();
+        let global_policy_id = Uuid::new_v4();
+        let production_policy_id = Uuid::new_v4();
+        let staging_policy_id = Uuid::new_v4();
+
+        let policies = vec![
+            policy_for_test(global_policy_id, team_id, "Global", "all", None),
+            policy_for_test(
+                production_policy_id,
+                team_id,
+                "Production",
+                "production_only",
+                None,
+            ),
+            policy_for_test(
+                staging_policy_id,
+                team_id,
+                "Staging",
+                "specific_environments",
+                Some(vec![staging_env_id]),
+            ),
+        ];
+
+        let mut approval_repo = MockApprovalRepository::new();
+        approval_repo
+            .expect_list_policies_for_team()
+            .with(mockall::predicate::eq(team_id))
+            .times(3)
+            .returning(move |_| Ok(policies.clone()));
+
+        let mut env_logic = MockEnvironmentLogic::new();
+        env_logic
+            .expect_get_environment_by_id()
+            .times(3)
+            .returning(move |id| {
+                let env_id = Uuid::try_from(id).expect("environment id");
+                let environment_type = if env_id == production_env_id {
+                    "Production"
+                } else if env_id == staging_env_id {
+                    "Staging"
+                } else {
+                    "Development"
+                };
+                Ok(Environment {
+                    id: ID::from(env_id),
+                    name: environment_type.to_string(),
+                    active: true,
+                    team_id: ID::from(team_id),
+                    environment_type: environment_type.to_string(),
+                })
+            });
+
+        let (approval_events_tx, _) = tokio::sync::broadcast::channel(4);
+        let (feature_updates_tx, _) = tokio::sync::broadcast::channel(4);
+        let logic = ApprovalLogicImpl {
+            db_pool: None,
+            approval_repository: Box::new(approval_repo),
+            feature_repository: Box::new(MockFeatureRepository::new()),
+            environment_logic: Box::new(env_logic),
+            role_repository: Box::new(MockRoleRepository::new()),
+            approval_events_tx,
+            feature_updates_tx,
+            notification_logic: None,
+        };
+
+        let production_preview = logic
+            .preview_stage_change_policy(team_id, production_env_id, "DEPLOYMENT_REQUESTED")
+            .await
+            .expect("production preview");
+        let staging_preview = logic
+            .preview_stage_change_policy(team_id, staging_env_id, "DEPLOYMENT_REQUESTED")
+            .await
+            .expect("staging preview");
+        let qa_preview = logic
+            .preview_stage_change_policy(team_id, qa_env_id, "DEPLOYMENT_REQUESTED")
+            .await
+            .expect("qa preview");
+
+        assert_eq!(
+            production_preview.policy.map(|policy| policy.id),
+            Some(production_policy_id)
+        );
+        assert_eq!(
+            staging_preview.policy.map(|policy| policy.id),
+            Some(staging_policy_id)
+        );
+        assert_eq!(
+            qa_preview.policy.map(|policy| policy.id),
+            Some(global_policy_id)
+        );
+        assert_eq!(
+            production_preview.outcome,
+            ApprovalPolicyPreviewOutcome::RequiresApproval
+        );
     }
 
     #[tokio::test]

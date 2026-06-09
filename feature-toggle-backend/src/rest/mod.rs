@@ -31,9 +31,11 @@ use utoipa::{Modify, OpenApi};
 use utoipa_swagger_ui::SwaggerUi;
 
 use crate::rest::approval::{
-    AppliesTo, ApprovalActionRequest, ApprovalPolicyResponse, ApprovalRequestListQuery,
-    ApprovalRequestResponse, ApprovalRequestStatus, ApprovalRequestsResponse, ApprovalVoteResponse,
-    CreateApprovalPolicyRequest, UpdateApprovalPolicyRequest,
+    AppliesTo, ApprovalActionRequest, ApprovalPolicyPreviewOutcomeResponse,
+    ApprovalPolicyPreviewRequest, ApprovalPolicyPreviewResponse, ApprovalPolicyResponse,
+    ApprovalRequestListQuery, ApprovalRequestResponse, ApprovalRequestStatus,
+    ApprovalRequestsResponse, ApprovalVoteResponse, CreateApprovalPolicyRequest,
+    UpdateApprovalPolicyRequest,
 };
 use crate::rest::auth::{
     AuthStatusResponse, LoginRequest, LoginResponse, ResetPasswordRequest,
@@ -167,6 +169,7 @@ async fn health() -> impl Responder {
         feature::pending_approvals,
         feature::active_kill_switches,
         feature::rollout_metrics,
+        approval::preview_approval_policy,
         approval::list_approval_requests,
         approval::approve_request,
         approval::reject_request,
@@ -298,6 +301,9 @@ async fn health() -> impl Responder {
         ApprovalRequestsResponse,
         ApprovalActionRequest,
         ApprovalPolicyResponse,
+        ApprovalPolicyPreviewOutcomeResponse,
+        ApprovalPolicyPreviewRequest,
+        ApprovalPolicyPreviewResponse,
         CreateApprovalPolicyRequest,
         UpdateApprovalPolicyRequest,
         AppliesTo,
