@@ -12,7 +12,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY evaluation-engine/ ./evaluation-engine/
 COPY feature-toggle-shared/ ./feature-toggle-shared/
 COPY feature-edge-server/ ./feature-edge-server/
-COPY feature-toggle-backend/proto/ ./feature-toggle-backend/proto/
+COPY feature-toggle-backend/ ./feature-toggle-backend/
 
 # Create a temporary workspace configuration that excludes feature-toggle-backend
 RUN printf '[workspace]\nresolver = "3"\nmembers = [\n    "evaluation-engine",\n    "feature-edge-server",\n    "feature-toggle-shared",\n]' > Cargo.toml
@@ -34,7 +34,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY evaluation-engine/ ./evaluation-engine/
 COPY feature-toggle-shared/ ./feature-toggle-shared/
 COPY feature-edge-server/ ./feature-edge-server/
-COPY feature-toggle-backend/proto/ ./feature-toggle-backend/proto/
+COPY feature-toggle-backend/ ./feature-toggle-backend/
 
 # Create workspace config
 RUN printf '[workspace]\nresolver = "3"\nmembers = [\n    "evaluation-engine",\n    "feature-edge-server",\n    "feature-toggle-shared",\n]' > Cargo.toml
