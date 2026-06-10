@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 FROM rust:1.89.0-slim AS chef
-RUN cargo install cargo-chef
+RUN cargo install cargo-chef --locked
 WORKDIR /app
 
 FROM chef AS planner
@@ -25,7 +25,7 @@ FROM chef AS builder
 RUN apt-get update && apt-get install -y pkg-config libssl-dev curl && rm -rf /var/lib/apt/lists/*
 
 # Install sqlx-cli for migrations
-RUN cargo install sqlx-cli --no-default-features --features postgres
+RUN cargo install sqlx-cli --version 0.8.6 --locked --no-default-features --features postgres
 
 COPY --from=planner /app/recipe.json recipe.json
 

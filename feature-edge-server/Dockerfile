@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 FROM rust:1.89.0-slim AS chef
-RUN cargo install cargo-chef
+RUN cargo install cargo-chef --locked
 WORKDIR /app
 
 FROM chef AS planner
