@@ -34,6 +34,55 @@ fn api_base_url(req: &HttpRequest) -> String {
     format!("{scheme}://{host}/api/v1")
 }
 
+fn build_ofrep_status_response(base: String) -> OfrepStatusResponse {
+    OfrepStatusResponse {
+        status: "healthy".to_string(),
+        generated_at: Utc::now().to_rfc3339(),
+        rest_evaluate_url: format!("{base}/evaluate"),
+        metrics_ingest_url: format!("{base}/metrics/track/system"),
+        grpc_evaluation: "available via feature-toggle-backend gRPC evaluation service".to_string(),
+        authentication: vec![
+            "Bearer system-client token with evaluate scope for REST evaluation".to_string(),
+            "Bearer system-client token with metrics:write scope for token metrics ingestion"
+                .to_string(),
+            "Client id and client secret remain supported by SDK/gRPC ingestion paths".to_string(),
+        ],
+        supported_evaluation_types: vec![
+            "boolean flags".to_string(),
+            "string variants".to_string(),
+            "number variants".to_string(),
+            "JSON variants".to_string(),
+            "OpenFeature targetingKey contexts".to_string(),
+        ],
+        capabilities: vec![
+            CompatibilityCapability {
+                name: "OpenFeature provider".to_string(),
+                status: "supported".to_string(),
+                notes: "REST evaluation accepts targetingKey, environmentId, featureKey, and context attributes.".to_string(),
+            },
+            CompatibilityCapability {
+                name: "OFREP protocol".to_string(),
+                status: "supported".to_string(),
+                notes: "FluxGate implements the required OFREP core single and bulk evaluation endpoints. Optional event stream metadata is omitted until OFREP SSE change streams are available.".to_string(),
+            },
+            CompatibilityCapability {
+                name: "Metrics ingestion".to_string(),
+                status: "supported".to_string(),
+                notes: "Client-secret ingestion and scoped system-token ingestion are available.".to_string(),
+            },
+            CompatibilityCapability {
+                name: "Streaming updates".to_string(),
+                status: "supported".to_string(),
+                notes: "gRPC streams and REST WebSocket dashboard streams are available for live updates.".to_string(),
+            },
+        ],
+        examples: vec![
+            format!("curl -H 'Authorization: Bearer $FLUXGATE_TOKEN' {base}/developer/ofrep-status"),
+            format!("curl -X POST -H 'Authorization: Bearer $FLUXGATE_TOKEN' -H 'Content-Type: application/json' {base}/evaluate -d '{{\"featureKey\":\"checkout\",\"environmentId\":\"$ENV_ID\",\"targetingKey\":\"user-1\",\"context\":{{}}}}'"),
+        ],
+    }
+}
+
 #[utoipa::path(
     get,
     path = "/api/v1/developer/ofrep-status",
@@ -55,53 +104,28 @@ pub(crate) async fn ofrep_status(
         .map_err(|err| RestError::internal(format!("database health check failed: {err}")))?;
 
     let base = api_base_url(&req);
-    Ok(HttpResponse::Ok().json(OfrepStatusResponse {
-        status: "healthy".to_string(),
-        generated_at: Utc::now().to_rfc3339(),
-        rest_evaluate_url: format!("{base}/evaluate"),
-        metrics_ingest_url: format!("{base}/metrics/track/system"),
-        grpc_evaluation: "available via feature-toggle-backend gRPC evaluation service".to_string(),
-        authentication: vec![
-            "Bearer system-client token with evaluate scope for REST evaluation".to_string(),
-            "Bearer system-client token with metrics:write scope for token metrics ingestion".to_string(),
-            "Client id and client secret remain supported by SDK/gRPC ingestion paths".to_string(),
-        ],
-        supported_evaluation_types: vec![
-            "boolean flags".to_string(),
-            "string variants".to_string(),
-            "number variants".to_string(),
-            "JSON variants".to_string(),
-            "OpenFeature targetingKey contexts".to_string(),
-        ],
-        capabilities: vec![
-            CompatibilityCapability {
-                name: "OpenFeature provider".to_string(),
-                status: "supported".to_string(),
-                notes: "REST evaluation accepts targetingKey, environmentId, featureKey, and context attributes.".to_string(),
-            },
-            CompatibilityCapability {
-                name: "OFREP protocol".to_string(),
-                status: "partial".to_string(),
-                notes: "FluxGate exposes compatible evaluation semantics; full OFREP wire shape is documented as partial.".to_string(),
-            },
-            CompatibilityCapability {
-                name: "Metrics ingestion".to_string(),
-                status: "supported".to_string(),
-                notes: "Client-secret ingestion and scoped system-token ingestion are available.".to_string(),
-            },
-            CompatibilityCapability {
-                name: "Streaming updates".to_string(),
-                status: "supported".to_string(),
-                notes: "gRPC streams and REST WebSocket dashboard streams are available for live updates.".to_string(),
-            },
-        ],
-        examples: vec![
-            format!("curl -H 'Authorization: Bearer $FLUXGATE_TOKEN' {base}/developer/ofrep-status"),
-            format!("curl -X POST -H 'Authorization: Bearer $FLUXGATE_TOKEN' -H 'Content-Type: application/json' {base}/evaluate -d '{{\"featureKey\":\"checkout\",\"environmentId\":\"$ENV_ID\",\"targetingKey\":\"user-1\",\"context\":{{}}}}'"),
-        ],
-    }))
+    Ok(HttpResponse::Ok().json(build_ofrep_status_response(base)))
 }
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(ofrep_status);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_ofrep_status_response;
+
+    #[test]
+    fn ofrep_status_reports_required_core_protocol_support() {
+        let response = build_ofrep_status_response("http://localhost:8080/api/v1".to_string());
+        let capability = response
+            .capabilities
+            .iter()
+            .find(|capability| capability.name == "OFREP protocol")
+            .expect("OFREP protocol capability should be present");
+
+        assert_eq!(capability.status, "supported");
+        assert!(capability.notes.contains("required OFREP core"));
+        assert!(!capability.notes.contains("partial"));
+    }
 }

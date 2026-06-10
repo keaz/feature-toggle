@@ -311,15 +311,27 @@ fn setup_logger() -> actix_web::Result<(), Box<dyn std::error::Error>> {
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(handlers::evaluate_handler, handlers::health_handler, handlers::ofrep_evaluate_flag),
+    paths(
+        handlers::evaluate_handler,
+        handlers::health_handler,
+        handlers::ofrep_evaluate_flag,
+        handlers::ofrep_evaluate_flags_bulk
+    ),
     components(schemas(
         handlers::EvaluateHttpRequest,
         handlers::EvaluateHttpResponse,
         handlers::EvaluateRequestContext,
         handlers::OFREPContext,
         handlers::OFREPEvaluationRequest,
+        handlers::OFREPBulkEvaluationRequest,
+        handlers::OFREPBulkEvaluationQuery,
         handlers::OFREPSuccessResponse,
-        handlers::OFREPErrorResponse
+        handlers::OFREPErrorResponse,
+        handlers::OFREPFlagEvaluation,
+        handlers::OFREPBulkEvaluationSuccess,
+        handlers::OFREPBulkEvaluationFailure,
+        handlers::OFREPEventStream,
+        handlers::OFREPEventStreamEndpoint
     )),
     tags(
         (name = "edge", description = "Edge evaluation API"),
@@ -422,7 +434,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .service(SwaggerUi::new("/docs/{_:.*}").url("/api-doc/openapi.json", openapi.clone()))
             .route("/health", web::get().to(handlers::health_handler))
             .route("/evaluate", web::post().to(handlers::evaluate_handler))
-            // OFREP (OpenFeature Remote Evaluation Protocol) endpoint
+            // OFREP (OpenFeature Remote Evaluation Protocol) endpoints
+            .route(
+                "/ofrep/v1/evaluate/flags",
+                web::post().to(handlers::ofrep_evaluate_flags_bulk),
+            )
             .route(
                 "/ofrep/v1/evaluate/flags/{key}",
                 web::post().to(handlers::ofrep_evaluate_flag),
@@ -643,7 +659,7 @@ mod tests {
 
         // Test success response
         let success = OFREPSuccessResponse {
-            key: None, // Key should be None for single eval success
+            key: "test-flag".to_string(),
             value: Some(serde_json::json!(true)),
             reason: "TARGETING_MATCH".to_string(),
             variant: Some("treatment".to_string()),
@@ -651,7 +667,7 @@ mod tests {
         };
 
         let json = serde_json::to_string(&success).unwrap();
-        assert!(!json.contains("\"key\":")); // key should be omitted when None
+        assert!(json.contains("\"key\":\"test-flag\""));
         assert!(json.contains("\"value\":true"));
         assert!(json.contains("\"reason\":\"TARGETING_MATCH\""));
 
@@ -660,6 +676,7 @@ mod tests {
             key: "test-flag".to_string(),
             error_code: "FLAG_NOT_FOUND".to_string(),
             error_details: Some("The requested flag does not exist".to_string()),
+            metadata: None,
         };
 
         let error_json = serde_json::to_string(&error).unwrap();

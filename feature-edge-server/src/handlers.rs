@@ -1,9 +1,10 @@
 use crate::grpc_client::{assignment_key, fetch_feature_via_grpc, get_or_fetch_client_info};
 use crate::pb;
 use crate::{AppState, EvaluationEvent};
-use actix_web::{HttpResponse, Responder, web};
+use actix_web::{HttpResponse, Responder, http::header, web};
 use evaluation_engine as engine;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::sync::atomic::Ordering;
 use tracing::error;
 use tracing::info as info_log;
@@ -75,11 +76,10 @@ pub struct OFREPEvaluationRequest {
 }
 
 /// OFREP successful evaluation response
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize, ToSchema, Clone)]
 pub struct OFREPSuccessResponse {
-    /// Flag key (only included in error responses for single eval, always in bulk)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub key: Option<String>,
+    /// Flag key
+    pub key: String,
     /// The resolved value (omitted for code defaults)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<serde_json::Value>,
@@ -94,7 +94,7 @@ pub struct OFREPSuccessResponse {
 }
 
 /// OFREP error response
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize, ToSchema, Clone)]
 pub struct OFREPErrorResponse {
     /// Flag key
     pub key: String,
@@ -102,6 +102,88 @@ pub struct OFREPErrorResponse {
     #[serde(rename = "errorCode")]
     pub error_code: String,
     /// Optional error details
+    #[serde(rename = "errorDetails", skip_serializing_if = "Option::is_none")]
+    pub error_details: Option<String>,
+    /// Optional metadata about the failure
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
+}
+
+/// OFREP flag evaluation item for bulk responses.
+#[derive(Serialize, ToSchema, Clone)]
+#[serde(untagged)]
+pub enum OFREPFlagEvaluation {
+    Success(OFREPSuccessResponse),
+    #[allow(dead_code)]
+    Failure(OFREPErrorResponse),
+}
+
+/// OFREP bulk flag evaluation request.
+#[derive(Deserialize, ToSchema, Clone)]
+pub struct OFREPBulkEvaluationRequest {
+    /// Static evaluation context with targetingKey and custom attributes.
+    pub context: OFREPContext,
+}
+
+/// Optional OFREP bulk re-fetch metadata query parameters.
+#[derive(Deserialize, ToSchema, Clone)]
+pub struct OFREPBulkEvaluationQuery {
+    /// ETag metadata from a change event. This is not an HTTP conditional header.
+    #[serde(rename = "flagConfigEtag")]
+    pub flag_config_etag: Option<String>,
+    /// Last-modified metadata from a change event, accepted as epoch seconds or ISO 8601 text.
+    #[serde(rename = "flagConfigLastModified")]
+    pub flag_config_last_modified: Option<String>,
+}
+
+/// OFREP event stream endpoint descriptor.
+#[derive(Serialize, ToSchema, Clone)]
+pub struct OFREPEventStreamEndpoint {
+    /// Optional endpoint origin. If absent, providers use their configured OFREP base URL origin.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    /// Path and query component for the event stream endpoint.
+    #[serde(rename = "requestUri")]
+    pub request_uri: String,
+}
+
+/// OFREP event stream descriptor.
+#[derive(Serialize, ToSchema, Clone)]
+pub struct OFREPEventStream {
+    /// Push mechanism type. OFREP currently defines `sse`.
+    #[serde(rename = "type")]
+    pub stream_type: String,
+    /// Opaque event stream URL.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Structured endpoint components.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<OFREPEventStreamEndpoint>,
+    /// Client inactivity timeout in seconds.
+    #[serde(rename = "inactivityDelaySec", skip_serializing_if = "Option::is_none")]
+    pub inactivity_delay_sec: Option<u32>,
+}
+
+/// OFREP successful bulk evaluation response.
+#[derive(Serialize, ToSchema, Clone)]
+pub struct OFREPBulkEvaluationSuccess {
+    /// Array of successful evaluations and per-flag failures.
+    pub flags: Vec<OFREPFlagEvaluation>,
+    /// Optional flag-set metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
+    /// Optional real-time change notification streams.
+    #[serde(rename = "eventStreams", skip_serializing_if = "Option::is_none")]
+    pub event_streams: Option<Vec<OFREPEventStream>>,
+}
+
+/// OFREP failure response for request-level bulk failures.
+#[derive(Serialize, ToSchema, Clone)]
+pub struct OFREPBulkEvaluationFailure {
+    /// OpenFeature-compatible error code.
+    #[serde(rename = "errorCode")]
+    pub error_code: String,
+    /// Optional error details.
     #[serde(rename = "errorDetails", skip_serializing_if = "Option::is_none")]
     pub error_details: Option<String>,
 }
@@ -802,6 +884,219 @@ fn map_ofrep_context_to_engine(
     }
 }
 
+fn ofrep_error(
+    key: String,
+    error_code: impl Into<String>,
+    error_details: Option<String>,
+) -> OFREPErrorResponse {
+    OFREPErrorResponse {
+        key,
+        error_code: error_code.into(),
+        error_details,
+        metadata: None,
+    }
+}
+
+fn normalize_ofrep_context_environment(
+    mut context: OFREPContext,
+    environment_id: &str,
+) -> Result<OFREPContext, ()> {
+    if let Some(req_env) = context
+        .attributes
+        .get("environment_id")
+        .and_then(|v| v.as_str())
+        && req_env != environment_id
+    {
+        return Err(());
+    }
+    context.attributes.remove("environment_id");
+    Ok(context)
+}
+
+fn ofrep_reason(reason: &engine::EvaluationReason) -> String {
+    reason.as_str().to_string()
+}
+
+fn ofrep_success(
+    key: String,
+    value: serde_json::Value,
+    reason: impl Into<String>,
+    variant: Option<String>,
+    metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
+) -> OFREPSuccessResponse {
+    OFREPSuccessResponse {
+        key,
+        value: Some(value),
+        reason: reason.into(),
+        variant,
+        metadata,
+    }
+}
+
+fn ofrep_disabled_success(key: String) -> OFREPSuccessResponse {
+    ofrep_success(key, serde_json::json!(false), "DISABLED", None, None)
+}
+
+async fn evaluate_ofrep_feature(
+    app: &AppState,
+    feature_key: String,
+    feature: std::sync::Arc<engine::Feature>,
+    environment_id: String,
+    context: OFREPContext,
+) -> OFREPSuccessResponse {
+    if !feature.enabled {
+        app.purge_assignments_for_feature(&feature.id).await;
+        return ofrep_disabled_success(feature_key);
+    }
+
+    let stage_enabled = feature
+        .stages
+        .iter()
+        .find(|s| s.environment_id == environment_id)
+        .map(|s| s.enabled)
+        .unwrap_or(false);
+
+    if !stage_enabled {
+        return ofrep_disabled_success(feature_key);
+    }
+
+    let OFREPContext {
+        targeting_key,
+        attributes,
+    } = context;
+    let user_id = targeting_key.clone();
+
+    let (mut result, prior_assignment) = {
+        let cache_key = assignment_key(&user_id, &feature.id, &environment_id);
+        let cached = app
+            .assigned_cache
+            .get(&cache_key)
+            .map(|entry| entry.value().clone());
+
+        if let Some(cached_assignment) = cached {
+            (
+                engine::EvaluationResult {
+                    flag_key: feature_key.clone(),
+                    value: cached_assignment.value,
+                    variant: cached_assignment.variant,
+                    reason: cached_assignment.reason,
+                    error_code: None,
+                    metadata: None,
+                },
+                true,
+            )
+        } else {
+            let ofrep_ctx = OFREPContext {
+                targeting_key: targeting_key.clone(),
+                attributes: attributes.clone(),
+            };
+            let ec =
+                map_ofrep_context_to_engine(feature_key.clone(), ofrep_ctx, environment_id.clone());
+            (engine::evaluate(&ec, &feature), false)
+        }
+    };
+
+    if feature.feature_type == "Simple" {
+        let is_enabled = result.value.as_bool().unwrap_or(false);
+        result.value = serde_json::json!(is_enabled);
+        result.variant = None;
+    }
+
+    let evaluation_result = result.variant.is_some() || result.value.as_bool().unwrap_or(false);
+    let evaluation_event = EvaluationEvent {
+        feature_key: feature.key.clone(),
+        environment_id: environment_id.clone(),
+        evaluation_result,
+        evaluation_context: EvaluateContext {
+            bucketing_key: user_id.clone(),
+            environment_id: environment_id.clone(),
+            attributes: attributes.clone(),
+        },
+        user_context: Some(user_id.clone()),
+        evaluated_at: std::time::SystemTime::now(),
+        prior_assignment,
+        variant: result.variant.clone(),
+        variant_value: if result.variant.is_some() {
+            Some(result.value.clone())
+        } else {
+            None
+        },
+    };
+    if let Err(err) = app.evaluation_event_tx.try_send(evaluation_event) {
+        match err {
+            tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                app.evaluation_event_dropped.fetch_add(1, Ordering::Relaxed);
+            }
+            tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                tracing::warn!("Evaluation event channel closed; dropping event");
+            }
+        }
+    }
+
+    let should_cache = result.variant.is_some() || result.value.as_bool().unwrap_or(false);
+    if should_cache {
+        let cache_key = assignment_key(&user_id, &feature.id, &environment_id);
+        app.assigned_cache.insert(
+            cache_key,
+            crate::CachedAssignment {
+                value: result.value.clone(),
+                variant: result.variant.clone(),
+                reason: result.reason.clone(),
+            },
+        );
+
+        app.pending_assignments
+            .push(crate::grpc_client::UserAssignment {
+                user_id,
+                feature_id: feature.id.clone(),
+                environment_id: environment_id.to_string(),
+                assigned: true,
+                variant: result.variant.clone(),
+            });
+    }
+
+    ofrep_success(
+        feature_key,
+        result.value,
+        ofrep_reason(&result.reason),
+        result.variant,
+        result.metadata,
+    )
+}
+
+fn bytes_to_lower_hex(bytes: &[u8]) -> String {
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(&mut hex, "{byte:02x}");
+    }
+    hex
+}
+
+fn ofrep_bulk_etag(features: &[std::sync::Arc<engine::Feature>]) -> String {
+    let mut feature_payloads = features
+        .iter()
+        .map(|feature| {
+            serde_json::to_string(feature.as_ref()).unwrap_or_else(|_| feature.key.clone())
+        })
+        .collect::<Vec<_>>();
+    feature_payloads.sort_unstable();
+
+    let mut hasher = Sha256::new();
+    for payload in feature_payloads {
+        hasher.update(payload.as_bytes());
+        hasher.update(b"\n");
+    }
+    bytes_to_lower_hex(&hasher.finalize())
+}
+
+fn if_none_match_contains(if_none_match: &str, etag: &str) -> bool {
+    if_none_match
+        .split(',')
+        .map(|part| part.trim().trim_matches('"'))
+        .any(|candidate| candidate == etag || candidate == "*")
+}
+
 /// OFREP handler for single flag evaluation
 /// Spec: POST /ofrep/v1/evaluate/flags/{key}
 #[utoipa::path(
@@ -838,11 +1133,11 @@ pub async fn ofrep_evaluate_flag(
 
     // Validate targetingKey is not empty
     if req.context.targeting_key.is_empty() {
-        return Ok(HttpResponse::BadRequest().json(OFREPErrorResponse {
-            key: feature_key,
-            error_code: "TARGETING_KEY_MISSING".to_string(),
-            error_details: Some("targetingKey is required and cannot be empty".to_string()),
-        }));
+        return Ok(HttpResponse::BadRequest().json(ofrep_error(
+            feature_key,
+            "TARGETING_KEY_MISSING",
+            Some("targetingKey is required and cannot be empty".to_string()),
+        )));
     }
 
     // Fetch client information for origin validation
@@ -867,11 +1162,11 @@ pub async fn ofrep_evaluate_flag(
         Ok(Some(f)) => f,
         Ok(None) => {
             // OFREP: Return 404 for missing flags
-            return Ok(HttpResponse::NotFound().json(OFREPErrorResponse {
-                key: feature_key,
-                error_code: "FLAG_NOT_FOUND".to_string(),
-                error_details: Some("The requested feature flag does not exist".to_string()),
-            }));
+            return Ok(HttpResponse::NotFound().json(ofrep_error(
+                feature_key,
+                "FLAG_NOT_FOUND",
+                Some("The requested feature flag does not exist".to_string()),
+            )));
         }
         Err(status) => {
             error!(
@@ -887,171 +1182,145 @@ pub async fn ofrep_evaluate_flag(
     };
     let feature = std::sync::Arc::new(hydrate_feature_with_dependencies(&app, &feature).await);
 
-    // Kill switch: disable feature if not active
-    if !feature.enabled {
-        app.purge_assignments_for_feature(&feature.id).await;
-        return Ok(HttpResponse::Ok().json(OFREPSuccessResponse {
-            key: None,
-            value: Some(serde_json::json!(false)),
-            reason: "DISABLED".to_string(),
-            variant: None,
-            metadata: None,
+    let environment_id = client_info.environment_id.clone();
+    let context = match normalize_ofrep_context_environment(req.context, &environment_id) {
+        Ok(context) => context,
+        Err(()) => {
+            return Err(actix_web::error::ErrorUnauthorized(
+                "Environment mismatch for client",
+            ));
+        }
+    };
+
+    let response =
+        evaluate_ofrep_feature(&app, feature_key, feature, environment_id, context).await;
+    Ok(HttpResponse::Ok().json(response))
+}
+
+/// OFREP handler for bulk flag evaluation
+/// Spec: POST /ofrep/v1/evaluate/flags
+#[utoipa::path(
+    post,
+    path = "/ofrep/v1/evaluate/flags",
+    request_body = OFREPBulkEvaluationRequest,
+    params(
+        ("If-None-Match" = Option<String>, Header, description = "ETag from a previous bulk evaluation response"),
+        ("flagConfigEtag" = Option<String>, Query, description = "ETag metadata from an OFREP change event"),
+        ("flagConfigLastModified" = Option<String>, Query, description = "Last-modified metadata from an OFREP change event")
+    ),
+    responses(
+        (status = 200, description = "Successful bulk evaluation", body = OFREPBulkEvaluationSuccess),
+        (status = 304, description = "Not modified"),
+        (status = 400, description = "Invalid request", body = OFREPBulkEvaluationFailure),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+        (status = 500, description = "Server error", body = OFREPBulkEvaluationFailure)
+    ),
+    tag = "ofrep"
+)]
+pub async fn ofrep_evaluate_flags_bulk(
+    http_req: actix_web::HttpRequest,
+    app: web::Data<AppState>,
+    query: web::Query<OFREPBulkEvaluationQuery>,
+    req: web::Json<OFREPBulkEvaluationRequest>,
+) -> actix_web::Result<HttpResponse> {
+    let req = req.into_inner();
+    let _change_event_refetch =
+        query.flag_config_etag.is_some() || query.flag_config_last_modified.is_some();
+
+    let Some((client_id, client_secret)) = extract_auth_from_headers(&http_req) else {
+        return Err(actix_web::error::ErrorUnauthorized(
+            "Missing explicit client credentials",
+        ));
+    };
+
+    if req.context.targeting_key.is_empty() {
+        return Ok(HttpResponse::BadRequest().json(OFREPBulkEvaluationFailure {
+            error_code: "TARGETING_KEY_MISSING".to_string(),
+            error_details: Some("targetingKey is required and cannot be empty".to_string()),
         }));
+    }
+
+    let client_info = match get_or_fetch_client_info(&app, &client_id, &client_secret).await {
+        Some(info) => info,
+        None => {
+            return Err(actix_web::error::ErrorBadGateway(
+                "Failed to fetch client info",
+            ));
+        }
+    };
+
+    if !validate_web_origin(&http_req, &client_info) {
+        return Err(actix_web::error::ErrorUnauthorized(
+            "Invalid origin for web client",
+        ));
     }
 
     let environment_id = client_info.environment_id.clone();
-    let OFREPContext {
-        targeting_key,
-        mut attributes,
-    } = req.context;
-    if let Some(req_env) = attributes.get("environment_id").and_then(|v| v.as_str())
-        && req_env != environment_id
+    let context = match normalize_ofrep_context_environment(req.context, &environment_id) {
+        Ok(context) => context,
+        Err(()) => {
+            return Err(actix_web::error::ErrorUnauthorized(
+                "Environment mismatch for client",
+            ));
+        }
+    };
+
+    let mut features = Vec::new();
+    for key in app.mapped_cache.get_all_keys().await {
+        if let Some(feature) = app.mapped_cache.get(&key).await {
+            features.push(std::sync::Arc::new(
+                hydrate_feature_with_dependencies(&app, &feature).await,
+            ));
+        }
+    }
+    features.sort_by(|left, right| left.key.cmp(&right.key));
+
+    let etag = ofrep_bulk_etag(&features);
+    if let Some(if_none_match) = http_req
+        .headers()
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        && if_none_match_contains(if_none_match, &etag)
     {
-        return Err(actix_web::error::ErrorUnauthorized(
-            "Environment mismatch for client",
-        ));
-    }
-    attributes.remove("environment_id");
-
-    let stage_enabled = feature
-        .stages
-        .iter()
-        .find(|s| s.environment_id == environment_id)
-        .map(|s| s.enabled)
-        .unwrap_or(false);
-
-    if !stage_enabled {
-        return Ok(HttpResponse::Ok().json(OFREPSuccessResponse {
-            key: None,
-            value: Some(serde_json::json!(false)),
-            reason: "DISABLED".to_string(),
-            variant: None,
-            metadata: None,
-        }));
+        return Ok(HttpResponse::NotModified().finish());
     }
 
-    // Extract user_id from targeting_key
-    let user_id = targeting_key.clone();
-
-    // Check cache for sticky assignment
-    let (mut result, prior_assignment) = {
-        let cache_key = assignment_key(&user_id, &feature.id, &environment_id);
-        let cached = app
-            .assigned_cache
-            .get(&cache_key)
-            .map(|entry| entry.value().clone());
-
-        if let Some(cached_assignment) = cached {
-            // Return cached result with original reason
-            (
-                engine::EvaluationResult {
-                    flag_key: feature_key.clone(),
-                    value: cached_assignment.value,
-                    variant: cached_assignment.variant,
-                    reason: cached_assignment.reason,
-                    error_code: None,
-                    metadata: None,
-                },
-                true,
-            )
-        } else {
-            // Perform fresh evaluation
-            let ofrep_ctx = OFREPContext {
-                targeting_key: targeting_key.clone(),
-                attributes: attributes.clone(),
-            };
-            let ec =
-                map_ofrep_context_to_engine(feature_key.clone(), ofrep_ctx, environment_id.clone());
-            let result = engine::evaluate(&ec, &feature);
-            (result, false)
-        }
-    };
-
-    // For Simple features, ensure value is always boolean and variant is None
-    if feature.feature_type == "Simple" {
-        let is_enabled = result.value.as_bool().unwrap_or(false);
-        result.value = serde_json::json!(is_enabled);
-        result.variant = None;
+    let mut flags = Vec::with_capacity(features.len());
+    for feature in features {
+        let feature_key = feature.key.clone();
+        let response = evaluate_ofrep_feature(
+            &app,
+            feature_key,
+            feature,
+            environment_id.clone(),
+            context.clone(),
+        )
+        .await;
+        flags.push(OFREPFlagEvaluation::Success(response));
     }
 
-    // Record evaluation event for analytics/observability
-    let evaluation_result = result.variant.is_some() || result.value.as_bool().unwrap_or(false);
-    let evaluation_context = EvaluateContext {
-        bucketing_key: user_id.clone(),
-        environment_id: environment_id.clone(),
-        attributes: attributes.clone(),
-    };
-    let evaluation_event = EvaluationEvent {
-        feature_key: feature.key.clone(),
-        environment_id: environment_id.clone(),
-        evaluation_result,
-        evaluation_context,
-        user_context: Some(user_id.clone()),
-        evaluated_at: std::time::SystemTime::now(),
-        prior_assignment,
-        variant: result.variant.clone(),
-        variant_value: if result.variant.is_some() {
-            Some(result.value.clone())
-        } else {
-            None
-        },
-    };
-    if let Err(err) = app.evaluation_event_tx.try_send(evaluation_event) {
-        match err {
-            tokio::sync::mpsc::error::TrySendError::Full(_) => {
-                app.evaluation_event_dropped.fetch_add(1, Ordering::Relaxed);
-            }
-            tokio::sync::mpsc::error::TrySendError::Closed(_) => {
-                tracing::warn!("Evaluation event channel closed; dropping event");
-            }
-        }
-    }
+    let mut metadata = std::collections::HashMap::new();
+    metadata.insert(
+        "version".to_string(),
+        serde_json::Value::String(etag.clone()),
+    );
 
-    // Cache successful assignments
-    let should_cache = result.variant.is_some() || result.value.as_bool().unwrap_or(false);
-    if should_cache {
-        let cache_key = assignment_key(&user_id, &feature.id, &environment_id);
-        app.assigned_cache.insert(
-            cache_key,
-            crate::CachedAssignment {
-                value: result.value.clone(),
-                variant: result.variant.clone(),
-                reason: result.reason.clone(),
-            },
-        );
-
-        // Queue for backend persistence
-        app.pending_assignments
-            .push(crate::grpc_client::UserAssignment {
-                user_id,
-                feature_id: feature.id.clone(),
-                environment_id: environment_id.to_string(),
-                assigned: true,
-                variant: result.variant.clone(),
-            });
-    }
-
-    // Convert reason to SCREAMING_SNAKE_CASE string (using serde serialization)
-    let reason = serde_json::to_string(&result.reason)
-        .unwrap_or_else(|_| "UNKNOWN".to_string())
-        .trim_matches('"')
-        .to_string();
-
-    // OFREP response: no "key" field for single evaluation success
-    Ok(HttpResponse::Ok().json(OFREPSuccessResponse {
-        key: None,
-        value: Some(result.value),
-        reason,
-        variant: result.variant,
-        metadata: None,
-    }))
+    Ok(HttpResponse::Ok()
+        .insert_header((header::ETAG, etag))
+        .json(OFREPBulkEvaluationSuccess {
+            flags,
+            metadata: Some(metadata),
+            event_streams: None,
+        }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         EvaluateContext, cache_fetched_feature, evaluate_http_feature_locally,
-        extract_auth_from_headers, hydrate_feature_with_dependencies, map_proto_to_engine,
+        extract_auth_from_headers, hydrate_feature_with_dependencies, if_none_match_contains,
+        map_proto_to_engine, ofrep_bulk_etag,
     };
     use crate::pb;
     use actix_web::test::TestRequest;
@@ -1154,6 +1423,34 @@ mod tests {
             .to_http_request();
         let auth = extract_auth_from_headers(&req);
         assert_eq!(auth, Some(("api-key-123".to_string(), String::new())));
+    }
+
+    #[test]
+    fn ofrep_bulk_etag_is_stable_and_matchable() {
+        let feature_a = Arc::new(map_proto_to_engine(&simple_feature(
+            "feature-a",
+            "alpha",
+            true,
+            false,
+            vec![simple_stage("env-1", true)],
+            vec![],
+        )));
+        let feature_b = Arc::new(map_proto_to_engine(&simple_feature(
+            "feature-b",
+            "beta",
+            true,
+            false,
+            vec![simple_stage("env-1", true)],
+            vec![],
+        )));
+
+        let etag = ofrep_bulk_etag(&[feature_a.clone(), feature_b.clone()]);
+        let reversed_etag = ofrep_bulk_etag(&[feature_b, feature_a]);
+
+        assert_eq!(etag, reversed_etag);
+        assert!(if_none_match_contains(&etag, &etag));
+        assert!(if_none_match_contains(&format!("\"{etag}\""), &etag));
+        assert!(if_none_match_contains(&format!("stale, \"{etag}\""), &etag));
     }
 
     #[test]
