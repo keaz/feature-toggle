@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE features\n               SET kill_switch_enabled = false,\n                   active = false,\n                   kill_switch_activated_at = $1,\n                   rollback_scheduled_at = NULL,\n                   emergency_override_applied_at = COALESCE(emergency_override_applied_at, $1)\n               WHERE id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "26dd31f300e9536830ce8d4eff8f28ac990cd79207d8975123fb8ce7a9285532"
+}

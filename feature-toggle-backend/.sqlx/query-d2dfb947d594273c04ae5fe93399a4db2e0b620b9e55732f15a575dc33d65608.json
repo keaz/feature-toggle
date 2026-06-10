@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT\n                ma.metric_id,\n                m.key as metric_key,\n                m.metric_type as \"metric_type: MetricType\",\n                ma.feature_key,\n                ma.environment_id,\n                ma.variant,\n                ma.time_bucket,\n                ma.sample_size,\n                ma.sum_value,\n                ma.mean_value,\n                ma.min_value,\n                ma.max_value,\n                ma.p50_value,\n                ma.p95_value,\n                ma.p99_value,\n                ma.conversion_count,\n                ma.conversion_rate\n            FROM metric_aggregations ma\n            JOIN metrics m ON ma.metric_id = m.id\n            WHERE ma.feature_key = $1\n              AND ($2::UUID IS NULL OR ma.environment_id = $2)\n              AND ma.time_bucket >= date_trunc('hour', $3::timestamptz)\n              AND ma.time_bucket < date_trunc('hour', $4::timestamptz) + INTERVAL '1 hour'\n            ORDER BY ma.time_bucket DESC, ma.metric_id, COALESCE(ma.variant, '')\n            ",
+  "query": "\n            SELECT\n                ma.metric_id,\n                m.key as metric_key,\n                m.metric_type as \"metric_type: MetricType\",\n                ma.feature_key,\n                ma.environment_id,\n                ma.variant,\n                ma.time_bucket,\n                ma.sample_size,\n                ma.sum_value,\n                ma.mean_value,\n                ma.min_value,\n                ma.max_value,\n                ma.p50_value,\n                ma.p95_value,\n                ma.p99_value,\n                ma.conversion_count,\n                ma.conversion_rate\n            FROM metric_aggregations ma\n            JOIN metrics m ON ma.metric_id = m.id\n            WHERE ma.feature_key = $1\n              AND ($2::UUID IS NULL OR m.team_id = $2)\n              AND ($3::UUID IS NULL OR ma.environment_id = $3)\n              AND ma.time_bucket >= date_trunc('hour', $4::timestamptz)\n              AND ma.time_bucket < date_trunc('hour', $5::timestamptz) + INTERVAL '1 hour'\n            ORDER BY ma.time_bucket DESC, ma.metric_id, COALESCE(ma.variant, '')\n            ",
   "describe": {
     "columns": [
       {
@@ -93,6 +93,7 @@
       "Left": [
         "Text",
         "Uuid",
+        "Uuid",
         "Timestamptz",
         "Timestamptz"
       ]
@@ -117,5 +118,5 @@
       true
     ]
   },
-  "hash": "bffd9c5d5e23047961260ed6dc68ca45e065c7449d5a35aead472637c406e97b"
+  "hash": "d2dfb947d594273c04ae5fe93399a4db2e0b620b9e55732f15a575dc33d65608"
 }

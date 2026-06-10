@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                INSERT INTO feature_variants (feature_id, control, value, value_type, description)\n                VALUES ($1, $2, $3, $4, $5)\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Varchar",
+        "Jsonb",
+        {
+          "Custom": {
+            "name": "variant_value_type",
+            "kind": {
+              "Enum": [
+                "string",
+                "number",
+                "boolean",
+                "json"
+              ]
+            }
+          }
+        },
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ba080ede0e4f4b53ff9225423864678cf3318cc79ec51ceee78f81d60c91c791"
+}

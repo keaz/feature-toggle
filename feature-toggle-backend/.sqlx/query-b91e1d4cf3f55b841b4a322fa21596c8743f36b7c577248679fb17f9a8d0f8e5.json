@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE features\n                SET kill_switch_enabled = true,\n                active = true,\n                kill_switch_activated_at = NULL,\n                rollback_scheduled_at = NULL,\n                emergency_override_reason = NULL,\n                emergency_override_expires_at = NULL,\n                emergency_override_actor_id = NULL,\n                emergency_override_applied_at = NULL\n                WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b91e1d4cf3f55b841b4a322fa21596c8743f36b7c577248679fb17f9a8d0f8e5"
+}

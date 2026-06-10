@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT client_id, origin\n               FROM client_web_origins\n               WHERE client_id = ANY($1)\n               ORDER BY client_id, origin",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "client_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "origin",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "7a23a1a7e59929c16e7a842056932aefb192b09886f9adb42bb077beac22d954"
+}

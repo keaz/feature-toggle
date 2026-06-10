@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT feature_id, depends_on_id\n               FROM feature_dependencies\n               WHERE feature_id = ANY($1)\n               ORDER BY feature_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "feature_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "depends_on_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "a0a92faf2d68de61309580a3a491d76d24c2d75c182417a1e81447a0cb9e1d11"
+}

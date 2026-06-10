@@ -1,0 +1,48 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO rule_groups (id, criteria_id, logic_operator)\n                   VALUES ($1, $2, $3)\n                   RETURNING id, criteria_id, logic_operator as \"logic_operator: LogicOperator\",\n                             created_at, updated_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "criteria_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "logic_operator: LogicOperator",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 4,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Varchar"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "e20e2df7570ce6a34099abeb2720a0980d416fb9797a3af180f315b972281207"
+}
