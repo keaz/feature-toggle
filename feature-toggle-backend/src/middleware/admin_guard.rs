@@ -310,6 +310,35 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn blocks_login_and_refresh_when_no_admin() {
+        let pool = test_pool();
+        let state = AdminState::new();
+        state.set_exists(false);
+
+        let app = test::init_service(
+            App::new()
+                .wrap(AdminGuard::new(pool, "http://ui".to_string(), state))
+                .route(
+                    "/api/v1/auth/login",
+                    web::post().to(|| async { HttpResponse::Ok().finish() }),
+                )
+                .route(
+                    "/api/v1/auth/refresh",
+                    web::post().to(|| async { HttpResponse::Ok().finish() }),
+                ),
+        )
+        .await;
+
+        for uri in ["/api/v1/auth/login", "/api/v1/auth/refresh"] {
+            let req = test::TestRequest::post().uri(uri).to_request();
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(resp.status(), actix_web::http::StatusCode::UNAUTHORIZED);
+            let body: serde_json::Value = test::read_body_json(resp).await;
+            assert_eq!(body["error"], "admin_account_missing", "{uri}");
+        }
+    }
+
+    #[actix_web::test]
     async fn allows_application_status_query_when_no_admin() {
         let pool = test_pool();
         let state = AdminState::new();

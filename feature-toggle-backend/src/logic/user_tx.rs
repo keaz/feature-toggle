@@ -7,6 +7,7 @@
 use crate::Error;
 use crate::database::activity_log::{ActivityLogRepository, CreateActivityLog};
 use crate::database::jwt_token::revoke_all_user_tokens_tx;
+use crate::database::refresh_token::revoke_all_user_refresh_tokens_tx;
 use crate::database::user::{CreateUser, UpdateUser, UserRepositoryTx};
 use crate::logic::ActorContext;
 use crate::logic::user::{ApiUser, RegisterUserInput, UpdateUserInput};
@@ -301,6 +302,10 @@ where
 
     repo.update_password_tx(conn, user_id, new_password_hash, false)
         .await?;
+
+    // A password change ends every refresh-token family of the user, so no
+    // session can be renewed with credentials issued before the change.
+    revoke_all_user_refresh_tokens_tx(conn, user_id).await?;
 
     // For reset_password, the actor is the user themselves (self-service password change).
     let (actor_id, actor_name) = actor

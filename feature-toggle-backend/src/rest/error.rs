@@ -51,6 +51,10 @@ pub enum RestError {
     },
     #[error("Account disabled")]
     AccountDisabled { message: String },
+    #[error("Invalid refresh token")]
+    InvalidRefreshToken { message: String },
+    #[error("Refresh token reused")]
+    RefreshTokenReused { message: String },
     #[error("Forbidden")]
     Forbidden {
         message: String,
@@ -104,6 +108,22 @@ impl RestError {
         }
     }
 
+    /// 401 `invalid_refresh_token`: unknown or expired refresh token, or its user
+    /// is missing or disabled.
+    pub fn invalid_refresh_token() -> Self {
+        Self::InvalidRefreshToken {
+            message: "Refresh token is invalid or expired".to_string(),
+        }
+    }
+
+    /// 401 `refresh_token_reused`: an already revoked refresh token was presented
+    /// and its token family has been revoked.
+    pub fn refresh_token_reused() -> Self {
+        Self::RefreshTokenReused {
+            message: "Refresh token was already used; the session has been revoked".to_string(),
+        }
+    }
+
     pub fn forbidden(message: impl Into<String>) -> Self {
         Self::Forbidden {
             message: message.into(),
@@ -127,6 +147,8 @@ impl RestError {
             Self::Conflict { .. } => "conflict",
             Self::Unauthorized { .. } => "unauthorized",
             Self::AccountDisabled { .. } => "account_disabled",
+            Self::InvalidRefreshToken { .. } => "invalid_refresh_token",
+            Self::RefreshTokenReused { .. } => "refresh_token_reused",
             Self::Forbidden { .. } => "forbidden",
             Self::Internal { .. } => "internal",
         }
@@ -140,7 +162,9 @@ impl RestError {
             | Self::Unauthorized { message, .. }
             | Self::Forbidden { message, .. }
             | Self::Internal { message, .. }
-            | Self::AccountDisabled { message } => message,
+            | Self::AccountDisabled { message }
+            | Self::InvalidRefreshToken { message }
+            | Self::RefreshTokenReused { message } => message,
         }
     }
 
@@ -152,7 +176,9 @@ impl RestError {
             | Self::Unauthorized { code, .. }
             | Self::Forbidden { code, .. }
             | Self::Internal { code, .. } => code.as_deref(),
-            Self::AccountDisabled { .. } => None,
+            Self::AccountDisabled { .. }
+            | Self::InvalidRefreshToken { .. }
+            | Self::RefreshTokenReused { .. } => None,
         }
     }
 
@@ -164,7 +190,9 @@ impl RestError {
             | Self::Unauthorized { details, .. }
             | Self::Forbidden { details, .. }
             | Self::Internal { details, .. } => details.as_ref(),
-            Self::AccountDisabled { .. } => None,
+            Self::AccountDisabled { .. }
+            | Self::InvalidRefreshToken { .. }
+            | Self::RefreshTokenReused { .. } => None,
         }
     }
 
@@ -184,7 +212,10 @@ impl ResponseError for RestError {
             Self::NotFound { .. } => StatusCode::NOT_FOUND,
             Self::InvalidInput { .. } => StatusCode::BAD_REQUEST,
             Self::Conflict { .. } => StatusCode::CONFLICT,
-            Self::Unauthorized { .. } | Self::AccountDisabled { .. } => StatusCode::UNAUTHORIZED,
+            Self::Unauthorized { .. }
+            | Self::AccountDisabled { .. }
+            | Self::InvalidRefreshToken { .. }
+            | Self::RefreshTokenReused { .. } => StatusCode::UNAUTHORIZED,
             Self::Forbidden { .. } => StatusCode::FORBIDDEN,
             Self::Internal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -289,5 +320,19 @@ mod tests {
         let body = to_bytes(resp.into_body()).await.expect("body");
         let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
         assert_eq!(json["error"], "account_disabled");
+    }
+
+    #[actix_web::test]
+    async fn refresh_token_errors_map_to_401_with_their_error_codes() {
+        for (err, code) in [
+            (RestError::invalid_refresh_token(), "invalid_refresh_token"),
+            (RestError::refresh_token_reused(), "refresh_token_reused"),
+        ] {
+            let resp = err.error_response();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+            let body = to_bytes(resp.into_body()).await.expect("body");
+            let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+            assert_eq!(json["error"], code);
+        }
     }
 }

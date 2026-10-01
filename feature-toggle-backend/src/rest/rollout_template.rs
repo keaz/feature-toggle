@@ -322,6 +322,8 @@ fn rest_error_message(err: &RestError) -> String {
         | RestError::Conflict { message, .. }
         | RestError::Unauthorized { message, .. }
         | RestError::AccountDisabled { message }
+        | RestError::InvalidRefreshToken { message }
+        | RestError::RefreshTokenReused { message }
         | RestError::Forbidden { message, .. }
         | RestError::Internal { message, .. } => message.clone(),
     }

@@ -11,6 +11,7 @@ mod feature_test;
 mod metrics_test;
 mod notification_test;
 mod pipeline_test;
+mod refresh_token_test;
 mod stage_contexts_test;
 mod system_client_approval_test;
 mod team_test;

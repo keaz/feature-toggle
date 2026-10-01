@@ -39,6 +39,7 @@ pub mod feature_evaluation;
 pub mod feature_tx;
 pub mod jwt_secret;
 pub mod jwt_token;
+pub mod jwt_token_tx;
 pub mod metrics;
 pub mod metrics_tx;
 pub mod notification;

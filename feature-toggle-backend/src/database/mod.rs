@@ -13,6 +13,7 @@ pub mod jwt_token;
 pub mod metrics;
 pub mod notification;
 pub mod pipeline;
+pub mod refresh_token;
 pub mod role;
 pub mod rollout_template;
 pub mod system_client;

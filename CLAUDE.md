@@ -68,7 +68,7 @@ Layers in `feature-toggle-backend/src/`:
 - `model.rs` — API-facing domain model, mapped to and from `database::entity` types.
 - `middleware/` — `JwtGuard` (JWT validation against persisted tokens, system client tokens), `AdminGuard` (bootstrap admin only when none exists), access log. Authorization decisions go through `logic/policy.rs` and `logic/authorization.rs`, and are audited in the activity log.
 - `grpc/` — service for the edge server: feature fetch, client info, streaming snapshots and incremental updates, evaluation/assignment ingest (idempotent via ingest fingerprint).
-- `scheduler/` — background jobs: kill-switch rollback, scheduled changes, auto-approval, metrics aggregation, canary governance.
+- `scheduler/` — background jobs: kill-switch rollback, scheduled changes, auto-approval, metrics aggregation, canary governance, expired session-token cleanup.
 - `cluster/` — optional multi-node replication and DB-backed discovery.
 
 Change propagation: `tokio::sync::broadcast` channel of `grpc::pb::FeatureUpdate` is shared by REST handlers, schedulers, context logic, and gRPC streaming. Any write that changes evaluable feature state must send an update on it, or edge caches go stale. A second broadcast channel carries `FeatureEvaluationEvent` for REST live streams (`rest/stream.rs`).
@@ -77,7 +77,7 @@ Rollout safety: `logic/dependency_graph.rs` validates feature dependencies (cycl
 
 ## Configuration
 
-Backend config (`src/config.rs`) loads first match of: `$FEATURE_TOGGLE_CONFIG`, `feature-toggle-backend/config.toml`, `./config.toml`. Keys: `allowed_origin`, `http_addr`, `grpc_addr`, optional `[cluster]`. The root `config.toml` is the **edge server** config (backend gRPC address, client credentials, flush/retry/cache settings); see `feature-edge-server/CONFIG.md`.
+Backend config (`src/config.rs`) loads first match of: `$FEATURE_TOGGLE_CONFIG`, `feature-toggle-backend/config.toml`, `./config.toml`. Keys: `allowed_origin`, `http_addr`, `grpc_addr`, optional `[cluster]`, optional `[auth]` (`access_token_ttl_minutes` default 30, `refresh_token_ttl_days` default 7). The root `config.toml` is the **edge server** config (backend gRPC address, client credentials, flush/retry/cache settings); see `feature-edge-server/CONFIG.md`.
 
 ## graphify
 

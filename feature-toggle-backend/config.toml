@@ -14,6 +14,13 @@ grpc_addr = "0.0.0.0:50051"
 # IMPORTANT: Change this to a secure random string in production
 jwt_secret = "your_secure_jwt_secret_change_in_production_minimum_32_characters"
 
+# Session token lifetimes (optional section; these are the defaults).
+# Access tokens (JWT) are short-lived; clients renew them with the rotating
+# refresh token returned by POST /api/v1/auth/login and POST /api/v1/auth/refresh.
+[auth]
+access_token_ttl_minutes = 30
+refresh_token_ttl_days = 7
+
 # Cluster replication (optional). Uncomment and adjust when running multiple backend instances.
 # Uses database-backed discovery where nodes register themselves in PostgreSQL and discover
 # peers via heartbeat table (similar to JGroups JDBC_PING - no external service discovery needed).

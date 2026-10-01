@@ -250,6 +250,7 @@ where
                 || (path == "/metrics/track" && method == actix_web::http::Method::POST)
                 || (path == "/api/v1/metrics/track" && method == actix_web::http::Method::POST)
                 || (path == "/api/v1/auth/login" && method == actix_web::http::Method::POST)
+                || (path == "/api/v1/auth/refresh" && method == actix_web::http::Method::POST)
                 || (path == "/api/v1/auth/status" && method == actix_web::http::Method::GET);
 
             if is_public_path {
@@ -723,22 +724,24 @@ fn timestamp_as_usize(timestamp: i64) -> usize {
     }
 }
 
+/// Creates a user access token that expires at `expires_at` (callers derive it
+/// from the configured access-token lifetime and store the same instant).
 pub fn create_jwt_token(
     user_id: Uuid,
     username: &str,
     is_admin: bool,
     roles: Vec<String>,
     secret: &str,
+    expires_at: DateTime<Utc>,
 ) -> Result<String, jsonwebtoken::errors::Error> {
     let now = Utc::now();
-    let exp = now + chrono::Duration::hours(24); // Token expires in 24 hours
 
     let claims = Claims {
         sub: user_id.to_string(),
         username: username.to_string(),
         is_admin,
         roles,
-        exp: timestamp_as_usize(exp.timestamp()),
+        exp: timestamp_as_usize(expires_at.timestamp()),
         iat: timestamp_as_usize(now.timestamp()),
         jti: Some(Uuid::new_v4().to_string()),
         token_type: "user".to_string(),
@@ -792,6 +795,10 @@ mod tests {
     use super::*;
     use actix_web::{App, HttpResponse, test, web};
     use sqlx::postgres::PgPoolOptions;
+
+    fn test_expiry() -> DateTime<Utc> {
+        Utc::now() + chrono::Duration::minutes(30)
+    }
 
     fn test_pool() -> sqlx::PgPool {
         // Create a lazy pool for testing (won't actually connect unless used)
@@ -879,7 +886,8 @@ mod tests {
     async fn allows_protected_request_with_valid_token() {
         let secret = "test_secret";
         let user_id = Uuid::new_v4();
-        let token = create_jwt_token(user_id, "testuser", false, vec![], secret).unwrap();
+        let token =
+            create_jwt_token(user_id, "testuser", false, vec![], secret, test_expiry()).unwrap();
 
         let app = test::init_service(
             App::new()
@@ -937,7 +945,8 @@ mod tests {
     async fn allows_logout_with_valid_token() {
         let secret = "test_secret";
         let user_id = Uuid::new_v4();
-        let token = create_jwt_token(user_id, "testuser", false, vec![], secret).unwrap();
+        let token =
+            create_jwt_token(user_id, "testuser", false, vec![], secret, test_expiry()).unwrap();
 
         let app = test::init_service(
             App::new()
@@ -997,7 +1006,15 @@ mod tests {
         let user_id = Uuid::new_v4();
         let secret = "test_secret";
         let roles = vec!["Approver".to_string(), "Team Admin".to_string()];
-        let token = create_jwt_token(user_id, "testuser", true, roles.clone(), secret).unwrap();
+        let token = create_jwt_token(
+            user_id,
+            "testuser",
+            true,
+            roles.clone(),
+            secret,
+            test_expiry(),
+        )
+        .unwrap();
 
         // Verify the token is not empty
         assert!(!token.is_empty());
@@ -1018,6 +1035,47 @@ mod tests {
         assert_eq!(token_data.claims.roles, roles);
         assert_eq!(token_data.claims.token_type, "user");
         assert!(token_data.claims.team_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn create_jwt_token_exp_is_the_given_expiry() {
+        let secret = "test_secret";
+        let expires_at = Utc::now() + chrono::Duration::minutes(7);
+        let token =
+            create_jwt_token(Uuid::new_v4(), "u", false, vec![], secret, expires_at).unwrap();
+
+        let decoding_key = jsonwebtoken::DecodingKey::from_secret(secret.as_ref());
+        let validation = jsonwebtoken::Validation::new(Algorithm::HS256);
+        let claims = jsonwebtoken::decode::<Claims>(&token, &decoding_key, &validation)
+            .unwrap()
+            .claims;
+        assert_eq!(claims.exp, expires_at.timestamp() as usize);
+        assert_eq!(claims.exp - claims.iat, 7 * 60);
+    }
+
+    #[actix_web::test]
+    async fn allows_refresh_without_token() {
+        let app = test::init_service(
+            App::new()
+                .wrap(JwtGuard::new(
+                    "http://ui".to_string(),
+                    mock_jwt_secret_logic(),
+                    test_pool(),
+                ))
+                .route(
+                    "/api/v1/auth/refresh",
+                    web::post().to(|| async { HttpResponse::Ok().finish() }),
+                ),
+        )
+        .await;
+
+        let req = test::TestRequest::post()
+            .uri("/api/v1/auth/refresh")
+            .set_payload(r#"{"refreshToken":"abc"}"#)
+            .insert_header(("content-type", "application/json"))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert!(resp.status().is_success());
     }
 
     #[tokio::test]
@@ -1055,7 +1113,8 @@ mod tests {
     async fn test_allows_reset_password_mutation_with_temporary_password() {
         let secret = "test_secret";
         let user_id = Uuid::new_v4();
-        let token = create_jwt_token(user_id, "tempuser", false, vec![], secret).unwrap();
+        let token =
+            create_jwt_token(user_id, "tempuser", false, vec![], secret, test_expiry()).unwrap();
 
         let app = test::init_service(
             App::new()
@@ -1146,7 +1205,15 @@ mod tests {
         .await
         .expect("insert user");
 
-        let token = create_jwt_token(user_id, "guard-user", false, vec![], "test_secret").unwrap();
+        let token = create_jwt_token(
+            user_id,
+            "guard-user",
+            false,
+            vec![],
+            "test_secret",
+            test_expiry(),
+        )
+        .unwrap();
         crate::database::jwt_token::jwt_token_repository(pool.clone())
             .store_token(
                 user_id,

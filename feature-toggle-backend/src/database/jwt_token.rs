@@ -1,4 +1,5 @@
 use crate::Error;
+use crate::database::refresh_token::revoke_all_user_refresh_tokens_tx;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use mockall::automock;
@@ -39,10 +40,12 @@ impl Clone for Box<dyn JwtTokenRepository> {
     }
 }
 
-/// Revokes every active session token of a user on the given connection, so it
-/// can join a caller's transaction (e.g. when disabling a user).
+/// Revokes every active session of a user on the given connection, so it can
+/// join a caller's transaction (e.g. when disabling a user or resetting a
+/// password): all access tokens and all refresh tokens.
 ///
 /// This is the single place that defines "kill all sessions of a user".
+/// Returns the number of access and refresh tokens revoked.
 pub async fn revoke_all_user_tokens_tx(
     conn: &mut PgConnection,
     user_id: Uuid,
@@ -58,8 +61,32 @@ pub async fn revoke_all_user_tokens_tx(
     .execute(&mut *conn)
     .await
     .map_err(Error::DatabaseError)?;
+    let refresh_revoked = revoke_all_user_refresh_tokens_tx(conn, user_id).await?;
 
-    Ok(result.rows_affected())
+    Ok(result.rows_affected() + refresh_revoked)
+}
+
+/// Stores an access token hash on the given connection.
+pub async fn store_token_tx(
+    conn: &mut PgConnection,
+    user_id: Uuid,
+    token_hash: String,
+    expires_at: DateTime<Utc>,
+) -> Result<JwtToken, Error> {
+    sqlx::query_as!(
+        JwtToken,
+        r#"
+        INSERT INTO jwt_tokens (user_id, token_hash, expires_at)
+        VALUES ($1, $2, $3)
+        RETURNING id, user_id, token_hash, expires_at, created_at, revoked_at, is_revoked
+        "#,
+        user_id,
+        token_hash,
+        expires_at
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(Error::DatabaseError)
 }
 
 pub fn jwt_token_repository(pool: PgPool) -> Box<dyn JwtTokenRepository> {
@@ -79,22 +106,8 @@ impl JwtTokenRepository for JwtTokenRepositoryImpl {
         token_hash: String,
         expires_at: DateTime<Utc>,
     ) -> Result<JwtToken, Error> {
-        let token = sqlx::query_as!(
-            JwtToken,
-            r#"
-            INSERT INTO jwt_tokens (user_id, token_hash, expires_at)
-            VALUES ($1, $2, $3)
-            RETURNING id, user_id, token_hash, expires_at, created_at, revoked_at, is_revoked
-            "#,
-            user_id,
-            token_hash,
-            expires_at
-        )
-        .fetch_one(&self.pool)
-        .await
-        .map_err(Error::DatabaseError)?;
-
-        Ok(token)
+        let mut conn = self.pool.acquire().await.map_err(Error::DatabaseError)?;
+        store_token_tx(&mut conn, user_id, token_hash, expires_at).await
     }
 
     async fn is_token_valid(&self, token_hash: &str) -> Result<bool, Error> {

@@ -26,6 +26,24 @@ pub struct ApiUser {
     pub is_temporary_password: bool,
 }
 
+impl From<crate::database::user::User> for ApiUser {
+    fn from(u: crate::database::user::User) -> Self {
+        ApiUser {
+            id: ID::from(u.id),
+            username: u.username,
+            first_name: u.first_name,
+            last_name: u.last_name,
+            email: u.email,
+            mobile_number: u.mobile_number,
+            is_admin: u.is_admin,
+            created_at: u.created_at,
+            updated_at: u.updated_at,
+            last_login: u.last_login,
+            is_temporary_password: u.is_temporary_password,
+        }
+    }
+}
+
 #[automock]
 #[async_trait::async_trait]
 pub trait UserLogic: Send + Sync {
