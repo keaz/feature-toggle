@@ -4,7 +4,7 @@
 |---|---|
 | Type | Bug (correctness, tenant isolation, security) |
 | Severity | Critical |
-| Status | Verified (independent code trace) |
+| Status | Fixed on branch fix/b03-stream-team-filter |
 | Crate | `feature-toggle-backend` (edge hardening optional) |
 | Behavior change | Yes, intended: edges stop receiving other teams' flags |
 

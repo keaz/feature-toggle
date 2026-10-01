@@ -4,7 +4,7 @@
 |---|---|
 | Type | Bug (correctness) |
 | Severity | Critical |
-| Status | Confirmed (code traced) |
+| Status | Fixed on branch fix/b01-exact-key-lookup |
 | Crate | `feature-toggle-backend` |
 | Behavior change | Yes, intended: lookups return only the flag with the exact key |
 | Related | [B02](B02-duplicate-key-check-substring-match.md) uses the same filter |

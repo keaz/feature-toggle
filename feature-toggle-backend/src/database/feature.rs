@@ -458,6 +458,13 @@ pub trait FeatureRepository: Send + Sync {
         key: Option<String>,
         feature_type: Option<FeatureType>,
     ) -> Result<Vec<Feature>, Error>;
+    /// Looks up one feature by its exact, case-sensitive key within a team.
+    /// Unlike `get_features`, the key is not a substring search.
+    async fn get_feature_by_key(
+        &self,
+        team_id: Uuid,
+        key: String,
+    ) -> Result<Option<Feature>, Error>;
     async fn get_features_filtered(
         &self,
         team_id: Uuid,
@@ -2295,6 +2302,27 @@ impl FeatureRepository for FeatureRepositoryImpl {
             None,
         )
         .await
+    }
+
+    async fn get_feature_by_key(
+        &self,
+        team_id: Uuid,
+        key: String,
+    ) -> Result<Option<Feature>, Error> {
+        let mut query_builder = sqlx::QueryBuilder::new(FEATURE_SELECT);
+        query_builder.push(" WHERE f.team_id = ").push_bind(team_id);
+        query_builder.push(" AND f.key = ").push_bind(key);
+
+        let result = query_builder
+            .build_query_as::<FeatureWithStageRow>()
+            .fetch_all(&self.pool)
+            .await;
+
+        let features_rows = handle_error(None, result)?;
+        let mut features = Self::map_rows_to_feature_list(features_rows);
+        self.hydrate_feature_dependencies(&mut features).await?;
+
+        Ok(features.pop())
     }
 
     async fn get_features_filtered(
