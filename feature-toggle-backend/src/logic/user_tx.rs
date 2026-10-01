@@ -323,7 +323,11 @@ where
     let user_id = Uuid::try_from(id).map_err(|e| Error::InvalidInput(e.to_string()))?;
     let user = repo.get_user_by_id_tx(conn, user_id).await?;
 
-    let parsed_hash = PasswordHash::new(&user.password_hash)
+    let stored_hash = user
+        .password_hash
+        .as_deref()
+        .ok_or_else(|| Error::InvalidInput("Current password is incorrect".to_string()))?;
+    let parsed_hash = PasswordHash::new(stored_hash)
         .map_err(|_| Error::InvalidInput("Stored password hash is invalid".to_string()))?;
     Argon2::default()
         .verify_password(current_password.as_bytes(), &parsed_hash)

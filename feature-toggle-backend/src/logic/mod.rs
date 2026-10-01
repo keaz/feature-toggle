@@ -49,6 +49,7 @@ pub mod pipeline_tx;
 pub mod policy;
 pub mod role;
 pub mod role_tx;
+pub mod secret_box;
 pub mod stage_builder;
 pub mod system_client;
 pub mod team;

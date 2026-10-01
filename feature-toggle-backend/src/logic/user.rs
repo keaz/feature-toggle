@@ -9,7 +9,30 @@ use argon2::{
 use chrono::{DateTime, Utc};
 use mockall::automock;
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use uuid::Uuid;
+
+/// Argon2 hash of a throwaway password, verified against when an account has no
+/// password (SSO-only). Keeps the cost of a failed login the same as for a wrong
+/// password so response time does not reveal which accounts are SSO-only.
+fn dummy_password_hash() -> &'static str {
+    static HASH: OnceLock<String> = OnceLock::new();
+    HASH.get_or_init(|| {
+        let salt = SaltString::generate(&mut OsRng);
+        Argon2::default()
+            .hash_password(b"fluxgate-dummy-password", &salt)
+            .map(|h| h.to_string())
+            .unwrap_or_default()
+    })
+}
+
+/// Runs a password verification that always fails, for accounts without a password.
+fn reject_passwordless_login(password: &str) -> Error {
+    if let Ok(parsed) = PasswordHash::new(dummy_password_hash()) {
+        let _ = Argon2::default().verify_password(password.as_bytes(), &parsed);
+    }
+    Error::Unauthorized("Invalid username or password".to_string())
+}
 
 #[derive(Clone, Debug)]
 pub struct ApiUser {
@@ -328,7 +351,10 @@ impl UserLogic for UserLogicImpl {
                 other => return Err(other),
             },
         };
-        let parsed_hash = PasswordHash::new(&u.password_hash)
+        let Some(stored_hash) = u.password_hash.as_deref() else {
+            return Err(reject_passwordless_login(&password));
+        };
+        let parsed_hash = PasswordHash::new(stored_hash)
             .map_err(|_| Error::InvalidInput("Stored password hash is invalid".to_string()))?;
         Argon2::default()
             .verify_password(password.as_bytes(), &parsed_hash)
@@ -443,7 +469,11 @@ impl UserLogic for UserLogicImpl {
         let user = self.repository.get_user_by_id(user_id).await?;
 
         // Verify current password
-        let parsed_hash = PasswordHash::new(&user.password_hash)
+        let stored_hash = user
+            .password_hash
+            .as_deref()
+            .ok_or_else(|| Error::InvalidInput("Current password is incorrect".to_string()))?;
+        let parsed_hash = PasswordHash::new(stored_hash)
             .map_err(|_| Error::InvalidInput("Stored password hash is invalid".to_string()))?;
         Argon2::default()
             .verify_password(current_password.as_bytes(), &parsed_hash)
@@ -729,7 +759,7 @@ mod tests {
         User {
             id: Uuid::new_v4(),
             username: "jdoe".to_string(),
-            password_hash: "$argon2id$v=19$m=19456,t=2,p=1$C+z5Yq+YcD1m0M1aQ3sYKA$2GgO7d4r8i5x5KQX1W0b3cVdQd1C8Wk2ZsJp6a9Xg2Q".to_string(),
+            password_hash: Some("$argon2id$v=19$m=19456,t=2,p=1$C+z5Yq+YcD1m0M1aQ3sYKA$2GgO7d4r8i5x5KQX1W0b3cVdQd1C8Wk2ZsJp6a9Xg2Q".to_string()),
             first_name: "John".to_string(),
             last_name: "Doe".to_string(),
             email: "john@example.com".to_string(),
@@ -740,6 +770,7 @@ mod tests {
             updated_at: Utc::now(),
             last_login: None,
             is_temporary_password: false,
+            auth_source: "local".to_string(),
         }
     }
 
@@ -803,7 +834,7 @@ mod tests {
             Ok(User {
                 id: Uuid::new_v4(),
                 username: input.username,
-                password_hash: input.password_hash,
+                password_hash: Some(input.password_hash),
                 first_name: input.first_name,
                 last_name: input.last_name,
                 email: input.email,
@@ -814,6 +845,7 @@ mod tests {
                 updated_at: Utc::now(),
                 last_login: None,
                 is_temporary_password: input.is_temporary_password,
+                auth_source: "local".to_string(),
             })
         });
 
@@ -936,7 +968,7 @@ mod tests {
             .unwrap()
             .to_string();
         let mut u = sample_user();
-        u.password_hash = hash.clone();
+        u.password_hash = Some(hash.clone());
         let id = u.id;
 
         let mut mock = MockUserRepository::new();
@@ -966,10 +998,12 @@ mod tests {
         let mut u = sample_user();
         // set a hash for password "abc"
         let salt = SaltString::generate(&mut OsRng);
-        u.password_hash = Argon2::default()
-            .hash_password("abc".as_bytes(), &salt)
-            .unwrap()
-            .to_string();
+        u.password_hash = Some(
+            Argon2::default()
+                .hash_password("abc".as_bytes(), &salt)
+                .unwrap()
+                .to_string(),
+        );
         let mut mock = MockUserRepository::new();
         mock.expect_get_user_by_username()
             .returning(move |_| Ok(u.clone()));
@@ -988,10 +1022,12 @@ mod tests {
     fn user_with_password(password: &str, enabled: bool) -> User {
         let salt = SaltString::generate(&mut OsRng);
         let mut u = sample_user();
-        u.password_hash = Argon2::default()
-            .hash_password(password.as_bytes(), &salt)
-            .unwrap()
-            .to_string();
+        u.password_hash = Some(
+            Argon2::default()
+                .hash_password(password.as_bytes(), &salt)
+                .unwrap()
+                .to_string(),
+        );
         u.enabled = enabled;
         u
     }
@@ -1067,7 +1103,7 @@ mod tests {
             Ok(User {
                 id,
                 username: "jdoe".to_string(),
-                password_hash: "hash".to_string(),
+                password_hash: Some("hash".to_string()),
                 first_name: input.first_name.unwrap_or("John".to_string()),
                 last_name: input.last_name.unwrap_or("Doe".to_string()),
                 email: input.email.unwrap_or("john@example.com".to_string()),
@@ -1078,6 +1114,7 @@ mod tests {
                 updated_at: Utc::now(),
                 last_login: None,
                 is_temporary_password: false,
+                auth_source: "local".to_string(),
             })
         });
         let logic = user_logic(Box::new(mock), create_mock_activity_log());
@@ -1177,7 +1214,7 @@ mod tests {
                 Ok(User {
                     id,
                     username: "jdoe".to_string(),
-                    password_hash: "hash".to_string(),
+                    password_hash: Some("hash".to_string()),
                     first_name: "Jane".to_string(),
                     last_name: "Doe".to_string(),
                     email: "jane@example.com".to_string(),
@@ -1188,6 +1225,7 @@ mod tests {
                     updated_at: Utc::now(),
                     last_login: None,
                     is_temporary_password: false,
+                    auth_source: "local".to_string(),
                 })
             });
         mock.expect_get_user_teams()

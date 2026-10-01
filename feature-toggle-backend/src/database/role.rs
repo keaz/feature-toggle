@@ -37,6 +37,8 @@ pub trait RoleRepository: Send + Sync {
     ) -> Result<(), Error>;
     async fn remove_user_role(&self, user_id: Uuid, role_id: Uuid) -> Result<(), Error>;
     async fn user_has_role(&self, user_id: Uuid, role_name: &str) -> Result<bool, Error>;
+    /// Ids of the roles the user holds through SSO group sync (`source = 'sso'`).
+    async fn list_sso_role_ids(&self, user_id: Uuid) -> Result<Vec<Uuid>, Error>;
     fn clone_box(&self) -> Box<dyn RoleRepository>;
 }
 
@@ -74,6 +76,26 @@ pub trait RoleRepositoryTx: RoleRepository {
         conn: &mut PgConnection,
         user_id: Uuid,
         role_id: Uuid,
+    ) -> Result<(), Error>;
+    async fn list_sso_role_ids_tx(
+        &self,
+        conn: &mut PgConnection,
+        user_id: Uuid,
+    ) -> Result<Vec<Uuid>, Error>;
+    /// Adds roles with `source = 'sso'`. A role the user already holds, manually or
+    /// through SSO, is left as is (manual wins).
+    async fn add_sso_user_roles_tx(
+        &self,
+        conn: &mut PgConnection,
+        user_id: Uuid,
+        role_ids: Vec<Uuid>,
+    ) -> Result<(), Error>;
+    /// Removes only `source = 'sso'` rows; manual assignments are never touched.
+    async fn remove_sso_user_roles_tx(
+        &self,
+        conn: &mut PgConnection,
+        user_id: Uuid,
+        role_ids: Vec<Uuid>,
     ) -> Result<(), Error>;
 }
 
@@ -207,10 +229,10 @@ impl RoleRepository for RoleRepositoryImpl {
             .await
             .map_err(|e| Error::DatabaseError(e))?;
 
-        // Remove existing role assignments
+        // Remove existing manual role assignments; SSO-sourced rows are left alone
         handle_error(
             Some(user_id),
-            sqlx::query("DELETE FROM user_roles WHERE user_id = $1")
+            sqlx::query("DELETE FROM user_roles WHERE user_id = $1 AND source = 'manual'")
                 .bind(user_id)
                 .execute(&mut *tx)
                 .await,
@@ -221,8 +243,9 @@ impl RoleRepository for RoleRepositoryImpl {
             handle_error(
                 Some(user_id),
                 sqlx::query(
-                    r#"INSERT INTO user_roles (user_id, role_id, assigned_by) 
-                       VALUES ($1, $2, $3)"#,
+                    r#"INSERT INTO user_roles (user_id, role_id, assigned_by, source)
+                       VALUES ($1, $2, $3, 'manual')
+                       ON CONFLICT (user_id, role_id) DO NOTHING"#,
                 )
                 .bind(user_id)
                 .bind(role_id)
@@ -239,11 +262,13 @@ impl RoleRepository for RoleRepositoryImpl {
     async fn remove_user_role(&self, user_id: Uuid, role_id: Uuid) -> Result<(), Error> {
         handle_error(
             Some(user_id),
-            sqlx::query("DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2")
-                .bind(user_id)
-                .bind(role_id)
-                .execute(&self.pool)
-                .await,
+            sqlx::query(
+                "DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2 AND source = 'manual'",
+            )
+            .bind(user_id)
+            .bind(role_id)
+            .execute(&self.pool)
+            .await,
         )?;
 
         Ok(())
@@ -267,12 +292,71 @@ impl RoleRepository for RoleRepositoryImpl {
         }
     }
 
+    async fn list_sso_role_ids(&self, user_id: Uuid) -> Result<Vec<Uuid>, Error> {
+        let mut conn = self.pool.acquire().await.map_err(Error::DatabaseError)?;
+        Self::list_sso_role_ids_internal(&mut conn, user_id).await
+    }
+
     fn clone_box(&self) -> Box<dyn RoleRepository> {
         Box::new(self.clone())
     }
 }
 
 impl RoleRepositoryImpl {
+    async fn list_sso_role_ids_internal(
+        conn: &mut PgConnection,
+        user_id: Uuid,
+    ) -> Result<Vec<Uuid>, Error> {
+        let result = sqlx::query_scalar!(
+            "SELECT role_id FROM user_roles WHERE user_id = $1 AND source = 'sso' ORDER BY role_id",
+            user_id
+        )
+        .fetch_all(&mut *conn)
+        .await;
+
+        handle_error(Some(user_id), result)
+    }
+
+    async fn add_sso_user_roles_internal(
+        conn: &mut PgConnection,
+        user_id: Uuid,
+        role_ids: Vec<Uuid>,
+    ) -> Result<(), Error> {
+        for role_id in role_ids {
+            handle_error(
+                Some(user_id),
+                sqlx::query!(
+                    r#"INSERT INTO user_roles (user_id, role_id, assigned_by, source)
+                       VALUES ($1, $2, NULL, 'sso')
+                       ON CONFLICT (user_id, role_id) DO NOTHING"#,
+                    user_id,
+                    role_id
+                )
+                .execute(&mut *conn)
+                .await,
+            )?;
+        }
+        Ok(())
+    }
+
+    async fn remove_sso_user_roles_internal(
+        conn: &mut PgConnection,
+        user_id: Uuid,
+        role_ids: Vec<Uuid>,
+    ) -> Result<(), Error> {
+        handle_error(
+            Some(user_id),
+            sqlx::query!(
+                "DELETE FROM user_roles WHERE user_id = $1 AND source = 'sso' AND role_id = ANY($2)",
+                user_id,
+                &role_ids
+            )
+            .execute(&mut *conn)
+            .await,
+        )?;
+        Ok(())
+    }
+
     async fn create_role_internal(
         conn: &mut PgConnection,
         name: &str,
@@ -316,10 +400,10 @@ impl RoleRepositoryImpl {
             return Ok(());
         }
 
-        // Remove existing role assignments
+        // Remove existing manual role assignments; SSO-sourced rows are left alone
         handle_error(
             Some(user_id),
-            sqlx::query("DELETE FROM user_roles WHERE user_id = $1")
+            sqlx::query("DELETE FROM user_roles WHERE user_id = $1 AND source = 'manual'")
                 .bind(user_id)
                 .execute(&mut *conn)
                 .await,
@@ -330,8 +414,9 @@ impl RoleRepositoryImpl {
             handle_error(
                 Some(user_id),
                 sqlx::query(
-                    r#"INSERT INTO user_roles (user_id, role_id, assigned_by) 
-                       VALUES ($1, $2, $3)"#,
+                    r#"INSERT INTO user_roles (user_id, role_id, assigned_by, source)
+                       VALUES ($1, $2, $3, 'manual')
+                       ON CONFLICT (user_id, role_id) DO NOTHING"#,
                 )
                 .bind(user_id)
                 .bind(role_id)
@@ -370,11 +455,13 @@ impl RoleRepositoryImpl {
     ) -> Result<(), Error> {
         handle_error(
             Some(user_id),
-            sqlx::query("DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2")
-                .bind(user_id)
-                .bind(role_id)
-                .execute(&mut *conn)
-                .await,
+            sqlx::query(
+                "DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2 AND source = 'manual'",
+            )
+            .bind(user_id)
+            .bind(role_id)
+            .execute(&mut *conn)
+            .await,
         )?;
 
         Ok(())
@@ -421,6 +508,32 @@ impl RoleRepositoryTx for RoleRepositoryImpl {
         role_id: Uuid,
     ) -> Result<(), Error> {
         Self::remove_user_role_internal(conn, user_id, role_id).await
+    }
+
+    async fn list_sso_role_ids_tx(
+        &self,
+        conn: &mut PgConnection,
+        user_id: Uuid,
+    ) -> Result<Vec<Uuid>, Error> {
+        Self::list_sso_role_ids_internal(conn, user_id).await
+    }
+
+    async fn add_sso_user_roles_tx(
+        &self,
+        conn: &mut PgConnection,
+        user_id: Uuid,
+        role_ids: Vec<Uuid>,
+    ) -> Result<(), Error> {
+        Self::add_sso_user_roles_internal(conn, user_id, role_ids).await
+    }
+
+    async fn remove_sso_user_roles_tx(
+        &self,
+        conn: &mut PgConnection,
+        user_id: Uuid,
+        role_ids: Vec<Uuid>,
+    ) -> Result<(), Error> {
+        Self::remove_sso_user_roles_internal(conn, user_id, role_ids).await
     }
 }
 

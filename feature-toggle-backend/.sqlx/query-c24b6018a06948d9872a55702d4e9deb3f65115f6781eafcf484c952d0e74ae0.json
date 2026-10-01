@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO users (id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, is_temporary_password)\n               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)\n               RETURNING id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, enabled, created_at, updated_at, last_login, is_temporary_password",
+  "query": "INSERT INTO users (id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, is_temporary_password)\n               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)\n               RETURNING id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, enabled, created_at, updated_at, last_login, is_temporary_password, auth_source",
   "describe": {
     "columns": [
       {
@@ -67,6 +67,11 @@
         "ordinal": 12,
         "name": "is_temporary_password",
         "type_info": "Bool"
+      },
+      {
+        "ordinal": 13,
+        "name": "auth_source",
+        "type_info": "Varchar"
       }
     ],
     "parameters": {
@@ -85,7 +90,7 @@
     "nullable": [
       false,
       false,
-      false,
+      true,
       false,
       false,
       false,
@@ -95,8 +100,9 @@
       false,
       false,
       true,
+      false,
       false
     ]
   },
-  "hash": "d8adad23eb490315126545f489823bced67ef2fa083e6e861ba3841d2fbbe65d"
+  "hash": "c24b6018a06948d9872a55702d4e9deb3f65115f6781eafcf484c952d0e74ae0"
 }

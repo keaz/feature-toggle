@@ -16,12 +16,18 @@ pub mod pipeline;
 pub mod refresh_token;
 pub mod role;
 pub mod rollout_template;
+pub mod sso_group_mapping;
+pub mod sso_login_code;
+pub mod sso_login_state;
+pub mod sso_provider;
+pub mod sso_settings;
 pub mod system_client;
 pub mod system_client_token;
 pub mod team;
 pub mod transaction;
 pub mod user;
 pub mod user_flag_assignment;
+pub mod user_identity;
 pub mod variant_allocations;
 
 use crate::Error;

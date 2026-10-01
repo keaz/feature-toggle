@@ -10,7 +10,8 @@ use uuid::Uuid;
 pub struct User {
     pub id: Uuid,
     pub username: String,
-    pub password_hash: String,
+    /// `None` for SSO-only accounts, which cannot log in with a password.
+    pub password_hash: Option<String>,
     pub first_name: String,
     pub last_name: String,
     pub email: String,
@@ -21,6 +22,8 @@ pub struct User {
     pub updated_at: DateTime<Utc>,
     pub last_login: Option<DateTime<Utc>>,
     pub is_temporary_password: bool,
+    /// How the account is managed: `local`, `sso` or `system`.
+    pub auth_source: String,
 }
 
 /// System-client shadow users are machine identities managed through the system
@@ -96,6 +99,8 @@ pub trait UserRepository: Send + Sync {
         page_size: i32,
     ) -> Result<(Vec<User>, i64), Error>;
     async fn get_user_teams(&self, id: Uuid) -> Result<Vec<Team>, Error>;
+    /// Ids of the teams the user belongs to through SSO group sync (`source = 'sso'`).
+    async fn list_sso_team_ids(&self, id: Uuid) -> Result<Vec<Uuid>, Error>;
     async fn admin_exists(&self) -> Result<bool, Error>;
     fn clone_box(&self) -> Box<dyn UserRepository>;
 }
@@ -134,6 +139,26 @@ pub trait UserRepositoryTx: UserRepository {
         password_hash: String,
         is_temporary: bool,
     ) -> Result<(), Error>;
+    async fn list_sso_team_ids_tx(
+        &self,
+        conn: &mut PgConnection,
+        id: Uuid,
+    ) -> Result<Vec<Uuid>, Error>;
+    /// Adds team memberships with `source = 'sso'`. A team the user already belongs
+    /// to, manually or through SSO, is left as is (manual wins).
+    async fn add_sso_user_teams_tx(
+        &self,
+        conn: &mut PgConnection,
+        id: Uuid,
+        team_ids: Vec<Uuid>,
+    ) -> Result<(), Error>;
+    /// Removes only `source = 'sso'` memberships; manual ones are never touched.
+    async fn remove_sso_user_teams_tx(
+        &self,
+        conn: &mut PgConnection,
+        id: Uuid,
+        team_ids: Vec<Uuid>,
+    ) -> Result<(), Error>;
 }
 
 pub fn user_repository(pool: PgPool) -> Box<dyn UserRepository> {
@@ -161,7 +186,7 @@ impl UserRepository for UserRepositoryImpl {
     async fn get_user_by_id(&self, id: Uuid) -> Result<User, Error> {
         let result = sqlx::query!(
             r#"SELECT id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, enabled,
-                       created_at, updated_at, last_login, is_temporary_password
+                       created_at, updated_at, last_login, is_temporary_password, auth_source
                 FROM users WHERE id = $1"#,
             id
         )
@@ -183,13 +208,14 @@ impl UserRepository for UserRepositoryImpl {
             updated_at: row.updated_at,
             last_login: row.last_login,
             is_temporary_password: row.is_temporary_password,
+            auth_source: row.auth_source,
         })
     }
 
     async fn get_user_by_username(&self, username: &str) -> Result<User, Error> {
         let row = sqlx::query!(
             r#"SELECT id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, enabled,
-                       created_at, updated_at, last_login, is_temporary_password
+                       created_at, updated_at, last_login, is_temporary_password, auth_source
                 FROM users WHERE username = $1"#,
             username
         )
@@ -211,13 +237,14 @@ impl UserRepository for UserRepositoryImpl {
             updated_at: row.updated_at,
             last_login: row.last_login,
             is_temporary_password: row.is_temporary_password,
+            auth_source: row.auth_source,
         })
     }
 
     async fn get_user_by_email(&self, email: &str) -> Result<User, Error> {
         let row = sqlx::query!(
             r#"SELECT id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, enabled,
-                       created_at, updated_at, last_login, is_temporary_password
+                       created_at, updated_at, last_login, is_temporary_password, auth_source
                 FROM users WHERE email = $1"#,
             email
         )
@@ -239,6 +266,7 @@ impl UserRepository for UserRepositoryImpl {
             updated_at: row.updated_at,
             last_login: row.last_login,
             is_temporary_password: row.is_temporary_password,
+            auth_source: row.auth_source,
         })
     }
 
@@ -247,7 +275,7 @@ impl UserRepository for UserRepositoryImpl {
         let result = sqlx::query!(
             r#"INSERT INTO users (id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, is_temporary_password)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-               RETURNING id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, enabled, created_at, updated_at, last_login, is_temporary_password"#,
+               RETURNING id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, enabled, created_at, updated_at, last_login, is_temporary_password, auth_source"#,
             id,
             input.username,
             input.password_hash,
@@ -276,6 +304,7 @@ impl UserRepository for UserRepositoryImpl {
             updated_at: row.updated_at,
             last_login: row.last_login,
             is_temporary_password: row.is_temporary_password,
+            auth_source: row.auth_source,
         })
     }
 
@@ -286,7 +315,7 @@ impl UserRepository for UserRepositoryImpl {
             r#"UPDATE users
                SET first_name = $1, last_name = $2, email = $3, mobile_number = $4, is_admin = $5, enabled = $6, updated_at = now()
                WHERE id = $7
-               RETURNING id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, enabled, created_at, updated_at, last_login, is_temporary_password"#,
+               RETURNING id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, enabled, created_at, updated_at, last_login, is_temporary_password, auth_source"#,
             input.first_name.unwrap_or(existing.first_name),
             input.last_name.unwrap_or(existing.last_name),
             input.email.unwrap_or(existing.email),
@@ -313,6 +342,7 @@ impl UserRepository for UserRepositoryImpl {
             updated_at: row.updated_at,
             last_login: row.last_login,
             is_temporary_password: row.is_temporary_password,
+            auth_source: row.auth_source,
         })
     }
 
@@ -387,10 +417,10 @@ impl UserRepository for UserRepositoryImpl {
             .begin()
             .await
             .map_err(|e| Error::DatabaseError(e))?;
-        // delete existing assignments
+        // delete existing manual assignments; SSO-sourced rows are left alone
         handle_error(
             Some(id),
-            sqlx::query("DELETE FROM user_teams WHERE user_id = $1")
+            sqlx::query("DELETE FROM user_teams WHERE user_id = $1 AND source = 'manual'")
                 .bind(id)
                 .execute(&mut *tx)
                 .await,
@@ -403,8 +433,9 @@ impl UserRepository for UserRepositoryImpl {
             handle_error(
                 Some(id),
                 sqlx::query(
-                    r#"INSERT INTO user_teams (user_id, team_id)
-                       SELECT * FROM UNNEST($1::uuid[], $2::uuid[])"#,
+                    r#"INSERT INTO user_teams (user_id, team_id, source)
+                       SELECT u, t, 'manual' FROM UNNEST($1::uuid[], $2::uuid[]) AS x(u, t)
+                       ON CONFLICT (user_id, team_id) DO NOTHING"#,
                 )
                 .bind(&user_ids)
                 .bind(&team_ids)
@@ -424,7 +455,7 @@ impl UserRepository for UserRepositoryImpl {
         page_size: i32,
     ) -> Result<(Vec<User>, i64), Error> {
         let mut base = QueryBuilder::<Postgres>::new(
-            "SELECT u.id, u.username, u.password_hash, u.first_name, u.last_name, u.email, u.mobile_number, u.is_admin, u.enabled, u.created_at, u.updated_at, u.last_login, u.is_temporary_password FROM users u",
+            "SELECT u.id, u.username, u.password_hash, u.first_name, u.last_name, u.email, u.mobile_number, u.is_admin, u.enabled, u.created_at, u.updated_at, u.last_login, u.is_temporary_password, u.auth_source FROM users u",
         );
         if team_id.is_some() {
             base.push(" JOIN user_teams ut ON ut.user_id = u.id");
@@ -458,7 +489,7 @@ impl UserRepository for UserRepositoryImpl {
             users.push(User {
                 id: row.get::<Uuid, _>(0),
                 username: row.get::<String, _>(1),
-                password_hash: row.get::<String, _>(2),
+                password_hash: row.try_get::<String, _>(2).ok(),
                 first_name: row.get::<String, _>(3),
                 last_name: row.get::<String, _>(4),
                 email: row.get::<String, _>(5),
@@ -469,6 +500,7 @@ impl UserRepository for UserRepositoryImpl {
                 updated_at: row.get::<DateTime<Utc>, _>(10),
                 last_login: row.try_get::<DateTime<Utc>, _>(11).ok(),
                 is_temporary_password: row.get::<bool, _>(12),
+                auth_source: row.get::<String, _>(13),
             });
         }
 
@@ -513,6 +545,11 @@ impl UserRepository for UserRepositoryImpl {
         Ok(teams)
     }
 
+    async fn list_sso_team_ids(&self, id: Uuid) -> Result<Vec<Uuid>, Error> {
+        let mut conn = self.pool.acquire().await.map_err(Error::DatabaseError)?;
+        Self::list_sso_team_ids_internal(&mut conn, id).await
+    }
+
     async fn admin_exists(&self) -> Result<bool, Error> {
         let row = handle_error(
             None,
@@ -530,10 +567,63 @@ impl UserRepository for UserRepositoryImpl {
 }
 
 impl UserRepositoryImpl {
+    async fn list_sso_team_ids_internal(
+        conn: &mut PgConnection,
+        id: Uuid,
+    ) -> Result<Vec<Uuid>, Error> {
+        let result = sqlx::query_scalar!(
+            "SELECT team_id FROM user_teams WHERE user_id = $1 AND source = 'sso' ORDER BY team_id",
+            id
+        )
+        .fetch_all(&mut *conn)
+        .await;
+        handle_error(Some(id), result)
+    }
+
+    async fn add_sso_user_teams_internal(
+        conn: &mut PgConnection,
+        id: Uuid,
+        team_ids: Vec<Uuid>,
+    ) -> Result<(), Error> {
+        for team_id in team_ids {
+            handle_error(
+                Some(id),
+                sqlx::query!(
+                    r#"INSERT INTO user_teams (user_id, team_id, source)
+                       VALUES ($1, $2, 'sso')
+                       ON CONFLICT (user_id, team_id) DO NOTHING"#,
+                    id,
+                    team_id
+                )
+                .execute(&mut *conn)
+                .await,
+            )?;
+        }
+        Ok(())
+    }
+
+    async fn remove_sso_user_teams_internal(
+        conn: &mut PgConnection,
+        id: Uuid,
+        team_ids: Vec<Uuid>,
+    ) -> Result<(), Error> {
+        handle_error(
+            Some(id),
+            sqlx::query!(
+                "DELETE FROM user_teams WHERE user_id = $1 AND source = 'sso' AND team_id = ANY($2)",
+                id,
+                &team_ids
+            )
+            .execute(&mut *conn)
+            .await,
+        )?;
+        Ok(())
+    }
+
     async fn get_user_by_id_internal(conn: &mut PgConnection, id: Uuid) -> Result<User, Error> {
         let result = sqlx::query!(
             r#"SELECT id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, enabled,
-                       created_at, updated_at, last_login, is_temporary_password
+                       created_at, updated_at, last_login, is_temporary_password, auth_source
                 FROM users WHERE id = $1"#,
             id
         )
@@ -555,6 +645,7 @@ impl UserRepositoryImpl {
             updated_at: row.updated_at,
             last_login: row.last_login,
             is_temporary_password: row.is_temporary_password,
+            auth_source: row.auth_source,
         })
     }
 
@@ -566,7 +657,7 @@ impl UserRepositoryImpl {
         let result = sqlx::query!(
             r#"INSERT INTO users (id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, is_temporary_password)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-               RETURNING id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, enabled, created_at, updated_at, last_login, is_temporary_password"#,
+               RETURNING id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, enabled, created_at, updated_at, last_login, is_temporary_password, auth_source"#,
             id,
             input.username,
             input.password_hash,
@@ -595,6 +686,7 @@ impl UserRepositoryImpl {
             updated_at: row.updated_at,
             last_login: row.last_login,
             is_temporary_password: row.is_temporary_password,
+            auth_source: row.auth_source,
         })
     }
 
@@ -607,7 +699,7 @@ impl UserRepositoryImpl {
             r#"UPDATE users
                SET first_name = $1, last_name = $2, email = $3, mobile_number = $4, is_admin = $5, enabled = $6, updated_at = now()
                WHERE id = $7
-               RETURNING id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, enabled, created_at, updated_at, last_login, is_temporary_password"#,
+               RETURNING id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, enabled, created_at, updated_at, last_login, is_temporary_password, auth_source"#,
             input.first_name.unwrap_or(existing.first_name),
             input.last_name.unwrap_or(existing.last_name),
             input.email.unwrap_or(existing.email),
@@ -634,6 +726,7 @@ impl UserRepositoryImpl {
             updated_at: row.updated_at,
             last_login: row.last_login,
             is_temporary_password: row.is_temporary_password,
+            auth_source: row.auth_source,
         })
     }
 
@@ -642,10 +735,10 @@ impl UserRepositoryImpl {
         id: Uuid,
         team_ids: Vec<Uuid>,
     ) -> Result<(), Error> {
-        // delete existing assignments
+        // delete existing manual assignments; SSO-sourced rows are left alone
         handle_error(
             Some(id),
-            sqlx::query("DELETE FROM user_teams WHERE user_id = $1")
+            sqlx::query("DELETE FROM user_teams WHERE user_id = $1 AND source = 'manual'")
                 .bind(id)
                 .execute(&mut *conn)
                 .await,
@@ -656,8 +749,9 @@ impl UserRepositoryImpl {
             handle_error(
                 Some(id),
                 sqlx::query(
-                    r#"INSERT INTO user_teams (user_id, team_id)
-                       SELECT * FROM UNNEST($1::uuid[], $2::uuid[])"#,
+                    r#"INSERT INTO user_teams (user_id, team_id, source)
+                       SELECT u, t, 'manual' FROM UNNEST($1::uuid[], $2::uuid[]) AS x(u, t)
+                       ON CONFLICT (user_id, team_id) DO NOTHING"#,
                 )
                 .bind(&user_ids)
                 .bind(&team_ids)
@@ -727,6 +821,32 @@ impl UserRepositoryTx for UserRepositoryImpl {
         handle_error(Some(id), result)?;
         Ok(())
     }
+
+    async fn list_sso_team_ids_tx(
+        &self,
+        conn: &mut PgConnection,
+        id: Uuid,
+    ) -> Result<Vec<Uuid>, Error> {
+        Self::list_sso_team_ids_internal(conn, id).await
+    }
+
+    async fn add_sso_user_teams_tx(
+        &self,
+        conn: &mut PgConnection,
+        id: Uuid,
+        team_ids: Vec<Uuid>,
+    ) -> Result<(), Error> {
+        Self::add_sso_user_teams_internal(conn, id, team_ids).await
+    }
+
+    async fn remove_sso_user_teams_tx(
+        &self,
+        conn: &mut PgConnection,
+        id: Uuid,
+        team_ids: Vec<Uuid>,
+    ) -> Result<(), Error> {
+        Self::remove_sso_user_teams_internal(conn, id, team_ids).await
+    }
 }
 
 #[cfg(test)]
@@ -739,7 +859,7 @@ mod tests {
         User {
             id: Uuid::new_v4(),
             username: "jdoe".to_string(),
-            password_hash: "hashed_password".to_string(),
+            password_hash: Some("hashed_password".to_string()),
             first_name: "John".to_string(),
             last_name: "Doe".to_string(),
             email: "john@example.com".to_string(),
@@ -750,6 +870,7 @@ mod tests {
             updated_at: Utc::now(),
             last_login: None,
             is_temporary_password: false,
+            auth_source: "local".to_string(),
         }
     }
 

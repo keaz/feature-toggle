@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM sso_login_codes WHERE expires_at < now() - INTERVAL '1 day'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "41a9272976d306ff79ee027ed300f592620717a622462101fdb7b996d4789e7c"
+}
