@@ -313,6 +313,17 @@ pub fn load_config() -> Result<EdgeConfig, config::ConfigError> {
         }
     }
 
+    // `try_parsing` below would turn credentials like `0123` or `1e5` into numbers,
+    // so read them verbatim. Overrides take precedence over the environment source.
+    for (var, key) in [
+        ("EDGE_CLIENT_ID", "client_id"),
+        ("EDGE_CLIENT_SECRET", "client_secret"),
+    ] {
+        if let Ok(value) = std::env::var(var) {
+            builder = builder.set_override(key, value)?;
+        }
+    }
+
     let settings = builder
         // Override with environment variables (EDGE_BACKEND_GRPC, EDGE_GRPC__TIMEOUT_SECS, etc.)
         .add_source(
@@ -511,6 +522,17 @@ timeout_secs = 3
             let cfg = load_config().expect("config should load");
             assert_eq!(cfg.client_secret, "x");
             assert_eq!(cfg.client_id, "file-client-id");
+        }
+
+        #[test]
+        fn credential_env_vars_are_not_parsed_as_numbers() {
+            let _env = EnvGuard::new(
+                Some(BASE_CONFIG),
+                &[("EDGE_CLIENT_ID", "1e5"), ("EDGE_CLIENT_SECRET", "0123")],
+            );
+            let cfg = load_config().expect("config should load");
+            assert_eq!(cfg.client_id, "1e5");
+            assert_eq!(cfg.client_secret, "0123");
         }
 
         #[test]
