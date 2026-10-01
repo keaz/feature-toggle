@@ -188,13 +188,22 @@ pub struct ClientInfoCache {
 }
 
 impl ClientInfoCache {
-    /// Create a new ClientInfoCache with TTL
+    /// Create a new ClientInfoCache with TTL and the default capacity.
     pub fn new(ttl: Duration) -> Self {
-        tracing::info!("Initializing ClientInfoCache with TTL={:?}", ttl);
+        Self::with_capacity(ttl, 1000)
+    }
+
+    /// Create a new ClientInfoCache holding up to `capacity` client credentials.
+    pub fn with_capacity(ttl: Duration, capacity: u64) -> Self {
+        tracing::info!(
+            "Initializing ClientInfoCache with TTL={:?}, max_capacity={}",
+            ttl,
+            capacity
+        );
         Self {
             cache: moka::future::Cache::builder()
                 .time_to_live(ttl)
-                .max_capacity(1000) // Support up to 1000 different clients
+                .max_capacity(capacity)
                 .build(),
             failures: moka::future::Cache::builder()
                 .time_to_live(CLIENT_INFO_FAILURE_TTL)
@@ -608,7 +617,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let state = AppState {
         mapped_cache: Arc::new(MappedFeatureCache::new(cfg.cache.max_capacity)),
-        client_info_cache: Arc::new(ClientInfoCache::new(cfg.cache.client_ttl())),
+        client_info_cache: Arc::new(ClientInfoCache::with_capacity(
+            cfg.cache.client_ttl(),
+            cfg.cache.client_max_capacity,
+        )),
         grpc: Arc::new(tokio::sync::Mutex::new(grpc_client)),
         client_id: cfg.client_id.clone(),
         client_secret: cfg.client_secret.clone(),
@@ -685,6 +697,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     use tonic::transport::Endpoint;
+
+    #[test]
+    fn client_info_cache_uses_configured_capacity() {
+        let cache = ClientInfoCache::with_capacity(Duration::from_secs(60), 25);
+        assert_eq!(cache.cache.policy().max_capacity(), Some(25));
+        let default = ClientInfoCache::new(Duration::from_secs(60));
+        assert_eq!(default.cache.policy().max_capacity(), Some(1000));
+    }
 
     fn test_state() -> AppState {
         let mapped_cache = Arc::new(MappedFeatureCache::new(1000));

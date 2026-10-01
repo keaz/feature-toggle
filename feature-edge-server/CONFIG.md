@@ -92,6 +92,9 @@ max_capacity = 10000
 
 # Client info cache TTL in seconds
 client_ttl_secs = 300
+
+# Maximum number of client credentials whose info is cached
+client_max_capacity = 1000
 ```
 
 ## Environment Variable Overrides
@@ -334,6 +337,7 @@ These settings have no default. Each one must be set in `config.toml` or through
 |---------|------|---------|-------------|
 | `max_capacity` | u64 | 10000 | Maximum number of features to cache (LRU eviction when exceeded) |
 | `client_ttl_secs` | u64 | 300 | How long client info fetched from the backend is cached, in seconds |
+| `client_max_capacity` | u64 | 1000 | Maximum number of client credentials whose info is cached (env: `EDGE_CACHE__CLIENT_MAX_CAPACITY`) |
 
 **Cache Capacity Recommendations:**
 

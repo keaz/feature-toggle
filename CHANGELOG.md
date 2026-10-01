@@ -7,6 +7,7 @@ All notable user-visible changes to FluxGate are recorded here.
 ### Added
 
 - **Edges drop flags renamed or removed while they were disconnected (backend + edge, B15).** The gRPC stream protocol has a new `FeatureUpdate.Action` value, `SNAPSHOT_COMPLETE = 5`. The backend sends it once after the initial snapshot of each `StreamUpdates` stream, and not when the snapshot fails. On that marker the edge removes cached features of its team that the snapshot did not contain and drops their cached and pending assignments, so evaluating such a key falls back to a backend fetch and then to not-found. Before, these entries kept evaluating until LRU eviction. The change is additive and backward compatible: older edges ignore the new action, and new edges connected to an older backend never sweep. The proto contract hashes changed, so the contract baseline was updated.
+- **Configurable edge client-info cache size (edge).** New `[cache] client_max_capacity` setting (env `EDGE_CACHE__CLIENT_MAX_CAPACITY`) sets how many client credentials' info the edge caches. The default stays 1000, so existing deployments are unchanged.
 
 ### Changed
 
