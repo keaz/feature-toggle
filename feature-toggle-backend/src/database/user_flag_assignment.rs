@@ -25,6 +25,15 @@ pub trait UserFlagAssignmentRepository: Send + Sync {
         variant: Option<String>,
     ) -> Result<(), Error>;
 
+    /// Returns true only when every feature and every environment in the given
+    /// lists exists and belongs to `team_id`. Duplicate ids are allowed.
+    async fn all_owned_by_team(
+        &self,
+        team_id: Uuid,
+        feature_ids: &[Uuid],
+        environment_ids: &[Uuid],
+    ) -> Result<bool, Error>;
+
     async fn list(
         &self,
         team_id: Uuid,
@@ -80,6 +89,33 @@ impl UserFlagAssignmentRepository for UserFlagAssignmentRepositoryImpl {
         .await;
 
         handle_error(None, res).map(|_| ())
+    }
+
+    async fn all_owned_by_team(
+        &self,
+        team_id: Uuid,
+        feature_ids: &[Uuid],
+        environment_ids: &[Uuid],
+    ) -> Result<bool, Error> {
+        let mut feature_ids = feature_ids.to_vec();
+        feature_ids.sort_unstable();
+        feature_ids.dedup();
+        let mut environment_ids = environment_ids.to_vec();
+        environment_ids.sort_unstable();
+        environment_ids.dedup();
+
+        let res = sqlx::query_scalar::<_, bool>(
+            r#"SELECT
+                   (SELECT COUNT(*) FROM features WHERE team_id = $1 AND id = ANY($2)) = cardinality($2::uuid[])
+               AND (SELECT COUNT(*) FROM environments WHERE team_id = $1 AND id = ANY($3)) = cardinality($3::uuid[])"#,
+        )
+        .bind(team_id)
+        .bind(&feature_ids)
+        .bind(&environment_ids)
+        .fetch_one(&self.pool)
+        .await;
+
+        handle_error(None, res)
     }
 
     async fn list(

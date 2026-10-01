@@ -28,9 +28,11 @@ pub trait UserFlagLogic: Send + Sync {
         client_secret: &str,
     ) -> Result<Uuid, UserFlagLogicError>;
 
-    // Upsert a single assignment after successful authentication
+    // Upsert a single assignment after successful authentication. The feature and
+    // environment must belong to `team_id`, the authenticated client's team.
     async fn upsert_after_auth(
         &self,
+        team_id: Uuid,
         user_id: &str,
         feature_id: &str,
         environment_id: &str,
@@ -120,6 +122,7 @@ impl UserFlagLogic for UserFlagLogicImpl {
 
     async fn upsert_after_auth(
         &self,
+        team_id: Uuid,
         user_id: &str,
         feature_id: &str,
         environment_id: &str,
@@ -132,6 +135,16 @@ impl UserFlagLogic for UserFlagLogicImpl {
         }
         let fid = Self::parse_uuid("feature_id", feature_id)?;
         let eid = Self::parse_uuid("environment_id", environment_id)?;
+        let owned = self
+            .user_flag_repo
+            .all_owned_by_team(team_id, &[fid], &[eid])
+            .await
+            .map_err(UserFlagLogicError::DatabaseError)?;
+        if !owned {
+            return Err(UserFlagLogicError::PermissionDenied(
+                "feature or environment does not belong to the client's team".to_string(),
+            ));
+        }
         self.user_flag_repo
             .upsert(user_id, fid, eid, assigned, variant)
             .await
@@ -280,12 +293,66 @@ mod tests {
     async fn upsert_after_auth_happy_path() {
         let mock_client = MockClientRepository::new();
         let mut uf_repo = MockUserFlagAssignmentRepository::new();
-        uf_repo.expect_upsert().returning(|_, _, _, _, _| Ok(()));
+        let team_id = Uuid::new_v4();
+        let fid = Uuid::new_v4();
+        let eid = Uuid::new_v4();
+        uf_repo
+            .expect_all_owned_by_team()
+            .withf(move |t, f, e| *t == team_id && f == [fid] && e == [eid])
+            .times(1)
+            .returning(|_, _, _| Ok(true));
+        uf_repo
+            .expect_upsert()
+            .times(1)
+            .returning(|_, _, _, _, _| Ok(()));
         let logic = UserFlagLogicImpl::new(Box::new(mock_client), Box::new(uf_repo));
-        let fid = Uuid::new_v4().to_string();
-        let eid = Uuid::new_v4().to_string();
         let res = logic
-            .upsert_after_auth("user", &fid, &eid, true, Some("variant-a".into()))
+            .upsert_after_auth(
+                team_id,
+                "user",
+                &fid.to_string(),
+                &eid.to_string(),
+                true,
+                Some("variant-a".into()),
+            )
+            .await;
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn upsert_after_auth_rejects_feature_of_another_team() {
+        let mock_client = MockClientRepository::new();
+        let mut uf_repo = MockUserFlagAssignmentRepository::new();
+        uf_repo
+            .expect_all_owned_by_team()
+            .times(1)
+            .returning(|_, _, _| Ok(false));
+        uf_repo.expect_upsert().never();
+        let logic = UserFlagLogicImpl::new(Box::new(mock_client), Box::new(uf_repo));
+        let err = logic
+            .upsert_after_auth(
+                Uuid::new_v4(),
+                "user",
+                &Uuid::new_v4().to_string(),
+                &Uuid::new_v4().to_string(),
+                true,
+                Some("attacker-variant".into()),
+            )
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(err, UserFlagLogicError::PermissionDenied(_)));
+    }
+
+    #[tokio::test]
+    async fn upsert_after_auth_skips_empty_ids_without_db_calls() {
+        let mock_client = MockClientRepository::new();
+        let mut uf_repo = MockUserFlagAssignmentRepository::new();
+        uf_repo.expect_all_owned_by_team().never();
+        uf_repo.expect_upsert().never();
+        let logic = UserFlagLogicImpl::new(Box::new(mock_client), Box::new(uf_repo));
+        let res = logic
+            .upsert_after_auth(Uuid::new_v4(), "", "", "", true, None)
             .await;
         assert!(res.is_ok());
     }
@@ -296,7 +363,14 @@ mod tests {
         let uf_repo = MockUserFlagAssignmentRepository::new();
         let logic = UserFlagLogicImpl::new(Box::new(mock_client), Box::new(uf_repo));
         let err = logic
-            .upsert_after_auth("user", "bad", &Uuid::new_v4().to_string(), true, None)
+            .upsert_after_auth(
+                Uuid::new_v4(),
+                "user",
+                "bad",
+                &Uuid::new_v4().to_string(),
+                true,
+                None,
+            )
             .await
             .err()
             .unwrap();
@@ -308,11 +382,15 @@ mod tests {
         let mock_client = MockClientRepository::new();
         let mut uf_repo = MockUserFlagAssignmentRepository::new();
         uf_repo
+            .expect_all_owned_by_team()
+            .returning(|_, _, _| Ok(true));
+        uf_repo
             .expect_upsert()
             .returning(|_, _, _, _, _| Err(Error::InvalidInput("x".into())));
         let logic = UserFlagLogicImpl::new(Box::new(mock_client), Box::new(uf_repo));
         let err = logic
             .upsert_after_auth(
+                Uuid::new_v4(),
                 "user",
                 &Uuid::new_v4().to_string(),
                 &Uuid::new_v4().to_string(),

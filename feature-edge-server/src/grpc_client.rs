@@ -285,6 +285,8 @@ mod tests {
         /// Codes returned by `GetFeatureByKey` / `GetClientInfo`, one per
         /// call, before they start to succeed.
         scripted_errors: std::sync::Mutex<std::collections::VecDeque<tonic::Code>>,
+        /// Feature ids of assignment rows the mock accepted.
+        accepted_assignment_features: std::sync::Mutex<Vec<String>>,
     }
 
     impl MockBackendState {
@@ -371,16 +373,29 @@ mod tests {
                 .state
                 .assignment_attempts
                 .fetch_add(1, Ordering::SeqCst);
-            let mut count = 0usize;
+            let mut feature_ids = Vec::new();
             let mut stream = request.into_inner();
             while let Some(msg) = stream.next().await {
-                msg.map_err(|e| Status::internal(format!("stream error: {e}")))?;
-                count += 1;
+                let msg = msg.map_err(|e| Status::internal(format!("stream error: {e}")))?;
+                feature_ids.push(msg.feature_id);
             }
+            let count = feature_ids.len();
 
             if attempt == 0 {
                 return Err(Status::unavailable("transient assignment ingest failure"));
             }
+
+            // Like the backend, reject the whole stream when any row belongs to another team.
+            if feature_ids.iter().any(|id| id.starts_with("foreign-")) {
+                return Err(Status::permission_denied(
+                    "feature or environment does not belong to the client's team",
+                ));
+            }
+            self.state
+                .accepted_assignment_features
+                .lock()
+                .unwrap()
+                .extend(feature_ids);
 
             Ok(Response::new(backend_pb::Ack {
                 message_id: format!("assignment-ack-{}", count),
@@ -986,6 +1001,53 @@ mod tests {
 
         assert_eq!(state.assignment_attempts.load(Ordering::SeqCst), 2);
         assert!(app_state.pending_assignments.pop().is_none());
+
+        task.abort();
+        server_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_run_flush_task_drops_rows_rejected_as_permission_denied() {
+        let (endpoint, state, server_handle) = start_mock_backend().await;
+        let mapped_cache = Arc::new(crate::MappedFeatureCache::new(100));
+        let mut app_state = test_app_state_with_endpoint(mapped_cache, &endpoint);
+        app_state.flush_interval = std::time::Duration::from_millis(0);
+        for feature_id in ["feature-own", "foreign-feature"] {
+            app_state.pending_assignments.push(UserAssignment {
+                user_id: "user-1".to_string(),
+                feature_id: feature_id.to_string(),
+                environment_id: "env-1".to_string(),
+                assigned: true,
+                variant: None,
+            });
+        }
+
+        let task = tokio::spawn(run_flush_task(app_state.clone()));
+
+        // Attempt 1: transient failure, batch requeued. Attempt 2: the batch is
+        // rejected as PermissionDenied. Attempts 3 and 4: rows pushed one by one;
+        // the own-team row is stored and the foreign row is dropped.
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if state.assignment_attempts.load(Ordering::SeqCst) >= 4
+                    && app_state.pending_assignments.is_empty()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a permanently rejected batch must not be requeued forever");
+
+        // Give the flush loop time to run more cycles; nothing may be retried.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(state.assignment_attempts.load(Ordering::SeqCst), 4);
+        assert!(app_state.pending_assignments.is_empty());
+        assert_eq!(
+            *state.accepted_assignment_features.lock().unwrap(),
+            vec!["feature-own".to_string()]
+        );
 
         task.abort();
         server_handle.abort();

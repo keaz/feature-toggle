@@ -41,6 +41,7 @@ impl crate::logic::user_flag::UserFlagLogic for NoopUserFlagLogic {
     }
     async fn upsert_after_auth(
         &self,
+        _team_id: uuid::Uuid,
         _user_id: &str,
         _feature_id: &str,
         _environment_id: &str,
@@ -1149,13 +1150,13 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
             None => return Err(Status::invalid_argument("empty stream")),
         };
 
-        // Authenticate using logic
-        match self
+        // Authenticate using logic; every row in the stream must belong to this team
+        let team_id = match self
             .user_flag_logic
             .authenticate_client(&first_msg.client_id, &first_msg.client_secret)
             .await
         {
-            Ok(_) => {}
+            Ok(team_id) => team_id,
             Err(e) => {
                 return Err(match e {
                     crate::logic::user_flag::UserFlagLogicError::InvalidInput(m) => {
@@ -1175,7 +1176,7 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
                     }
                 });
             }
-        }
+        };
 
         // Process the first payload then the rest via logic
         let variant = if first_msg.variant.is_empty() {
@@ -1186,6 +1187,7 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
         if let Err(e) = self
             .user_flag_logic
             .upsert_after_auth(
+                team_id,
                 &first_msg.user_id,
                 &first_msg.feature_id,
                 &first_msg.environment_id,
@@ -1197,6 +1199,9 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
             return Err(match e {
                 crate::logic::user_flag::UserFlagLogicError::InvalidInput(m) => {
                     Status::invalid_argument(m)
+                }
+                crate::logic::user_flag::UserFlagLogicError::PermissionDenied(m) => {
+                    Status::permission_denied(m)
                 }
                 crate::logic::user_flag::UserFlagLogicError::DatabaseError(e) => {
                     Status::internal(format!("db error: {}", e))
@@ -1216,6 +1221,7 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
                     if let Err(e) = self
                         .user_flag_logic
                         .upsert_after_auth(
+                            team_id,
                             &m.user_id,
                             &m.feature_id,
                             &m.environment_id,
@@ -1227,6 +1233,9 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
                         return Err(match e {
                             crate::logic::user_flag::UserFlagLogicError::InvalidInput(m) => {
                                 Status::invalid_argument(m)
+                            }
+                            crate::logic::user_flag::UserFlagLogicError::PermissionDenied(m) => {
+                                Status::permission_denied(m)
                             }
                             crate::logic::user_flag::UserFlagLogicError::DatabaseError(e) => {
                                 Status::internal(format!("db error: {}", e))
