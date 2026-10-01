@@ -534,6 +534,18 @@ pub trait FeatureRepository: Send + Sync {
         team_id: Uuid,
         key: String,
     ) -> Result<Option<Feature>, Error>;
+    /// Looks up many features by exact, case-sensitive key within a team, with
+    /// the same matching as `get_feature_by_key`. Keys without a match are
+    /// absent from the result; the result order is unspecified.
+    async fn get_features_by_keys(
+        &self,
+        team_id: Uuid,
+        keys: &[String],
+    ) -> Result<Vec<Feature>, Error>;
+    /// Loads many features by id, with dependencies, like `get_feature_by_id`
+    /// does for one. Ids without a feature are absent from the result (no
+    /// `NotFound` error); the result order is unspecified.
+    async fn get_features_by_ids(&self, ids: &[Uuid]) -> Result<Vec<Feature>, Error>;
     /// Returns the features in a team whose key equals `key` ignoring case.
     /// Used by key conflict checks: no substring or wildcard matching, but
     /// case variants (`Checkout` vs `checkout`) still count as a conflict.
@@ -2304,6 +2316,57 @@ impl FeatureRepository for FeatureRepositoryImpl {
         self.hydrate_feature_dependencies(&mut features).await?;
 
         Ok(features.pop())
+    }
+
+    async fn get_features_by_keys(
+        &self,
+        team_id: Uuid,
+        keys: &[String],
+    ) -> Result<Vec<Feature>, Error> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut query_builder = sqlx::QueryBuilder::new(FEATURE_SELECT);
+        query_builder.push(" WHERE f.team_id = ").push_bind(team_id);
+        query_builder
+            .push(" AND f.key = ANY(")
+            .push_bind(keys)
+            .push(")");
+
+        let result = query_builder
+            .build_query_as::<FeatureWithStageRow>()
+            .fetch_all(&self.pool)
+            .await;
+
+        let features_rows = handle_error(None, result)?;
+        let mut features = Self::map_rows_to_feature_list(features_rows);
+        self.hydrate_feature_dependencies(&mut features).await?;
+
+        Ok(features)
+    }
+
+    async fn get_features_by_ids(&self, ids: &[Uuid]) -> Result<Vec<Feature>, Error> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut query_builder = sqlx::QueryBuilder::new(FEATURE_SELECT);
+        query_builder
+            .push(" WHERE f.id = ANY(")
+            .push_bind(ids)
+            .push(")");
+
+        let result = query_builder
+            .build_query_as::<FeatureWithStageRow>()
+            .fetch_all(&self.pool)
+            .await;
+
+        let features_rows = handle_error(None, result)?;
+        let mut features = Self::map_rows_to_feature_list(features_rows);
+        self.hydrate_feature_dependencies(&mut features).await?;
+
+        Ok(features)
     }
 
     async fn get_features_by_key_ignore_case(

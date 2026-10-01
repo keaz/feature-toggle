@@ -184,6 +184,40 @@ where
     }
 }
 
+/// Builds a `get_features_by_keys` mock from a `get_feature_by_key` closure:
+/// keys without a match are absent from the result.
+fn keys_batch<F>(per_key: F) -> impl Fn(Uuid, &[String]) -> Result<Vec<db::Feature>, Error>
+where
+    F: Fn(Uuid, String) -> Result<Option<db::Feature>, Error>,
+{
+    move |team, keys| {
+        let mut out = Vec::new();
+        for key in keys {
+            out.extend(per_key(team, key.clone())?);
+        }
+        Ok(out)
+    }
+}
+
+/// Builds a `get_features_by_ids` mock from a `get_feature_by_id` closure:
+/// like the real repository, unknown ids are absent instead of an error.
+fn ids_batch<F>(per_id: F) -> impl Fn(&[Uuid]) -> Result<Vec<db::Feature>, Error>
+where
+    F: Fn(Uuid) -> Result<db::Feature, Error>,
+{
+    move |ids| {
+        let mut out = Vec::new();
+        for id in ids {
+            match per_id(*id) {
+                Ok(feature) => out.push(feature),
+                Err(Error::NotFound(_)) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(out)
+    }
+}
+
 async fn recv_update_with_timeout(
     stream: &mut tonic::Streaming<pb::FeatureUpdate>,
     timeout: Duration,
@@ -699,8 +733,8 @@ async fn evaluate_returns_false_for_dependency_disabled_by_kill_switch() {
             }
         }));
     feature_mock
-        .expect_get_feature_by_id()
-        .returning(move |id| {
+        .expect_get_features_by_ids()
+        .returning(ids_batch(move |id| {
             if id == dependency_id {
                 Ok(test_feature(
                     dependency_id,
@@ -713,7 +747,7 @@ async fn evaluate_returns_false_for_dependency_disabled_by_kill_switch() {
             } else {
                 Err(Error::NotFound(id))
             }
-        });
+        }));
     feature_mock
         .expect_get_feature_stages_batch()
         .returning(stages_batch(move |id| {
@@ -847,6 +881,9 @@ async fn get_feature_by_key_and_stream_branches() {
     feature_mock
         .expect_get_feature_by_key()
         .returning(exact_key_lookup(features_by_key));
+    feature_mock
+        .expect_get_features_by_keys()
+        .returning(keys_batch(exact_key_lookup(features_by_key)));
     feature_mock
         .expect_get_stage_criteria_batch()
         .returning(criteria_batch(|_sid| Ok(Vec::new())));
@@ -1480,6 +1517,9 @@ async fn stream_subscriptions_are_connection_scoped() {
         .expect_get_feature_by_key()
         .returning(exact_key_lookup(features_by_key));
     feature_mock
+        .expect_get_features_by_keys()
+        .returning(keys_batch(exact_key_lookup(features_by_key)));
+    feature_mock
         .expect_get_stage_criteria_batch()
         .returning(criteria_batch(|_sid| Ok(Vec::new())));
 
@@ -1729,6 +1769,9 @@ async fn requested_keys_are_cleared_when_last_stream_disconnects() {
     feature_mock
         .expect_get_feature_by_key()
         .returning(exact_key_lookup(features_by_key));
+    feature_mock
+        .expect_get_features_by_keys()
+        .returning(keys_batch(exact_key_lookup(features_by_key)));
     feature_mock
         .expect_get_stage_criteria_batch()
         .returning(criteria_batch(|_sid| Ok(Vec::new())));
@@ -2147,8 +2190,8 @@ async fn stream_keys_snapshot_sends_delete_for_missing_key() {
         .expect_get_feature_stages_batch()
         .returning(stages_batch(|_fid| Ok(Vec::new())));
     feature_mock
-        .expect_get_feature_by_key()
-        .returning(move |_team, key| match key.as_str() {
+        .expect_get_features_by_keys()
+        .returning(keys_batch(move |_team, key| match key.as_str() {
             "present" => Ok(Some(test_feature(
                 present_id,
                 "present",
@@ -2158,7 +2201,7 @@ async fn stream_keys_snapshot_sends_delete_for_missing_key() {
                 vec![],
             ))),
             _ => Ok(None),
-        });
+        }));
 
     let (addr, _server) =
         start_server_with_repos(Box::new(feature_mock), Box::new(client_mock), updates_tx).await;
@@ -2648,14 +2691,20 @@ fn mapping_repo_mock(fixture: &MappingFixture) -> MockFeatureRepository {
         .returning(move |_team, key| Ok(features.iter().find(|f| f.key == key).cloned()));
     let features = fixture.features.clone();
     feature_mock
-        .expect_get_feature_by_id()
-        .returning(move |id| {
+        .expect_get_features_by_keys()
+        .returning(keys_batch(move |_team, key| {
+            Ok(features.iter().find(|f| f.key == key).cloned())
+        }));
+    let features = fixture.features.clone();
+    feature_mock
+        .expect_get_features_by_ids()
+        .returning(ids_batch(move |id| {
             features
                 .iter()
                 .find(|f| f.id == id)
                 .cloned()
                 .ok_or(Error::NotFound(id))
-        });
+        }));
 
     let stages = fixture.stages.clone();
     feature_mock
@@ -3025,4 +3074,596 @@ async fn stream_snapshot_loads_child_rows_with_one_call_per_kind() {
         snapshot.push(update.feature.expect("snapshot carries a feature"));
     }
     assert_eq!(snapshot, expected);
+}
+
+/// Counts calls to a mocked repository method.
+#[derive(Clone, Default)]
+struct CallCounter(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl CallCounter {
+    fn hit(&self) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn get(&self) -> usize {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// Call counters for the per-id and the batched child-row loaders.
+#[derive(Clone, Default)]
+struct ChildLoaderCounters {
+    stages: CallCounter,
+    criteria: CallCounter,
+    variants: CallCounter,
+    stages_batch: CallCounter,
+    criteria_batch: CallCounter,
+    variants_batch: CallCounter,
+}
+
+/// Wires both the per-id and the batched child-row loaders of a mock to the
+/// fixture, counting calls to each.
+fn child_loader_mock(
+    fixture: &MappingFixture,
+    feature_mock: &mut MockFeatureRepository,
+) -> ChildLoaderCounters {
+    let counters = ChildLoaderCounters::default();
+
+    let stages = fixture.stages.clone();
+    let counter = counters.stages.clone();
+    feature_mock
+        .expect_get_feature_stages()
+        .returning(move |feature_id| {
+            counter.hit();
+            Ok(stages.get(&feature_id).cloned().unwrap_or_default())
+        });
+    let criteria = fixture.criteria.clone();
+    let counter = counters.criteria.clone();
+    feature_mock
+        .expect_get_stage_criteria()
+        .returning(move |stage_id| {
+            counter.hit();
+            Ok(criteria.get(&stage_id).cloned().unwrap_or_default())
+        });
+    let variants = fixture.variants.clone();
+    let counter = counters.variants.clone();
+    feature_mock
+        .expect_get_feature_variants()
+        .returning(move |feature_id| {
+            counter.hit();
+            Ok(variants.get(&feature_id).cloned().unwrap_or_default())
+        });
+
+    let stages = fixture.stages.clone();
+    let counter = counters.stages_batch.clone();
+    let per_feature =
+        stages_batch(move |feature_id| Ok(stages.get(&feature_id).cloned().unwrap_or_default()));
+    feature_mock
+        .expect_get_feature_stages_batch()
+        .returning(move |ids| {
+            counter.hit();
+            per_feature(ids)
+        });
+    let criteria = fixture.criteria.clone();
+    let counter = counters.criteria_batch.clone();
+    let per_stage =
+        criteria_batch(move |stage_id| Ok(criteria.get(&stage_id).cloned().unwrap_or_default()));
+    feature_mock
+        .expect_get_stage_criteria_batch()
+        .returning(move |team, ids| {
+            counter.hit();
+            per_stage(team, ids)
+        });
+    let variants = fixture.variants.clone();
+    let counter = counters.variants_batch.clone();
+    let per_feature = variants_batch(move |feature_id| {
+        Ok(variants.get(&feature_id).cloned().unwrap_or_default())
+    });
+    feature_mock
+        .expect_get_feature_variants_batch()
+        .returning(move |ids| {
+            counter.hit();
+            per_feature(ids)
+        });
+
+    counters
+}
+
+fn print_child_loader_counts(label: &str, counters: &ChildLoaderCounters) {
+    println!(
+        "{label}: per-id stages={} criteria={} variants={}; batch stages={} criteria={} variants={}",
+        counters.stages.get(),
+        counters.criteria.get(),
+        counters.variants.get(),
+        counters.stages_batch.get(),
+        counters.criteria_batch.get(),
+        counters.variants_batch.get(),
+    );
+}
+
+/// Dependency graphs for the multi-level Evaluate pin test:
+///
+/// - `ml-root` -> `ml-m1`, `ml-m2`; `ml-m1` -> `ml-leaf`; `ml-m2` -> `ml-leaf`,
+///   `ml-deep`; `ml-leaf` -> `ml-deep`; `ml-deep` -> `ml-deepest`. That is
+///   three dependency levels below the root, and `ml-leaf` is Contextual with
+///   a `country == US` criterion serving its `on` variant.
+/// - `ml-off-root` -> `ml-off-mid` -> `ml-off-leaf` (kill switch off).
+/// - `ml-stage-root` -> `ml-stage-mid` -> `ml-stage-leaf` (stage disabled).
+/// - `cy-a` -> `cy-b` -> `cy-c` -> `cy-a` (cycle).
+/// - `ml-missing` -> `ml-missing-mid` -> a feature id that does not exist.
+///
+/// Returns the fixture and the missing feature id.
+fn multi_level_fixture() -> (MappingFixture, Uuid) {
+    use chrono::TimeZone;
+    let team_id = fixed_uuid(1);
+    let env_1 = fixed_uuid(2);
+    let env_2 = fixed_uuid(3);
+    let created_at = chrono::Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 5).unwrap();
+    let ghost = fixed_uuid(999);
+
+    // (id, key, contextual, kill switch enabled, stage enabled in env_1, deps)
+    type Spec = (u128, &'static str, bool, bool, bool, Vec<u128>);
+    let specs: Vec<Spec> = vec![
+        (100, "ml-root", false, true, true, vec![101, 102]),
+        (101, "ml-m1", false, true, true, vec![103]),
+        (102, "ml-m2", false, true, true, vec![103, 104]),
+        (103, "ml-leaf", true, true, true, vec![104]),
+        (104, "ml-deep", false, true, true, vec![105]),
+        (105, "ml-deepest", false, true, true, vec![]),
+        (110, "ml-off-root", false, true, true, vec![111]),
+        (111, "ml-off-mid", false, true, true, vec![112]),
+        (112, "ml-off-leaf", false, false, true, vec![]),
+        (120, "ml-stage-root", false, true, true, vec![121]),
+        (121, "ml-stage-mid", false, true, true, vec![122]),
+        (122, "ml-stage-leaf", false, true, false, vec![]),
+        (130, "cy-a", false, true, true, vec![131]),
+        (131, "cy-b", false, true, true, vec![132]),
+        (132, "cy-c", false, true, true, vec![130]),
+        (140, "ml-missing", false, true, true, vec![141]),
+        (141, "ml-missing-mid", false, true, true, vec![999]),
+    ];
+
+    let mut features = Vec::new();
+    let mut stages = std::collections::HashMap::new();
+    for (n, key, contextual, kill_switch_enabled, stage_enabled, deps) in specs {
+        let id = fixed_uuid(n);
+        let mut feature = test_feature(
+            id,
+            key,
+            team_id,
+            true,
+            kill_switch_enabled,
+            deps.into_iter()
+                .map(|dep| db::FeatureDependency {
+                    feature_id: id,
+                    depends_on_id: fixed_uuid(dep),
+                })
+                .collect(),
+        );
+        if contextual {
+            feature.feature_type = db::FeatureType::Contextual;
+        }
+        feature.created_at = created_at;
+        feature.rollback_scheduled_at = None;
+        features.push(feature);
+        stages.insert(
+            id,
+            vec![db::FeaturePipelineStage {
+                id: fixed_uuid(n + 1000),
+                feature_id: id,
+                environment_id: env_1,
+                order_index: 0,
+                parent_stage_id: None,
+                position: "{}".into(),
+                enabled: stage_enabled,
+                status: "DEPLOYED".into(),
+            }],
+        );
+    }
+
+    let leaf_stage = fixed_uuid(1103);
+    let criteria = std::collections::HashMap::from([(
+        leaf_stage,
+        vec![db::StageCriterion {
+            id: fixed_uuid(2103),
+            stage_id: leaf_stage,
+            priority: 0,
+            rule_groups: vec![db::CompoundRuleGroup {
+                id: fixed_uuid(3103),
+                logic_operator: db::LogicOperator::And,
+                conditions: vec![db::CompoundRuleCondition {
+                    id: fixed_uuid(4103),
+                    context_key: "country".into(),
+                    operator: "EQUALS".into(),
+                    value: serde_json::json!("US"),
+                    order_index: 0,
+                }],
+            }],
+            variant_allocations: vec![],
+            variant_selection_mode: db::VariantSelectionMode::SpecificVariant,
+            selected_variant_control: Some("on".into()),
+        }],
+    )]);
+
+    let leaf = fixed_uuid(103);
+    let variant = |n: u128, control: &str, value: serde_json::Value| db::FeatureVariant {
+        id: fixed_uuid(n),
+        feature_id: leaf,
+        control: control.into(),
+        value,
+        value_type: db::VariantValueType::Boolean,
+        description: None,
+        created_at,
+        updated_at: created_at,
+    };
+    let variants = std::collections::HashMap::from([(
+        leaf,
+        vec![
+            variant(5103, "on", serde_json::json!(true)),
+            variant(5104, "off", serde_json::json!(false)),
+        ],
+    )]);
+
+    (
+        MappingFixture {
+            team_id,
+            env_1,
+            env_2,
+            features,
+            stages,
+            criteria,
+            variants,
+        },
+        ghost,
+    )
+}
+
+/// Pins Evaluate over multi-level dependency graphs (diamond, kill switch and
+/// disabled stage deep in the graph, a cycle, a missing dependency).
+#[tokio::test]
+async fn evaluate_multi_level_dependency_output_is_pinned() {
+    let (fixture, ghost) = multi_level_fixture();
+    let (updates_tx, _updates_rx) = broadcast::channel::<pb::FeatureUpdate>(8);
+    let (cid, sec) = client_ids();
+    let client_id = Uuid::parse_str(&cid).unwrap();
+    let client_mock = stream_client_mock(client_id, fixture.team_id, sec.clone());
+
+    // No `get_feature_by_id` expectation: dependencies are loaded with one
+    // `get_features_by_ids` call per graph level, never one by one.
+    let by_ids_calls = CallCounter::default();
+    let mut feature_mock = MockFeatureRepository::new();
+    let features = fixture.features.clone();
+    feature_mock
+        .expect_get_feature_by_key()
+        .returning(move |_team, key| Ok(features.iter().find(|f| f.key == key).cloned()));
+    let features = fixture.features.clone();
+    let counter = by_ids_calls.clone();
+    let lookup = ids_batch(move |id| {
+        features
+            .iter()
+            .find(|f| f.id == id)
+            .cloned()
+            .ok_or(Error::NotFound(id))
+    });
+    feature_mock
+        .expect_get_features_by_ids()
+        .returning(move |ids| {
+            counter.hit();
+            lookup(ids)
+        });
+    let counters = child_loader_mock(&fixture, &mut feature_mock);
+
+    let (addr, _server) =
+        start_server_with_repos(Box::new(feature_mock), Box::new(client_mock), updates_tx).await;
+    let mut client = FeatureEvaluationClient::connect(format!("http://{}", addr))
+        .await
+        .unwrap();
+
+    let country = |value: &str| {
+        vec![
+            pb::Context {
+                key: "bucketingKey".into(),
+                value: "u1".into(),
+            },
+            pb::Context {
+                key: "country".into(),
+                value: value.into(),
+            },
+        ]
+    };
+    let cases = [
+        ("ml-root", fixture.env_1, country("US")),
+        ("ml-root", fixture.env_1, country("FR")),
+        ("ml-root", fixture.env_2, country("US")),
+        ("ml-leaf", fixture.env_1, country("US")),
+        ("ml-off-root", fixture.env_1, country("US")),
+        ("ml-stage-root", fixture.env_1, country("US")),
+        ("cy-a", fixture.env_1, country("US")),
+        ("ml-missing", fixture.env_1, country("US")),
+    ];
+    let mut results = Vec::new();
+    let mut calls_per_case = Vec::new();
+    for (key, env, context) in cases {
+        let before = by_ids_calls.get();
+        let response = client
+            .evaluate(EvaluateRequest {
+                client_id: cid.clone(),
+                client_secret: sec.clone(),
+                feature_key: key.into(),
+                environment_id: env.to_string(),
+                context,
+                ..Default::default()
+            })
+            .await;
+        results.push(match response {
+            Ok(response) => Ok(response.into_inner().enabled),
+            Err(status) => Err((status.code(), status.message().to_string())),
+        });
+        calls_per_case.push(by_ids_calls.get() - before);
+    }
+    print_child_loader_counts("evaluate", &counters);
+
+    // Values recorded from the per-dependency implementation before the P02
+    // follow-up.
+    assert_eq!(
+        results,
+        vec![
+            Ok(true),
+            Ok(false),
+            Ok(false),
+            Ok(true),
+            Ok(false),
+            Ok(false),
+            Ok(false),
+            Err((
+                tonic::Code::Internal,
+                format!("db error: {}", Error::NotFound(ghost)),
+            )),
+        ],
+        "evaluate results"
+    );
+    // One lookup per dependency level. The per-dependency implementation made
+    // [5, 5, 5, 2, 2, 2, 2, 2] `get_feature_by_id` calls for these cases.
+    assert_eq!(calls_per_case, vec![3, 3, 3, 2, 2, 2, 2, 2]);
+    assert_eq!(counters.stages.get(), 0);
+    assert_eq!(counters.criteria.get(), 0);
+    assert_eq!(counters.variants.get(), 0);
+}
+
+/// Pins a keyed snapshot with present and missing keys: one Delete without a
+/// payload per missing key, then a Snapshot per present key, then exactly one
+/// SnapshotComplete marker.
+#[tokio::test]
+async fn keyed_snapshot_output_is_pinned() {
+    let fixture = mapping_fixture();
+    let expected = expected_mapping_messages(&fixture);
+    let (updates_tx, _updates_rx) = broadcast::channel::<pb::FeatureUpdate>(8);
+    let (cid, sec) = client_ids();
+    let client_id = Uuid::parse_str(&cid).unwrap();
+    let client_mock = stream_client_mock(client_id, fixture.team_id, sec.clone());
+
+    let keys = ["pin-a", "pin-b", "pin-d", "gone-1", "PIN-A"];
+    let requested = keys
+        .iter()
+        .map(|k| k.to_string())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    // No `get_feature_by_key` expectation: all keys are looked up with one
+    // exact-key query. The per-key implementation made five calls here.
+    let mut feature_mock = MockFeatureRepository::new();
+    let features = fixture.features.clone();
+    let team_id = fixture.team_id;
+    let lookup = keys_batch(move |team, key| {
+        assert_eq!(team, team_id);
+        Ok(features.iter().find(|f| f.key == key).cloned())
+    });
+    feature_mock
+        .expect_get_features_by_keys()
+        .withf(move |team, keys| {
+            *team == team_id
+                && keys
+                    .iter()
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    == requested
+        })
+        .times(1)
+        .returning(lookup);
+    let counters = child_loader_mock(&fixture, &mut feature_mock);
+
+    let (addr, _server) =
+        start_server_with_repos(Box::new(feature_mock), Box::new(client_mock), updates_tx).await;
+    let (mut stream, _tx) =
+        open_update_stream(addr, cid, sec, keys.iter().map(|k| k.to_string()).collect()).await;
+    let received = drain_updates(&mut stream).await;
+    print_child_loader_counts("keyed snapshot", &counters);
+
+    let actions = received.iter().map(|u| u.action).collect::<Vec<_>>();
+    let delete = pb::feature_update::Action::Delete as i32;
+    let snapshot = pb::feature_update::Action::Snapshot as i32;
+    let complete = pb::feature_update::Action::SnapshotComplete as i32;
+    assert_eq!(
+        actions,
+        vec![delete, delete, snapshot, snapshot, snapshot, complete],
+        "deletes, then snapshots, then one marker: {received:?}"
+    );
+
+    // Lookups are exact and case-sensitive: `PIN-A` is missing.
+    let mut deleted = received[..2]
+        .iter()
+        .map(|u| {
+            assert!(u.feature.is_none(), "Delete must not carry a payload");
+            u.feature_key.clone()
+        })
+        .collect::<Vec<_>>();
+    deleted.sort();
+    assert_eq!(deleted, vec!["PIN-A".to_string(), "gone-1".to_string()]);
+
+    // Keys come from a HashSet, so compare the snapshots sorted by key.
+    let mut snapshots = received[2..5]
+        .iter()
+        .map(|u| u.feature.clone().expect("snapshot carries a feature"))
+        .collect::<Vec<_>>();
+    snapshots.sort_by(|a, b| a.key.cmp(&b.key));
+    assert_eq!(snapshots, expected);
+    assert!(received[5].feature.is_none());
+    assert_eq!(counters.stages_batch.get(), 1);
+    assert_eq!(counters.criteria_batch.get(), 1);
+    assert_eq!(counters.variants_batch.get(), 1);
+}
+
+/// The mapping fixture plus variants on the Simple feature `pin-a`, which
+/// the snapshot never sends.
+fn fixture_with_simple_variants() -> MappingFixture {
+    let mut fixture = mapping_fixture();
+    let feature_a = fixed_uuid(10);
+    let created_at = fixture.features[0].created_at;
+    let variant = |n: u128, control: &str, value: serde_json::Value| db::FeatureVariant {
+        id: fixed_uuid(n),
+        feature_id: feature_a,
+        control: control.into(),
+        value,
+        value_type: db::VariantValueType::String,
+        description: None,
+        created_at,
+        updated_at: created_at,
+    };
+    fixture.variants.insert(
+        feature_a,
+        vec![
+            variant(62, "small", serde_json::json!("s")),
+            variant(63, "large", serde_json::json!("l")),
+        ],
+    );
+    fixture
+}
+
+/// Pins `broadcast::map_db_feature_to_full_for_broadcast`, the mapper of live
+/// updates sent by REST handlers and approvals.
+#[tokio::test]
+async fn broadcast_mapping_output_is_pinned() {
+    let fixture = fixture_with_simple_variants();
+    let mut expected = expected_mapping_messages(&fixture);
+    // Recorded behavior before the P02 follow-up: the broadcast mapper also
+    // sends the variants of Simple features.
+    expected[0].variants = vec![
+        pb::FeatureVariant {
+            control: "small".into(),
+            value: "\"s\"".into(),
+        },
+        pb::FeatureVariant {
+            control: "large".into(),
+            value: "\"l\"".into(),
+        },
+    ];
+
+    let mut feature_mock = MockFeatureRepository::new();
+    let counters = child_loader_mock(&fixture, &mut feature_mock);
+
+    let mut mapped = Vec::new();
+    for feature in fixture.features.clone() {
+        mapped.push(
+            feature_toggle_backend::broadcast::map_db_feature_to_full_for_broadcast(
+                &feature_mock,
+                feature,
+            )
+            .await
+            .expect("mapping succeeds"),
+        );
+    }
+    print_child_loader_counts("broadcast mapper", &counters);
+    assert_eq!(mapped, expected);
+    // One batched call per kind and feature, instead of the per-id loaders
+    // (3 stage, 4 criteria and 3 variant calls before the P02 follow-up).
+    assert_eq!(counters.stages.get(), 0);
+    assert_eq!(counters.criteria.get(), 0);
+    assert_eq!(counters.variants.get(), 0);
+    assert_eq!(counters.stages_batch.get(), 3);
+    assert_eq!(counters.criteria_batch.get(), 3);
+    assert_eq!(counters.variants_batch.get(), 3);
+}
+
+/// Pins the Upserts that a context update broadcasts for the features that
+/// reference the context.
+#[tokio::test]
+async fn context_update_broadcast_output_is_pinned() {
+    use feature_toggle_backend::database::context::MockContextRepository;
+    use feature_toggle_backend::logic::context::context_logic;
+    use feature_toggle_backend::model::{ID, UpdateContextInput};
+
+    let fixture = fixture_with_simple_variants();
+    let expected = expected_mapping_messages(&fixture);
+    let context_id = fixed_uuid(70);
+    let team_id = fixture.team_id;
+
+    let mut context_mock = MockContextRepository::new();
+    context_mock
+        .expect_update_context()
+        .returning(move |id, _| {
+            Ok(db::Context {
+                id,
+                team_id,
+                key: "country".into(),
+                entries: vec![],
+            })
+        });
+
+    let mut feature_mock = MockFeatureRepository::new();
+    let feature_ids = fixture.features.iter().map(|f| f.id).collect::<Vec<_>>();
+    feature_mock
+        .expect_get_feature_ids_by_context_id()
+        .returning(move |_| Ok(feature_ids.clone()));
+    // No `get_feature_by_id` expectation: the features are loaded together.
+    let by_ids_calls = CallCounter::default();
+    let counter = by_ids_calls.clone();
+    let features = fixture.features.clone();
+    let lookup = ids_batch(move |id| {
+        features
+            .iter()
+            .find(|f| f.id == id)
+            .cloned()
+            .ok_or(Error::NotFound(id))
+    });
+    feature_mock
+        .expect_get_features_by_ids()
+        .returning(move |ids| {
+            counter.hit();
+            lookup(ids)
+        });
+    let counters = child_loader_mock(&fixture, &mut feature_mock);
+
+    let (updates_tx, mut updates_rx) = broadcast::channel::<pb::FeatureUpdate>(16);
+    let logic = context_logic(
+        Box::new(context_mock),
+        Box::new(feature_mock),
+        updates_tx.clone(),
+    );
+    logic
+        .update_context(
+            ID::from(context_id),
+            UpdateContextInput {
+                key: Some("country".into()),
+                entries: Some(vec!["US".into()]),
+            },
+        )
+        .await
+        .expect("update succeeds");
+
+    let mut received = Vec::new();
+    while let Ok(update) = updates_rx.try_recv() {
+        assert_eq!(update.action, pb::feature_update::Action::Upsert as i32);
+        received.push(update.feature.expect("upsert carries a feature"));
+    }
+    print_child_loader_counts("context update", &counters);
+    // Same as the snapshot: no variants for the Simple feature `pin-a`.
+    assert_eq!(received, expected);
+    // One call per kind for all three features. Before the P02 follow-up:
+    // 3 `get_feature_by_id`, 3 stage, 4 criteria and 1 variant calls.
+    assert_eq!(by_ids_calls.get(), 1);
+    assert_eq!(counters.stages.get(), 0);
+    assert_eq!(counters.criteria.get(), 0);
+    assert_eq!(counters.variants.get(), 0);
+    assert_eq!(counters.stages_batch.get(), 1);
+    assert_eq!(counters.criteria_batch.get(), 1);
+    assert_eq!(counters.variants_batch.get(), 1);
 }

@@ -248,7 +248,44 @@ struct EngineFeatureBase {
 }
 
 /// Number of features mapped per batched child-row load in a stream snapshot.
-const SNAPSHOT_MAPPING_BATCH_SIZE: usize = 200;
+pub(crate) const SNAPSHOT_MAPPING_BATCH_SIZE: usize = 200;
+
+/// Which features carry their variants in a mapped `pb::FeatureFull`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum VariantScope {
+    /// Only Contextual features carry variants (snapshot, `GetFeatureByKey`,
+    /// Evaluate).
+    ContextualOnly,
+    /// Every feature carries its variants (`broadcast` live updates).
+    AllFeatureTypes,
+}
+
+impl VariantScope {
+    fn includes(self, feature_type: &db::FeatureType) -> bool {
+        match self {
+            Self::ContextualOnly => matches!(feature_type, db::FeatureType::Contextual),
+            Self::AllFeatureTypes => true,
+        }
+    }
+}
+
+/// Maps features to `pb::FeatureFull` with one batched load of their stages,
+/// criteria and variants, keeping the input order. This is the one mapping
+/// used by snapshots, `GetFeatureByKey` and live updates.
+pub(crate) async fn map_features_to_full(
+    repo: &dyn crate::database::feature::FeatureRepository,
+    features: Vec<db::Feature>,
+    variant_scope: VariantScope,
+) -> Result<Vec<pb::FeatureFull>, crate::Error> {
+    let children =
+        FeatureChildren::load(repo, &features.iter().collect::<Vec<_>>(), variant_scope).await?;
+    Ok(features
+        .into_iter()
+        .map(|f| {
+            FeatureEvaluationSvc::map_db_feature_to_full_with_children(f, &children, variant_scope)
+        })
+        .collect())
+}
 
 /// Stages, criteria and variants of a set of features, loaded with one
 /// batched query per kind instead of several queries per stage.
@@ -267,6 +304,7 @@ impl FeatureChildren {
     async fn load(
         repo: &dyn crate::database::feature::FeatureRepository,
         features: &[&db::Feature],
+        variant_scope: VariantScope,
     ) -> Result<Self, crate::Error> {
         if features.is_empty() {
             return Ok(Self::default());
@@ -292,16 +330,17 @@ impl FeatureChildren {
             criteria.extend(repo.get_stage_criteria_batch(team_id, &stage_ids).await?);
         }
 
-        // Variants are only mapped for Contextual features.
-        let contextual_ids = features
+        // Variants are only loaded for the features that carry them.
+        let variant_feature_ids = features
             .iter()
-            .filter(|f| matches!(f.feature_type, db::FeatureType::Contextual))
+            .filter(|f| variant_scope.includes(&f.feature_type))
             .map(|f| f.id)
             .collect::<Vec<_>>();
-        let variants = if contextual_ids.is_empty() {
+        let variants = if variant_feature_ids.is_empty() {
             std::collections::HashMap::new()
         } else {
-            repo.get_feature_variants_batch(&contextual_ids).await?
+            repo.get_feature_variants_batch(&variant_feature_ids)
+                .await?
         };
 
         Ok(Self {
@@ -569,37 +608,48 @@ impl FeatureEvaluationSvc {
 
         let mut feature_graph: std::collections::HashMap<Uuid, db::Feature> =
             std::collections::HashMap::new();
-        let mut queue: std::collections::VecDeque<Uuid> = root
-            .dependencies
-            .iter()
-            .map(|dependency| dependency.depends_on_id)
-            .collect();
-
         feature_graph.insert(root.id, root);
 
-        while let Some(feature_id) = queue.pop_front() {
-            if feature_graph.contains_key(&feature_id) {
-                continue;
-            }
-
-            let dependency_feature = repo
-                .get_feature_by_id(feature_id)
+        // Walk the dependency graph breadth first, loading each level with one
+        // query. Ids already in the graph are skipped, which also stops cycles.
+        let mut frontier = Self::unseen_dependency_ids(
+            feature_graph.values().map(|feature| &feature.dependencies),
+            &feature_graph,
+        );
+        while !frontier.is_empty() {
+            let mut loaded: std::collections::HashMap<Uuid, db::Feature> = repo
+                .get_features_by_ids(&frontier)
                 .await
-                .map_err(|e| Status::internal(format!("db error: {}", e)))?;
+                .map_err(db_error_status)?
+                .into_iter()
+                .map(|feature| (feature.id, feature))
+                .collect();
 
-            for nested_dependency in &dependency_feature.dependencies {
-                if !feature_graph.contains_key(&nested_dependency.depends_on_id) {
-                    queue.push_back(nested_dependency.depends_on_id);
-                }
+            // Same error as the per-dependency lookup it replaces: the first
+            // missing id in breadth-first order.
+            let mut level = Vec::with_capacity(frontier.len());
+            for feature_id in &frontier {
+                let feature = loaded
+                    .remove(feature_id)
+                    .ok_or_else(|| db_error_status(crate::Error::NotFound(*feature_id)))?;
+                level.push(feature);
             }
 
-            feature_graph.insert(dependency_feature.id, dependency_feature);
+            frontier = Self::unseen_dependency_ids(
+                level.iter().map(|feature| &feature.dependencies),
+                &feature_graph,
+            );
+            for feature in level {
+                feature_graph.insert(feature.id, feature);
+            }
+            frontier.retain(|id| !feature_graph.contains_key(id));
         }
 
         let graph_features = feature_graph.values().collect::<Vec<_>>();
-        let children = FeatureChildren::load(repo.as_ref(), &graph_features)
-            .await
-            .map_err(db_error_status)?;
+        let children =
+            FeatureChildren::load(repo.as_ref(), &graph_features, VariantScope::ContextualOnly)
+                .await
+                .map_err(db_error_status)?;
 
         let mut base_map: std::collections::HashMap<Uuid, EngineFeatureBase> =
             std::collections::HashMap::new();
@@ -632,6 +682,20 @@ impl FeatureEvaluationSvc {
             &mut memo,
             &mut visiting,
         ))
+    }
+
+    /// Dependency ids of `dependency_lists` that are not in `graph`, in order
+    /// of first appearance and without duplicates.
+    fn unseen_dependency_ids<'a>(
+        dependency_lists: impl Iterator<Item = &'a Vec<db::FeatureDependency>>,
+        graph: &std::collections::HashMap<Uuid, db::Feature>,
+    ) -> Vec<Uuid> {
+        let mut seen = std::collections::HashSet::new();
+        dependency_lists
+            .flatten()
+            .map(|dependency| dependency.depends_on_id)
+            .filter(|id| !graph.contains_key(id) && seen.insert(*id))
+            .collect()
     }
 
     fn map_db_feature_payload_to_engine(
@@ -818,28 +882,16 @@ impl FeatureEvaluationSvc {
         repo: &dyn crate::database::feature::FeatureRepository,
         f: db::Feature,
     ) -> Result<pb::FeatureFull, Status> {
-        let children = FeatureChildren::load(repo, &[&f])
+        let mut mapped = map_features_to_full(repo, vec![f], VariantScope::ContextualOnly)
             .await
             .map_err(db_error_status)?;
-        Ok(Self::map_db_feature_to_full_with_children(f, &children))
-    }
-
-    /// Maps many features with one batched load of their stages, criteria and
-    /// variants, keeping the input order.
-    async fn map_db_features_to_full_with_repo(
-        repo: &dyn crate::database::feature::FeatureRepository,
-        features: Vec<db::Feature>,
-    ) -> Result<Vec<pb::FeatureFull>, crate::Error> {
-        let children = FeatureChildren::load(repo, &features.iter().collect::<Vec<_>>()).await?;
-        Ok(features
-            .into_iter()
-            .map(|f| Self::map_db_feature_to_full_with_children(f, &children))
-            .collect())
+        Ok(mapped.remove(0))
     }
 
     fn map_db_feature_to_full_with_children(
         f: db::Feature,
         children: &FeatureChildren,
+        variant_scope: VariantScope,
     ) -> pb::FeatureFull {
         // Map stages with their criterias
         let stages = children.stages_of(f.id);
@@ -922,8 +974,7 @@ impl FeatureEvaluationSvc {
             })
             .collect::<Vec<_>>();
 
-        // Load variants from database only for Contextual features
-        let variant_msgs = if matches!(f.feature_type, db::FeatureType::Contextual) {
+        let variant_msgs = if variant_scope.includes(&f.feature_type) {
             let db_variants = children.variants_of(f.id);
 
             db_variants
@@ -990,15 +1041,22 @@ impl FeatureEvaluationSvc {
                         subscription_keys.len(),
                         client_id
                     );
+                    // One exact-key query for all keys, then the per-key
+                    // results in key iteration order, as one lookup per key
+                    // would produce them.
+                    let keys = subscription_keys.iter().cloned().collect::<Vec<_>>();
+                    let mut by_key = feature_repo
+                        .get_features_by_keys(team_id, &keys)
+                        .await
+                        .map_err(|e| Status::internal(format!("db error: {}", e)))?
+                        .into_iter()
+                        .map(|feature| (feature.key.clone(), feature))
+                        .collect::<std::collections::HashMap<_, _>>();
                     let mut all_features = Vec::new();
-                    for feature_key in &subscription_keys {
-                        let feature = feature_repo
-                            .get_feature_by_key(team_id, feature_key.clone())
-                            .await
-                            .map_err(|e| Status::internal(format!("db error: {}", e)))?;
-                        match feature {
+                    for feature_key in keys {
+                        match by_key.remove(&feature_key) {
                             Some(feature) => all_features.push(feature),
-                            None => missing_keys.push(feature_key.clone()),
+                            None => missing_keys.push(feature_key),
                         }
                     }
                     all_features
@@ -1037,7 +1095,7 @@ impl FeatureEvaluationSvc {
             if batch.is_empty() {
                 break;
             }
-            let mapped = Self::map_db_features_to_full_with_repo(feature_repo, batch)
+            let mapped = map_features_to_full(feature_repo, batch, VariantScope::ContextualOnly)
                 .await
                 .map_err(db_error_status)?;
             for full in mapped {

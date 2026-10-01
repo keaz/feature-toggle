@@ -159,130 +159,20 @@ impl KillSwitchRollbackScheduler {
         Ok(processed_count)
     }
 
-    // Helper function to map database feature to gRPC FeatureFull for broadcasting
+    // Maps a database feature to the gRPC FeatureFull of a broadcast, with the
+    // same mapping as the stream snapshot.
     async fn map_db_feature_to_full_for_broadcast(
         pool: sqlx::PgPool,
         f: crate::database::entity::Feature,
     ) -> Result<crate::grpc::pb::FeatureFull, crate::Error> {
-        use crate::grpc::pb;
-        let feature_repository = crate::database::feature::feature_repository(pool.clone());
-        let stages = feature_repository.get_feature_stages(f.id).await?;
-        // stages with criterias
-        let mut stage_msgs: Vec<pb::FeatureStageFull> = Vec::with_capacity(stages.len());
-        for s in stages.iter() {
-            let crits = feature_repository.get_stage_criteria(s.id).await?;
-            let criterias = crits
-                .into_iter()
-                .map(|c| {
-                    // Map rule groups
-                    let rule_groups = c
-                        .rule_groups
-                        .into_iter()
-                        .map(|group| pb::RuleGroup {
-                            id: group.id.to_string(),
-                            logic_operator: match group.logic_operator {
-                                crate::database::entity::LogicOperator::And => "AND".to_string(),
-                                crate::database::entity::LogicOperator::Or => "OR".to_string(),
-                            },
-                            conditions: group
-                                .conditions
-                                .into_iter()
-                                .map(|cond| pb::RuleCondition {
-                                    id: cond.id.to_string(),
-                                    context_key: cond.context_key,
-                                    operator: cond.operator,
-                                    value: cond.value.to_string(),
-                                    order_index: cond.order_index,
-                                })
-                                .collect(),
-                        })
-                        .collect();
-
-                    // Map variant allocations
-                    let variant_allocations = c
-                        .variant_allocations
-                        .into_iter()
-                        .map(|alloc| pb::VariantAllocation {
-                            variant_control: alloc.variant_control,
-                            weight: alloc.weight,
-                        })
-                        .collect();
-
-                    pb::StageCriterionFull {
-                        id: c.id.to_string(),
-                        stage_id: c.stage_id.to_string(),
-                        priority: c.priority,
-                        rule_groups,
-                        variant_allocations,
-                        variant_selection_mode: match c.variant_selection_mode {
-                            crate::database::entity::VariantSelectionMode::WeightedSplit => {
-                                "WEIGHTED_SPLIT".to_string()
-                            }
-                            crate::database::entity::VariantSelectionMode::SpecificVariant => {
-                                "SPECIFIC_VARIANT".to_string()
-                            }
-                        },
-                        selected_variant_control: c.selected_variant_control.unwrap_or_default(),
-                    }
-                })
-                .collect::<Vec<_>>();
-
-            stage_msgs.push(pb::FeatureStageFull {
-                id: s.id.to_string(),
-                environment_id: s.environment_id.to_string(),
-                order_index: s.order_index,
-                position: s.position.clone(),
-                enabled: s.enabled,
-                criterias,
-            });
-        }
-
-        let deps = f
-            .dependencies
-            .iter()
-            .map(|d| pb::FeatureDependencyFull {
-                feature_id: d.feature_id.to_string(),
-                depends_on_id: d.depends_on_id.to_string(),
-            })
-            .collect::<Vec<_>>();
-
-        // Load variants from database only for Contextual features
-        use crate::database::entity::FeatureType as EntityFeatureType;
-        let variant_msgs = if matches!(f.feature_type, EntityFeatureType::Contextual) {
-            let db_variants = feature_repository.get_feature_variants(f.id).await?;
-
-            db_variants
-                .into_iter()
-                .map(|v| pb::FeatureVariant {
-                    control: v.control,
-                    value: serde_json::to_string(&v.value).unwrap_or_default(),
-                })
-                .collect::<Vec<_>>()
-        } else {
-            vec![]
-        };
-
-        Ok(pb::FeatureFull {
-            id: f.id.to_string(),
-            key: f.key,
-            description: f.description.unwrap_or_default(),
-            feature_type: format!("{:?}", f.feature_type),
-            team_id: f.team_id.to_string(),
-            active: f.active,
-            created_at: f.created_at.to_rfc3339(),
-            kill_switch_enabled: f.kill_switch_enabled,
-            kill_switch_activated_at: f
-                .kill_switch_activated_at
-                .map(|dt| dt.to_rfc3339())
-                .unwrap_or_default(),
-            rollback_scheduled_at: f
-                .rollback_scheduled_at
-                .map(|dt| dt.to_rfc3339())
-                .unwrap_or_default(),
-            stages: stage_msgs,
-            dependencies: deps,
-            variants: variant_msgs,
-        })
+        let feature_repository = crate::database::feature::feature_repository(pool);
+        let mut mapped = crate::grpc::map_features_to_full(
+            &*feature_repository,
+            vec![f],
+            crate::grpc::VariantScope::ContextualOnly,
+        )
+        .await?;
+        Ok(mapped.remove(0))
     }
 }
 

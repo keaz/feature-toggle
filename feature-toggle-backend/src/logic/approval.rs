@@ -2691,17 +2691,17 @@ mod tests {
                 })
             });
 
-        // Add expectation for get_feature_stages
+        // The broadcast mapping loads child rows with batched calls.
         feature_repo
-            .expect_get_feature_stages()
+            .expect_get_feature_stages_batch()
             .times(..=1)
-            .returning(|_| Ok(vec![]));
+            .returning(|_| Ok(std::collections::HashMap::new()));
 
-        // Add expectation for get_feature_variants (for Simple features it's empty)
+        // Variants of the feature (empty here)
         feature_repo
-            .expect_get_feature_variants()
+            .expect_get_feature_variants_batch()
             .times(..=1)
-            .returning(|_| Ok(vec![]));
+            .returning(|_| Ok(std::collections::HashMap::new()));
 
         approval_repo
             .expect_update_request_status()
