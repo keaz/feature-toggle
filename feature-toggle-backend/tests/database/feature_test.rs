@@ -2,7 +2,9 @@ use std::vec;
 
 use chrono::{Duration, Utc};
 use feature_toggle_backend::database::entity::FeatureType;
-use feature_toggle_backend::database::feature::{CreateFeature, CreateFeatureStage, UpdateFeature};
+use feature_toggle_backend::database::feature::{
+    CreateFeature, CreateFeatureStage, FeatureRepositoryTx, UpdateFeature,
+};
 use feature_toggle_backend::database::{feature, init_pg_pool};
 use uuid::Uuid;
 
@@ -1705,5 +1707,220 @@ async fn test_create_feature_key_conflict_is_exact_and_case_insensitive() {
             Err(feature_toggle_backend::Error::RecordAlreadyExists(_))
         ),
         "case-variant duplicate must stay rejected, got {case_variant:?}"
+    );
+}
+
+async fn create_uniqueness_test_team(pool: &sqlx::PgPool, label: &str) -> Uuid {
+    let team_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO teams (id, name, description) VALUES ($1, $2, $3)")
+        .bind(team_id)
+        .bind(format!("{label}-{team_id}"))
+        .bind("Feature key uniqueness test")
+        .execute(pool)
+        .await
+        .expect("create test team");
+    team_id
+}
+
+async fn delete_uniqueness_test_team(pool: &sqlx::PgPool, team_id: Uuid) {
+    sqlx::query("DELETE FROM teams WHERE id = $1")
+        .bind(team_id)
+        .execute(pool)
+        .await
+        .expect("delete test team");
+}
+
+/// Creates one feature through the transactional path the REST create handler
+/// uses, committing on success and rolling back on failure.
+async fn create_feature_in_own_tx(
+    pool: &sqlx::PgPool,
+    team_id: Uuid,
+    key: &str,
+) -> Result<Uuid, feature_toggle_backend::Error> {
+    let repository = feature::feature_repository_tx(pool.clone());
+    let mut tx = pool.begin().await.expect("tx begins");
+    let result = repository
+        .create_feature_tx(&mut tx, simple_create_feature(team_id, key))
+        .await;
+    if result.is_ok() {
+        tx.commit().await.expect("commit");
+    } else {
+        tx.rollback().await.expect("rollback");
+    }
+    result
+}
+
+fn rename_feature(id: Uuid, key: &str) -> UpdateFeature {
+    UpdateFeature {
+        id,
+        key: Some(key.to_string()),
+        description: None,
+        feature_type: None,
+        lifecycle_stage: None,
+        owner: None,
+        purpose: None,
+        reference_url: None,
+        expires_at: None,
+        cleanup_reason: None,
+        tags: None,
+        archive_confirmation: false,
+        stages: vec![],
+        dependencies: vec![],
+        variants: None,
+    }
+}
+
+#[tokio::test]
+async fn test_create_feature_tx_key_conflict_is_exact_and_case_insensitive() {
+    let pool = init_pg_pool().await;
+    let team_id = create_uniqueness_test_team(&pool, "key-unique-create-tx").await;
+
+    let checkout = create_feature_in_own_tx(&pool, team_id, "checkout").await;
+    let substring = create_feature_in_own_tx(&pool, team_id, "check").await;
+    let wildcard = create_feature_in_own_tx(&pool, team_id, "check_ut").await;
+    let duplicate = create_feature_in_own_tx(&pool, team_id, "checkout").await;
+    let case_variant = create_feature_in_own_tx(&pool, team_id, "Checkout").await;
+
+    // Two case variants created inside one transaction: the second check must
+    // see the uncommitted first row.
+    let repository = feature::feature_repository_tx(pool.clone());
+    let mut tx = pool.begin().await.expect("tx begins");
+    let first_in_tx = repository
+        .create_feature_tx(&mut tx, simple_create_feature(team_id, "pay"))
+        .await;
+    let second_in_tx = repository
+        .create_feature_tx(&mut tx, simple_create_feature(team_id, "PAY"))
+        .await;
+    tx.rollback().await.expect("rollback");
+
+    delete_uniqueness_test_team(&pool, team_id).await;
+
+    checkout.expect("create checkout");
+    substring.expect("a key that only contains an existing key must be allowed");
+    wildcard.expect("`_` in a key must not act as a wildcard");
+    first_in_tx.expect("create pay inside the transaction");
+    assert!(
+        matches!(
+            duplicate,
+            Err(feature_toggle_backend::Error::RecordAlreadyExists(_))
+        ),
+        "exact duplicate must be rejected, got {duplicate:?}"
+    );
+    assert!(
+        matches!(
+            case_variant,
+            Err(feature_toggle_backend::Error::RecordAlreadyExists(_))
+        ),
+        "case-variant duplicate must be rejected, got {case_variant:?}"
+    );
+    assert!(
+        matches!(
+            second_in_tx,
+            Err(feature_toggle_backend::Error::RecordAlreadyExists(_))
+        ),
+        "case-variant duplicate in the same transaction must be rejected, got {second_in_tx:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_rename_feature_key_conflict_is_exact_and_case_insensitive() {
+    let pool = init_pg_pool().await;
+    let repository = feature::feature_repository(pool.clone());
+    let tx_repository = feature::feature_repository_tx(pool.clone());
+    let team_id = create_uniqueness_test_team(&pool, "key-unique-rename").await;
+
+    let checkout_id = repository
+        .create_feature(simple_create_feature(team_id, "checkout"))
+        .await;
+    let other_id = repository
+        .create_feature(simple_create_feature(team_id, "other"))
+        .await;
+    let (checkout_id, other_id) = match (checkout_id, other_id) {
+        (Ok(a), Ok(b)) => (a, b),
+        (a, b) => {
+            delete_uniqueness_test_team(&pool, team_id).await;
+            panic!("setup failed: {a:?} {b:?}");
+        }
+    };
+
+    // Transactional path (REST PATCH /features/{id}).
+    let mut tx = pool.begin().await.expect("tx begins");
+    let tx_case_variant = tx_repository
+        .update_feature_tx(&mut tx, rename_feature(other_id, "Checkout"))
+        .await;
+    tx.rollback().await.expect("rollback");
+
+    // Pool path (FeatureLogic::update_feature).
+    let pool_case_variant = repository
+        .update_feature(rename_feature(other_id, "CHECKOUT"))
+        .await;
+    let pool_substring = repository
+        .update_feature(rename_feature(other_id, "check"))
+        .await;
+    // Changing only the case of a feature's own key is not a conflict.
+    let own_case_change = repository
+        .update_feature(rename_feature(checkout_id, "Checkout"))
+        .await;
+
+    delete_uniqueness_test_team(&pool, team_id).await;
+
+    assert!(
+        matches!(
+            tx_case_variant,
+            Err(feature_toggle_backend::Error::RecordAlreadyExists(_))
+        ),
+        "tx rename to a case variant of another key must be rejected, got {tx_case_variant:?}"
+    );
+    assert!(
+        matches!(
+            pool_case_variant,
+            Err(feature_toggle_backend::Error::RecordAlreadyExists(_))
+        ),
+        "rename to a case variant of another key must be rejected, got {pool_case_variant:?}"
+    );
+    assert_eq!(pool_substring.expect("rename to substring").key, "check");
+    assert_eq!(own_case_change.expect("own case change").key, "Checkout");
+}
+
+#[tokio::test]
+async fn test_restore_feature_snapshot_key_conflict_is_case_insensitive() {
+    let pool = init_pg_pool().await;
+    let repository = feature::feature_repository(pool.clone());
+    let tx_repository = feature::feature_repository_tx(pool.clone());
+    let team_id = create_uniqueness_test_team(&pool, "key-unique-restore").await;
+
+    let checkout_id = repository
+        .create_feature(simple_create_feature(team_id, "checkout"))
+        .await;
+    let other_id = repository
+        .create_feature(simple_create_feature(team_id, "other"))
+        .await;
+    let other_id = match (checkout_id, other_id) {
+        (Ok(_), Ok(b)) => b,
+        (a, b) => {
+            delete_uniqueness_test_team(&pool, team_id).await;
+            panic!("setup failed: {a:?} {b:?}");
+        }
+    };
+
+    let mut tx = pool.begin().await.expect("tx begins");
+    let mut snapshot = tx_repository
+        .build_feature_snapshot_tx(&mut tx, other_id)
+        .await
+        .expect("build snapshot");
+    snapshot["feature"]["key"] = serde_json::json!("Checkout");
+    let restored = tx_repository
+        .restore_feature_snapshot_tx(&mut tx, other_id, snapshot, false)
+        .await;
+    tx.rollback().await.expect("rollback");
+
+    delete_uniqueness_test_team(&pool, team_id).await;
+
+    assert!(
+        matches!(
+            restored,
+            Err(feature_toggle_backend::Error::RecordAlreadyExists(_))
+        ),
+        "restoring a key that case-insensitively matches another feature must be rejected, got {restored:?}"
     );
 }

@@ -257,6 +257,22 @@ describe('Feature API', () => {
             createdIds.push(shorter.data.id);
         });
 
+        it('should reject a key that differs from an existing key only by case', async () => {
+            const base = uniqueName('case');
+            const existing = await client.post(
+                `/teams/${testTeamId}/features`,
+                createFeatureFixture({ key: `${base}-checkout`, environmentId: testEnvironmentId })
+            );
+            expectStatus(existing, 201);
+            createdIds.push(existing.data.id);
+
+            const caseVariant = await client.post(
+                `/teams/${testTeamId}/features`,
+                createFeatureFixture({ key: `${base}-Checkout`, environmentId: testEnvironmentId })
+            );
+            expectStatus(caseVariant, 409);
+        });
+
         it('should reject empty key', async () => {
             const response = await client.post(`/teams/${testTeamId}/features`, {
                 key: '',
