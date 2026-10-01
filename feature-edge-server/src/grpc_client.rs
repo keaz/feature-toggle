@@ -4,7 +4,7 @@ mod stream;
 use crate::AppState;
 use crate::pb;
 use std::time::Duration;
-use tokio_retry::{Retry, RetryIf};
+use tokio_retry::RetryIf;
 use tonic::transport::Endpoint;
 use tracing::{error, info};
 
@@ -36,8 +36,19 @@ pub(crate) fn backoff(cfg: &crate::config::RetryConfig) -> impl Iterator<Item = 
     })
 }
 
-fn should_retry_feature_fetch(status: &tonic::Status) -> bool {
-    status.code() != tonic::Code::NotFound
+/// Whether a failed gRPC call may succeed on retry. Permanent errors such as
+/// bad credentials or invalid arguments fail fast instead.
+///
+/// `ResourceExhausted` stays retryable: the backend uses it for the ingest ack
+/// timeout, and retried events are deduplicated by their ingest fingerprint.
+/// `Unknown` and `Internal` stay retryable because transport failures can
+/// surface as either.
+pub(crate) fn is_transient(status: &tonic::Status) -> bool {
+    use tonic::Code::*;
+    matches!(
+        status.code(),
+        Unavailable | DeadlineExceeded | ResourceExhausted | Aborted | Internal | Unknown
+    )
 }
 
 /// Fetch a feature by key from the backend via gRPC with retry logic
@@ -65,7 +76,7 @@ pub async fn fetch_feature_via_grpc(
             .await
     };
 
-    match RetryIf::spawn(retry_strategy, action, should_retry_feature_fetch).await {
+    match RetryIf::spawn(retry_strategy, action, is_transient).await {
         Ok(resp) => {
             let feature = resp.into_inner().feature;
             if feature.is_some() {
@@ -111,7 +122,7 @@ async fn fetch_client_info_via_grpc_uncached(
         client.get_client_info(tonic::Request::new(request)).await
     };
 
-    match Retry::spawn(retry_strategy, action).await {
+    match RetryIf::spawn(retry_strategy, action, is_transient).await {
         Ok(resp) => {
             let client_info = resp.into_inner();
             info!("Successfully fetched client info for: {}", client_id);
@@ -225,6 +236,23 @@ mod tests {
     struct MockBackendState {
         assignment_attempts: AtomicUsize,
         evaluation_attempts: AtomicUsize,
+        /// When set, `PushEvaluationEvents` always fails with this code.
+        evaluation_error: std::sync::Mutex<Option<tonic::Code>>,
+        feature_attempts: AtomicUsize,
+        client_info_attempts: AtomicUsize,
+        /// Codes returned by `GetFeatureByKey` / `GetClientInfo`, one per
+        /// call, before they start to succeed.
+        scripted_errors: std::sync::Mutex<std::collections::VecDeque<tonic::Code>>,
+    }
+
+    impl MockBackendState {
+        fn next_scripted_error(&self) -> Option<Status> {
+            self.scripted_errors
+                .lock()
+                .unwrap()
+                .pop_front()
+                .map(|code| Status::new(code, "scripted mock failure"))
+        }
     }
 
     #[derive(Clone)]
@@ -245,16 +273,52 @@ mod tests {
 
         async fn get_feature_by_key(
             &self,
-            _request: Request<backend_pb::GetFeatureByKeyRequest>,
+            request: Request<backend_pb::GetFeatureByKeyRequest>,
         ) -> Result<Response<backend_pb::GetFeatureByKeyResponse>, Status> {
-            Err(Status::unimplemented("not used in edge ingestion tests"))
+            self.state.feature_attempts.fetch_add(1, Ordering::SeqCst);
+            if let Some(status) = self.state.next_scripted_error() {
+                return Err(status);
+            }
+            let key = request.into_inner().feature_key;
+            Ok(Response::new(backend_pb::GetFeatureByKeyResponse {
+                feature: Some(backend_pb::FeatureFull {
+                    id: format!("{key}-id"),
+                    key,
+                    description: String::new(),
+                    feature_type: "Simple".to_string(),
+                    team_id: "team-1".to_string(),
+                    created_at: "2026-03-26T00:00:00Z".to_string(),
+                    active: true,
+                    kill_switch_enabled: true,
+                    kill_switch_activated_at: String::new(),
+                    rollback_scheduled_at: String::new(),
+                    stages: vec![],
+                    dependencies: vec![],
+                    variants: vec![],
+                }),
+            }))
         }
 
         async fn get_client_info(
             &self,
-            _request: Request<backend_pb::GetClientInfoRequest>,
+            request: Request<backend_pb::GetClientInfoRequest>,
         ) -> Result<Response<backend_pb::GetClientInfoResponse>, Status> {
-            Err(Status::unimplemented("not used in edge ingestion tests"))
+            self.state
+                .client_info_attempts
+                .fetch_add(1, Ordering::SeqCst);
+            if let Some(status) = self.state.next_scripted_error() {
+                return Err(status);
+            }
+            Ok(Response::new(backend_pb::GetClientInfoResponse {
+                id: request.into_inner().client_id,
+                team_id: "team-1".to_string(),
+                name: "mock client".to_string(),
+                description: String::new(),
+                enabled: true,
+                client_type: "Backend".to_string(),
+                web_origins: vec![],
+                environment_id: "env-1".to_string(),
+            }))
         }
 
         async fn push_user_assignments(
@@ -307,6 +371,9 @@ mod tests {
                 .evaluation_attempts
                 .fetch_add(1, Ordering::SeqCst);
 
+            if let Some(code) = *self.state.evaluation_error.lock().unwrap() {
+                return Err(Status::new(code, "permanent evaluation ingest failure"));
+            }
             if attempt == 0 {
                 return Err(Status::unavailable("transient evaluation ingest failure"));
             }
@@ -560,7 +627,7 @@ mod tests {
         let result = RetryIf::spawn(
             ExponentialBackoff::from_millis(0).take(3),
             action,
-            should_retry_feature_fetch,
+            is_transient,
         )
         .await;
 
@@ -605,7 +672,7 @@ mod tests {
         let result = RetryIf::spawn(
             ExponentialBackoff::from_millis(0).take(3),
             action,
-            should_retry_feature_fetch,
+            is_transient,
         )
         .await;
 
@@ -936,5 +1003,152 @@ mod tests {
         assert_eq!(state.evaluation_attempts.load(Ordering::SeqCst), 2);
         task.abort();
         server_handle.abort();
+    }
+
+    #[test]
+    fn is_transient_retries_only_transient_codes() {
+        use tonic::Code;
+        for code in [
+            Code::Unavailable,
+            Code::DeadlineExceeded,
+            Code::ResourceExhausted,
+            Code::Aborted,
+            Code::Internal,
+            Code::Unknown,
+        ] {
+            assert!(
+                is_transient(&tonic::Status::new(code, "x")),
+                "{code:?} should be retried"
+            );
+        }
+        for code in [
+            Code::InvalidArgument,
+            Code::Unauthenticated,
+            Code::PermissionDenied,
+            Code::NotFound,
+            Code::FailedPrecondition,
+            Code::AlreadyExists,
+            Code::Unimplemented,
+            Code::OutOfRange,
+            Code::Cancelled,
+        ] {
+            assert!(
+                !is_transient(&tonic::Status::new(code, "x")),
+                "{code:?} should not be retried"
+            );
+        }
+    }
+
+    /// App state wired to a fresh mock backend with short retry delays
+    /// (3 retries, 1 ms base).
+    async fn app_with_mock_backend() -> (
+        crate::AppState,
+        Arc<MockBackendState>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (endpoint, state, handle) = start_mock_backend().await;
+        let mut app =
+            test_app_state_with_endpoint(Arc::new(crate::MappedFeatureCache::new(100)), &endpoint);
+        app.retry_config = retry_config(1, 3);
+        (app, state, handle)
+    }
+
+    fn script_errors(state: &MockBackendState, codes: &[tonic::Code]) {
+        state.scripted_errors.lock().unwrap().extend(codes);
+    }
+
+    #[tokio::test]
+    async fn client_info_fetch_does_not_retry_unauthenticated() {
+        let (app, state, server) = app_with_mock_backend().await;
+        script_errors(&state, &[tonic::Code::Unauthenticated; 4]);
+
+        let result = get_or_fetch_client_info(&app, "client", "wrong-secret").await;
+
+        assert!(result.is_none());
+        assert_eq!(state.client_info_attempts.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn client_info_fetch_retries_unavailable_until_success() {
+        let (app, state, server) = app_with_mock_backend().await;
+        script_errors(&state, &[tonic::Code::Unavailable; 2]);
+
+        let result = get_or_fetch_client_info(&app, "client", "secret").await;
+
+        assert_eq!(result.map(|info| info.team_id), Some("team-1".to_string()));
+        assert_eq!(state.client_info_attempts.load(Ordering::SeqCst), 3);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn feature_fetch_does_not_retry_unauthenticated() {
+        let (app, state, server) = app_with_mock_backend().await;
+        script_errors(&state, &[tonic::Code::Unauthenticated; 4]);
+
+        let result = fetch_feature_via_grpc(&app, "flag", "client", "wrong-secret").await;
+
+        assert!(matches!(result, Err(status) if status.code() == tonic::Code::Unauthenticated));
+        assert_eq!(state.feature_attempts.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn feature_fetch_retries_unavailable_until_success() {
+        let (app, state, server) = app_with_mock_backend().await;
+        script_errors(&state, &[tonic::Code::Unavailable; 2]);
+
+        let result = fetch_feature_via_grpc(&app, "flag", "client", "secret").await;
+
+        assert_eq!(
+            result.expect("fetch should succeed").map(|f| f.key),
+            Some("flag".to_string())
+        );
+        assert_eq!(state.feature_attempts.load(Ordering::SeqCst), 3);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn evaluation_flush_does_not_retry_unauthenticated_within_cycle() {
+        let (mut app, state, server) = app_with_mock_backend().await;
+        *state.evaluation_error.lock().unwrap() = Some(tonic::Code::Unauthenticated);
+        // Retries (1 + 2 + 4 ms) would land well inside one flush interval.
+        let flush_interval = std::time::Duration::from_millis(400);
+        app.evaluation_flush_interval = flush_interval;
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(10);
+        event_tx
+            .send(crate::EvaluationEvent {
+                feature_key: "feature-a".to_string(),
+                environment_id: "env-a".to_string(),
+                evaluation_result: true,
+                evaluation_context: crate::handlers::EvaluateContext {
+                    bucketing_key: "user-1".to_string(),
+                    environment_id: "env-a".to_string(),
+                    attributes: std::collections::HashMap::new(),
+                },
+                user_context: Some("user-1".to_string()),
+                evaluated_at: std::time::SystemTime::UNIX_EPOCH,
+                prior_assignment: false,
+                variant: None,
+                variant_value: None,
+            })
+            .await
+            .expect("queue event");
+
+        let task = tokio::spawn(run_evaluation_flush_task(app.clone(), event_rx));
+
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while state.evaluation_attempts.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("evaluation flush should run");
+        // The next flush cycle cannot start before `flush_interval` elapses.
+        tokio::time::sleep(flush_interval / 2).await;
+
+        assert_eq!(state.evaluation_attempts.load(Ordering::SeqCst), 1);
+        task.abort();
+        server.abort();
     }
 }

@@ -4,7 +4,7 @@
 |---|---|
 | Type | Bug (availability, wasted load) |
 | Severity | Medium |
-| Status | Confirmed (code traced) |
+| Status | Fixed on branch `fix/b08-no-retry-permanent-errors` |
 | Crate | `feature-edge-server` |
 | Behavior change | Permanent errors fail fast instead of after retries. Final results are unchanged. |
 | Related | [B07](B07-retry-backoff-math.md), [P04](P04-cache-client-auth-failures.md), [B12](B12-evaluation-timestamp-fallback-breaks-dedupe.md) |
