@@ -199,6 +199,77 @@ async fn push_evaluation_events_dedupes_retries_with_reordered_context() {
 }
 
 #[tokio::test]
+async fn push_evaluation_events_dedupes_retries_without_timestamp() {
+    if std::env::var("DATABASE_URL").is_err() {
+        eprintln!("Skipping test: DATABASE_URL is not set");
+        return;
+    }
+
+    let pool = init_pg_pool().await;
+    let test_suffix = Uuid::new_v4().to_string();
+    let feature_key = format!("grpc-no-timestamp-feature-{test_suffix}");
+    let user_context = format!("grpc-no-timestamp-user-{test_suffix}");
+    let request = pb::PushEvaluationEventsRequest {
+        events: vec![pb::FeatureEvaluationEvent {
+            feature_key: feature_key.clone(),
+            environment_id: SEEDED_ENV_ID.to_string(),
+            client_id: SEEDED_CLIENT_ID.to_string(),
+            client_secret: SEEDED_CLIENT_SECRET.to_string(),
+            evaluation_result: true,
+            evaluation_context: vec![],
+            user_context: user_context.clone(),
+            // Missing producer timestamp: the backend stores its receive time.
+            evaluated_at_unix_ms: 0,
+            prior_assignment: false,
+            variant: String::new(),
+            variant_value: String::new(),
+        }],
+    };
+
+    // Each attempt goes to a fresh server, so the in-memory request deduper
+    // cannot help: only the stored ingest fingerprint can drop the retry,
+    // as after a lost ack or a backend restart.
+    for attempt in 0..2 {
+        let (addr, server_handle) = start_server(pool.clone()).await;
+        let mut client = FeatureEvaluationClient::connect(format!("http://{}", addr))
+            .await
+            .expect("connect grpc client");
+        let response = client
+            .push_evaluation_events(request.clone())
+            .await
+            .expect("push should succeed")
+            .into_inner();
+        assert_eq!(response.processed_count, 1, "attempt {attempt}");
+        server_handle.abort();
+        // A later attempt gets a different receive time.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    // Give a wrongly stored second row time to show up before counting.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let persisted = wait_for_evaluation_count(
+        &pool,
+        &feature_key,
+        &user_context,
+        1,
+        Duration::from_secs(5),
+    )
+    .await;
+
+    sqlx::query("DELETE FROM feature_evaluations WHERE feature_key = $1 AND user_context = $2")
+        .bind(&feature_key)
+        .bind(&user_context)
+        .execute(&pool)
+        .await
+        .expect("cleanup should succeed");
+
+    assert_eq!(
+        persisted, 1,
+        "a retried batch without a timestamp must not create a second row"
+    );
+}
+
+#[tokio::test]
 async fn push_user_assignments_upserts_duplicate_deliveries() {
     if std::env::var("DATABASE_URL").is_err() {
         eprintln!("Skipping test: DATABASE_URL is not set");

@@ -4,7 +4,7 @@
 |---|---|
 | Type | Bug (data accuracy) |
 | Severity | Low |
-| Status | Verified (code traced) |
+| Status | Fixed on branch `fix/b12-evaluation-timestamp-dedupe` |
 | Crate | `feature-toggle-backend` |
 | Behavior change | Small: events with invalid timestamps are deduplicated correctly |
 

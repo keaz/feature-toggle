@@ -1587,7 +1587,7 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
 
         // Convert proto events to database format
         let mut evaluations = Vec::with_capacity(input_count);
-        for event in req.events {
+        for (index, event) in req.events.into_iter().enumerate() {
             if event.feature_key.is_empty() {
                 return Err(Status::invalid_argument("feature_key cannot be empty"));
             }
@@ -1595,11 +1595,20 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
                 return Err(Status::invalid_argument("environment_id cannot be empty"));
             }
 
-            let evaluated_at = if event.evaluated_at_unix_ms > 0 {
+            let producer_evaluated_at = if event.evaluated_at_unix_ms > 0 {
                 sqlx::types::chrono::DateTime::from_timestamp_millis(event.evaluated_at_unix_ms)
-                    .unwrap_or_else(sqlx::types::chrono::Utc::now)
             } else {
-                sqlx::types::chrono::Utc::now()
+                None
+            };
+            let (evaluated_at, ingest_dedupe_key) = match producer_evaluated_at {
+                Some(evaluated_at) => (evaluated_at, None),
+                // No usable producer timestamp: store the receive time, but key
+                // the ingest fingerprint to this request and position so a
+                // retry of the same batch is dropped by the fingerprint index.
+                None => (
+                    sqlx::types::chrono::Utc::now(),
+                    Some(format!("{request_fingerprint}:{index}")),
+                ),
             };
 
             // Convert context to JSON
@@ -1654,6 +1663,7 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
                     evaluation_success,
                     evaluation_value,
                     variant,
+                    ingest_dedupe_key,
                 },
             );
         }
@@ -1954,6 +1964,7 @@ mod tests {
             evaluation_success: true,
             evaluation_value: Some(serde_json::json!(true)),
             variant: None,
+            ingest_dedupe_key: None,
         }
     }
 
@@ -2125,6 +2136,169 @@ mod tests {
         );
 
         gate.notify_one();
+
+        writer_handle.abort();
+    }
+
+    /// Writer that records every batch it receives and then fails the ack, as
+    /// if the rows were written but the durability confirmation was lost. The
+    /// handler returns an error, so the in-memory deduper does not remember the
+    /// request and a retry reaches the writer again.
+    fn spawn_recording_failing_writer() -> (
+        mpsc::Sender<EvaluationWriteJob>,
+        Arc<tokio::sync::Mutex<Vec<Vec<CreateFeatureEvaluation>>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (tx, mut rx) = mpsc::channel::<EvaluationWriteJob>(4);
+        let batches = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let recorded = batches.clone();
+        let handle = tokio::spawn(async move {
+            while let Some(job) = rx.recv().await {
+                recorded.lock().await.push(job.evaluations);
+                let _ = job.completion.send(Err("ack lost".to_string()));
+            }
+        });
+        (tx, batches, handle)
+    }
+
+    fn svc_with_client(
+        writer_tx: mpsc::Sender<EvaluationWriteJob>,
+        client_id: Uuid,
+        client_secret: &str,
+    ) -> FeatureEvaluationSvc {
+        let svc = test_service(writer_tx);
+        let mut client_repo = MockClientRepository::new();
+        let client = test_client(client_id, Uuid::new_v4(), Uuid::new_v4(), client_secret);
+        client_repo
+            .expect_get_client_by_id()
+            .returning(move |_| Ok(client.clone()));
+        FeatureEvaluationSvc {
+            client_repo: Box::new(client_repo),
+            ..svc
+        }
+    }
+
+    fn fingerprints(batch: &[CreateFeatureEvaluation]) -> Vec<String> {
+        batch
+            .iter()
+            .map(crate::database::feature_evaluation::evaluation_ingest_fingerprint)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn retried_batch_without_usable_timestamp_keeps_ingest_fingerprints() {
+        for bad_timestamp in [0, -1, i64::MAX] {
+            let (writer_tx, batches, writer_handle) = spawn_recording_failing_writer();
+            let client_id = Uuid::new_v4();
+            let client_secret = "secret-123";
+            let svc = svc_with_client(writer_tx, client_id, client_secret);
+            let request = pb::PushEvaluationEventsRequest {
+                events: vec![
+                    push_event(
+                        "feature-a",
+                        "env-a",
+                        &client_id,
+                        client_secret,
+                        true,
+                        bad_timestamp,
+                    ),
+                    push_event(
+                        "feature-b",
+                        "env-a",
+                        &client_id,
+                        client_secret,
+                        false,
+                        bad_timestamp,
+                    ),
+                ],
+            };
+
+            let first = svc
+                .push_evaluation_events(Request::new(request.clone()))
+                .await;
+            assert!(first.is_err(), "lost ack must surface as an error");
+            // Make sure a substituted receive time would differ between tries.
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            let retry = svc.push_evaluation_events(Request::new(request)).await;
+            assert!(retry.is_err());
+
+            let batches = batches.lock().await;
+            assert_eq!(batches.len(), 2, "both attempts must reach the writer");
+            let first_fingerprints = fingerprints(&batches[0]);
+            assert_eq!(
+                first_fingerprints,
+                fingerprints(&batches[1]),
+                "retrying a batch with evaluated_at_unix_ms = {bad_timestamp} must map to the same ingest fingerprints"
+            );
+            assert_ne!(
+                first_fingerprints[0], first_fingerprints[1],
+                "distinct events in one batch keep distinct fingerprints"
+            );
+
+            writer_handle.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn identical_events_without_timestamp_in_different_batches_stay_distinct() {
+        let (writer_tx, batches, writer_handle) = spawn_recording_failing_writer();
+        let client_id = Uuid::new_v4();
+        let client_secret = "secret-123";
+        let svc = svc_with_client(writer_tx, client_id, client_secret);
+        let event = push_event("feature-a", "env-a", &client_id, client_secret, true, 0);
+        let other = push_event("feature-b", "env-a", &client_id, client_secret, true, 0);
+
+        let _ = svc
+            .push_evaluation_events(Request::new(pb::PushEvaluationEventsRequest {
+                events: vec![event.clone()],
+            }))
+            .await;
+        let _ = svc
+            .push_evaluation_events(Request::new(pb::PushEvaluationEventsRequest {
+                events: vec![event, other],
+            }))
+            .await;
+
+        let batches = batches.lock().await;
+        assert_eq!(batches.len(), 2);
+        assert_ne!(
+            fingerprints(&batches[0])[0],
+            fingerprints(&batches[1])[0],
+            "a later, different batch is a new evaluation, not a retry"
+        );
+
+        writer_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn valid_timestamp_is_stored_and_fingerprinted_as_sent() {
+        let (writer_tx, batches, writer_handle) = spawn_recording_failing_writer();
+        let client_id = Uuid::new_v4();
+        let client_secret = "secret-123";
+        let svc = svc_with_client(writer_tx, client_id, client_secret);
+        let sent_at = 1_700_000_000_123;
+        let request = pb::PushEvaluationEventsRequest {
+            events: vec![push_event(
+                "feature-a",
+                "env-a",
+                &client_id,
+                client_secret,
+                true,
+                sent_at,
+            )],
+        };
+
+        let _ = svc.push_evaluation_events(Request::new(request)).await;
+
+        let batches = batches.lock().await;
+        let stored = &batches[0][0];
+        assert_eq!(stored.evaluated_at.timestamp_millis(), sent_at);
+        let mut expected = stored.clone();
+        expected.evaluated_at = DateTime::from_timestamp_millis(sent_at).unwrap();
+        assert_eq!(
+            crate::database::feature_evaluation::evaluation_ingest_fingerprint(stored),
+            crate::database::feature_evaluation::evaluation_ingest_fingerprint(&expected)
+        );
 
         writer_handle.abort();
     }

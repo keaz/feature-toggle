@@ -30,6 +30,7 @@ fn evaluation_fixture(feature_key: String, environment_id: String) -> CreateFeat
         evaluation_success: true,
         evaluation_value: Some(json!(true)),
         variant: None,
+        ingest_dedupe_key: None,
     }
 }
 
@@ -51,6 +52,7 @@ async fn test_create_evaluation() {
         evaluation_success: true,
         evaluation_value: Some(json!(true)),
         variant: None,
+        ingest_dedupe_key: None,
     };
     let created = repo.create_evaluation(eval.clone()).await.unwrap();
     assert_eq!(created.feature_key, eval.feature_key);
@@ -78,6 +80,7 @@ async fn test_bulk_create_evaluations() {
             evaluation_success: true,
             evaluation_value: Some(json!(true)),
             variant: None,
+            ingest_dedupe_key: None,
         },
         CreateFeatureEvaluation {
             feature_key: key2.clone(),
@@ -92,6 +95,7 @@ async fn test_bulk_create_evaluations() {
             evaluation_success: true,
             evaluation_value: Some(json!(false)),
             variant: None,
+            ingest_dedupe_key: None,
         },
     ];
     let created = repo.bulk_create_evaluations(evals.clone()).await.unwrap();
@@ -118,6 +122,7 @@ async fn test_duplicate_create_evaluation_is_idempotent() {
         evaluation_success: true,
         evaluation_value: Some(json!(true)),
         variant: Some("control".to_string()),
+        ingest_dedupe_key: None,
     };
 
     let created = repo.create_evaluation(eval.clone()).await.unwrap();
@@ -144,6 +149,62 @@ async fn test_duplicate_create_evaluation_is_idempotent() {
         evals.len(),
         1,
         "duplicate ingest should not create a second row"
+    );
+}
+
+#[tokio::test]
+async fn test_retried_evaluation_without_producer_timestamp_is_stored_once() {
+    let pool = init_pg_pool().await;
+    let repo = feature_evaluation_repository(pool.clone());
+    let unique_key = format!("test-feature-no-timestamp-{}", Uuid::new_v4());
+
+    // What the gRPC ingest builds for an event with evaluated_at_unix_ms = 0:
+    // the receive time as evaluated_at plus a request-scoped dedupe key. A
+    // retry of the same request gets a later receive time and the same key.
+    let mut first_try = evaluation_fixture(unique_key.clone(), "env-123".to_string());
+    first_try.ingest_dedupe_key = Some(format!("request-{}:0", Uuid::new_v4()));
+    let mut retry = first_try.clone();
+    retry.evaluated_at = first_try.evaluated_at + chrono::Duration::milliseconds(250);
+
+    let first_rows = repo.bulk_create_evaluations(vec![first_try.clone()]).await;
+    let retry_rows = repo.bulk_create_evaluations(vec![retry]).await;
+    let stored = repo
+        .get_evaluations(FeatureEvaluationFilter {
+            team_id: None,
+            feature_key: Some(unique_key.clone()),
+            environment_id: None,
+            client_id: None,
+            user_context: None,
+            prior_assignment: None,
+            from_date: None,
+            to_date: None,
+            limit: Some(10),
+            offset: Some(0),
+        })
+        .await;
+
+    sqlx::query("DELETE FROM feature_evaluations WHERE feature_key = $1")
+        .bind(&unique_key)
+        .execute(&pool)
+        .await
+        .expect("clean up test evaluations");
+
+    assert_eq!(first_rows.expect("first insert").len(), 1);
+    assert_eq!(
+        retry_rows.expect("retry insert").len(),
+        0,
+        "the retry must hit the ingest fingerprint index"
+    );
+    let stored = stored.expect("load stored evaluations");
+    assert_eq!(
+        stored.len(),
+        1,
+        "a retried batch must not create a second row"
+    );
+    assert_eq!(
+        stored[0].evaluated_at.timestamp_millis(),
+        first_try.evaluated_at.timestamp_millis(),
+        "the first receive time is kept as the display time"
     );
 }
 
