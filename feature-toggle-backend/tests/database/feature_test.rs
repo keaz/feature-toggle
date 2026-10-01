@@ -1701,14 +1701,29 @@ async fn test_get_features_by_ids_matches_get_feature_by_id() {
     let pool = init_pg_pool().await;
     let repository = feature::feature_repository(pool.clone());
 
-    // Seeded features, including ones with dependencies, plus an unknown id.
-    let mut ids: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM features ORDER BY (SELECT COUNT(*) FROM feature_dependencies d WHERE d.feature_id = features.id) DESC, id LIMIT 20",
-    )
-    .fetch_all(&pool)
-    .await
-    .expect("list seeded features");
-    assert!(!ids.is_empty(), "seed data has features");
+    // Own team, so tests running in parallel cannot add or delete features
+    // between the batch and the single lookups. Includes dependencies and an
+    // unknown id.
+    let team_id = create_uniqueness_test_team(&pool, "batch-by-ids").await;
+    let leaf = repository
+        .create_feature(simple_create_feature(team_id, "batch-leaf"))
+        .await
+        .expect("create leaf");
+    let middle = repository
+        .create_feature(CreateFeature {
+            dependencies: vec![leaf],
+            ..simple_create_feature(team_id, "batch-middle")
+        })
+        .await
+        .expect("create middle");
+    let top = repository
+        .create_feature(CreateFeature {
+            dependencies: vec![middle, leaf],
+            ..simple_create_feature(team_id, "batch-top")
+        })
+        .await
+        .expect("create top");
+    let mut ids = vec![top, middle, leaf];
     ids.push(Uuid::new_v4());
 
     let mut batch = repository
@@ -1729,6 +1744,7 @@ async fn test_get_features_by_ids_matches_get_feature_by_id() {
         }
     }
     single.sort();
+    delete_uniqueness_test_team(&pool, team_id).await;
 
     assert_eq!(
         single.len(),
