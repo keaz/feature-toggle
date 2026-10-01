@@ -50,7 +50,7 @@ where
         let service = self.service.clone();
         let start_time = Instant::now();
         let method = req.method().clone();
-        let path = req.path().to_string();
+        let path = super::routed_path(&req);
         let peer_addr = req
             .connection_info()
             .realip_remote_addr()

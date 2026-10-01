@@ -118,7 +118,7 @@ where
             }
 
             // No admin exists -> allow only admin creation/status checks and preflight OPTIONS
-            let path = req.path().to_string();
+            let path = super::routed_path(&req);
             let method = req.method().clone();
 
             let is_preflight = method == actix_web::http::Method::OPTIONS;

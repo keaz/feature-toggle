@@ -316,7 +316,7 @@ where
                 return Ok(res.map_into_left_body());
             }
 
-            let path = req.path().to_string();
+            let path = super::routed_path(&req);
 
             let is_public_path = path == "/api/v1/health"
                 || path == "/api/v1/openapi.json"
@@ -419,7 +419,7 @@ where
                             hostname,
                             pod_ip,
                             e,
-                            req.path()
+                            path
                         );
                         // If we can't get the secret, reject the token
                         let response =
@@ -1933,6 +1933,12 @@ mod tests {
             "evaluate".to_string(),
         ];
         let (team_id, client_id, token) = system_client_with_token(&pool, scopes).await;
+        let token_id: Uuid =
+            sqlx::query_scalar("SELECT id FROM system_client_tokens WHERE token_hash = $1")
+                .bind(hash_token(&token))
+                .fetch_one(&pool)
+                .await
+                .expect("load token id");
 
         let app = test::init_service(
             App::new()
@@ -1975,6 +1981,10 @@ mod tests {
             ),
             ("GET", format!("/api/v1/system-clients/{client_id}/tokens")),
             ("POST", format!("/api/v1/system-clients/{client_id}/tokens")),
+            (
+                "POST",
+                format!("/api/v1/system-client-tokens/{token_id}/revoke"),
+            ),
         ];
         for (method, uri) in routes {
             let builder = match method {
@@ -1994,6 +2004,127 @@ mod tests {
             );
             let body: serde_json::Value = test::read_body_json(resp).await;
             assert_eq!(body["code"], "policy_denied", "{method} {uri}");
+        }
+    }
+
+    /// App whose routes answer 200 "handler"; anything else is 404, so a request
+    /// that is routed but not denied is visible.
+    macro_rules! encoded_path_app {
+        ($pool:expr) => {{
+            let ok = || async { HttpResponse::Ok().body("handler") };
+            test::init_service(
+                App::new()
+                    .wrap(JwtGuard::new(
+                        "http://ui".to_string(),
+                        db_secret_logic(),
+                        $pool.clone(),
+                    ))
+                    .route("/api/v1/system-clients/{id}", web::get().to(ok))
+                    .route("/api/v1/teams/{id}/system-clients", web::get().to(ok))
+                    .route("/api/v1/roles", web::post().to(ok))
+                    .route("/api/v1/health", web::get().to(ok))
+                    .route("/api/v1/auth/login", web::post().to(ok))
+                    .route("/api/v1/auth/refresh", web::post().to(ok)),
+            )
+            .await
+        }};
+    }
+
+    #[actix_web::test]
+    async fn percent_encoded_paths_cannot_bypass_route_policies() {
+        let pool = db_pool().await;
+        let (_, plain_token) = insert_user_with_session(&pool, true).await;
+        let (_, admin_token) = insert_user_with_token(&pool, true, |user_id| {
+            create_jwt_token(
+                user_id,
+                "guard-admin",
+                true,
+                vec![],
+                &test_key(),
+                test_expiry(),
+            )
+            .unwrap()
+        })
+        .await;
+        let app = encoded_path_app!(pool);
+        let id = Uuid::new_v4();
+
+        let cases = [
+            ("GET", format!("/api/v1/system%2Dclients/{id}")),
+            ("GET", format!("/api/v1/teams/{id}/system%2Dclients")),
+            ("GET", format!("/%61pi/v1/system-clients/{id}")),
+            ("GET", format!("/api/v1/%73ystem-clients/{id}")),
+            ("POST", "/api/v1/%72oles".to_string()),
+            ("POST", "/%61pi/%76%31/roles".to_string()),
+        ];
+        for (method, uri) in cases {
+            let build = |token: &str| {
+                let builder = if method == "GET" {
+                    test::TestRequest::get()
+                } else {
+                    test::TestRequest::post()
+                };
+                builder
+                    .uri(&uri)
+                    .insert_header(("Authorization", format!("Bearer {token}")))
+                    .to_request()
+            };
+
+            // The router decodes the path, so an admin reaches the handler...
+            let resp = test::call_service(&app, build(&admin_token)).await;
+            assert_eq!(resp.status(), actix_web::http::StatusCode::OK, "{uri}");
+
+            // ...and the policy must see the same path and deny everyone else.
+            let resp = test::call_service(&app, build(&plain_token)).await;
+            assert_eq!(
+                resp.status(),
+                actix_web::http::StatusCode::FORBIDDEN,
+                "{method} {uri}"
+            );
+            let body: serde_json::Value = test::read_body_json(resp).await;
+            assert_eq!(body["code"], "policy_denied", "{method} {uri}");
+        }
+    }
+
+    #[actix_web::test]
+    async fn public_paths_work_and_are_not_widened_by_encoding() {
+        let pool = db_pool().await;
+        let app = encoded_path_app!(pool);
+
+        for (method, uri) in [
+            ("GET", "/api/v1/health"),
+            ("POST", "/api/v1/auth/login"),
+            ("POST", "/api/v1/auth/refresh"),
+        ] {
+            let builder = if method == "GET" {
+                test::TestRequest::get()
+            } else {
+                test::TestRequest::post()
+            };
+            let resp = test::call_service(&app, builder.uri(uri).to_request()).await;
+            assert_eq!(resp.status(), actix_web::http::StatusCode::OK, "{uri}");
+        }
+
+        // An escaped `/` is not decoded by the router and must not turn a protected
+        // path into a public one: no token, no entry.
+        for (method, uri) in [
+            ("GET", "/api/v1/health%2Fx"),
+            ("GET", "/api/v1/health%2F..%2Fsystem-clients/x"),
+            ("POST", "/api/v1/auth%2Flogin"),
+            ("POST", "/api/v1/auth/refresh%2F"),
+            ("POST", "/api/v1/roles"),
+        ] {
+            let builder = if method == "GET" {
+                test::TestRequest::get()
+            } else {
+                test::TestRequest::post()
+            };
+            let resp = test::call_service(&app, builder.uri(uri).to_request()).await;
+            assert_eq!(
+                resp.status(),
+                actix_web::http::StatusCode::UNAUTHORIZED,
+                "{uri}"
+            );
         }
     }
 }

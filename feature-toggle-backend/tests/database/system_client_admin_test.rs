@@ -1,7 +1,11 @@
 use chrono::{Duration, Utc};
+use feature_toggle_backend::Error;
 use feature_toggle_backend::database::init_pg_pool;
 use feature_toggle_backend::database::system_client::{
     CreateSystemClient, system_client_repository,
+};
+use feature_toggle_backend::database::user::{
+    UpdateUser, UserRepositoryTx, user_repository, user_repository_tx,
 };
 use uuid::Uuid;
 
@@ -127,4 +131,62 @@ async fn test_migration_clears_admin_flag_on_existing_shadow_users_only() {
 
     assert!(!shadow_admin);
     assert!(real_admin);
+}
+
+/// The users API must not be able to turn a shadow user into an admin again.
+#[tokio::test]
+async fn test_users_api_cannot_update_system_client_shadow_user() {
+    let pool = init_pg_pool().await;
+    let team_id = insert_team(&pool).await;
+    let client = system_client_repository(pool.clone())
+        .create_system_client(
+            team_id,
+            CreateSystemClient {
+                name: format!("sc-admin-{}", Uuid::new_v4().simple()),
+                description: None,
+                enabled: true,
+                expires_at: Utc::now() + Duration::days(1),
+            },
+        )
+        .await
+        .expect("create system client");
+
+    let update = || UpdateUser {
+        id: client.id,
+        first_name: None,
+        last_name: None,
+        email: None,
+        mobile_number: None,
+        is_admin: Some(true),
+        enabled: None,
+    };
+
+    let pool_result = user_repository(pool.clone()).update_user(update()).await;
+
+    let mut tx = pool.begin().await.expect("begin");
+    let tx_result = user_repository_tx(pool.clone())
+        .update_user_tx(&mut tx, update())
+        .await;
+    tx.rollback().await.expect("rollback");
+
+    let is_admin: bool = sqlx::query_scalar("SELECT is_admin FROM users WHERE id = $1")
+        .bind(client.id)
+        .fetch_one(&pool)
+        .await
+        .expect("load shadow user");
+
+    sqlx::query("DELETE FROM teams WHERE id = $1")
+        .bind(team_id)
+        .execute(&pool)
+        .await
+        .expect("delete team");
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(client.id)
+        .execute(&pool)
+        .await
+        .expect("delete shadow user");
+
+    assert!(matches!(pool_result, Err(Error::InvalidInput(_))));
+    assert!(matches!(tx_result, Err(Error::InvalidInput(_))));
+    assert!(!is_admin);
 }
