@@ -25,22 +25,20 @@ mkdir -p feature-edge-server/tests/results
 
 # 5. Run load test
 cd feature-edge-server
-k6 run --env LOAD_TIER=1x tests/load_test.js
+k6 run --env LOAD_TIER=1x --env SDK_KEY=<clientId>.<apiKey> tests/load_test.js
 ```
 
 ## Client Authentication
 
-```bash
-# With client auth (recommended)
-k6 run --env LOAD_TIER=1x --env CLIENT_ID=<client-id> tests/load_test.js
+OFREP requires an SDK key `<clientId>.<apiKey>` (see `docs/edge-server-api.md`). Without one, every request gets 401.
 
-# Without (uses edge server defaults from config.toml)
-k6 run --env LOAD_TIER=1x tests/load_test.js
+```bash
+k6 run --env LOAD_TIER=1x --env SDK_KEY=<clientId>.<apiKey> tests/load_test.js
 ```
 
-Get client credentials:
+Get client credentials (the admin UI also shows the SDK key):
 ```sql
-SELECT name, client_id, client_secret FROM clients;
+SELECT name, id || '.' || api_key AS sdk_key FROM clients;
 ```
 
 ## Load Tiers
@@ -163,7 +161,7 @@ load_tier,target_rps,actual_rps,total_requests,p50_ms,p95_ms,p99_ms,avg_ms,min_m
 ### Standard Test (Cached Users)
 Uses a fixed pool of user IDs, simulating realistic cache hit rates:
 ```bash
-k6 run --env LOAD_TIER=1x tests/load_test.js
+k6 run --env LOAD_TIER=1x --env SDK_KEY=<clientId>.<apiKey> tests/load_test.js
 ```
 
 ### Unique Users Test (No Cache)
@@ -221,6 +219,7 @@ docker logs feature_toggle_edge_server
 **Verify feature exists:**
 ```bash
 curl -X POST http://localhost:8081/ofrep/v1/evaluate/flags/NewCheckoutFlow \
+  -H "Authorization: Bearer <clientId>.<apiKey>" \
   -H "Content-Type: application/json" \
   -d '{
     "context": {

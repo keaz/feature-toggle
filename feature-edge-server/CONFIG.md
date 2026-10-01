@@ -336,7 +336,7 @@ These settings have no default. Each one must be set in `config.toml` or through
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `max_capacity` | u64 | 10000 | Maximum number of features to cache (LRU eviction when exceeded) |
-| `client_ttl_secs` | u64 | 300 | How long client info fetched from the backend is cached, in seconds |
+| `client_ttl_secs` | u64 | 300 | How long a successful client authentication (client info fetched from the backend) is cached, in seconds. Failed authentications are never cached. Keyed by client ID and a SHA-256 hash of the secret. |
 | `client_max_capacity` | u64 | 1000 | Maximum number of client credentials whose info is cached (env: `EDGE_CACHE__CLIENT_MAX_CAPACITY`) |
 
 **Cache Capacity Recommendations:**

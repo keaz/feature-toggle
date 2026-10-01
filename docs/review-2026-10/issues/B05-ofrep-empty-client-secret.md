@@ -99,3 +99,7 @@ Use the test module in `feature-edge-server/src/handlers.rs` (around line 1319) 
 - Existing `extract_auth_*` tests pass unchanged.
 - `cargo test -p feature-edge-server` passes.
 - Manual check: `make up`, then `curl -XPOST localhost:8081/ofrep/v1/evaluate/flags/<key> -H "X-API-Key: <client_id>" -H 'content-type: application/json' -d '{"context":{"targetingKey":"u1"}}'` returns 200. This needs B10, because compose currently ignores env vars.
+
+## Update (2026-10-01): superseded by SDK key authentication
+
+The configured-client fallback is removed. OFREP now authenticates with an SDK key `<clientId>.<apiKey>` (`Authorization: Bearer` or `X-API-Key`), split on the first `.`. A bare client ID, with or without a matching configured client, is rejected with 401. See `docs/edge-server-api.md`.

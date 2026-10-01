@@ -3,7 +3,9 @@ use crate::grpc_client::{
 };
 use crate::pb;
 use crate::{AppState, EvaluationEvent};
-use actix_web::{HttpResponse, Responder, http::header, web};
+use actix_web::http::StatusCode;
+use actix_web::http::header::{self, HeaderValue};
+use actix_web::{HttpResponse, Responder, web};
 use evaluation_engine as engine;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -188,6 +190,26 @@ pub struct OFREPBulkEvaluationFailure {
     /// Optional error details.
     #[serde(rename = "errorDetails", skip_serializing_if = "Option::is_none")]
     pub error_details: Option<String>,
+}
+
+/// OFREP authentication or authorization failure (401 / 403).
+#[derive(Serialize, ToSchema, Clone, Debug)]
+pub struct OFREPAuthErrorResponse {
+    /// `UNAUTHORIZED` (401) or `FORBIDDEN` (403).
+    #[serde(rename = "errorCode")]
+    pub error_code: String,
+    /// Human-readable reason.
+    #[serde(rename = "errorDetails")]
+    pub error_details: String,
+}
+
+/// Error body of the edge's own (non-OFREP) endpoints.
+#[derive(Serialize, ToSchema, Clone, Debug)]
+pub struct EdgeErrorResponse {
+    /// Error code, for example `FORBIDDEN`.
+    pub error: String,
+    /// Human-readable reason.
+    pub message: String,
 }
 
 /// Map protobuf feature to evaluation engine format
@@ -530,41 +552,110 @@ fn evaluate_http_feature_locally(
     result
 }
 
-/// Validate web origin for Web client types
-fn validate_web_origin(
+/// Origin rejected for a `Web` client (missing, unreadable or not listed in
+/// its `web_origins`).
+#[derive(Debug, PartialEq, Eq)]
+struct OriginNotAllowed;
+
+/// CORS decision for an actual (non-preflight) request from an authenticated
+/// client.
+///
+/// - `Web` client, `Origin` listed in `web_origins`: `Ok(Some(origin))`, so
+///   the response carries CORS headers for that origin.
+/// - `Web` client, `Origin` missing or not listed: `Err(OriginNotAllowed)`.
+/// - `Backend` client: `Ok(None)`. The request is served without CORS headers,
+///   whatever the `Origin`.
+fn cors_origin_for_client(
     http_req: &actix_web::HttpRequest,
     client_info: &pb::GetClientInfoResponse,
-) -> bool {
-    // Only validate origins for Web clients
-    if client_info.client_type != "Web" {
-        return true; // Backend clients don't need origin validation
+) -> Result<Option<HeaderValue>, OriginNotAllowed> {
+    if !client_info.client_type.eq_ignore_ascii_case("web") {
+        return Ok(None);
     }
 
-    // Get the Origin header from the request
-    let origin = match http_req.headers().get("origin") {
-        Some(origin_header) => match origin_header.to_str() {
-            Ok(origin_str) => origin_str,
-            Err(_) => {
-                error!("Invalid Origin header format");
-                return false;
-            }
-        },
-        None => {
-            // For web clients, Origin header is required
-            error!("Missing Origin header for web client request");
-            return false;
-        }
-    };
+    let origin = http_req.headers().get(header::ORIGIN);
+    let allowed = origin
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|origin| client_info.web_origins.iter().any(|o| o == origin));
+    if allowed {
+        return Ok(origin.cloned());
+    }
 
-    // Check if the origin is in the allowed list
-    let allowed = client_info.web_origins.contains(&origin.to_string());
-    if !allowed {
-        error!(
-            "Origin '{}' not allowed for client '{}'. Allowed origins: {:?}",
-            origin, client_info.name, client_info.web_origins
+    match origin.map(|value| value.to_str()) {
+        Some(Ok(origin)) => error!(
+            "Origin '{}' not allowed for web client '{}'",
+            origin, client_info.name
+        ),
+        Some(Err(_)) => error!(
+            "Unreadable Origin header for web client '{}'",
+            client_info.name
+        ),
+        None => error!(
+            "Missing Origin header for web client '{}'",
+            client_info.name
+        ),
+    }
+    Err(OriginNotAllowed)
+}
+
+/// Add the CORS headers of an allowed cross-origin request to `response`.
+fn with_cors_headers(mut response: HttpResponse, origin: Option<&HeaderValue>) -> HttpResponse {
+    if let Some(origin) = origin {
+        let headers = response.headers_mut();
+        headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin.clone());
+        headers.insert(
+            header::ACCESS_CONTROL_EXPOSE_HEADERS,
+            HeaderValue::from_static("ETag"),
         );
+        headers.append(header::VARY, HeaderValue::from_static("Origin"));
     }
-    allowed
+    response
+}
+
+/// CORS preflight (`OPTIONS`) for the evaluation endpoints. A preflight
+/// carries no credentials, so the client is not checked here; the actual
+/// request is checked against the client's `web_origins`.
+pub async fn cors_preflight(http_req: actix_web::HttpRequest) -> HttpResponse {
+    let mut response = HttpResponse::NoContent();
+    if let Some(origin) = http_req.headers().get(header::ORIGIN) {
+        response.insert_header((header::ACCESS_CONTROL_ALLOW_ORIGIN, origin.clone()));
+    }
+    response
+        .insert_header((header::ACCESS_CONTROL_ALLOW_METHODS, "POST, OPTIONS"))
+        .insert_header((
+            header::ACCESS_CONTROL_ALLOW_HEADERS,
+            "Authorization, X-API-Key, Content-Type, If-None-Match",
+        ))
+        .insert_header((header::ACCESS_CONTROL_MAX_AGE, "600"))
+        .insert_header((header::VARY, "Origin"))
+        .finish()
+}
+
+/// Register the edge's HTTP routes, including CORS preflights.
+pub fn configure_routes(cfg: &mut web::ServiceConfig) {
+    cfg.route("/health", web::get().to(health_handler))
+        .route("/evaluate", web::post().to(evaluate_handler))
+        .route(
+            "/evaluate",
+            web::method(actix_web::http::Method::OPTIONS).to(cors_preflight),
+        )
+        // OFREP (OpenFeature Remote Evaluation Protocol) endpoints
+        .route(
+            "/ofrep/v1/evaluate/flags",
+            web::post().to(ofrep_evaluate_flags_bulk),
+        )
+        .route(
+            "/ofrep/v1/evaluate/flags",
+            web::method(actix_web::http::Method::OPTIONS).to(cors_preflight),
+        )
+        .route(
+            "/ofrep/v1/evaluate/flags/{key}",
+            web::post().to(ofrep_evaluate_flag),
+        )
+        .route(
+            "/ofrep/v1/evaluate/flags/{key}",
+            web::method(actix_web::http::Method::OPTIONS).to(cors_preflight),
+        );
 }
 
 /// Get feature from cache or fetch from backend (returns mapped engine::Feature).
@@ -633,8 +724,9 @@ async fn get_or_fetch_feature(
     request_body = EvaluateHttpRequest,
     responses(
         (status = 200, description = "Evaluation result", body = EvaluateHttpResponse),
-        (status = 502, description = "Backend unavailable"),
-        (status = 400, description = "Invalid request")
+        (status = 400, description = "Invalid request"),
+        (status = 403, description = "Origin not allowed for the edge's web client", body = EdgeErrorResponse),
+        (status = 502, description = "Backend unavailable")
     ),
     tag = "edge"
 )]
@@ -642,38 +734,55 @@ pub async fn evaluate_handler(
     http_req: actix_web::HttpRequest,
     app: web::Data<AppState>,
     req: web::Json<EvaluateHttpRequest>,
-) -> actix_web::Result<web::Json<EvaluateHttpResponse>> {
-    let req = req.into_inner();
-    let feature_key = req.flag_key.clone();
-
+) -> HttpResponse {
+    // `/evaluate` always acts as the edge-configured client.
     let client_id = app.client_id.clone();
     let client_secret = app.client_secret.clone();
 
     // Fetch client information for origin validation (uses cache with 5min TTL)
-    let client_info = match get_or_fetch_client_info(&app, &client_id, &client_secret).await {
-        Some(info) => info,
-        None => {
-            return Err(actix_web::error::ErrorBadGateway(
-                "Failed to fetch client info",
-            ));
-        }
+    let Some(client_info) = get_or_fetch_client_info(&app, &client_id, &client_secret).await else {
+        return actix_web::error::ErrorBadGateway("Failed to fetch client info").error_response();
     };
     note_configured_client_team(&app, &client_id, &client_info);
 
-    // Validate web origin for web clients
-    if !validate_web_origin(&http_req, &client_info) {
-        error!("Origin validation failed for client: {}", client_info.name);
-        return Err(actix_web::error::ErrorUnauthorized(
-            "Invalid origin for web client",
-        ));
-    }
+    let Ok(cors_origin) = cors_origin_for_client(&http_req, &client_info) else {
+        return HttpResponse::Forbidden().json(EdgeErrorResponse {
+            error: "FORBIDDEN".to_string(),
+            message: "Origin is not allowed for this client".to_string(),
+        });
+    };
+
+    let response = match evaluate_for_client(
+        &app,
+        req.into_inner(),
+        &client_id,
+        &client_secret,
+        &client_info,
+    )
+    .await
+    {
+        Ok(body) => HttpResponse::Ok().json(body),
+        Err(err) => err.error_response(),
+    };
+    with_cors_headers(response, cors_origin.as_ref())
+}
+
+/// Evaluate one flag for an authenticated client whose origin was accepted.
+async fn evaluate_for_client(
+    app: &AppState,
+    req: EvaluateHttpRequest,
+    client_id: &str,
+    client_secret: &str,
+    client_info: &pb::GetClientInfoResponse,
+) -> actix_web::Result<EvaluateHttpResponse> {
+    let feature_key = req.flag_key.clone();
 
     // Get feature from cache or backend
     let feature = match get_or_fetch_feature(
-        &app,
+        app,
         &feature_key,
-        &client_id,
-        &client_secret,
+        client_id,
+        client_secret,
         &client_info.team_id,
     )
     .await
@@ -681,14 +790,14 @@ pub async fn evaluate_handler(
         Ok(Some(f)) => f,
         Ok(None) => {
             // Feature doesn't exist, return default
-            return Ok(web::Json(EvaluateHttpResponse {
+            return Ok(EvaluateHttpResponse {
                 flag_key: feature_key.clone(),
                 value: serde_json::json!(false),
                 variant: None,
                 reason: "DEFAULT".to_string(),
                 error_code: Some("FLAG_NOT_FOUND".to_string()),
                 metadata: None,
-            }));
+            });
         }
         Err(status) => {
             error!(
@@ -702,19 +811,19 @@ pub async fn evaluate_handler(
             ));
         }
     };
-    let feature = std::sync::Arc::new(hydrate_feature_with_dependencies(&app, &feature).await);
+    let feature = std::sync::Arc::new(hydrate_feature_with_dependencies(app, &feature).await);
 
     // This is kill switch enabled we should disable the feature.
     if !feature.enabled {
         app.purge_assignments_for_feature(&feature.id).await;
-        return Ok(web::Json(EvaluateHttpResponse {
+        return Ok(EvaluateHttpResponse {
             flag_key: feature_key.clone(),
             value: serde_json::json!(false),
             variant: None,
             reason: "STATIC".to_string(),
             error_code: None,
             metadata: None,
-        }));
+        });
     }
 
     let environment_id = client_info.environment_id.clone();
@@ -743,14 +852,14 @@ pub async fn evaluate_handler(
         .find(|s| s.environment_id == eval_context.environment_id);
 
     if stage.is_none() {
-        return Ok(web::Json(EvaluateHttpResponse {
+        return Ok(EvaluateHttpResponse {
             flag_key: feature_key.clone(),
             value: serde_json::json!(false),
             variant: None,
             reason: "DEFAULT".to_string(),
             error_code: Some("ENVIRONMENT_NOT_FOUND".to_string()),
             metadata: None,
-        }));
+        });
     }
 
     // Use targeting_key from request context (OpenFeature standard)
@@ -845,14 +954,14 @@ pub async fn evaluate_handler(
         .metadata
         .map(|m| serde_json::to_value(m).unwrap_or(serde_json::json!({})));
 
-    Ok(web::Json(EvaluateHttpResponse {
+    Ok(EvaluateHttpResponse {
         flag_key: result.flag_key,
         value: result.value,
         variant: result.variant,
         reason,
         error_code,
         metadata,
-    }))
+    })
 }
 
 /// HTTP handler for health check
@@ -873,40 +982,161 @@ pub async fn health_handler(app: web::Data<AppState>) -> impl Responder {
 
 // ===== OFREP (OpenFeature Remote Evaluation Protocol) Handlers =====
 
-/// Extract explicit credentials from Authorization header or X-API-Key header.
-/// Returns `None` when no explicit credentials were provided.
-fn extract_auth_from_headers(http_req: &actix_web::HttpRequest) -> Option<(String, String)> {
-    // Try Bearer token first
-    if let Some(auth_header) = http_req.headers().get("authorization")
-        && let Ok(auth_str) = auth_header.to_str()
-        && let Some(token) = auth_str.strip_prefix("Bearer ")
-    {
-        // For now, we don't parse JWT - just use the token as client_id
-        // In production, you'd validate the JWT and extract client_id
-        return Some((token.to_string(), String::new()));
-    }
-
-    // Try X-API-Key
-    if let Some(api_key) = http_req.headers().get("x-api-key")
-        && let Ok(key_str) = api_key.to_str()
-    {
-        return Some((key_str.to_string(), String::new()));
-    }
-
-    None
+/// Why an OFREP request carries no usable SDK key.
+#[derive(Debug, PartialEq, Eq)]
+enum SdkKeyError {
+    /// Neither `Authorization: Bearer` nor `X-API-Key` is present.
+    Missing,
+    /// The key is not `<clientId>.<secret>` with a UUID client ID and a
+    /// non-empty secret.
+    Malformed,
 }
 
-/// Resolve OFREP credentials. When the caller supplies only the configured
-/// client ID, use the configured secret.
-fn resolve_ofrep_credentials(
+/// Credentials from an SDK key.
+#[derive(PartialEq, Eq)]
+struct SdkCredentials {
+    client_id: String,
+    client_secret: String,
+}
+
+// Hand-written so the secret never reaches logs or panic messages.
+impl std::fmt::Debug for SdkCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SdkCredentials")
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Parse an SDK key `<clientId>.<secret>`. The key is split on the first
+/// `.`, so the secret may itself contain dots.
+fn parse_sdk_key(sdk_key: &str) -> Result<SdkCredentials, SdkKeyError> {
+    let (client_id, client_secret) = sdk_key
+        .trim()
+        .split_once('.')
+        .ok_or(SdkKeyError::Malformed)?;
+    if client_id.is_empty() || client_secret.is_empty() {
+        return Err(SdkKeyError::Malformed);
+    }
+    uuid::Uuid::parse_str(client_id).map_err(|_| SdkKeyError::Malformed)?;
+    Ok(SdkCredentials {
+        client_id: client_id.to_string(),
+        client_secret: client_secret.to_string(),
+    })
+}
+
+/// Read the SDK key from `Authorization: Bearer <sdkKey>` or, failing that,
+/// `X-API-Key: <sdkKey>`.
+fn extract_auth_from_headers(
+    http_req: &actix_web::HttpRequest,
+) -> Result<SdkCredentials, SdkKeyError> {
+    let headers = http_req.headers();
+    let bearer = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            let (scheme, token) = value.trim().split_once(' ')?;
+            scheme.eq_ignore_ascii_case("bearer").then_some(token)
+        });
+    let sdk_key = match bearer {
+        Some(token) => token,
+        None => match headers.get("x-api-key") {
+            Some(value) => value.to_str().map_err(|_| SdkKeyError::Malformed)?,
+            None => return Err(SdkKeyError::Missing),
+        },
+    };
+    parse_sdk_key(sdk_key)
+}
+
+/// OFREP 401 / 403 response with `errorCode` `UNAUTHORIZED` / `FORBIDDEN`.
+fn ofrep_auth_error(status: StatusCode, details: &str) -> HttpResponse {
+    let error_code = if status == StatusCode::FORBIDDEN {
+        "FORBIDDEN"
+    } else {
+        "UNAUTHORIZED"
+    };
+    HttpResponse::build(status).json(OFREPAuthErrorResponse {
+        error_code: error_code.to_string(),
+        error_details: details.to_string(),
+    })
+}
+
+/// OFREP response for a backend call rejected because of the caller's
+/// credentials. Bad credentials and unknown clients get 401, disabled clients
+/// 403. Returns `None` for other failures (backend unavailable or broken),
+/// which are reported as 502.
+///
+/// None of these codes is retried (see `grpc_client::is_transient`).
+fn ofrep_backend_auth_failure(status: &tonic::Status) -> Option<HttpResponse> {
+    use tonic::Code;
+    match status.code() {
+        Code::Unauthenticated | Code::InvalidArgument | Code::NotFound => Some(ofrep_auth_error(
+            StatusCode::UNAUTHORIZED,
+            "SDK key is invalid",
+        )),
+        Code::PermissionDenied => Some(ofrep_auth_error(
+            StatusCode::FORBIDDEN,
+            "Client is disabled or not permitted to evaluate flags",
+        )),
+        _ => None,
+    }
+}
+
+/// An OFREP caller whose SDK key and origin were accepted.
+struct OfrepCaller {
+    credentials: SdkCredentials,
+    client_info: pb::GetClientInfoResponse,
+    /// `Origin` to echo in CORS headers (allowed `Web` clients only).
+    cors_origin: Option<HeaderValue>,
+}
+
+/// Authenticate an OFREP request with its SDK key and apply the client's
+/// origin rules. On failure returns the response to send (401, 403 or 502).
+async fn authenticate_ofrep(
     app: &AppState,
     http_req: &actix_web::HttpRequest,
-) -> Option<(String, String)> {
-    let (client_id, client_secret) = extract_auth_from_headers(http_req)?;
-    if client_secret.is_empty() && client_id == app.client_id {
-        return Some((client_id, app.client_secret.clone()));
+) -> Result<OfrepCaller, HttpResponse> {
+    let credentials = extract_auth_from_headers(http_req).map_err(|err| match err {
+        SdkKeyError::Missing => ofrep_auth_error(
+            StatusCode::UNAUTHORIZED,
+            "Missing SDK key: send Authorization: Bearer <clientId>.<apiKey> or X-API-Key",
+        ),
+        SdkKeyError::Malformed => ofrep_auth_error(
+            StatusCode::UNAUTHORIZED,
+            "Malformed SDK key: expected <clientId>.<apiKey>",
+        ),
+    })?;
+
+    let client_info =
+        try_get_or_fetch_client_info(app, &credentials.client_id, &credentials.client_secret)
+            .await
+            .map_err(|status| {
+                ofrep_backend_auth_failure(&status).unwrap_or_else(|| {
+                    actix_web::error::ErrorBadGateway("Failed to fetch client info")
+                        .error_response()
+                })
+            })?;
+    if !client_info.enabled {
+        return Err(ofrep_auth_error(
+            StatusCode::FORBIDDEN,
+            "Client is disabled or not permitted to evaluate flags",
+        ));
     }
-    Some((client_id, client_secret))
+    note_configured_client_team(app, &credentials.client_id, &client_info);
+
+    let cors_origin = cors_origin_for_client(http_req, &client_info).map_err(|_| {
+        ofrep_auth_error(
+            StatusCode::FORBIDDEN,
+            "Origin is not allowed for this client",
+        )
+    })?;
+
+    Ok(OfrepCaller {
+        credentials,
+        client_info,
+        cors_origin,
+    })
 }
 
 /// Map OFREP context to engine context
@@ -935,27 +1165,6 @@ fn ofrep_error(
         error_code: error_code.into(),
         error_details,
         metadata: None,
-    }
-}
-
-/// OFREP response for a failed client-info lookup. Bad credentials and
-/// unknown clients get 401, disabled clients 403. Returns `None` for other
-/// failures, which the handlers keep reporting as 502.
-fn ofrep_client_auth_failure(
-    status: &tonic::Status,
-) -> Option<(actix_web::http::StatusCode, &'static str)> {
-    use actix_web::http::StatusCode;
-    use tonic::Code;
-    match status.code() {
-        Code::Unauthenticated | Code::InvalidArgument | Code::NotFound => Some((
-            StatusCode::UNAUTHORIZED,
-            "Client credentials are missing or invalid",
-        )),
-        Code::PermissionDenied => Some((
-            StatusCode::FORBIDDEN,
-            "Client is not permitted to evaluate flags",
-        )),
-        _ => None,
     }
 }
 
@@ -1194,9 +1403,10 @@ fn if_none_match_contains(if_none_match: &str, etag: &str) -> bool {
         (status = 200, description = "Successful evaluation", body = OFREPSuccessResponse),
         (status = 400, description = "Invalid request", body = OFREPErrorResponse),
         (status = 404, description = "Flag not found", body = OFREPErrorResponse),
-        (status = 401, description = "Unauthorized"),
-        (status = 403, description = "Forbidden"),
-        (status = 500, description = "Server error", body = OFREPErrorResponse)
+        (status = 401, description = "Missing, malformed or invalid SDK key", body = OFREPAuthErrorResponse),
+        (status = 403, description = "Client disabled or origin not allowed", body = OFREPAuthErrorResponse),
+        (status = 500, description = "Server error", body = OFREPErrorResponse),
+        (status = 502, description = "Backend unavailable")
     ),
     tag = "ofrep"
 )]
@@ -1205,69 +1415,49 @@ pub async fn ofrep_evaluate_flag(
     app: web::Data<AppState>,
     path: web::Path<String>,
     req: web::Json<OFREPEvaluationRequest>,
-) -> actix_web::Result<HttpResponse> {
-    let feature_key = path.into_inner();
-    let req = req.into_inner();
-
-    // Extract credentials from headers (OFREP standard)
-    let Some((client_id, client_secret)) = resolve_ofrep_credentials(&app, &http_req) else {
-        return Err(actix_web::error::ErrorUnauthorized(
-            "Missing explicit client credentials",
-        ));
+) -> HttpResponse {
+    let caller = match authenticate_ofrep(&app, &http_req).await {
+        Ok(caller) => caller,
+        Err(response) => return response,
     };
+    let response =
+        ofrep_evaluate_flag_for(&app, &caller, path.into_inner(), req.into_inner()).await;
+    with_cors_headers(response, caller.cors_origin.as_ref())
+}
 
+async fn ofrep_evaluate_flag_for(
+    app: &AppState,
+    caller: &OfrepCaller,
+    feature_key: String,
+    req: OFREPEvaluationRequest,
+) -> HttpResponse {
     // Validate targetingKey is not empty
     if req.context.targeting_key.is_empty() {
-        return Ok(HttpResponse::BadRequest().json(ofrep_error(
+        return HttpResponse::BadRequest().json(ofrep_error(
             feature_key,
             "TARGETING_KEY_MISSING",
             Some("targetingKey is required and cannot be empty".to_string()),
-        )));
-    }
-
-    // Fetch client information for origin validation
-    let client_info = match try_get_or_fetch_client_info(&app, &client_id, &client_secret).await {
-        Ok(info) => info,
-        Err(status) => {
-            if let Some((http_status, details)) = ofrep_client_auth_failure(&status) {
-                return Ok(HttpResponse::build(http_status).json(ofrep_error(
-                    feature_key,
-                    "GENERAL",
-                    Some(details.to_string()),
-                )));
-            }
-            return Err(actix_web::error::ErrorBadGateway(
-                "Failed to fetch client info",
-            ));
-        }
-    };
-    note_configured_client_team(&app, &client_id, &client_info);
-
-    // Validate web origin for web clients
-    if !validate_web_origin(&http_req, &client_info) {
-        return Err(actix_web::error::ErrorUnauthorized(
-            "Invalid origin for web client",
         ));
     }
 
     // Get feature from cache or backend
     let feature = match get_or_fetch_feature(
-        &app,
+        app,
         &feature_key,
-        &client_id,
-        &client_secret,
-        &client_info.team_id,
+        &caller.credentials.client_id,
+        &caller.credentials.client_secret,
+        &caller.client_info.team_id,
     )
     .await
     {
         Ok(Some(f)) => f,
         Ok(None) => {
             // OFREP: Return 404 for missing flags
-            return Ok(HttpResponse::NotFound().json(ofrep_error(
+            return HttpResponse::NotFound().json(ofrep_error(
                 feature_key,
                 "FLAG_NOT_FOUND",
                 Some("The requested feature flag does not exist".to_string()),
-            )));
+            ));
         }
         Err(status) => {
             error!(
@@ -1276,26 +1466,23 @@ pub async fn ofrep_evaluate_flag(
                 status.code(),
                 status.message()
             );
-            return Err(actix_web::error::ErrorBadGateway(
-                "Failed to fetch feature from backend",
-            ));
+            if let Some(response) = ofrep_backend_auth_failure(&status) {
+                return response;
+            }
+            return actix_web::error::ErrorBadGateway("Failed to fetch feature from backend")
+                .error_response();
         }
     };
-    let feature = std::sync::Arc::new(hydrate_feature_with_dependencies(&app, &feature).await);
+    let feature = std::sync::Arc::new(hydrate_feature_with_dependencies(app, &feature).await);
 
-    let environment_id = client_info.environment_id.clone();
-    let context = match normalize_ofrep_context_environment(req.context, &environment_id) {
-        Ok(context) => context,
-        Err(()) => {
-            return Err(actix_web::error::ErrorUnauthorized(
-                "Environment mismatch for client",
-            ));
-        }
+    let environment_id = caller.client_info.environment_id.clone();
+    let Ok(context) = normalize_ofrep_context_environment(req.context, &environment_id) else {
+        return actix_web::error::ErrorUnauthorized("Environment mismatch for client")
+            .error_response();
     };
 
-    let response =
-        evaluate_ofrep_feature(&app, feature_key, feature, environment_id, context).await;
-    Ok(HttpResponse::Ok().json(response))
+    let response = evaluate_ofrep_feature(app, feature_key, feature, environment_id, context).await;
+    HttpResponse::Ok().json(response)
 }
 
 /// OFREP handler for bulk flag evaluation
@@ -1313,9 +1500,10 @@ pub async fn ofrep_evaluate_flag(
         (status = 200, description = "Successful bulk evaluation", body = OFREPBulkEvaluationSuccess),
         (status = 304, description = "Not modified"),
         (status = 400, description = "Invalid request", body = OFREPBulkEvaluationFailure),
-        (status = 401, description = "Unauthorized"),
-        (status = 403, description = "Forbidden"),
-        (status = 500, description = "Server error", body = OFREPBulkEvaluationFailure)
+        (status = 401, description = "Missing, malformed or invalid SDK key", body = OFREPAuthErrorResponse),
+        (status = 403, description = "Client disabled or origin not allowed", body = OFREPAuthErrorResponse),
+        (status = 500, description = "Server error", body = OFREPBulkEvaluationFailure),
+        (status = 502, description = "Backend unavailable")
     ),
     tag = "ofrep"
 )]
@@ -1324,83 +1512,65 @@ pub async fn ofrep_evaluate_flags_bulk(
     app: web::Data<AppState>,
     query: web::Query<OFREPBulkEvaluationQuery>,
     req: web::Json<OFREPBulkEvaluationRequest>,
-) -> actix_web::Result<HttpResponse> {
-    let req = req.into_inner();
+) -> HttpResponse {
     let _change_event_refetch =
         query.flag_config_etag.is_some() || query.flag_config_last_modified.is_some();
 
-    let Some((client_id, client_secret)) = resolve_ofrep_credentials(&app, &http_req) else {
-        return Err(actix_web::error::ErrorUnauthorized(
-            "Missing explicit client credentials",
-        ));
+    let caller = match authenticate_ofrep(&app, &http_req).await {
+        Ok(caller) => caller,
+        Err(response) => return response,
     };
+    let if_none_match = http_req
+        .headers()
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok());
+    let response =
+        ofrep_evaluate_flags_bulk_for(&app, &caller, req.into_inner(), if_none_match).await;
+    with_cors_headers(response, caller.cors_origin.as_ref())
+}
 
+async fn ofrep_evaluate_flags_bulk_for(
+    app: &AppState,
+    caller: &OfrepCaller,
+    req: OFREPBulkEvaluationRequest,
+    if_none_match: Option<&str>,
+) -> HttpResponse {
     if req.context.targeting_key.is_empty() {
-        return Ok(HttpResponse::BadRequest().json(OFREPBulkEvaluationFailure {
+        return HttpResponse::BadRequest().json(OFREPBulkEvaluationFailure {
             error_code: "TARGETING_KEY_MISSING".to_string(),
             error_details: Some("targetingKey is required and cannot be empty".to_string()),
-        }));
+        });
     }
 
-    let client_info = match try_get_or_fetch_client_info(&app, &client_id, &client_secret).await {
-        Ok(info) => info,
-        Err(status) => {
-            if let Some((http_status, details)) = ofrep_client_auth_failure(&status) {
-                return Ok(
-                    HttpResponse::build(http_status).json(OFREPBulkEvaluationFailure {
-                        error_code: "GENERAL".to_string(),
-                        error_details: Some(details.to_string()),
-                    }),
-                );
-            }
-            return Err(actix_web::error::ErrorBadGateway(
-                "Failed to fetch client info",
-            ));
-        }
-    };
-    note_configured_client_team(&app, &client_id, &client_info);
-
-    if !validate_web_origin(&http_req, &client_info) {
-        return Err(actix_web::error::ErrorUnauthorized(
-            "Invalid origin for web client",
-        ));
-    }
-
-    let environment_id = client_info.environment_id.clone();
-    let context = match normalize_ofrep_context_environment(req.context, &environment_id) {
-        Ok(context) => context,
-        Err(()) => {
-            return Err(actix_web::error::ErrorUnauthorized(
-                "Environment mismatch for client",
-            ));
-        }
+    let environment_id = caller.client_info.environment_id.clone();
+    let Ok(context) = normalize_ofrep_context_environment(req.context, &environment_id) else {
+        return actix_web::error::ErrorUnauthorized("Environment mismatch for client")
+            .error_response();
     };
 
     let mut features = Vec::new();
-    for feature in app.mapped_cache.features_for_team(&client_info.team_id) {
+    for feature in app
+        .mapped_cache
+        .features_for_team(&caller.client_info.team_id)
+    {
         features.push(std::sync::Arc::new(
-            hydrate_feature_with_dependencies(&app, &feature).await,
+            hydrate_feature_with_dependencies(app, &feature).await,
         ));
     }
     features.sort_by(|left, right| left.key.cmp(&right.key));
 
     let etag = ofrep_bulk_etag(&features, &environment_id, &context);
-    if let Some(if_none_match) = http_req
-        .headers()
-        .get(header::IF_NONE_MATCH)
-        .and_then(|value| value.to_str().ok())
-        && if_none_match_contains(if_none_match, &etag)
-    {
-        return Ok(HttpResponse::NotModified()
+    if if_none_match.is_some_and(|if_none_match| if_none_match_contains(if_none_match, &etag)) {
+        return HttpResponse::NotModified()
             .insert_header((header::ETAG, etag))
-            .finish());
+            .finish();
     }
 
     let mut flags = Vec::with_capacity(features.len());
     for feature in features {
         let feature_key = feature.key.clone();
         let response = evaluate_ofrep_feature(
-            &app,
+            app,
             feature_key,
             feature,
             environment_id.clone(),
@@ -1416,22 +1586,23 @@ pub async fn ofrep_evaluate_flags_bulk(
         serde_json::Value::String(etag.clone()),
     );
 
-    Ok(HttpResponse::Ok()
+    HttpResponse::Ok()
         .insert_header((header::ETAG, etag))
         .json(OFREPBulkEvaluationSuccess {
             flags,
             metadata: Some(metadata),
             event_streams: None,
-        }))
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        EvaluateContext, OFREPContext, cache_fetched_feature, evaluate_handler,
-        evaluate_http_feature_locally, extract_auth_from_headers,
-        hydrate_feature_with_dependencies, if_none_match_contains, map_proto_to_engine,
-        ofrep_bulk_etag, ofrep_evaluate_flag, ofrep_evaluate_flags_bulk, resolve_ofrep_credentials,
+        EvaluateContext, OFREPContext, SdkCredentials, SdkKeyError, cache_fetched_feature,
+        configure_routes, evaluate_handler, evaluate_http_feature_locally,
+        extract_auth_from_headers, hydrate_feature_with_dependencies, if_none_match_contains,
+        map_proto_to_engine, ofrep_bulk_etag, ofrep_evaluate_flag, ofrep_evaluate_flags_bulk,
+        parse_sdk_key,
     };
     use crate::pb;
     use actix_web::test::TestRequest;
@@ -1439,6 +1610,7 @@ mod tests {
     use feature_toggle_backend::grpc::pb as backend_pb;
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::mpsc;
     use tonic::transport::Endpoint;
 
@@ -1498,8 +1670,8 @@ mod tests {
             mapped_cache,
             client_info_cache,
             grpc: Arc::new(tokio::sync::Mutex::new(grpc_client)),
-            client_id: "client".into(),
-            client_secret: "secret".into(),
+            client_id: CONFIGURED_CLIENT_ID.into(),
+            client_secret: CONFIGURED_SECRET.into(),
             edge_team_id: Arc::new(std::sync::OnceLock::new()),
             connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             assigned_cache: Arc::new(crate::AssignmentCache::default()),
@@ -1515,109 +1687,211 @@ mod tests {
         }
     }
 
+    /// Client ID and secret the test `AppState` is configured with.
+    const CONFIGURED_CLIENT_ID: &str = "11111111-1111-4111-8111-111111111111";
+    const CONFIGURED_SECRET: &str = "secret";
+    /// A second client of the same team, used for web / disabled scenarios.
+    const OTHER_CLIENT_ID: &str = "22222222-2222-4222-8222-222222222222";
+    const OTHER_SECRET: &str = "other.secret";
+    const ALLOWED_ORIGIN: &str = "https://app.example.com";
+
+    fn sdk_key(client_id: &str, secret: &str) -> String {
+        format!("{client_id}.{secret}")
+    }
+
+    fn configured_sdk_key() -> String {
+        sdk_key(CONFIGURED_CLIENT_ID, CONFIGURED_SECRET)
+    }
+
+    fn credentials(client_id: &str, secret: &str) -> SdkCredentials {
+        SdkCredentials {
+            client_id: client_id.to_string(),
+            client_secret: secret.to_string(),
+        }
+    }
+
+    #[test]
+    fn parse_sdk_key_splits_on_first_dot() {
+        assert_eq!(
+            parse_sdk_key(&sdk_key(OTHER_CLIENT_ID, OTHER_SECRET)),
+            Ok(credentials(OTHER_CLIENT_ID, "other.secret"))
+        );
+        assert_eq!(
+            parse_sdk_key(&format!(" {} ", configured_sdk_key())),
+            Ok(credentials(CONFIGURED_CLIENT_ID, CONFIGURED_SECRET))
+        );
+    }
+
+    #[test]
+    fn parse_sdk_key_rejects_malformed_keys() {
+        for key in [
+            "",
+            CONFIGURED_CLIENT_ID,
+            &format!("{CONFIGURED_CLIENT_ID}."),
+            ".secret",
+            "client.secret",
+            "not-a-uuid.secret",
+        ] {
+            assert_eq!(parse_sdk_key(key), Err(SdkKeyError::Malformed), "{key:?}");
+        }
+    }
+
+    #[test]
+    fn sdk_credentials_debug_redacts_secret() {
+        let debug = format!("{:?}", credentials(CONFIGURED_CLIENT_ID, "top-secret"));
+        assert!(debug.contains(CONFIGURED_CLIENT_ID));
+        assert!(!debug.contains("top-secret"), "{debug}");
+    }
+
     #[test]
     fn extract_auth_requires_explicit_headers() {
         let req = TestRequest::default().to_http_request();
-        assert!(extract_auth_from_headers(&req).is_none());
+        assert_eq!(extract_auth_from_headers(&req), Err(SdkKeyError::Missing));
+
+        // A non-Bearer Authorization header is not an SDK key.
+        let req = TestRequest::default()
+            .insert_header(("authorization", "Basic dXNlcjpwYXNz"))
+            .to_http_request();
+        assert_eq!(extract_auth_from_headers(&req), Err(SdkKeyError::Missing));
     }
 
     #[test]
-    fn extract_auth_uses_bearer_token_when_present() {
-        let req = TestRequest::default()
-            .insert_header(("authorization", "Bearer token-123"))
-            .to_http_request();
-        let auth = extract_auth_from_headers(&req);
-        assert_eq!(auth, Some(("token-123".to_string(), String::new())));
+    fn extract_auth_reads_bearer_sdk_key() {
+        for scheme in ["Bearer", "bearer"] {
+            let req = TestRequest::default()
+                .insert_header((
+                    "authorization",
+                    format!("{scheme} {}", configured_sdk_key()),
+                ))
+                .to_http_request();
+            assert_eq!(
+                extract_auth_from_headers(&req),
+                Ok(credentials(CONFIGURED_CLIENT_ID, CONFIGURED_SECRET))
+            );
+        }
     }
 
     #[test]
-    fn extract_auth_uses_api_key_when_present() {
+    fn extract_auth_reads_api_key_header() {
         let req = TestRequest::default()
-            .insert_header(("x-api-key", "api-key-123"))
+            .insert_header(("x-api-key", sdk_key(OTHER_CLIENT_ID, OTHER_SECRET)))
             .to_http_request();
-        let auth = extract_auth_from_headers(&req);
-        assert_eq!(auth, Some(("api-key-123".to_string(), String::new())));
-    }
-
-    #[tokio::test]
-    async fn resolve_ofrep_credentials_uses_configured_secret_for_bearer_client_id() {
-        let app = test_app_state(Arc::new(crate::MappedFeatureCache::new(10)));
-        let req = TestRequest::default()
-            .insert_header(("authorization", "Bearer client"))
-            .to_http_request();
-
-        let auth = resolve_ofrep_credentials(&app, &req);
-        assert_eq!(auth, Some(("client".to_string(), "secret".to_string())));
-    }
-
-    #[tokio::test]
-    async fn resolve_ofrep_credentials_uses_configured_secret_for_api_key_client_id() {
-        let app = test_app_state(Arc::new(crate::MappedFeatureCache::new(10)));
-        let req = TestRequest::default()
-            .insert_header(("x-api-key", "client"))
-            .to_http_request();
-
-        let auth = resolve_ofrep_credentials(&app, &req);
-        assert_eq!(auth, Some(("client".to_string(), "secret".to_string())));
-    }
-
-    #[tokio::test]
-    async fn resolve_ofrep_credentials_keeps_empty_secret_for_other_client_id() {
-        let app = test_app_state(Arc::new(crate::MappedFeatureCache::new(10)));
-        let bearer = TestRequest::default()
-            .insert_header(("authorization", "Bearer other-client"))
-            .to_http_request();
-        let api_key = TestRequest::default()
-            .insert_header(("x-api-key", "other-client"))
-            .to_http_request();
-
         assert_eq!(
-            resolve_ofrep_credentials(&app, &bearer),
-            Some(("other-client".to_string(), String::new()))
-        );
-        assert_eq!(
-            resolve_ofrep_credentials(&app, &api_key),
-            Some(("other-client".to_string(), String::new()))
+            extract_auth_from_headers(&req),
+            Ok(credentials(OTHER_CLIENT_ID, OTHER_SECRET))
         );
     }
 
-    #[tokio::test]
-    async fn resolve_ofrep_credentials_requires_explicit_headers() {
-        let app = test_app_state(Arc::new(crate::MappedFeatureCache::new(10)));
-        let req = TestRequest::default().to_http_request();
-
-        assert!(resolve_ofrep_credentials(&app, &req).is_none());
+    #[test]
+    fn extract_auth_never_falls_back_to_bare_client_id() {
+        for (name, value) in [
+            ("authorization", format!("Bearer {CONFIGURED_CLIENT_ID}")),
+            ("x-api-key", CONFIGURED_CLIENT_ID.to_string()),
+        ] {
+            let req = TestRequest::default()
+                .insert_header((name, value))
+                .to_http_request();
+            assert_eq!(
+                extract_auth_from_headers(&req),
+                Err(SdkKeyError::Malformed),
+                "{name}"
+            );
+        }
     }
 
-    /// Minimal backend that only accepts the configured test credentials
-    /// (`client` / `secret`) and records every secret it receives.
-    #[derive(Clone, Default)]
+    /// A client known to the mock backend.
+    #[derive(Clone)]
+    struct MockClient {
+        secret: String,
+        enabled: bool,
+        client_type: &'static str,
+        web_origins: Vec<String>,
+    }
+
+    impl MockClient {
+        fn backend(secret: &str) -> Self {
+            Self {
+                secret: secret.to_string(),
+                enabled: true,
+                client_type: "Backend",
+                web_origins: vec![],
+            }
+        }
+
+        fn web(secret: &str, origins: &[&str]) -> Self {
+            Self {
+                client_type: "Web",
+                web_origins: origins.iter().map(|o| o.to_string()).collect(),
+                ..Self::backend(secret)
+            }
+        }
+    }
+
+    /// Minimal backend that authenticates clients the way the real one does
+    /// and records every secret it receives. Knows the configured client
+    /// (`CONFIGURED_CLIENT_ID` / `CONFIGURED_SECRET`, Backend type) by default.
+    #[derive(Clone)]
     struct OfrepMockBackend {
         seen_secrets: Arc<std::sync::Mutex<Vec<String>>>,
+        clients: Arc<std::sync::Mutex<HashMap<String, MockClient>>>,
+        client_info_calls: Arc<AtomicUsize>,
         /// Keys for which `GetFeatureByKey` answers `NotFound`.
         missing_keys: Arc<std::sync::Mutex<Vec<String>>>,
         /// When set, `GetClientInfo` always fails with this code.
         client_info_error: Arc<std::sync::Mutex<Option<tonic::Code>>>,
+        /// When set, `GetFeatureByKey` always fails with this code.
+        feature_error: Arc<std::sync::Mutex<Option<tonic::Code>>>,
+    }
+
+    impl Default for OfrepMockBackend {
+        fn default() -> Self {
+            let backend = Self {
+                seen_secrets: Arc::default(),
+                clients: Arc::default(),
+                client_info_calls: Arc::default(),
+                missing_keys: Arc::default(),
+                client_info_error: Arc::default(),
+                feature_error: Arc::default(),
+            };
+            backend.set_client(CONFIGURED_CLIENT_ID, MockClient::backend(CONFIGURED_SECRET));
+            backend
+        }
     }
 
     impl OfrepMockBackend {
-        /// Records the secret and returns the rejection status, if any.
-        fn reject_credentials(
+        fn set_client(&self, client_id: &str, client: MockClient) {
+            self.clients
+                .lock()
+                .unwrap()
+                .insert(client_id.to_string(), client);
+        }
+
+        /// Records the secret and authenticates like the real backend:
+        /// empty secret `InvalidArgument`, unknown client `NotFound`, disabled
+        /// client `PermissionDenied`, wrong secret `Unauthenticated`.
+        #[allow(clippy::result_large_err)]
+        fn authenticate(
             &self,
             client_id: &str,
             client_secret: &str,
-        ) -> Option<tonic::Status> {
+        ) -> Result<MockClient, tonic::Status> {
             self.seen_secrets
                 .lock()
                 .unwrap()
                 .push(client_secret.to_string());
             if client_secret.is_empty() {
-                return Some(tonic::Status::invalid_argument("client_secret is required"));
+                return Err(tonic::Status::invalid_argument("client_secret is required"));
             }
-            if client_id != "client" || client_secret != "secret" {
-                return Some(tonic::Status::unauthenticated("invalid client credentials"));
+            let Some(client) = self.clients.lock().unwrap().get(client_id).cloned() else {
+                return Err(tonic::Status::not_found("client not found"));
+            };
+            if !client.enabled {
+                return Err(tonic::Status::permission_denied("client is disabled"));
             }
-            None
+            if client.secret != client_secret {
+                return Err(tonic::Status::unauthenticated("invalid client_secret"));
+            }
+            Ok(client)
         }
     }
 
@@ -1639,8 +1913,9 @@ mod tests {
             request: tonic::Request<backend_pb::GetFeatureByKeyRequest>,
         ) -> Result<tonic::Response<backend_pb::GetFeatureByKeyResponse>, tonic::Status> {
             let req = request.into_inner();
-            if let Some(status) = self.reject_credentials(&req.client_id, &req.client_secret) {
-                return Err(status);
+            self.authenticate(&req.client_id, &req.client_secret)?;
+            if let Some(code) = *self.feature_error.lock().unwrap() {
+                return Err(tonic::Status::new(code, "forced feature failure"));
             }
             if self.missing_keys.lock().unwrap().contains(&req.feature_key) {
                 return Err(tonic::Status::not_found("feature not found"));
@@ -1675,21 +1950,20 @@ mod tests {
             &self,
             request: tonic::Request<backend_pb::GetClientInfoRequest>,
         ) -> Result<tonic::Response<backend_pb::GetClientInfoResponse>, tonic::Status> {
+            self.client_info_calls.fetch_add(1, Ordering::SeqCst);
             let req = request.into_inner();
             if let Some(code) = *self.client_info_error.lock().unwrap() {
                 return Err(tonic::Status::new(code, "forced client info failure"));
             }
-            if let Some(status) = self.reject_credentials(&req.client_id, &req.client_secret) {
-                return Err(status);
-            }
+            let client = self.authenticate(&req.client_id, &req.client_secret)?;
             Ok(tonic::Response::new(backend_pb::GetClientInfoResponse {
                 id: req.client_id,
                 team_id: "team-1".to_string(),
                 name: "test client".to_string(),
                 description: String::new(),
-                enabled: true,
-                client_type: "Backend".to_string(),
-                web_origins: vec![],
+                enabled: client.enabled,
+                client_type: client.client_type.to_string(),
+                web_origins: client.web_origins,
                 environment_id: "env-1".to_string(),
             }))
         }
@@ -1765,141 +2039,514 @@ mod tests {
         (app, backend)
     }
 
-    #[actix_web::test]
-    async fn ofrep_single_flag_with_configured_client_id_uses_configured_secret() {
-        let (app_state, backend) = ofrep_app_with_mock_backend().await;
-        let service =
-            actix_test::init_service(App::new().app_data(web::Data::new(app_state)).route(
-                "/ofrep/v1/evaluate/flags/{key}",
-                web::post().to(ofrep_evaluate_flag),
-            ))
-            .await;
+    /// Response of one test request, read into owned parts.
+    struct TestResponse {
+        status: actix_web::http::StatusCode,
+        headers: actix_web::http::header::HeaderMap,
+        body: serde_json::Value,
+    }
 
-        let req = actix_test::TestRequest::post()
-            .uri("/ofrep/v1/evaluate/flags/my-flag")
-            .insert_header(("authorization", "Bearer client"))
-            .set_json(serde_json::json!({ "context": { "targetingKey": "u1" } }))
-            .to_request();
-        let resp = actix_test::call_service(&service, req).await;
+    impl TestResponse {
+        fn header(&self, name: &str) -> Option<&str> {
+            self.headers.get(name).and_then(|value| value.to_str().ok())
+        }
 
-        assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
-        let body: serde_json::Value = actix_test::read_body_json(resp).await;
-        assert_eq!(body["key"], serde_json::json!("my-flag"));
-        assert_eq!(body["value"], serde_json::json!(true));
+        fn has_no_cors_headers(&self) -> bool {
+            self.header("access-control-allow-origin").is_none()
+                && self.header("access-control-expose-headers").is_none()
+        }
+    }
 
-        let seen = backend.seen_secrets.lock().unwrap().clone();
-        assert!(!seen.is_empty(), "expected backend calls");
+    /// Send one request through the production route table.
+    async fn call_routes(app_state: crate::AppState, req: actix_test::TestRequest) -> TestResponse {
+        let service = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(app_state))
+                .configure(configure_routes),
+        )
+        .await;
+        let resp = actix_test::call_service(&service, req.to_request()).await;
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let body = actix_test::read_body(resp).await;
+        let body = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+        TestResponse {
+            status,
+            headers,
+            body,
+        }
+    }
+
+    fn ofrep_uri(bulk: bool) -> &'static str {
+        if bulk {
+            "/ofrep/v1/evaluate/flags"
+        } else {
+            "/ofrep/v1/evaluate/flags/my-flag"
+        }
+    }
+
+    /// An OFREP request (single flag or bulk) with the given headers.
+    fn ofrep_request(bulk: bool, headers: &[(&str, String)]) -> actix_test::TestRequest {
+        let mut req = actix_test::TestRequest::post()
+            .uri(ofrep_uri(bulk))
+            .set_json(serde_json::json!({ "context": { "targetingKey": "u1" } }));
+        for (name, value) in headers {
+            req = req.insert_header((*name, value.clone()));
+        }
+        req
+    }
+
+    fn bearer(key: &str) -> (&'static str, String) {
+        ("authorization", format!("Bearer {key}"))
+    }
+
+    fn assert_ofrep_auth_error(resp: &TestResponse, expected_code: &str, context: &str) {
+        let expected_status = if expected_code == "FORBIDDEN" {
+            actix_web::http::StatusCode::FORBIDDEN
+        } else {
+            actix_web::http::StatusCode::UNAUTHORIZED
+        };
+        assert_eq!(resp.status, expected_status, "{context}");
+        assert_eq!(
+            resp.body["errorCode"],
+            serde_json::json!(expected_code),
+            "{context}"
+        );
         assert!(
-            seen.iter().all(|secret| secret == "secret"),
+            resp.body["errorDetails"]
+                .as_str()
+                .is_some_and(|details| !details.is_empty()),
+            "{context}: body {}",
+            resp.body
+        );
+    }
+
+    #[actix_web::test]
+    async fn ofrep_valid_sdk_key_authenticates_with_its_secret() {
+        for bulk in [false, true] {
+            for header in [
+                bearer(&configured_sdk_key()),
+                ("x-api-key", configured_sdk_key()),
+            ] {
+                let context = format!("bulk={bulk} header={}", header.0);
+                let (app_state, backend) = ofrep_app_with_mock_backend().await;
+
+                let resp = call_routes(app_state, ofrep_request(bulk, &[header])).await;
+
+                assert_eq!(resp.status, actix_web::http::StatusCode::OK, "{context}");
+                if !bulk {
+                    assert_eq!(resp.body["key"], serde_json::json!("my-flag"));
+                    assert_eq!(resp.body["value"], serde_json::json!(true));
+                }
+                let seen = backend.seen_secrets.lock().unwrap().clone();
+                assert!(!seen.is_empty(), "{context}: expected backend calls");
+                assert!(
+                    seen.iter().all(|secret| secret == CONFIGURED_SECRET),
+                    "{context}: backend saw secrets {seen:?}"
+                );
+            }
+        }
+    }
+
+    #[actix_web::test]
+    async fn ofrep_sdk_key_of_another_client_uses_that_clients_secret() {
+        let (app_state, backend) = ofrep_app_with_mock_backend().await;
+        backend.set_client(OTHER_CLIENT_ID, MockClient::backend(OTHER_SECRET));
+
+        let key = sdk_key(OTHER_CLIENT_ID, OTHER_SECRET);
+        let resp = call_routes(app_state, ofrep_request(false, &[bearer(&key)])).await;
+
+        assert_eq!(resp.status, actix_web::http::StatusCode::OK);
+        let seen = backend.seen_secrets.lock().unwrap().clone();
+        assert!(
+            seen.iter().all(|secret| secret == OTHER_SECRET),
             "backend saw secrets {seen:?}"
         );
     }
 
     #[actix_web::test]
-    async fn ofrep_bulk_with_configured_client_id_uses_configured_secret() {
-        let (app_state, backend) = ofrep_app_with_mock_backend().await;
-        let service =
-            actix_test::init_service(App::new().app_data(web::Data::new(app_state)).route(
-                "/ofrep/v1/evaluate/flags",
-                web::post().to(ofrep_evaluate_flags_bulk),
-            ))
-            .await;
+    async fn ofrep_missing_or_malformed_sdk_key_returns_401_without_backend_call() {
+        let malformed = [
+            vec![],
+            vec![("authorization", "Basic dXNlcjpwYXNz".to_string())],
+            vec![bearer(CONFIGURED_CLIENT_ID)],
+            vec![("x-api-key", CONFIGURED_CLIENT_ID.to_string())],
+            vec![bearer(&format!("{CONFIGURED_CLIENT_ID}."))],
+            vec![bearer(".secret")],
+            vec![bearer("client.secret")],
+            vec![("x-api-key", "not-a-uuid.secret".to_string())],
+        ];
+        for bulk in [false, true] {
+            for headers in &malformed {
+                let context = format!("bulk={bulk} headers={headers:?}");
+                let (app_state, backend) = ofrep_app_with_mock_backend().await;
 
-        let req = actix_test::TestRequest::post()
-            .uri("/ofrep/v1/evaluate/flags")
-            .insert_header(("x-api-key", "client"))
-            .set_json(serde_json::json!({ "context": { "targetingKey": "u1" } }))
-            .to_request();
-        let resp = actix_test::call_service(&service, req).await;
+                let resp = call_routes(app_state, ofrep_request(bulk, headers)).await;
 
-        assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
-        let seen = backend.seen_secrets.lock().unwrap().clone();
-        assert_eq!(seen, vec!["secret".to_string()]);
+                assert_ofrep_auth_error(&resp, "UNAUTHORIZED", &context);
+                assert_eq!(
+                    backend.client_info_calls.load(Ordering::SeqCst),
+                    0,
+                    "{context}"
+                );
+                assert!(backend.seen_secrets.lock().unwrap().is_empty(), "{context}");
+            }
+        }
     }
 
-    /// Send one OFREP request (single flag or bulk) as `client_id` and return
-    /// the response status and body.
-    async fn ofrep_call(
-        app_state: crate::AppState,
-        bulk: bool,
-        client_id: &str,
-    ) -> (actix_web::http::StatusCode, serde_json::Value) {
+    #[actix_web::test]
+    async fn ofrep_wrong_secret_returns_401_without_retry() {
+        for bulk in [false, true] {
+            let (mut app_state, backend) = ofrep_app_with_mock_backend().await;
+            // Retries enabled: an auth error must still be tried only once.
+            app_state.retry_config.max_attempts = 3;
+
+            let key = sdk_key(CONFIGURED_CLIENT_ID, "wrong-secret");
+            let resp = call_routes(app_state, ofrep_request(bulk, &[bearer(&key)])).await;
+
+            assert_ofrep_auth_error(&resp, "UNAUTHORIZED", &format!("bulk={bulk}"));
+            assert_eq!(backend.client_info_calls.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[actix_web::test]
+    async fn ofrep_unknown_client_returns_401() {
+        let (app_state, _backend) = ofrep_app_with_mock_backend().await;
+        let key = sdk_key(OTHER_CLIENT_ID, OTHER_SECRET);
+        let resp = call_routes(app_state, ofrep_request(false, &[bearer(&key)])).await;
+        assert_ofrep_auth_error(&resp, "UNAUTHORIZED", "unknown client");
+    }
+
+    #[actix_web::test]
+    async fn ofrep_wrong_secret_for_cached_client_still_fails() {
+        let (app_state, backend) = ofrep_app_with_mock_backend().await;
         let service = actix_test::init_service(
             App::new()
                 .app_data(web::Data::new(app_state))
-                .route(
-                    "/ofrep/v1/evaluate/flags/{key}",
-                    web::post().to(ofrep_evaluate_flag),
-                )
-                .route(
-                    "/ofrep/v1/evaluate/flags",
-                    web::post().to(ofrep_evaluate_flags_bulk),
-                ),
+                .configure(configure_routes),
         )
         .await;
-        let uri = if bulk {
-            "/ofrep/v1/evaluate/flags"
-        } else {
-            "/ofrep/v1/evaluate/flags/my-flag"
-        };
-        let req = actix_test::TestRequest::post()
-            .uri(uri)
-            .insert_header(("authorization", format!("Bearer {client_id}")))
-            .set_json(serde_json::json!({ "context": { "targetingKey": "u1" } }))
-            .to_request();
+
+        let ok = ofrep_request(false, &[bearer(&configured_sdk_key())]).to_request();
+        let resp = actix_test::call_service(&service, ok).await;
+        assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+
+        let wrong = sdk_key(CONFIGURED_CLIENT_ID, "wrong-secret");
+        let req = ofrep_request(false, &[bearer(&wrong)]).to_request();
         let resp = actix_test::call_service(&service, req).await;
-        let status = resp.status();
-        let body = actix_test::read_body(resp).await;
-        let body = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
-        (status, body)
+        assert_eq!(resp.status(), actix_web::http::StatusCode::UNAUTHORIZED);
+
+        // The good key is served from the cache; the wrong one is not.
+        let ok = ofrep_request(false, &[bearer(&configured_sdk_key())]).to_request();
+        let resp = actix_test::call_service(&service, ok).await;
+        assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+        assert_eq!(backend.client_info_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[actix_web::test]
+    async fn ofrep_auth_failures_are_not_cached() {
+        let (app_state, backend) = ofrep_app_with_mock_backend().await;
+        let mut disabled = MockClient::backend(OTHER_SECRET);
+        disabled.enabled = false;
+        backend.set_client(OTHER_CLIENT_ID, disabled);
+        let service = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(app_state))
+                .configure(configure_routes),
+        )
+        .await;
+        let key = sdk_key(OTHER_CLIENT_ID, OTHER_SECRET);
+
+        let req = ofrep_request(false, &[bearer(&key)]).to_request();
+        let resp = actix_test::call_service(&service, req).await;
+        assert_eq!(resp.status(), actix_web::http::StatusCode::FORBIDDEN);
+
+        // Re-enabled client works at once: the rejection was not cached.
+        backend.set_client(OTHER_CLIENT_ID, MockClient::backend(OTHER_SECRET));
+        let req = ofrep_request(false, &[bearer(&key)]).to_request();
+        let resp = actix_test::call_service(&service, req).await;
+        assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+    }
+
+    #[actix_web::test]
+    async fn ofrep_disabled_client_returns_403() {
+        for bulk in [false, true] {
+            let (app_state, backend) = ofrep_app_with_mock_backend().await;
+            let mut disabled = MockClient::backend(OTHER_SECRET);
+            disabled.enabled = false;
+            backend.set_client(OTHER_CLIENT_ID, disabled);
+
+            let key = sdk_key(OTHER_CLIENT_ID, OTHER_SECRET);
+            let resp = call_routes(app_state, ofrep_request(bulk, &[bearer(&key)])).await;
+
+            assert_ofrep_auth_error(&resp, "FORBIDDEN", &format!("bulk={bulk}"));
+        }
     }
 
     #[actix_web::test]
     async fn ofrep_maps_client_info_failures_to_auth_statuses() {
         use actix_web::http::StatusCode;
         let cases = [
-            (tonic::Code::Unauthenticated, StatusCode::UNAUTHORIZED),
-            (tonic::Code::InvalidArgument, StatusCode::UNAUTHORIZED),
-            (tonic::Code::NotFound, StatusCode::UNAUTHORIZED),
-            (tonic::Code::PermissionDenied, StatusCode::FORBIDDEN),
-            (tonic::Code::Unavailable, StatusCode::BAD_GATEWAY),
-            (tonic::Code::Internal, StatusCode::BAD_GATEWAY),
+            (tonic::Code::Unauthenticated, StatusCode::UNAUTHORIZED, 1),
+            (tonic::Code::InvalidArgument, StatusCode::UNAUTHORIZED, 1),
+            (tonic::Code::NotFound, StatusCode::UNAUTHORIZED, 1),
+            (tonic::Code::PermissionDenied, StatusCode::FORBIDDEN, 1),
+            // Only transient failures are retried, then reported as 502.
+            (tonic::Code::Unavailable, StatusCode::BAD_GATEWAY, 3),
+            (tonic::Code::Internal, StatusCode::BAD_GATEWAY, 3),
         ];
         for bulk in [false, true] {
-            for (code, expected) in cases {
-                let (app_state, backend) = ofrep_app_with_mock_backend().await;
+            for (code, expected, attempts) in cases {
+                let context = format!("bulk={bulk} code={code:?}");
+                let (mut app_state, backend) = ofrep_app_with_mock_backend().await;
+                app_state.retry_config.max_attempts = 2;
                 *backend.client_info_error.lock().unwrap() = Some(code);
 
-                let (status, body) = ofrep_call(app_state, bulk, "client").await;
+                let resp = call_routes(
+                    app_state,
+                    ofrep_request(bulk, &[bearer(&configured_sdk_key())]),
+                )
+                .await;
 
-                assert_eq!(status, expected, "bulk={bulk} code={code:?}");
-                if expected != StatusCode::BAD_GATEWAY {
-                    assert_eq!(
-                        body["errorCode"],
-                        serde_json::json!("GENERAL"),
-                        "bulk={bulk} code={code:?}"
-                    );
+                assert_eq!(resp.status, expected, "{context}");
+                match expected {
+                    StatusCode::UNAUTHORIZED => {
+                        assert_ofrep_auth_error(&resp, "UNAUTHORIZED", &context)
+                    }
+                    StatusCode::FORBIDDEN => assert_ofrep_auth_error(&resp, "FORBIDDEN", &context),
+                    _ => {}
                 }
-                if !bulk && expected != StatusCode::BAD_GATEWAY {
-                    assert_eq!(body["key"], serde_json::json!("my-flag"));
-                }
+                assert_eq!(
+                    backend.client_info_calls.load(Ordering::SeqCst),
+                    attempts,
+                    "{context}"
+                );
             }
         }
     }
 
     #[actix_web::test]
-    async fn ofrep_unknown_client_without_secret_returns_unauthorized() {
-        // Another client ID with no secret: the backend rejects it with
-        // InvalidArgument("client_secret is required").
+    async fn ofrep_feature_fetch_auth_failures_map_to_401_and_403() {
+        use actix_web::http::StatusCode;
+        for (code, expected) in [
+            (tonic::Code::Unauthenticated, Some("UNAUTHORIZED")),
+            (tonic::Code::PermissionDenied, Some("FORBIDDEN")),
+            (tonic::Code::Unavailable, None),
+        ] {
+            let (app_state, backend) = ofrep_app_with_mock_backend().await;
+            *backend.feature_error.lock().unwrap() = Some(code);
+
+            let resp = call_routes(
+                app_state,
+                ofrep_request(false, &[bearer(&configured_sdk_key())]),
+            )
+            .await;
+
+            match expected {
+                Some(error_code) => {
+                    assert_ofrep_auth_error(&resp, error_code, &format!("code={code:?}"))
+                }
+                None => assert_eq!(resp.status, StatusCode::BAD_GATEWAY, "code={code:?}"),
+            }
+        }
+    }
+
+    #[actix_web::test]
+    async fn cors_preflight_allows_request_origin_without_checking_client() {
+        for uri in ["/evaluate", ofrep_uri(true), ofrep_uri(false)] {
+            let (app_state, backend) = ofrep_app_with_mock_backend().await;
+            let req = actix_test::TestRequest::default()
+                .method(actix_web::http::Method::OPTIONS)
+                .uri(uri)
+                .insert_header(("origin", "https://any.example.org"))
+                .insert_header(("access-control-request-method", "POST"))
+                .insert_header(("access-control-request-headers", "authorization"));
+
+            let resp = call_routes(app_state, req).await;
+
+            assert_eq!(
+                resp.status,
+                actix_web::http::StatusCode::NO_CONTENT,
+                "{uri}"
+            );
+            assert_eq!(
+                resp.header("access-control-allow-origin"),
+                Some("https://any.example.org"),
+                "{uri}"
+            );
+            assert_eq!(
+                resp.header("access-control-allow-methods"),
+                Some("POST, OPTIONS"),
+                "{uri}"
+            );
+            assert_eq!(
+                resp.header("access-control-allow-headers"),
+                Some("Authorization, X-API-Key, Content-Type, If-None-Match"),
+                "{uri}"
+            );
+            assert_eq!(resp.header("access-control-max-age"), Some("600"), "{uri}");
+            assert_eq!(resp.header("vary"), Some("Origin"), "{uri}");
+            assert_eq!(backend.client_info_calls.load(Ordering::SeqCst), 0, "{uri}");
+        }
+    }
+
+    /// App state whose backend knows `OTHER_CLIENT_ID` as a Web client
+    /// allowed for `ALLOWED_ORIGIN`, with one cached team flag.
+    async fn web_client_app() -> crate::AppState {
+        let (app_state, backend) = ofrep_app_with_mock_backend().await;
+        backend.set_client(
+            OTHER_CLIENT_ID,
+            MockClient::web(OTHER_SECRET, &[ALLOWED_ORIGIN]),
+        );
+        cache_fetched_feature(&app_state, &team_feature("f-1", "my-flag", "team-1", true)).await;
+        app_state.mapped_cache.run_pending_tasks().await;
+        app_state
+    }
+
+    fn web_client_headers(origin: Option<&str>) -> Vec<(&'static str, String)> {
+        let mut headers = vec![bearer(&sdk_key(OTHER_CLIENT_ID, OTHER_SECRET))];
+        if let Some(origin) = origin {
+            headers.push(("origin", origin.to_string()));
+        }
+        headers
+    }
+
+    #[actix_web::test]
+    async fn ofrep_web_client_allowed_origin_gets_cors_headers() {
+        for bulk in [false, true] {
+            let context = format!("bulk={bulk}");
+            let req = ofrep_request(bulk, &web_client_headers(Some(ALLOWED_ORIGIN)));
+
+            let resp = call_routes(web_client_app().await, req).await;
+
+            assert_eq!(resp.status, actix_web::http::StatusCode::OK, "{context}");
+            assert_eq!(
+                resp.header("access-control-allow-origin"),
+                Some(ALLOWED_ORIGIN),
+                "{context}"
+            );
+            assert_eq!(
+                resp.header("access-control-expose-headers"),
+                Some("ETag"),
+                "{context}"
+            );
+            assert_eq!(resp.header("vary"), Some("Origin"), "{context}");
+            if bulk {
+                assert!(resp.header("etag").is_some(), "bulk response has an ETag");
+            }
+        }
+    }
+
+    #[actix_web::test]
+    async fn ofrep_web_client_not_modified_keeps_cors_headers() {
+        let app_state = web_client_app().await;
+        let service = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(app_state))
+                .configure(configure_routes),
+        )
+        .await;
+        let headers = web_client_headers(Some(ALLOWED_ORIGIN));
+        let resp =
+            actix_test::call_service(&service, ofrep_request(true, &headers).to_request()).await;
+        let etag = resp
+            .headers()
+            .get("etag")
+            .and_then(|value| value.to_str().ok())
+            .expect("ETag")
+            .to_string();
+
+        let req = ofrep_request(true, &headers).insert_header(("if-none-match", etag));
+        let resp = actix_test::call_service(&service, req.to_request()).await;
+
+        assert_eq!(resp.status(), actix_web::http::StatusCode::NOT_MODIFIED);
+        assert_eq!(
+            resp.headers()
+                .get("access-control-allow-origin")
+                .and_then(|value| value.to_str().ok()),
+            Some(ALLOWED_ORIGIN)
+        );
+    }
+
+    #[actix_web::test]
+    async fn ofrep_web_client_disallowed_or_missing_origin_returns_403() {
+        for bulk in [false, true] {
+            for origin in [Some("https://evil.example.org"), None] {
+                let context = format!("bulk={bulk} origin={origin:?}");
+                let req = ofrep_request(bulk, &web_client_headers(origin));
+
+                let resp = call_routes(web_client_app().await, req).await;
+
+                assert_ofrep_auth_error(&resp, "FORBIDDEN", &context);
+                assert!(resp.has_no_cors_headers(), "{context}");
+            }
+        }
+    }
+
+    #[actix_web::test]
+    async fn ofrep_backend_client_gets_no_cors_headers() {
         for bulk in [false, true] {
             let (app_state, _backend) = ofrep_app_with_mock_backend().await;
-            let (status, _) = ofrep_call(app_state, bulk, "other-client").await;
-            assert_eq!(
-                status,
-                actix_web::http::StatusCode::UNAUTHORIZED,
-                "bulk={bulk}"
+            let req = ofrep_request(
+                bulk,
+                &[
+                    bearer(&configured_sdk_key()),
+                    ("origin", ALLOWED_ORIGIN.to_string()),
+                ],
             );
+
+            let resp = call_routes(app_state, req).await;
+
+            assert_eq!(resp.status, actix_web::http::StatusCode::OK, "bulk={bulk}");
+            assert!(resp.has_no_cors_headers(), "bulk={bulk}");
         }
+    }
+
+    fn evaluate_request(origin: Option<&str>) -> actix_test::TestRequest {
+        let req = actix_test::TestRequest::post()
+            .uri("/evaluate")
+            .set_json(serde_json::json!({
+                "flagKey": "my-flag",
+                "context": { "bucketingKey": "u1" }
+            }));
+        match origin {
+            Some(origin) => req.insert_header(("origin", origin)),
+            None => req,
+        }
+    }
+
+    #[actix_web::test]
+    async fn evaluate_applies_cors_rules_of_configured_client() {
+        use actix_web::http::StatusCode;
+
+        // Configured client is a Web client.
+        let (app_state, backend) = ofrep_app_with_mock_backend().await;
+        backend.set_client(
+            CONFIGURED_CLIENT_ID,
+            MockClient::web(CONFIGURED_SECRET, &[ALLOWED_ORIGIN]),
+        );
+        let resp = call_routes(app_state.clone(), evaluate_request(Some(ALLOWED_ORIGIN))).await;
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(resp.body["value"], serde_json::json!(true));
+        assert_eq!(
+            resp.header("access-control-allow-origin"),
+            Some(ALLOWED_ORIGIN)
+        );
+        assert_eq!(resp.header("access-control-expose-headers"), Some("ETag"));
+        assert_eq!(resp.header("vary"), Some("Origin"));
+
+        for origin in [Some("https://evil.example.org"), None] {
+            let resp = call_routes(app_state.clone(), evaluate_request(origin)).await;
+            assert_eq!(resp.status, StatusCode::FORBIDDEN, "origin={origin:?}");
+            assert_eq!(resp.body["error"], serde_json::json!("FORBIDDEN"));
+            assert!(resp.has_no_cors_headers(), "origin={origin:?}");
+        }
+
+        // Configured client is a Backend client: served, no CORS headers.
+        let (app_state, _backend) = ofrep_app_with_mock_backend().await;
+        let resp = call_routes(app_state, evaluate_request(Some(ALLOWED_ORIGIN))).await;
+        assert_eq!(resp.status, StatusCode::OK);
+        assert!(resp.has_no_cors_headers());
     }
 
     #[actix_web::test]
@@ -1967,7 +2614,7 @@ mod tests {
             .await;
         let req = actix_test::TestRequest::post()
             .uri("/ofrep/v1/evaluate/flags")
-            .insert_header(("x-api-key", "client"))
+            .insert_header(("x-api-key", configured_sdk_key()))
             .set_json(serde_json::json!({ "context": { "targetingKey": "u1" } }))
             .to_request();
         let resp = actix_test::call_service(&service, req).await;
@@ -2006,7 +2653,7 @@ mod tests {
             .await;
         let req = actix_test::TestRequest::post()
             .uri("/ofrep/v1/evaluate/flags/foreign-flag")
-            .insert_header(("authorization", "Bearer client"))
+            .insert_header(("authorization", format!("Bearer {}", configured_sdk_key())))
             .set_json(serde_json::json!({ "context": { "targetingKey": "u1" } }))
             .to_request();
         let resp = actix_test::call_service(&service, req).await;
@@ -2036,7 +2683,7 @@ mod tests {
             .await;
         let req = actix_test::TestRequest::post()
             .uri("/ofrep/v1/evaluate/flags/checkout")
-            .insert_header(("authorization", "Bearer client"))
+            .insert_header(("authorization", format!("Bearer {}", configured_sdk_key())))
             .set_json(serde_json::json!({ "context": { "targetingKey": "u1" } }))
             .to_request();
         let resp = actix_test::call_service(&service, req).await;
@@ -2061,7 +2708,7 @@ mod tests {
         .await;
         let req = actix_test::TestRequest::post()
             .uri("/ofrep/v1/evaluate/flags/my-flag")
-            .insert_header(("authorization", "Bearer client"))
+            .insert_header(("authorization", format!("Bearer {}", configured_sdk_key())))
             .set_json(serde_json::json!({ "context": { "targetingKey": "u1" } }))
             .to_request();
         let resp = actix_test::call_service(&service, req).await;
@@ -2100,7 +2747,7 @@ mod tests {
 
         let req = actix_test::TestRequest::post()
             .uri("/ofrep/v1/evaluate/flags/my-flag")
-            .insert_header(("authorization", "Bearer client"))
+            .insert_header(("authorization", format!("Bearer {}", configured_sdk_key())))
             .set_json(serde_json::json!({ "context": { "targetingKey": "u1" } }))
             .to_request();
         let resp = actix_test::call_service(&service, req).await;
@@ -2108,7 +2755,7 @@ mod tests {
 
         let req = actix_test::TestRequest::post()
             .uri("/ofrep/v1/evaluate/flags/missing-flag")
-            .insert_header(("authorization", "Bearer client"))
+            .insert_header(("authorization", format!("Bearer {}", configured_sdk_key())))
             .set_json(serde_json::json!({ "context": { "targetingKey": "u1" } }))
             .to_request();
         let resp = actix_test::call_service(&service, req).await;
@@ -2162,7 +2809,7 @@ mod tests {
     ) -> actix_test::TestRequest {
         let req = actix_test::TestRequest::post()
             .uri("/ofrep/v1/evaluate/flags")
-            .insert_header(("x-api-key", "client"))
+            .insert_header(("x-api-key", configured_sdk_key()))
             .set_json(serde_json::json!({ "context": context }));
         match if_none_match {
             Some(value) => req.insert_header(("if-none-match", value)),
@@ -2429,7 +3076,7 @@ mod tests {
                 actix_test::call_and_read_body_json(&service, req).await;
             let req = actix_test::TestRequest::post()
                 .uri("/ofrep/v1/evaluate/flags/sticky")
-                .insert_header(("x-api-key", "client"))
+                .insert_header(("x-api-key", configured_sdk_key()))
                 .set_json(serde_json::json!({ "context": { "targetingKey": "u1" } }))
                 .to_request();
             let ofrep: serde_json::Value = actix_test::call_and_read_body_json(&service, req).await;

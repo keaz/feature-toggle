@@ -16,7 +16,7 @@ import {Counter, Rate, Trend} from 'k6/metrics';
 //
 // Usage:
 //   k6 run --env LOAD_TIER=1x tests/load_test.js
-//   k6 run --env LOAD_TIER=1x --env CLIENT_ID=your-client-id tests/load_test.js
+//   k6 run --env LOAD_TIER=1x --env SDK_KEY=<clientId>.<apiKey> tests/load_test.js
 // ============================================================================
 
 // Custom metrics
@@ -39,7 +39,7 @@ const baseUrl = __ENV.BASE_URL || 'http://localhost:8081';
 
 // Client authentication (from environment or defaults)
 // Get these from: node populate_test_data.js output or database
-const clientId = __ENV.CLIENT_ID || '';
+const sdkKey = __ENV.SDK_KEY || ''; // <clientId>.<apiKey>
 const clientSecret = __ENV.CLIENT_SECRET || '';
 
 // Test options
@@ -111,7 +111,7 @@ const formatLatencyUs = (ms) => `${toMicroseconds(ms).toFixed(0)}us`;
 const formatLatencyUsWithMs = (ms) => `${formatLatencyUs(ms)} (${ms.toFixed(2)}ms)`;
 
 export function setup() {
-    const authMethod = clientId ? `Bearer token (${clientId.substring(0, 8)}...)` : 'Default (edge server credentials)';
+    const authMethod = sdkKey ? `SDK key (client ${sdkKey.substring(0, 8)}...)` : 'MISSING (set SDK_KEY, requests get 401)';
 
     console.log(`
 ╔══════════════════════════════════════════════════════════════╗
@@ -136,8 +136,8 @@ SETUP:
 
     // Warm-up request
     const headers = { 'Content-Type': 'application/json' };
-    if (clientId) {
-        headers['Authorization'] = `Bearer ${clientId}`;
+    if (sdkKey) {
+        headers['Authorization'] = `Bearer ${sdkKey}`;
     }
 
     const warmupRes = http.post(`${baseUrl}/ofrep/v1/evaluate/flags/NewCheckoutFlow`, JSON.stringify({
@@ -149,7 +149,7 @@ SETUP:
 
     console.log(`Warm-up response: ${warmupRes.status}`);
 
-    return { baseUrl, clientId };
+    return { baseUrl, sdkKey };
 }
 
 export default function (data) {
@@ -174,8 +174,8 @@ export default function (data) {
     };
 
     // Add authentication if client ID is provided
-    if (data.clientId) {
-        headers['Authorization'] = `Bearer ${data.clientId}`;
+    if (data.sdkKey) {
+        headers['Authorization'] = `Bearer ${data.sdkKey}`;
     }
 
     const params = {

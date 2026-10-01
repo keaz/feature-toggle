@@ -1227,6 +1227,7 @@ dependencies = [
  "tracing",
  "utoipa 4.2.3",
  "utoipa-swagger-ui 7.1.0",
+ "uuid",
 ]
 
 [[package]]
