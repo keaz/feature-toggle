@@ -49,7 +49,7 @@ Docker: `make up` / `make down` / `make logs-backend`; image builds via `make bu
 
 ## Key gotchas
 
-- **SQLx offline cache**: backend uses `sqlx::query!` macros. Docker builds and contract scripts compile with `SQLX_OFFLINE=true` against `feature-toggle-backend/.sqlx/`. After adding or changing a checked query, regenerate it with `cargo sqlx prepare` (run in `feature-toggle-backend/` with `DATABASE_URL` set) and commit the `.sqlx` changes, or Docker builds break.
+- **SQLx offline cache**: backend uses `sqlx::query!` macros. Docker builds and contract scripts compile with `SQLX_OFFLINE=true` against `feature-toggle-backend/.sqlx/`. After adding or changing a checked query, regenerate it with `cargo sqlx prepare -- --all-targets` (run in `feature-toggle-backend/` with `DATABASE_URL` set) and commit the `.sqlx` changes, or Docker builds break. Keep `-- --all-targets`: the cache also covers queries in unit and integration tests, so `SQLX_OFFLINE=true cargo clippy --all-targets` works, and a plain `cargo sqlx prepare` deletes those entries as unused.
 - **DB tests depend on seed data**: tests in `feature-toggle-backend/tests/database/` (wired through `tests/integration_test.rs` → `mod database;`) use hard-coded UUIDs from `init.sql`. Run migrations and then `init.sql` before running them.
 - **Migrations**: add new files to `feature-toggle-backend/migrations/` with a timestamp prefix. Never edit an applied migration. `init.sql` holds seed fixtures only, not schema.
 - **Contract compatibility**: changes to REST DTOs/OpenAPI or `proto/evaluation.proto` change contract hashes. `contract_compatibility_test` fails until the baseline is updated on purpose.

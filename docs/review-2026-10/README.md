@@ -20,7 +20,7 @@ Review of `feature-toggle-backend/`, `feature-edge-server/` and `evaluation-engi
    ./scripts/check-contract-compat.sh        # only if REST DTOs or proto changed
    ```
 8. **Repo gotchas** (details in `/CLAUDE.md`):
-   - New or changed `sqlx::query!`/`query_as!`: run `cargo sqlx prepare` in `feature-toggle-backend/` and commit `.sqlx/`.
+   - New or changed `sqlx::query!`/`query_as!`: run `cargo sqlx prepare -- --all-targets` in `feature-toggle-backend/` and commit `.sqlx/` (a plain `cargo sqlx prepare` deletes the test-only entries).
    - Never edit an applied migration. Add a new timestamped one.
    - Any write that changes evaluable feature state must send a `FeatureUpdate` on the broadcast channel.
    - After changing code, run `graphify update .`.

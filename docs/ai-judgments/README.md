@@ -35,7 +35,7 @@ Features:
      ```
 8. **Repo gotchas:**
    - Never edit an applied migration. Add a new timestamped one: `migrations/YYYYMMDDHHMMSS_name.sql`, later than every existing file.
-   - Prefer runtime `sqlx::query(...)`. If you add a `query!`/`query_as!` macro, run `cargo sqlx prepare` in `feature-toggle-backend/` and commit `.sqlx/`.
+   - Prefer runtime `sqlx::query(...)`. If you add a `query!`/`query_as!` macro, run `cargo sqlx prepare -- --all-targets` in `feature-toggle-backend/` and commit `.sqlx/`.
    - New REST endpoints and DTO fields: register them in `ApiDoc` (`rest/mod.rs`). Then run `scripts/export-contracts.sh` and copy `contracts/generated/contract-hashes.json` to `contracts/baseline/`. Say so in the PR.
    - Adding a field to `model::Feature` breaks struct literals in many tests. Fix them all in the same change.
    - The UI fails tests on raw Tailwind palette classes or hex colors (`__tests__/designTokenGuard.test.ts`). Use token classes such as `bg-warning/10` or `text-destructive`.
