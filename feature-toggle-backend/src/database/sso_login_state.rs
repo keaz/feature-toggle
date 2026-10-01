@@ -8,7 +8,8 @@ use mockall::automock;
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
-#[derive(Debug, Clone)]
+/// `Debug` redacts the nonce and PKCE verifier.
+#[derive(Clone)]
 pub struct NewSsoLoginState {
     /// SHA-256 hash of the `state` parameter.
     pub state_hash: String,
@@ -17,6 +18,18 @@ pub struct NewSsoLoginState {
     pub pkce_verifier: String,
     pub redirect_path: Option<String>,
     pub expires_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for NewSsoLoginState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NewSsoLoginState")
+            .field("provider_id", &self.provider_id)
+            .field("nonce", &"<redacted>")
+            .field("pkce_verifier", &"<redacted>")
+            .field("redirect_path", &self.redirect_path)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 #[automock]
@@ -44,6 +57,10 @@ pub trait SsoLoginStateRepositoryTx: SsoLoginStateRepository {
         conn: &mut PgConnection,
         input: NewSsoLoginState,
     ) -> Result<SsoLoginState, Error>;
+    /// Consumes the state inside the caller's transaction. If that transaction rolls
+    /// back, the state is back and can be replayed: the login callback must use
+    /// [`SsoLoginStateRepository::consume_state`] (its own committed statement)
+    /// instead.
     async fn consume_state_tx(
         &self,
         conn: &mut PgConnection,

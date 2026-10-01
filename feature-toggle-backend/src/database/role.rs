@@ -189,16 +189,10 @@ impl RoleRepository for RoleRepositoryImpl {
     }
 
     async fn delete_role(&self, id: Uuid) -> Result<(), Error> {
-        let result = sqlx::query("DELETE FROM roles WHERE id = $1")
-            .bind(id)
-            .execute(&self.pool)
-            .await;
-
-        let res = handle_error(Some(id), result)?;
-        if res.rows_affected() == 0 {
-            return Err(Error::NotFound(id));
-        }
-
+        // One transaction, so the role and its SSO group mappings go together.
+        let mut tx = self.pool.begin().await.map_err(Error::DatabaseError)?;
+        Self::delete_role_internal(&mut tx, id).await?;
+        tx.commit().await.map_err(Error::DatabaseError)?;
         Ok(())
     }
 
@@ -388,6 +382,15 @@ impl RoleRepositoryImpl {
     }
 
     async fn delete_role_internal(conn: &mut PgConnection, id: Uuid) -> Result<(), Error> {
+        // sso_group_mappings.target_id is polymorphic (no FK): remove the role's
+        // mappings explicitly so none is left pointing at a deleted role.
+        sqlx::query!(
+            "DELETE FROM sso_group_mappings WHERE target_type = 'role' AND target_id = $1",
+            id
+        )
+        .execute(&mut *conn)
+        .await
+        .map_err(Error::DatabaseError)?;
         let result = sqlx::query("DELETE FROM roles WHERE id = $1")
             .bind(id)
             .execute(&mut *conn)

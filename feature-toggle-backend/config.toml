@@ -10,6 +10,13 @@ http_addr = "0.0.0.0:8080"
 # Address that the gRPC server binds to
 grpc_addr = "0.0.0.0:50051"
 
+# Public base URL of this backend as browsers and identity providers reach it
+# (optional). SSO callbacks go to <public_base_url>/api/v1/auth/sso/<slug>/callback,
+# which must be registered as a redirect URI at the identity provider. When unset,
+# it is derived from each request (scheme and host, including Forwarded /
+# X-Forwarded-* headers); set it explicitly in production behind a proxy.
+#public_base_url = "https://fluxgate.example.com"
+
 # Session token lifetimes (optional section; these are the defaults).
 # Access tokens (JWT) are short-lived; clients renew them with the rotating
 # refresh token returned by POST /api/v1/auth/login and POST /api/v1/auth/refresh.

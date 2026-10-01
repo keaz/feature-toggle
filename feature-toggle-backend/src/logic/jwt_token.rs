@@ -10,8 +10,8 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-/// Tokens issued for a session, by login or by a refresh.
-#[derive(Clone, Debug)]
+/// Tokens issued for a session, by login or by a refresh. `Debug` redacts the tokens.
+#[derive(Clone)]
 pub struct LoginResult {
     pub user: ApiUser,
     pub token: String,
@@ -20,6 +20,18 @@ pub struct LoginResult {
     pub refresh_token: String,
     /// Access token lifetime in seconds.
     pub expires_in: i64,
+}
+
+impl std::fmt::Debug for LoginResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoginResult")
+            .field("user", &self.user)
+            .field("token", &"<redacted>")
+            .field("is_temporary", &self.is_temporary)
+            .field("refresh_token", &"<redacted>")
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
 }
 
 /// A freshly signed access token together with the values to persist for it.
@@ -67,7 +79,14 @@ pub(crate) fn generate_refresh_token() -> (String, String) {
 
 #[async_trait::async_trait]
 pub trait JwtTokenLogic: Send + Sync {
+    /// Password login: [`JwtTokenLogic::authenticate`] then [`JwtTokenLogic::issue_session`].
     async fn login_user(&self, username: String, password: String) -> Result<LoginResult, Error>;
+    /// Verifies username and password (and that the account is enabled) without
+    /// issuing tokens.
+    async fn authenticate(&self, username: String, password: String) -> Result<ApiUser, Error>;
+    /// Starts a new session for an already authenticated user: signs an access
+    /// token and stores it with a new refresh-token family (see `store_session_tx`).
+    async fn issue_session(&self, user: ApiUser) -> Result<LoginResult, Error>;
     async fn logout_user(&self, user_id: Uuid) -> Result<u64, Error>;
     /// Revokes the whole family of `refresh_token` if it belongs to `user_id`.
     async fn revoke_refresh_token_family(
@@ -126,12 +145,15 @@ struct JwtTokenLogicImpl {
 #[async_trait::async_trait]
 impl JwtTokenLogic for JwtTokenLogicImpl {
     async fn login_user(&self, username: String, password: String) -> Result<LoginResult, Error> {
-        // Authenticate user
-        let user = self
-            .user_logic
-            .authenticate_user(username, password)
-            .await?;
+        let user = self.authenticate(username, password).await?;
+        self.issue_session(user).await
+    }
 
+    async fn authenticate(&self, username: String, password: String) -> Result<ApiUser, Error> {
+        self.user_logic.authenticate_user(username, password).await
+    }
+
+    async fn issue_session(&self, user: ApiUser) -> Result<LoginResult, Error> {
         // Fetch user roles
         let user_id = Uuid::try_from(user.id.clone())
             .map_err(|e| Error::InvalidInput(format!("Invalid user ID: {}", e)))?;

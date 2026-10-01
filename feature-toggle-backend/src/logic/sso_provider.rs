@@ -8,6 +8,7 @@
 
 use crate::Error;
 use crate::database::entity::SsoProvider;
+use crate::logic::oidc_http::{FetchError, get_json};
 use crate::logic::secret_box::{SecretBox, SecretBoxError};
 use serde::Deserialize;
 use std::time::Duration;
@@ -369,7 +370,8 @@ struct DiscoveryDocument {
     jwks_uri: Option<String>,
 }
 
-fn same_issuer(a: &str, b: &str) -> bool {
+/// Issuer URLs compare equal ignoring trailing slashes.
+pub(crate) fn same_issuer(a: &str, b: &str) -> bool {
     a.trim_end_matches('/') == b.trim_end_matches('/')
 }
 
@@ -409,21 +411,9 @@ async fn run_discovery_test(
         .map_err(|_| "Could not create HTTP client".to_string())?;
 
     let discovery_endpoint = discovery_url(issuer_url);
-    let response = client
-        .get(&discovery_endpoint)
-        .send()
+    let document: DiscoveryDocument = get_json(&client, &discovery_endpoint)
         .await
-        .map_err(|err| format!("Could not reach discovery endpoint: {}", describe(&err)))?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "Discovery endpoint returned HTTP {}",
-            response.status().as_u16()
-        ));
-    }
-    let document: DiscoveryDocument = response
-        .json()
-        .await
-        .map_err(|_| "Discovery document is not valid JSON".to_string())?;
+        .map_err(|err| describe("Discovery", err))?;
 
     result.issuer = document.issuer.clone();
     result.authorization_endpoint = document.authorization_endpoint.clone();
@@ -444,35 +434,32 @@ async fn run_discovery_test(
         .jwks_uri
         .ok_or_else(|| "Discovery document has no jwks_uri".to_string())?;
 
-    let jwks_response = client
-        .get(&jwks_uri)
-        .send()
+    let jwks: serde_json::Value = get_json(&client, &jwks_uri)
         .await
-        .map_err(|err| format!("Could not reach JWKS endpoint: {}", describe(&err)))?;
-    if !jwks_response.status().is_success() {
-        return Err(format!(
-            "JWKS endpoint returned HTTP {}",
-            jwks_response.status().as_u16()
-        ));
-    }
-    let jwks: serde_json::Value = jwks_response
-        .json()
-        .await
-        .map_err(|_| "JWKS response is not valid JSON".to_string())?;
+        .map_err(|err| describe("JWKS", err))?;
     match jwks.get("keys").and_then(|keys| keys.as_array()) {
         Some(keys) if !keys.is_empty() => Ok(()),
         _ => Err("JWKS response contains no keys".to_string()),
     }
 }
 
-/// Short, URL-free description of a transport error.
-fn describe(err: &reqwest::Error) -> &'static str {
-    if err.is_timeout() {
-        "timed out"
-    } else if err.is_connect() {
-        "connection failed"
-    } else {
-        "request failed"
+/// Short, URL-free description of a failed discovery or JWKS request.
+fn describe(what: &str, err: FetchError) -> String {
+    match err {
+        FetchError::Status(code) => format!("{what} endpoint returned HTTP {code}"),
+        FetchError::InvalidJson if what == "Discovery" => {
+            "Discovery document is not valid JSON".to_string()
+        }
+        FetchError::InvalidJson => format!("{what} response is not valid JSON"),
+        FetchError::TooLarge => format!("{what} response exceeds 1 MiB"),
+        other => {
+            let name = if what == "Discovery" {
+                "discovery"
+            } else {
+                what
+            };
+            format!("Could not reach {name} endpoint: {other}")
+        }
     }
 }
 

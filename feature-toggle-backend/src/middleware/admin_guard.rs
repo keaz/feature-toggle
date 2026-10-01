@@ -340,6 +340,34 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn blocks_sso_login_routes_when_no_admin() {
+        let pool = test_pool();
+        let state = AdminState::new();
+        state.set_exists(false);
+        let ok = || async { HttpResponse::Ok().finish() };
+
+        let app = test::init_service(
+            App::new()
+                .wrap(AdminGuard::new(pool, "http://ui".to_string(), state))
+                .route("/api/v1/auth/sso/{slug}/authorize", web::get().to(ok))
+                .route("/api/v1/auth/sso/{slug}/callback", web::get().to(ok))
+                .route("/api/v1/auth/sso/exchange", web::post().to(ok)),
+        )
+        .await;
+
+        for req in [
+            test::TestRequest::get().uri("/api/v1/auth/sso/okta/authorize"),
+            test::TestRequest::get().uri("/api/v1/auth/sso/okta/callback"),
+            test::TestRequest::post().uri("/api/v1/auth/sso/exchange"),
+        ] {
+            let resp = test::call_service(&app, req.to_request()).await;
+            assert_eq!(resp.status(), actix_web::http::StatusCode::UNAUTHORIZED);
+            let body: serde_json::Value = test::read_body_json(resp).await;
+            assert_eq!(body["error"], "admin_account_missing");
+        }
+    }
+
+    #[actix_web::test]
     async fn allows_application_status_query_when_no_admin() {
         let pool = test_pool();
         let state = AdminState::new();

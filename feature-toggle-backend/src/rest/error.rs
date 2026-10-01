@@ -65,6 +65,10 @@ pub enum RestError {
     InvalidRefreshToken { message: String },
     #[error("Refresh token reused")]
     RefreshTokenReused { message: String },
+    #[error("SSO required")]
+    SsoRequired { message: String },
+    #[error("Invalid SSO code")]
+    InvalidSsoCode { message: String },
     #[error("Forbidden")]
     Forbidden {
         message: String,
@@ -173,6 +177,21 @@ impl RestError {
         }
     }
 
+    /// 403 `sso_required`: password login is disabled for non-admin users while
+    /// SSO is enforced.
+    pub fn sso_required() -> Self {
+        Self::SsoRequired {
+            message: "Sign in with single sign-on".to_string(),
+        }
+    }
+
+    /// 401 `invalid_sso_code`: the one-time SSO code is unknown, expired or used.
+    pub fn invalid_sso_code() -> Self {
+        Self::InvalidSsoCode {
+            message: "SSO login code is invalid or expired".to_string(),
+        }
+    }
+
     pub fn forbidden(message: impl Into<String>) -> Self {
         Self::Forbidden {
             message: message.into(),
@@ -212,6 +231,8 @@ impl RestError {
             Self::SsoUserNoLocalPassword { .. } => "sso_user_no_local_password",
             Self::InvalidRefreshToken { .. } => "invalid_refresh_token",
             Self::RefreshTokenReused { .. } => "refresh_token_reused",
+            Self::SsoRequired { .. } => "sso_required",
+            Self::InvalidSsoCode { .. } => "invalid_sso_code",
             Self::Forbidden { .. } => "forbidden",
             Self::Internal { .. } => "internal",
         }
@@ -232,7 +253,9 @@ impl RestError {
             | Self::EncryptionKeyMissing { message }
             | Self::SsoUserNoLocalPassword { message }
             | Self::InvalidRefreshToken { message }
-            | Self::RefreshTokenReused { message } => message,
+            | Self::RefreshTokenReused { message }
+            | Self::SsoRequired { message }
+            | Self::InvalidSsoCode { message } => message,
         }
     }
 
@@ -251,7 +274,9 @@ impl RestError {
             | Self::SsoUserNoLocalPassword { .. }
             | Self::EncryptionKeyMissing { .. }
             | Self::InvalidRefreshToken { .. }
-            | Self::RefreshTokenReused { .. } => None,
+            | Self::RefreshTokenReused { .. }
+            | Self::SsoRequired { .. }
+            | Self::InvalidSsoCode { .. } => None,
         }
     }
 
@@ -270,7 +295,9 @@ impl RestError {
             | Self::SsoUserNoLocalPassword { .. }
             | Self::EncryptionKeyMissing { .. }
             | Self::InvalidRefreshToken { .. }
-            | Self::RefreshTokenReused { .. } => None,
+            | Self::RefreshTokenReused { .. }
+            | Self::SsoRequired { .. }
+            | Self::InvalidSsoCode { .. } => None,
         }
     }
 
@@ -297,8 +324,11 @@ impl ResponseError for RestError {
             Self::Unauthorized { .. }
             | Self::AccountDisabled { .. }
             | Self::InvalidRefreshToken { .. }
-            | Self::RefreshTokenReused { .. } => StatusCode::UNAUTHORIZED,
-            Self::Forbidden { .. } | Self::SelfApprovalNotAllowed { .. } => StatusCode::FORBIDDEN,
+            | Self::RefreshTokenReused { .. }
+            | Self::InvalidSsoCode { .. } => StatusCode::UNAUTHORIZED,
+            Self::Forbidden { .. }
+            | Self::SelfApprovalNotAllowed { .. }
+            | Self::SsoRequired { .. } => StatusCode::FORBIDDEN,
             Self::Internal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }

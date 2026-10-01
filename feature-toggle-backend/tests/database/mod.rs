@@ -16,6 +16,7 @@ mod pipeline_test;
 mod refresh_token_test;
 mod self_approval_test;
 mod sso_admin_test;
+mod sso_login_test;
 mod sso_test;
 mod stage_contexts_test;
 mod system_client_admin_test;

@@ -67,6 +67,9 @@ pub mod activity_types {
     pub const SSO_PROVIDER_DELETED: &str = "sso_provider_deleted";
     pub const SSO_MAPPINGS_UPDATED: &str = "sso_mappings_updated";
     pub const SSO_SETTINGS_UPDATED: &str = "sso_settings_updated";
+    pub const SSO_LOGIN: &str = "sso_login";
+    pub const SSO_USER_PROVISIONED: &str = "sso_user_provisioned";
+    pub const SSO_IDENTITY_LINKED: &str = "sso_identity_linked";
 
     // Approval policy activities
     pub const APPROVAL_POLICY_CREATED: &str = "approval_policy_created";

@@ -495,7 +495,8 @@ pub struct JwtSecret {
 
 /// OIDC identity provider configuration. `client_secret_enc` holds the
 /// AES-256-GCM encrypted secret (`base64(nonce || ciphertext)`), never plaintext.
-#[derive(Debug, Clone, sqlx::FromRow)]
+/// `Debug` shows only whether a secret is stored.
+#[derive(Clone, sqlx::FromRow)]
 pub struct SsoProvider {
     pub id: Uuid,
     pub slug: String,
@@ -512,6 +513,31 @@ pub struct SsoProvider {
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for SsoProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SsoProvider")
+            .field("id", &self.id)
+            .field("slug", &self.slug)
+            .field("display_name", &self.display_name)
+            .field("issuer_url", &self.issuer_url)
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret_enc",
+                &self.client_secret_enc.as_ref().map(|_| "<redacted>"),
+            )
+            .field("scopes", &self.scopes)
+            .field("groups_claim", &self.groups_claim)
+            .field("allowed_email_domains", &self.allowed_email_domains)
+            .field("jit_provisioning", &self.jit_provisioning)
+            .field("allow_email_linking", &self.allow_email_linking)
+            .field("role_sync_mode", &self.role_sync_mode)
+            .field("enabled", &self.enabled)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
 }
 
 /// A user's account at an identity provider, matched by `(provider_id, subject)`.
@@ -547,8 +573,9 @@ pub struct SsoGroupMapping {
     pub target_id: Option<Uuid>,
 }
 
-/// An authorization request in flight. Single use and short lived.
-#[derive(Debug, Clone, sqlx::FromRow)]
+/// An authorization request in flight. Single use and short lived. `Debug`
+/// redacts the nonce and PKCE verifier.
+#[derive(Clone, sqlx::FromRow)]
 pub struct SsoLoginState {
     pub id: Uuid,
     pub state_hash: String,
@@ -558,6 +585,20 @@ pub struct SsoLoginState {
     pub redirect_path: Option<String>,
     pub expires_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for SsoLoginState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SsoLoginState")
+            .field("id", &self.id)
+            .field("provider_id", &self.provider_id)
+            .field("nonce", &"<redacted>")
+            .field("pkce_verifier", &"<redacted>")
+            .field("redirect_path", &self.redirect_path)
+            .field("expires_at", &self.expires_at)
+            .field("created_at", &self.created_at)
+            .finish()
+    }
 }
 
 /// One-time code exchanged by the UI for a FluxGate session. Only its hash is stored.

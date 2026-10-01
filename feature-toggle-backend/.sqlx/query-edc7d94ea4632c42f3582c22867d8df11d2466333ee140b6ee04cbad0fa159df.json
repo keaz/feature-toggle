@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM sso_group_mappings WHERE target_type = 'role' AND target_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "edc7d94ea4632c42f3582c22867d8df11d2466333ee140b6ee04cbad0fa159df"
+}

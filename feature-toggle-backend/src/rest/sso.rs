@@ -75,8 +75,8 @@ impl From<SsoProvider> for SsoProviderResponse {
 }
 
 /// Provider fields for create (`slug`, `displayName`, `issuerUrl`, `clientId` required)
-/// and, with every field optional, for PATCH.
-#[derive(Debug, Deserialize, ToSchema)]
+/// and, with every field optional, for PATCH. `Debug` redacts the client secret.
+#[derive(Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SsoProviderInput {
     pub slug: Option<String>,
@@ -92,6 +92,28 @@ pub struct SsoProviderInput {
     pub allow_email_linking: Option<bool>,
     pub role_sync_mode: Option<String>,
     pub enabled: Option<bool>,
+}
+
+impl std::fmt::Debug for SsoProviderInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SsoProviderInput")
+            .field("slug", &self.slug)
+            .field("display_name", &self.display_name)
+            .field("issuer_url", &self.issuer_url)
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .field("scopes", &self.scopes)
+            .field("groups_claim", &self.groups_claim)
+            .field("allowed_email_domains", &self.allowed_email_domains)
+            .field("jit_provisioning", &self.jit_provisioning)
+            .field("allow_email_linking", &self.allow_email_linking)
+            .field("role_sync_mode", &self.role_sync_mode)
+            .field("enabled", &self.enabled)
+            .finish()
+    }
 }
 
 impl SsoProviderInput {

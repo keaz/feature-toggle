@@ -18,6 +18,7 @@ pub mod role;
 pub mod rollout_template;
 pub mod serde;
 pub mod sso;
+pub mod sso_auth;
 pub mod stream;
 pub mod system_client;
 pub mod team;
@@ -121,6 +122,7 @@ use crate::rest::sso::{
     PublicSsoProviderResponse, SsoGroupMappingInput, SsoGroupMappingResponse, SsoProviderInput,
     SsoProviderResponse, SsoProviderTestResponse, SsoSettingsBody,
 };
+use crate::rest::sso_auth::SsoExchangeRequest;
 use crate::rest::system_client::{
     CreateSystemClientRequest, CreateSystemClientTokenRequest, SystemClientListQuery,
     SystemClientResponse, SystemClientTokenResponse, SystemClientTokensResponse,
@@ -227,6 +229,9 @@ async fn health() -> impl Responder {
         auth::set_temporary_password,
         auth::auth_status,
         sso::list_public_sso_providers,
+        sso_auth::sso_authorize,
+        sso_auth::sso_callback,
+        sso_auth::sso_exchange,
         sso::list_sso_providers,
         sso::create_sso_provider,
         sso::get_sso_provider,
@@ -406,6 +411,7 @@ async fn health() -> impl Responder {
         SsoGroupMappingInput,
         SsoSettingsBody,
         PublicSsoProviderResponse,
+        SsoExchangeRequest,
         JwtSecretResponse,
         StageCriterionResponse,
         VariantAllocationResponse,
@@ -519,6 +525,9 @@ fn is_public_operation(path: &str, method: &str) -> bool {
             | ("/api/v1/auth/refresh", "POST")
             | ("/api/v1/auth/status", "GET")
             | ("/api/v1/auth/sso/providers", "GET")
+            | ("/api/v1/auth/sso/{slug}/authorize", "GET")
+            | ("/api/v1/auth/sso/{slug}/callback", "GET")
+            | ("/api/v1/auth/sso/exchange", "POST")
             | ("/api/v1/admins", "POST")
     )
 }
@@ -633,6 +642,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .configure(user::configure)
             .configure(auth::configure)
             .configure(sso::configure)
+            .configure(sso_auth::configure)
             .configure(jwt_secret::configure)
             .configure(notification::configure)
             .configure(operational_safety::configure)

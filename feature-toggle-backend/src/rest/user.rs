@@ -43,7 +43,7 @@ pub struct UserResponse {
     pub is_temporary_password: bool,
     pub team_ids: Option<Vec<String>>,
     pub teams: Option<Vec<TeamResponse>>,
-    /// How the account is managed: `local`, `sso` or `system`.
+    /// How the account is managed: `local` or `sso`.
     pub auth_source: String,
     /// Roles the user holds through SSO group sync (not removable by hand).
     pub sso_managed_role_ids: Vec<String>,
@@ -120,7 +120,13 @@ impl UserResponse {
             is_temporary_password: user.is_temporary_password,
             team_ids: None,
             teams: None,
-            auth_source: user.auth_source,
+            // The contract is `local` | `sso`; system-client shadow users are
+            // stored as `system` and reported as `local`.
+            auth_source: if user.auth_source == "sso" {
+                "sso".to_string()
+            } else {
+                "local".to_string()
+            },
             sso_managed_role_ids: Vec::new(),
             sso_managed_team_ids: Vec::new(),
             identities: Vec::new(),
@@ -876,6 +882,15 @@ mod tests {
             last_login: None,
             is_temporary_password: false,
             auth_source: "local".to_string(),
+        }
+    }
+
+    #[actix_web::test]
+    async fn auth_source_is_local_or_sso() {
+        for (stored, reported) in [("local", "local"), ("sso", "sso"), ("system", "local")] {
+            let mut user = sample_user(Uuid::new_v4());
+            user.auth_source = stored.to_string();
+            assert_eq!(UserResponse::from(user).auth_source, reported, "{stored}");
         }
     }
 

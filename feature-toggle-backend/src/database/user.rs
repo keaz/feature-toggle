@@ -59,6 +59,16 @@ pub struct CreateUser {
     pub is_temporary_password: bool,
 }
 
+/// A user created on first SSO login.
+#[derive(Debug, Clone)]
+pub struct CreateSsoUser {
+    pub username: String,
+    pub first_name: String,
+    pub last_name: String,
+    pub email: String,
+    pub last_login: Option<DateTime<Utc>>,
+}
+
 pub struct UpdateUser {
     pub id: Uuid,
     pub first_name: Option<String>,
@@ -164,6 +174,34 @@ pub trait UserRepositoryTx: UserRepository {
         id: Uuid,
         team_ids: Vec<Uuid>,
     ) -> Result<(), Error>;
+    /// The user whose email matches case-insensitively (oldest first if the
+    /// case-sensitive unique constraint lets several differ only in case).
+    async fn find_user_by_email_ci_tx(
+        &self,
+        conn: &mut PgConnection,
+        email: &str,
+    ) -> Result<Option<User>, Error>;
+    /// Whether a username is taken, compared case-insensitively.
+    async fn username_exists_tx(
+        &self,
+        conn: &mut PgConnection,
+        username: &str,
+    ) -> Result<bool, Error>;
+    /// Creates a just-in-time provisioned SSO user: no password,
+    /// `auth_source = 'sso'`, not an admin, no temporary password.
+    async fn create_sso_user_tx(
+        &self,
+        conn: &mut PgConnection,
+        input: CreateSsoUser,
+    ) -> Result<User, Error>;
+    async fn update_last_login_tx(
+        &self,
+        conn: &mut PgConnection,
+        id: Uuid,
+        when: DateTime<Utc>,
+    ) -> Result<(), Error>;
+    /// Whether the user is the shadow user of a system client.
+    async fn is_system_client_tx(&self, conn: &mut PgConnection, id: Uuid) -> Result<bool, Error>;
 }
 
 pub fn user_repository(pool: PgPool) -> Box<dyn UserRepository> {
@@ -866,6 +904,125 @@ impl UserRepositoryTx for UserRepositoryImpl {
         team_ids: Vec<Uuid>,
     ) -> Result<(), Error> {
         Self::remove_sso_user_teams_internal(conn, id, team_ids).await
+    }
+
+    async fn find_user_by_email_ci_tx(
+        &self,
+        conn: &mut PgConnection,
+        email: &str,
+    ) -> Result<Option<User>, Error> {
+        let row = sqlx::query!(
+            r#"SELECT id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, enabled,
+                       created_at, updated_at, last_login, is_temporary_password, auth_source
+                FROM users WHERE lower(email) = lower($1)
+                ORDER BY created_at
+                LIMIT 1"#,
+            email
+        )
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(Error::DatabaseError)?;
+        Ok(row.map(|row| User {
+            id: row.id,
+            username: row.username,
+            password_hash: row.password_hash,
+            first_name: row.first_name,
+            last_name: row.last_name,
+            email: row.email,
+            mobile_number: row.mobile_number,
+            is_admin: row.is_admin,
+            enabled: row.enabled,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+            last_login: row.last_login,
+            is_temporary_password: row.is_temporary_password,
+            auth_source: row.auth_source,
+        }))
+    }
+
+    async fn username_exists_tx(
+        &self,
+        conn: &mut PgConnection,
+        username: &str,
+    ) -> Result<bool, Error> {
+        let exists = sqlx::query_scalar!(
+            r#"SELECT EXISTS(SELECT 1 FROM users WHERE lower(username) = lower($1)) AS "exists!""#,
+            username
+        )
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(Error::DatabaseError)?;
+        Ok(exists)
+    }
+
+    async fn create_sso_user_tx(
+        &self,
+        conn: &mut PgConnection,
+        input: CreateSsoUser,
+    ) -> Result<User, Error> {
+        let result = sqlx::query!(
+            r#"INSERT INTO users (id, username, password_hash, first_name, last_name, email, is_admin,
+                                  is_temporary_password, auth_source, last_login)
+               VALUES ($1, $2, NULL, $3, $4, $5, FALSE, FALSE, 'sso', $6)
+               RETURNING id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, enabled,
+                         created_at, updated_at, last_login, is_temporary_password, auth_source"#,
+            Uuid::new_v4(),
+            input.username,
+            input.first_name,
+            input.last_name,
+            input.email,
+            input.last_login
+        )
+        .fetch_one(&mut *conn)
+        .await;
+        let row = handle_error(None, result)?;
+        Ok(User {
+            id: row.id,
+            username: row.username,
+            password_hash: row.password_hash,
+            first_name: row.first_name,
+            last_name: row.last_name,
+            email: row.email,
+            mobile_number: row.mobile_number,
+            is_admin: row.is_admin,
+            enabled: row.enabled,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+            last_login: row.last_login,
+            is_temporary_password: row.is_temporary_password,
+            auth_source: row.auth_source,
+        })
+    }
+
+    async fn update_last_login_tx(
+        &self,
+        conn: &mut PgConnection,
+        id: Uuid,
+        when: DateTime<Utc>,
+    ) -> Result<(), Error> {
+        let result = sqlx::query!(
+            r#"UPDATE users SET last_login = $1, updated_at = now() WHERE id = $2"#,
+            when,
+            id
+        )
+        .execute(&mut *conn)
+        .await
+        .map_err(Error::DatabaseError)?;
+        if result.rows_affected() == 0 {
+            return Err(Error::NotFound(id));
+        }
+        Ok(())
+    }
+
+    async fn is_system_client_tx(&self, conn: &mut PgConnection, id: Uuid) -> Result<bool, Error> {
+        let exists = sqlx::query_scalar!(
+            r#"SELECT EXISTS(SELECT 1 FROM system_clients WHERE id = $1) AS "exists!""#,
+            id
+        )
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(Error::DatabaseError)?;
+        Ok(exists)
     }
 }
 

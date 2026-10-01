@@ -20,6 +20,13 @@ pub struct Config {
     /// Session token lifetimes. A missing `[auth]` section uses the defaults.
     #[serde(default)]
     pub auth: AuthConfig,
+    /// Public base URL of this backend as browsers and identity providers reach it,
+    /// e.g. `https://fluxgate.example.com`. Used to build the SSO callback URL
+    /// (`<public_base_url>/api/v1/auth/sso/<slug>/callback`). When unset, it is
+    /// derived from each request (scheme and host, honouring `Forwarded` /
+    /// `X-Forwarded-*` headers); set it in production behind a proxy.
+    #[serde(default)]
+    pub public_base_url: Option<String>,
 }
 
 /// Lifetimes of user session tokens (`[auth]` section).
@@ -82,6 +89,7 @@ impl Default for Config {
             grpc_addr: "0.0.0.0:50051".to_string(),
             cluster: ClusterConfig::default(),
             auth: AuthConfig::default(),
+            public_base_url: None,
         }
     }
 }
@@ -135,6 +143,10 @@ impl Config {
     pub fn from_toml(content: &str) -> Result<Self, toml::de::Error> {
         let mut cfg: Config = toml::from_str(content)?;
         cfg.auth = cfg.auth.sanitized();
+        cfg.public_base_url = cfg
+            .public_base_url
+            .map(|url| url.trim().trim_end_matches('/').to_string())
+            .filter(|url| !url.is_empty());
         Ok(cfg)
     }
 
@@ -195,6 +207,22 @@ grpc_addr = "0.0.0.0:50051"
         .unwrap();
         assert_eq!(cfg.auth.access_token_ttl_minutes, 1);
         assert_eq!(cfg.auth.refresh_token_ttl_days, 3);
+    }
+
+    #[test]
+    fn public_base_url_is_optional_and_normalized() {
+        let cfg = Config::from_toml(BASE).unwrap();
+        assert_eq!(cfg.public_base_url, None);
+        let cfg = Config::from_toml(&format!(
+            "public_base_url = \"https://flux.example.com/\"\n{BASE}"
+        ))
+        .unwrap();
+        assert_eq!(
+            cfg.public_base_url.as_deref(),
+            Some("https://flux.example.com")
+        );
+        let cfg = Config::from_toml(&format!("public_base_url = \"  \"\n{BASE}")).unwrap();
+        assert_eq!(cfg.public_base_url, None);
     }
 
     #[test]

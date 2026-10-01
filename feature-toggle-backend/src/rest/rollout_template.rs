@@ -329,6 +329,8 @@ fn rest_error_message(err: &RestError) -> String {
         | RestError::SsoUserNoLocalPassword { message }
         | RestError::InvalidRefreshToken { message }
         | RestError::RefreshTokenReused { message }
+        | RestError::SsoRequired { message }
+        | RestError::InvalidSsoCode { message }
         | RestError::Forbidden { message, .. }
         | RestError::Internal { message, .. } => message.clone(),
     }
