@@ -220,9 +220,10 @@ pub async fn load_user_assignments(app: &AppState) -> Result<usize, tonic::Statu
     let mut count = 0usize;
     for a in resp.assignments.into_iter() {
         if a.assigned {
-            let key = assignment_key(&a.user_id, &a.feature_id, &a.environment_id);
             app.assigned_cache.insert(
-                key,
+                &a.user_id,
+                &a.feature_id,
+                &a.environment_id,
                 crate::CachedAssignment {
                     value: serde_json::json!(true),
                     variant: if a.variant.is_empty() {
@@ -277,6 +278,8 @@ mod tests {
     #[derive(Default)]
     struct MockBackendState {
         assignment_attempts: AtomicUsize,
+        /// `(user_id, feature_id)` of every assignment in an accepted push.
+        accepted_assignments: std::sync::Mutex<Vec<(String, String)>>,
         evaluation_attempts: AtomicUsize,
         /// When set, `PushEvaluationEvents` always fails with this code.
         evaluation_error: std::sync::Mutex<Option<tonic::Code>>,
@@ -372,9 +375,11 @@ mod tests {
                 .assignment_attempts
                 .fetch_add(1, Ordering::SeqCst);
             let mut count = 0usize;
+            let mut received = Vec::new();
             let mut stream = request.into_inner();
             while let Some(msg) = stream.next().await {
-                msg.map_err(|e| Status::internal(format!("stream error: {e}")))?;
+                let msg = msg.map_err(|e| Status::internal(format!("stream error: {e}")))?;
+                received.push((msg.user_id, msg.feature_id));
                 count += 1;
             }
 
@@ -382,6 +387,11 @@ mod tests {
                 return Err(Status::unavailable("transient assignment ingest failure"));
             }
 
+            self.state
+                .accepted_assignments
+                .lock()
+                .unwrap()
+                .extend(received);
             Ok(Response::new(backend_pb::Ack {
                 message_id: format!("assignment-ack-{}", count),
             }))
@@ -456,8 +466,8 @@ mod tests {
             client_secret: "test-secret".to_string(),
             edge_team_id: Arc::new(std::sync::OnceLock::from("team-1".to_string())),
             connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            assigned_cache: Arc::new(dashmap::DashMap::new()),
-            pending_assignments: Arc::new(crossbeam::queue::SegQueue::new()),
+            assigned_cache: Arc::new(crate::AssignmentCache::default()),
+            pending_assignments: Arc::new(crate::PendingAssignments::default()),
             flush_interval: std::time::Duration::from_secs(10),
             assignment_flush_batch_size: 1000,
             evaluation_event_tx: event_tx,
@@ -877,7 +887,9 @@ mod tests {
         mapped_cache.insert("team-1", stale_feature).await;
         mapped_cache.add_negative("stale-miss").await;
         app_state.assigned_cache.insert(
-            assignment_key("user-1", "stale-id", "env-1"),
+            "user-1",
+            "stale-id",
+            "env-1",
             crate::CachedAssignment {
                 value: serde_json::json!(true),
                 variant: None,
@@ -950,6 +962,48 @@ mod tests {
         );
         assert_eq!(recovered.unwrap().id, "fresh-id");
         assert!(mapped_cache.get("stale-key").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn flush_skips_assignments_of_purged_features() {
+        let (endpoint, state, server_handle) = start_mock_backend().await;
+        let mapped_cache = Arc::new(crate::MappedFeatureCache::new(100));
+        let mut app_state = test_app_state_with_endpoint(mapped_cache, &endpoint);
+        app_state.flush_interval = std::time::Duration::from_millis(0);
+        for (user_id, feature_id) in [
+            ("user-1", "feature-x"),
+            ("user-1", "feature-y"),
+            ("user-2", "feature-x"),
+        ] {
+            app_state.pending_assignments.push(UserAssignment {
+                user_id: user_id.to_string(),
+                feature_id: feature_id.to_string(),
+                environment_id: "env-1".to_string(),
+                assigned: true,
+                variant: None,
+            });
+        }
+
+        app_state.purge_assignments_for_feature("feature-x").await;
+        let task = tokio::spawn(run_flush_task(app_state.clone()));
+
+        // The mock rejects the first push; the second one is accepted.
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while state.accepted_assignments.lock().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("assignment flush should be accepted");
+
+        assert_eq!(
+            *state.accepted_assignments.lock().unwrap(),
+            vec![("user-1".to_string(), "feature-y".to_string())]
+        );
+        assert!(app_state.pending_assignments.pop().is_none());
+
+        task.abort();
+        server_handle.abort();
     }
 
     #[tokio::test]

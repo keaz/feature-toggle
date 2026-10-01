@@ -81,6 +81,8 @@ pub async fn run_flush_task(app: AppState) {
                         "Will retry on next flush cycle ({}s)",
                         app.flush_interval.as_secs()
                     );
+                    // Requeued under the current generation: a purge while
+                    // the batch was in flight does not drop it.
                     for assignment in assignments {
                         app.pending_assignments.push(assignment);
                     }

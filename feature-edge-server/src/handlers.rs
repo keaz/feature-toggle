@@ -1,5 +1,5 @@
 use crate::grpc_client::{
-    assignment_key, fetch_feature_via_grpc, get_or_fetch_client_info, try_get_or_fetch_client_info,
+    fetch_feature_via_grpc, get_or_fetch_client_info, try_get_or_fetch_client_info,
 };
 use crate::pb;
 use crate::{AppState, EvaluationEvent};
@@ -758,11 +758,9 @@ pub async fn evaluate_handler(
 
     // Perform evaluation (check cache first if we have a user_id)
     let (result, prior_assignment) = if let Some(user_id) = &user_id_opt {
-        let key = assignment_key(user_id, &feature.id, &eval_context.environment_id);
         let cached = app
             .assigned_cache
-            .get(&key)
-            .map(|entry| entry.value().clone());
+            .get(user_id, &feature.id, &eval_context.environment_id);
 
         if let Some(cached_assignment) = cached {
             // Cached assignment - return cached result with original reason (not "CACHED")
@@ -826,9 +824,10 @@ pub async fn evaluate_handler(
     let should_cache_assignment =
         result.variant.is_some() || result.value.as_bool().unwrap_or(false);
     if should_cache_assignment && let Some(user_id) = user_id_opt {
-        let key = assignment_key(&user_id, &feature.id, &eval_context.environment_id);
         app.assigned_cache.insert(
-            key,
+            &user_id,
+            &feature.id,
+            &eval_context.environment_id,
             crate::CachedAssignment {
                 value: result.value.clone(),
                 variant: result.variant.clone(),
@@ -1039,11 +1038,9 @@ async fn evaluate_ofrep_feature(
     let user_id = targeting_key.clone();
 
     let (mut result, prior_assignment) = {
-        let cache_key = assignment_key(&user_id, &feature.id, &environment_id);
         let cached = app
             .assigned_cache
-            .get(&cache_key)
-            .map(|entry| entry.value().clone());
+            .get(&user_id, &feature.id, &environment_id);
 
         if let Some(cached_assignment) = cached {
             (
@@ -1107,9 +1104,10 @@ async fn evaluate_ofrep_feature(
 
     let should_cache = result.variant.is_some() || result.value.as_bool().unwrap_or(false);
     if should_cache {
-        let cache_key = assignment_key(&user_id, &feature.id, &environment_id);
         app.assigned_cache.insert(
-            cache_key,
+            &user_id,
+            &feature.id,
+            &environment_id,
             crate::CachedAssignment {
                 value: result.value.clone(),
                 variant: result.variant.clone(),
@@ -1488,8 +1486,8 @@ mod tests {
             client_secret: "secret".into(),
             edge_team_id: Arc::new(std::sync::OnceLock::new()),
             connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            assigned_cache: Arc::new(dashmap::DashMap::new()),
-            pending_assignments: Arc::new(crossbeam::queue::SegQueue::new()),
+            assigned_cache: Arc::new(crate::AssignmentCache::default()),
+            pending_assignments: Arc::new(crate::PendingAssignments::default()),
             flush_interval: std::time::Duration::from_secs(60),
             assignment_flush_batch_size: 10,
             evaluation_event_tx: event_tx,
@@ -2260,6 +2258,78 @@ mod tests {
                 .is_some(),
             "expected dependency block metadata"
         );
+    }
+
+    /// Sticky results: a truthy result is served from the assignment cache
+    /// until the feature's assignments are purged.
+    #[actix_web::test]
+    async fn sticky_results_are_served_until_the_feature_is_purged() {
+        let (app_state, _backend) = ofrep_app_with_mock_backend().await;
+        cache_fetched_feature(&app_state, &team_feature("f-1", "sticky", "team-1", true)).await;
+        app_state.mapped_cache.run_pending_tasks().await;
+        let service = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(app_state.clone()))
+                .route("/evaluate", web::post().to(evaluate_handler))
+                .route(
+                    "/ofrep/v1/evaluate/flags/{key}",
+                    web::post().to(ofrep_evaluate_flag),
+                ),
+        )
+        .await;
+        let values = || async {
+            let req = actix_test::TestRequest::post()
+                .uri("/evaluate")
+                .set_json(serde_json::json!({
+                    "flagKey": "sticky",
+                    "context": { "bucketingKey": "u1" }
+                }))
+                .to_request();
+            let evaluate: serde_json::Value =
+                actix_test::call_and_read_body_json(&service, req).await;
+            let req = actix_test::TestRequest::post()
+                .uri("/ofrep/v1/evaluate/flags/sticky")
+                .insert_header(("x-api-key", "client"))
+                .set_json(serde_json::json!({ "context": { "targetingKey": "u1" } }))
+                .to_request();
+            let ofrep: serde_json::Value = actix_test::call_and_read_body_json(&service, req).await;
+            (evaluate["value"].clone(), ofrep["value"].clone())
+        };
+
+        let fresh = values().await;
+        assert_eq!(fresh, (serde_json::json!(true), serde_json::json!(true)));
+
+        // Target only premium users without purging: the sticky result is
+        // still served to u1, who has no `plan` attribute.
+        let mut premium_only = team_feature("f-1", "sticky", "team-1", true);
+        premium_only.stages[0].criterias = vec![pb::StageCriterionFull {
+            id: "criterion-1".to_string(),
+            stage_id: premium_only.stages[0].id.clone(),
+            priority: 0,
+            rule_groups: vec![pb::RuleGroup {
+                id: "group-1".to_string(),
+                logic_operator: "AND".to_string(),
+                conditions: vec![pb::RuleCondition {
+                    id: "condition-1".to_string(),
+                    context_key: "plan".to_string(),
+                    operator: "EQUALS".to_string(),
+                    value: "\"premium\"".to_string(),
+                    order_index: 0,
+                }],
+            }],
+            variant_allocations: vec![],
+            variant_selection_mode: String::new(),
+            selected_variant_control: String::new(),
+        }];
+        cache_fetched_feature(&app_state, &premium_only).await;
+        app_state.mapped_cache.run_pending_tasks().await;
+        let cached = values().await;
+        assert_eq!(cached, (serde_json::json!(true), serde_json::json!(true)));
+
+        // After a purge, both endpoints evaluate the new config.
+        app_state.purge_assignments_for_feature("f-1").await;
+        let purged = values().await;
+        assert_eq!(purged, (serde_json::json!(false), serde_json::json!(false)));
     }
 
     #[tokio::test]
