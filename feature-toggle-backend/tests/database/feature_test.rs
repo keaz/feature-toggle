@@ -1541,3 +1541,91 @@ async fn test_get_features_paginated_edge_cases() {
     );
     assert_eq!(total2, total, "Total should be consistent");
 }
+
+#[tokio::test]
+async fn test_get_feature_by_key_matches_exact_key_only() {
+    let pool = init_pg_pool().await;
+    let repository = feature::feature_repository(pool.clone());
+
+    // Use a fresh team so the test does not depend on seed data. Deleting the
+    // team at the end cascades to the features created here.
+    let team_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO teams (id, name, description) VALUES ($1, $2, $3)")
+        .bind(team_id)
+        .bind(format!("b01-key-lookup-{team_id}"))
+        .bind("Exact feature key lookup test")
+        .execute(&pool)
+        .await
+        .expect("create test team");
+
+    let mut created = Vec::new();
+    for key in ["checkout", "checkout-v2"] {
+        created.push(
+            repository
+                .create_feature(CreateFeature {
+                    team_id,
+                    key: key.to_string(),
+                    description: None,
+                    feature_type: FeatureType::Simple,
+                    lifecycle_stage: "active".to_string(),
+                    owner: None,
+                    purpose: None,
+                    reference_url: None,
+                    expires_at: None,
+                    cleanup_reason: None,
+                    tags: vec![],
+                    stages: vec![],
+                    dependencies: vec![],
+                    variants: None,
+                })
+                .await,
+        );
+    }
+
+    let exact = repository
+        .get_feature_by_key(team_id, "checkout".to_string())
+        .await;
+    let substring_only = repository
+        .get_feature_by_key(team_id, "check".to_string())
+        .await;
+    let other_case = repository
+        .get_feature_by_key(team_id, "Checkout".to_string())
+        .await;
+    let search = repository
+        .get_features(team_id, Some("checkout".to_string()), None)
+        .await;
+
+    sqlx::query("DELETE FROM teams WHERE id = $1")
+        .bind(team_id)
+        .execute(&pool)
+        .await
+        .expect("delete test team");
+
+    let checkout_id = created.remove(0).expect("create checkout");
+    created.remove(0).expect("create checkout-v2");
+
+    let exact = exact
+        .expect("exact lookup should succeed")
+        .expect("checkout should be found");
+    assert_eq!(exact.id, checkout_id);
+    assert_eq!(exact.key, "checkout");
+    assert_eq!(exact.team_id, team_id);
+
+    assert!(
+        substring_only.expect("lookup should succeed").is_none(),
+        "a key that is only a substring of another key must not match"
+    );
+    assert!(
+        other_case.expect("lookup should succeed").is_none(),
+        "exact lookup is case-sensitive"
+    );
+
+    // The admin list/search path keeps substring matching.
+    let mut search_keys: Vec<String> = search
+        .expect("search should succeed")
+        .into_iter()
+        .map(|f| f.key)
+        .collect();
+    search_keys.sort();
+    assert_eq!(search_keys, vec!["checkout", "checkout-v2"]);
+}

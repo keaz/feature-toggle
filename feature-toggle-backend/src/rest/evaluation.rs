@@ -321,12 +321,10 @@ pub(crate) async fn evaluate_feature(
     }
 
     let repo = feature_repository(pool.get_ref().clone());
-    let mut features = repo
-        .get_features(team_id, Some(body.feature_key.trim().to_string()), None)
+    let db_feature = repo
+        .get_feature_by_key(team_id, body.feature_key.trim().to_string())
         .await
-        .map_err(|err| RestError::internal(format!("Failed to load feature: {err}")))?;
-    let db_feature = features
-        .pop()
+        .map_err(|err| RestError::internal(format!("Failed to load feature: {err}")))?
         .ok_or_else(|| RestError::not_found("feature not found"))?;
 
     let engine_feature = load_engine_feature(repo.as_ref(), db_feature.clone()).await?;

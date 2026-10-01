@@ -859,11 +859,11 @@ impl FeatureEvaluationSvc {
                     );
                     let mut all_features = Vec::new();
                     for feature_key in &subscription_keys {
-                        let features = feature_repo
-                            .get_features(team_id, Some(feature_key.clone()), None)
+                        let feature = feature_repo
+                            .get_feature_by_key(team_id, feature_key.clone())
                             .await
                             .map_err(|e| Status::internal(format!("db error: {}", e)))?;
-                        all_features.extend(features);
+                        all_features.extend(feature);
                     }
                     all_features
                 }
@@ -935,12 +935,12 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
 
         // Fetch feature by key within team
         let feature_repo = &self.feature_repo;
-        let mut features = feature_repo
-            .get_features(team_id, Some(req.feature_key.clone()), None)
+        let db_feature = feature_repo
+            .get_feature_by_key(team_id, req.feature_key.clone())
             .await
             .map_err(|e| Status::internal(format!("db error: {}", e)))?;
 
-        let db_feature = features.pop().ok_or_else(|| {
+        let db_feature = db_feature.ok_or_else(|| {
             Status::not_found("feature with given key not found for client's team")
         })?;
 
@@ -1018,12 +1018,12 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
 
         // Fetch feature by key within team
         let feature_repo = &self.feature_repo;
-        let mut features = feature_repo
-            .get_features(team_id, Some(req.feature_key.clone()), None)
+        let db_feature = feature_repo
+            .get_feature_by_key(team_id, req.feature_key.clone())
             .await
             .map_err(|e| Status::internal(format!("db error: {}", e)))?;
 
-        let response = if let Some(db_feature) = features.pop() {
+        let response = if let Some(db_feature) = db_feature {
             let feature_msg = self.map_db_feature_to_full(db_feature).await?;
 
             // Track that this client requested this feature key for future update filtering

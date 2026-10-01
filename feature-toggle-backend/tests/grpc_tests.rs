@@ -126,6 +126,18 @@ fn test_stage(feature_id: Uuid, environment_id: Uuid, enabled: bool) -> db::Feat
     }
 }
 
+/// Builds a `get_feature_by_key` mock from a keyed `get_features` mock closure:
+/// the exact-key lookup returns the feature whose key equals the request.
+fn exact_key_lookup<F>(features: F) -> impl Fn(Uuid, String) -> Result<Option<db::Feature>, Error>
+where
+    F: Fn(Uuid, Option<String>, Option<db::FeatureType>) -> Result<Vec<db::Feature>, Error>,
+{
+    move |team, key| {
+        features(team, Some(key.clone()), None)
+            .map(|found| found.into_iter().find(|feature| feature.key == key))
+    }
+}
+
 async fn recv_update_with_timeout(
     stream: &mut tonic::Streaming<pb::FeatureUpdate>,
     timeout: Duration,
@@ -364,8 +376,8 @@ async fn evaluate_auth_and_success() {
             }
         });
     feature_mock
-        .expect_get_features()
-        .returning(move |_team, key, _ftype| {
+        .expect_get_feature_by_key()
+        .returning(exact_key_lookup(move |_team, key, _ftype| {
             let res: Result<Vec<db::Feature>, Error> = match key.as_deref() {
                 Some("Test Feature") => Ok(vec![db::Feature {
                     id: feature_id,
@@ -401,7 +413,7 @@ async fn evaluate_auth_and_success() {
                 _ => Ok(vec![]),
             };
             res
-        });
+        }));
     feature_mock
         .expect_get_stage_criteria()
         .returning(|_sid| Ok(Vec::new()));
@@ -488,18 +500,20 @@ async fn evaluate_returns_false_for_kill_switched_feature() {
     let mut feature_mock = MockFeatureRepository::new();
     let feature_id = Uuid::new_v4();
     feature_mock
-        .expect_get_features()
-        .returning(move |_team, key, _ftype| match key.as_deref() {
-            Some("Test Feature") => Ok(vec![test_feature(
-                feature_id,
-                "Test Feature",
-                team_id,
-                true,
-                false,
-                vec![],
-            )]),
-            _ => Ok(vec![]),
-        });
+        .expect_get_feature_by_key()
+        .returning(exact_key_lookup(move |_team, key, _ftype| {
+            match key.as_deref() {
+                Some("Test Feature") => Ok(vec![test_feature(
+                    feature_id,
+                    "Test Feature",
+                    team_id,
+                    true,
+                    false,
+                    vec![],
+                )]),
+                _ => Ok(vec![]),
+            }
+        }));
 
     let (tx, _rx) = broadcast::channel::<pb::FeatureUpdate>(8);
     let (addr, _server) =
@@ -547,18 +561,20 @@ async fn evaluate_returns_false_for_stage_disabled_feature() {
     let mut feature_mock = MockFeatureRepository::new();
     let feature_id = Uuid::new_v4();
     feature_mock
-        .expect_get_features()
-        .returning(move |_team, key, _ftype| match key.as_deref() {
-            Some("Test Feature") => Ok(vec![test_feature(
-                feature_id,
-                "Test Feature",
-                team_id,
-                true,
-                true,
-                vec![],
-            )]),
-            _ => Ok(vec![]),
-        });
+        .expect_get_feature_by_key()
+        .returning(exact_key_lookup(move |_team, key, _ftype| {
+            match key.as_deref() {
+                Some("Test Feature") => Ok(vec![test_feature(
+                    feature_id,
+                    "Test Feature",
+                    team_id,
+                    true,
+                    true,
+                    vec![],
+                )]),
+                _ => Ok(vec![]),
+            }
+        }));
     feature_mock
         .expect_get_feature_stages()
         .returning(move |id| {
@@ -619,21 +635,23 @@ async fn evaluate_returns_false_for_dependency_disabled_by_kill_switch() {
 
     let mut feature_mock = MockFeatureRepository::new();
     feature_mock
-        .expect_get_features()
-        .returning(move |_team, key, _ftype| match key.as_deref() {
-            Some("Test Feature") => Ok(vec![test_feature(
-                root_id,
-                "Test Feature",
-                team_id,
-                true,
-                true,
-                vec![db::FeatureDependency {
-                    feature_id: root_id,
-                    depends_on_id: dependency_id,
-                }],
-            )]),
-            _ => Ok(vec![]),
-        });
+        .expect_get_feature_by_key()
+        .returning(exact_key_lookup(move |_team, key, _ftype| {
+            match key.as_deref() {
+                Some("Test Feature") => Ok(vec![test_feature(
+                    root_id,
+                    "Test Feature",
+                    team_id,
+                    true,
+                    true,
+                    vec![db::FeatureDependency {
+                        feature_id: root_id,
+                        depends_on_id: dependency_id,
+                    }],
+                )]),
+                _ => Ok(vec![]),
+            }
+        }));
     feature_mock
         .expect_get_feature_by_id()
         .returning(move |id| {
@@ -739,9 +757,8 @@ async fn get_feature_by_key_and_stream_branches() {
                 Ok(vec![])
             }
         });
-    feature_mock
-        .expect_get_features()
-        .returning(move |_team, key, _ftype| {
+    let features_by_key =
+        move |_team: Uuid, key: Option<String>, _ftype: Option<db::FeatureType>| {
             let res: Result<Vec<db::Feature>, Error> = match key.as_deref() {
                 Some("Test Feature") => Ok(vec![db::Feature {
                     id: feature_id,
@@ -777,7 +794,13 @@ async fn get_feature_by_key_and_stream_branches() {
                 _ => Ok(vec![]),
             };
             res
-        });
+        };
+    feature_mock
+        .expect_get_features()
+        .returning(features_by_key);
+    feature_mock
+        .expect_get_feature_by_key()
+        .returning(exact_key_lookup(features_by_key));
     feature_mock
         .expect_get_stage_criteria()
         .returning(|_sid| Ok(Vec::new()));
@@ -1336,9 +1359,10 @@ async fn stream_subscriptions_are_connection_scoped() {
     feature_mock
         .expect_get_feature_stages()
         .returning(|_fid| Ok(Vec::new()));
-    feature_mock
-        .expect_get_features()
-        .returning(move |_team, key, _ftype| match key.as_deref() {
+    let features_by_key =
+        move |_team: Uuid, key: Option<String>, _ftype: Option<db::FeatureType>| match key
+            .as_deref()
+        {
             Some("feature-A") => Ok(vec![db::Feature {
                 id: feature_a_id,
                 key: "feature-A".into(),
@@ -1402,7 +1426,13 @@ async fn stream_subscriptions_are_connection_scoped() {
                 dependencies: vec![],
             }]),
             _ => Ok(vec![]),
-        });
+        };
+    feature_mock
+        .expect_get_features()
+        .returning(features_by_key);
+    feature_mock
+        .expect_get_feature_by_key()
+        .returning(exact_key_lookup(features_by_key));
     feature_mock
         .expect_get_stage_criteria()
         .returning(|_sid| Ok(Vec::new()));
@@ -1579,9 +1609,10 @@ async fn requested_keys_are_cleared_when_last_stream_disconnects() {
     feature_mock
         .expect_get_feature_stages()
         .returning(|_fid| Ok(Vec::new()));
-    feature_mock
-        .expect_get_features()
-        .returning(move |_team, key, _ftype| match key.as_deref() {
+    let features_by_key =
+        move |_team: Uuid, key: Option<String>, _ftype: Option<db::FeatureType>| match key
+            .as_deref()
+        {
             Some("feature-A") => Ok(vec![db::Feature {
                 id: feature_a_id,
                 key: "feature-A".into(),
@@ -1645,7 +1676,13 @@ async fn requested_keys_are_cleared_when_last_stream_disconnects() {
                 dependencies: vec![],
             }]),
             _ => Ok(vec![]),
-        });
+        };
+    feature_mock
+        .expect_get_features()
+        .returning(features_by_key);
+    feature_mock
+        .expect_get_feature_by_key()
+        .returning(exact_key_lookup(features_by_key));
     feature_mock
         .expect_get_stage_criteria()
         .returning(|_sid| Ok(Vec::new()));
@@ -1984,4 +2021,56 @@ async fn stream_drops_upserts_from_other_teams() {
     let feature = own.feature.unwrap();
     assert_eq!(feature.key, "shared");
     assert_eq!(feature.team_id, team_a.to_string());
+}
+
+#[tokio::test]
+async fn get_feature_by_key_returns_exact_key_match() {
+    let (updates_tx, _updates_rx) = broadcast::channel::<pb::FeatureUpdate>(8);
+    let (cid, sec) = client_ids();
+    let client_id = Uuid::parse_str(&cid).unwrap();
+    let team_id = Uuid::new_v4();
+    let client_mock = stream_client_mock(client_id, team_id, sec.clone());
+
+    let checkout_id = Uuid::new_v4();
+    let checkout_v2_id = Uuid::new_v4();
+    let mut feature_mock = MockFeatureRepository::new();
+    feature_mock
+        .expect_get_feature_stages()
+        .returning(|_fid| Ok(Vec::new()));
+    // The list/search query matches substrings, ordered by key.
+    feature_mock
+        .expect_get_features()
+        .returning(move |_team, _key, _ftype| {
+            Ok(vec![
+                test_feature(checkout_id, "checkout", team_id, true, true, vec![]),
+                test_feature(checkout_v2_id, "checkout-v2", team_id, true, true, vec![]),
+            ])
+        });
+    feature_mock
+        .expect_get_feature_by_key()
+        .returning(move |team, key| {
+            assert_eq!(team, team_id);
+            Ok((key == "checkout")
+                .then(|| test_feature(checkout_id, "checkout", team_id, true, true, vec![])))
+        });
+
+    let (addr, _server) =
+        start_server_with_repos(Box::new(feature_mock), Box::new(client_mock), updates_tx).await;
+    let mut client = FeatureEvaluationClient::connect(format!("http://{}", addr))
+        .await
+        .unwrap();
+
+    let response = client
+        .get_feature_by_key(GetFeatureByKeyRequest {
+            client_id: cid,
+            client_secret: sec,
+            feature_key: "checkout".into(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    let feature = response.feature.expect("checkout should be found");
+    assert_eq!(feature.key, "checkout");
+    assert_eq!(feature.id, checkout_id.to_string());
 }

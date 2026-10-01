@@ -38,7 +38,7 @@ Review of `feature-toggle-backend/`, `feature-edge-server/` and `evaluation-engi
 
 | Done | ID | Title | Severity | Crate | Behavior change | Depends on |
 |---|---|---|---|---|---|---|
-| [ ] | [B01](issues/B01-feature-key-lookup-substring-match.md) | Feature key lookups use `ILIKE '%key%'` and return the wrong flag | Critical | backend | Yes (intended) | — |
+| [x] | [B01](issues/B01-feature-key-lookup-substring-match.md) | Feature key lookups use `ILIKE '%key%'` and return the wrong flag | Critical | backend | Yes (intended) | — |
 | [ ] | [B02](issues/B02-duplicate-key-check-substring-match.md) | Duplicate-key checks reject valid keys (`check` vs `checkout`) | Medium | backend | Yes (intended) | B01 |
 | [x] | [B03](issues/B03-stream-updates-cross-team.md) | Stream updates are not filtered by team | Critical | backend | Yes (intended) | — |
 | [x] | [B04](issues/B04-stream-snapshot-deadlock-and-lost-updates.md) | Stream snapshot hangs above 64 features and loses updates | Critical | backend | Minor | — |
