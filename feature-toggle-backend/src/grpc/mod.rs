@@ -1339,6 +1339,7 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
         };
 
         let feature_repo = self.feature_repo.clone();
+        let team_id_str = team_id.to_string();
         let out_tx_clone = out_tx.clone();
         let requested_keys_clone = self.requested_keys.clone();
         let subscriptions_clone = self.active_subscriptions.clone();
@@ -1368,6 +1369,21 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
                 loop {
                     match rx.recv().await {
                         Ok(update) => {
+                            // The broadcast carries every team's updates. Keys are
+                            // unique only per team, so forward only this client's team.
+                            if update.action == pb::feature_update::Action::Upsert as i32
+                                && update
+                                    .feature
+                                    .as_ref()
+                                    .is_some_and(|feature| feature.team_id != team_id_str)
+                            {
+                                log::debug!(
+                                    "gRPC: Filtering out update message_id={} (other team)",
+                                    update.message_id
+                                );
+                                continue;
+                            }
+
                             // Determine feature key for the update
                             let key_for_update = if let Some(ref feature) = update.feature {
                                 feature.key.clone()

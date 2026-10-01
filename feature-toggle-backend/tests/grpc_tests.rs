@@ -1925,3 +1925,63 @@ async fn stream_forwards_update_broadcast_during_snapshot_read() {
         "update broadcast during the snapshot read was lost"
     );
 }
+
+#[tokio::test]
+async fn stream_drops_upserts_from_other_teams() {
+    let (updates_tx, _updates_rx) = broadcast::channel::<pb::FeatureUpdate>(16);
+    let (cid, sec) = client_ids();
+    let client_id = Uuid::parse_str(&cid).unwrap();
+    let team_a = Uuid::new_v4();
+    let team_b = Uuid::new_v4();
+    let client_mock = stream_client_mock(client_id, team_a, sec.clone());
+
+    let mut feature_mock = MockFeatureRepository::new();
+    feature_mock
+        .expect_get_feature_stages()
+        .returning(|_fid| Ok(Vec::new()));
+    feature_mock
+        .expect_get_features()
+        .returning(move |_team, _key, _ftype| {
+            Ok(vec![test_feature(
+                Uuid::new_v4(),
+                "shared",
+                team_a,
+                true,
+                false,
+                vec![],
+            )])
+        });
+
+    let (addr, _server) = start_server_with_repos(
+        Box::new(feature_mock),
+        Box::new(client_mock),
+        updates_tx.clone(),
+    )
+    .await;
+
+    // Subscribe as Team A for all features and drain the snapshot.
+    let (mut stream, _tx) = open_update_stream(addr, cid, sec, vec![]).await;
+    let snapshot = recv_update_with_timeout(&mut stream, Duration::from_secs(2))
+        .await
+        .expect("missing snapshot");
+    assert_eq!(snapshot.action, pb::feature_update::Action::Snapshot as i32);
+    assert_eq!(snapshot.feature.unwrap().team_id, team_a.to_string());
+
+    // Team B changes its flag with the same key: Team A's stream must not see it.
+    updates_tx.send(upsert_for("shared", team_b)).unwrap();
+    let leaked = recv_update_with_timeout(&mut stream, Duration::from_millis(300)).await;
+    assert!(
+        leaked.is_none(),
+        "Team A stream received Team B's update: {leaked:?}"
+    );
+
+    // Control: Team A's own update still arrives.
+    updates_tx.send(upsert_for("shared", team_a)).unwrap();
+    let own = recv_update_with_timeout(&mut stream, Duration::from_secs(2))
+        .await
+        .expect("Team A update was not forwarded");
+    assert_eq!(own.action, pb::feature_update::Action::Upsert as i32);
+    let feature = own.feature.unwrap();
+    assert_eq!(feature.key, "shared");
+    assert_eq!(feature.team_id, team_a.to_string());
+}
