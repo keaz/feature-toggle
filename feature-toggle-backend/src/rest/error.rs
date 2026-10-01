@@ -51,6 +51,8 @@ pub enum RestError {
     },
     #[error("Account disabled")]
     AccountDisabled { message: String },
+    #[error("Self approval not allowed")]
+    SelfApprovalNotAllowed { message: String },
     #[error("Invalid refresh token")]
     InvalidRefreshToken { message: String },
     #[error("Refresh token reused")]
@@ -108,6 +110,13 @@ impl RestError {
         }
     }
 
+    /// 403 `self_approval_not_allowed`: a requester tried to approve their own request.
+    pub fn self_approval_not_allowed() -> Self {
+        Self::SelfApprovalNotAllowed {
+            message: "Requesters cannot approve their own request".to_string(),
+        }
+    }
+
     /// 401 `invalid_refresh_token`: unknown or expired refresh token, or its user
     /// is missing or disabled.
     pub fn invalid_refresh_token() -> Self {
@@ -132,6 +141,15 @@ impl RestError {
         }
     }
 
+    /// 403 with `code: "policy_denied"`, the shape `JwtGuard` uses for policy denials.
+    pub fn policy_denied(message: impl Into<String>) -> Self {
+        Self::Forbidden {
+            message: message.into(),
+            code: Some("policy_denied".to_string()),
+            details: None,
+        }
+    }
+
     pub fn internal(message: impl Into<String>) -> Self {
         Self::Internal {
             message: message.into(),
@@ -147,6 +165,7 @@ impl RestError {
             Self::Conflict { .. } => "conflict",
             Self::Unauthorized { .. } => "unauthorized",
             Self::AccountDisabled { .. } => "account_disabled",
+            Self::SelfApprovalNotAllowed { .. } => "self_approval_not_allowed",
             Self::InvalidRefreshToken { .. } => "invalid_refresh_token",
             Self::RefreshTokenReused { .. } => "refresh_token_reused",
             Self::Forbidden { .. } => "forbidden",
@@ -163,6 +182,7 @@ impl RestError {
             | Self::Forbidden { message, .. }
             | Self::Internal { message, .. }
             | Self::AccountDisabled { message }
+            | Self::SelfApprovalNotAllowed { message }
             | Self::InvalidRefreshToken { message }
             | Self::RefreshTokenReused { message } => message,
         }
@@ -177,6 +197,7 @@ impl RestError {
             | Self::Forbidden { code, .. }
             | Self::Internal { code, .. } => code.as_deref(),
             Self::AccountDisabled { .. }
+            | Self::SelfApprovalNotAllowed { .. }
             | Self::InvalidRefreshToken { .. }
             | Self::RefreshTokenReused { .. } => None,
         }
@@ -191,6 +212,7 @@ impl RestError {
             | Self::Forbidden { details, .. }
             | Self::Internal { details, .. } => details.as_ref(),
             Self::AccountDisabled { .. }
+            | Self::SelfApprovalNotAllowed { .. }
             | Self::InvalidRefreshToken { .. }
             | Self::RefreshTokenReused { .. } => None,
         }
@@ -216,7 +238,7 @@ impl ResponseError for RestError {
             | Self::AccountDisabled { .. }
             | Self::InvalidRefreshToken { .. }
             | Self::RefreshTokenReused { .. } => StatusCode::UNAUTHORIZED,
-            Self::Forbidden { .. } => StatusCode::FORBIDDEN,
+            Self::Forbidden { .. } | Self::SelfApprovalNotAllowed { .. } => StatusCode::FORBIDDEN,
             Self::Internal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -237,6 +259,7 @@ impl From<crate::Error> for RestError {
             crate::Error::InvalidInput(msg) => RestError::invalid_input(msg),
             crate::Error::Unauthorized(msg) => RestError::unauthorized(msg),
             crate::Error::AccountDisabled => RestError::account_disabled("Account is disabled"),
+            crate::Error::SelfApprovalNotAllowed => RestError::self_approval_not_allowed(),
         }
     }
 }

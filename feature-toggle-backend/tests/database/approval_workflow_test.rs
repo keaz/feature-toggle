@@ -231,7 +231,19 @@ async fn test_quorum_approvals_execute_stage_change() {
     );
 
     let (feature_id, stage_id) = create_isolated_feature_stage(feature_repository.as_ref()).await;
-    let requester = Uuid::parse_str("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb").unwrap();
+    // Requesters never count as approvers, so the requester must be someone other
+    // than the two seeded approvers.
+    let requester = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO users (id, username, password_hash, first_name, last_name, email)
+         VALUES ($1, $2, 'x', 'Quorum', 'Requester', $3)",
+    )
+    .bind(requester)
+    .bind(format!("quorum_requester_{requester}"))
+    .bind(format!("quorum_requester_{requester}@example.com"))
+    .execute(&pool)
+    .await
+    .unwrap();
     let approver_one = Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").unwrap();
     let approver_two = Uuid::parse_str("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb").unwrap();
 
@@ -282,6 +294,14 @@ async fn test_quorum_approvals_execute_stage_change() {
 
     // Cleanup test feature/stage rows.
     let _ = sqlx::query!("DELETE FROM features WHERE id = $1", feature_id)
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM approval_requests WHERE requested_by = $1")
+        .bind(requester)
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(requester)
         .execute(&pool)
         .await;
 }

@@ -208,7 +208,10 @@ pub async fn enforce_for_route(
 
     let decision = evaluate(pool, &policy_request).await?;
     record_policy_decision(pool, &policy_request, decision).await;
+    decision_to_result(decision)
+}
 
+fn decision_to_result(decision: PolicyDecision) -> Result<(), PolicyError> {
     if decision.allowed {
         Ok(())
     } else if decision.unauthorized {
@@ -216,6 +219,28 @@ pub async fn enforce_for_route(
     } else {
         Err(PolicyError::Forbidden(decision.reason.to_string()))
     }
+}
+
+/// The decision `PATCH /features/{id}` and `POST /features/{id}/emergency-*` get from
+/// `enforce_for_route`, for callers that act on a feature outside that route (the
+/// scheduled-change create handler and executor): a user actor that is a system admin,
+/// or a `Team Admin` who belongs to `team_id`. System clients are always denied.
+pub(crate) async fn authorize_feature_update(
+    pool: &sqlx::PgPool,
+    feature_id: Uuid,
+    team_id: Uuid,
+    actor: PolicyActor,
+) -> Result<(), PolicyError> {
+    let policy_request = PolicyRequest {
+        action: PolicyAction::UpdateTeamResource,
+        resource: PolicyResource::Feature,
+        resource_id: Some(feature_id),
+        team_id: Some(team_id),
+        actor: Some(actor),
+    };
+    let decision = evaluate(pool, &policy_request).await?;
+    record_policy_decision(pool, &policy_request, decision).await;
+    decision_to_result(decision)
 }
 
 /// Whether `path` is a system-client management route (any method).

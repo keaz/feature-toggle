@@ -38,6 +38,8 @@ pub enum Error {
     Unauthorized(String),
     #[error("Account is disabled")]
     AccountDisabled,
+    #[error("Requesters cannot approve their own request")]
+    SelfApprovalNotAllowed,
 }
 
 pub async fn run() -> std::io::Result<()> {

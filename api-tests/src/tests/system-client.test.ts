@@ -1,10 +1,11 @@
 import axios, { AxiosInstance } from 'axios';
-import { ApiClient, getApiClient } from '../utils/api-client.js';
+import { ApiClient, createApiClient, getApiClient } from '../utils/api-client.js';
 import {
   createApprovalPolicyFixture,
   createEnvironmentFixture,
   createFeatureFixture,
   createTeamFixture,
+  createUserFixture,
 } from '../utils/test-fixtures.js';
 import { cleanupResource, expectStatus, expectSuccess } from '../utils/test-utils.js';
 
@@ -34,6 +35,7 @@ describe('System Client API', () => {
   let systemClientId: string;
   let systemToken = '';
   let tokenClient: AxiosInstance;
+  let humanApproverClient: ApiClient;
 
   beforeAll(async () => {
     adminClient = await getApiClient();
@@ -89,6 +91,26 @@ describe('System Client API', () => {
     systemClientId = systemClientResponse.data.systemClient.id;
     systemToken = systemClientResponse.data.token;
     tokenClient = createTokenClient(systemToken);
+
+    // Requesters can never approve their own request, so the system client's request
+    // needs a second approver in the team. Create one before any request is made,
+    // because eligible approvers are resolved when the request is created.
+    const approverFixture = createUserFixture({
+      username: `sc-approver-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`,
+    });
+    const approverResponse = await adminClient.post('/users', {
+      ...approverFixture,
+      isTemporaryPassword: false,
+    });
+    expectStatus(approverResponse, 201);
+    const approverId = approverResponse.data.id;
+    expectSuccess(await adminClient.post(`/users/${approverId}/teams`, { teamIds: [teamId] }));
+    expectSuccess(await adminClient.post(`/users/${approverId}/roles`, { roleIds: [APPROVER_ROLE_ID] }));
+    humanApproverClient = createApiClient({
+      username: approverFixture.username,
+      password: approverFixture.password,
+    });
+    await humanApproverClient.authenticate();
   });
 
   afterAll(async () => {
@@ -140,7 +162,7 @@ describe('System Client API', () => {
     expect(issue.data.code).toBe('policy_denied');
   });
 
-  it('can request and approve a stage change using system client token', async () => {
+  it('can request a stage change with a system client token but not approve it itself', async () => {
     const requestResponse = await tokenClient.post(`/stages/${stageId}/request-change`, {
       request: 'DEPLOYMENT_REQUESTED',
     });
@@ -149,8 +171,14 @@ describe('System Client API', () => {
     const requestId = requestResponse.data.pendingApprovalRequestId;
     expect(requestId).toBeTruthy();
 
-    const approveResponse = await tokenClient.post(`/approval-requests/${requestId}/approve`, {
+    const selfApprove = await tokenClient.post(`/approval-requests/${requestId}/approve`, {
       comment: 'automation approval',
+    });
+    expectStatus(selfApprove, 403);
+    expect(selfApprove.data.error).toBe('self_approval_not_allowed');
+
+    const approveResponse = await humanApproverClient.post(`/approval-requests/${requestId}/approve`, {
+      comment: 'human approval',
     });
     expectStatus(approveResponse, 200);
 
