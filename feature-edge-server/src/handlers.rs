@@ -868,6 +868,19 @@ fn extract_auth_from_headers(http_req: &actix_web::HttpRequest) -> Option<(Strin
     None
 }
 
+/// Resolve OFREP credentials. When the caller supplies only the configured
+/// client ID, use the configured secret.
+fn resolve_ofrep_credentials(
+    app: &AppState,
+    http_req: &actix_web::HttpRequest,
+) -> Option<(String, String)> {
+    let (client_id, client_secret) = extract_auth_from_headers(http_req)?;
+    if client_secret.is_empty() && client_id == app.client_id {
+        return Some((client_id, app.client_secret.clone()));
+    }
+    Some((client_id, client_secret))
+}
+
 /// Map OFREP context to engine context
 fn map_ofrep_context_to_engine(
     flag_key: String,
@@ -1125,7 +1138,7 @@ pub async fn ofrep_evaluate_flag(
     let req = req.into_inner();
 
     // Extract credentials from headers (OFREP standard)
-    let Some((client_id, client_secret)) = extract_auth_from_headers(&http_req) else {
+    let Some((client_id, client_secret)) = resolve_ofrep_credentials(&app, &http_req) else {
         return Err(actix_web::error::ErrorUnauthorized(
             "Missing explicit client credentials",
         ));
@@ -1228,7 +1241,7 @@ pub async fn ofrep_evaluate_flags_bulk(
     let _change_event_refetch =
         query.flag_config_etag.is_some() || query.flag_config_last_modified.is_some();
 
-    let Some((client_id, client_secret)) = extract_auth_from_headers(&http_req) else {
+    let Some((client_id, client_secret)) = resolve_ofrep_credentials(&app, &http_req) else {
         return Err(actix_web::error::ErrorUnauthorized(
             "Missing explicit client credentials",
         ));
@@ -1320,10 +1333,13 @@ mod tests {
     use super::{
         EvaluateContext, cache_fetched_feature, evaluate_http_feature_locally,
         extract_auth_from_headers, hydrate_feature_with_dependencies, if_none_match_contains,
-        map_proto_to_engine, ofrep_bulk_etag,
+        map_proto_to_engine, ofrep_bulk_etag, ofrep_evaluate_flag, ofrep_evaluate_flags_bulk,
+        resolve_ofrep_credentials,
     };
     use crate::pb;
     use actix_web::test::TestRequest;
+    use actix_web::{App, test as actix_test, web};
+    use feature_toggle_backend::grpc::pb as backend_pb;
     use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::mpsc;
@@ -1423,6 +1439,274 @@ mod tests {
             .to_http_request();
         let auth = extract_auth_from_headers(&req);
         assert_eq!(auth, Some(("api-key-123".to_string(), String::new())));
+    }
+
+    #[tokio::test]
+    async fn resolve_ofrep_credentials_uses_configured_secret_for_bearer_client_id() {
+        let app = test_app_state(Arc::new(crate::MappedFeatureCache::new(10)));
+        let req = TestRequest::default()
+            .insert_header(("authorization", "Bearer client"))
+            .to_http_request();
+
+        let auth = resolve_ofrep_credentials(&app, &req);
+        assert_eq!(auth, Some(("client".to_string(), "secret".to_string())));
+    }
+
+    #[tokio::test]
+    async fn resolve_ofrep_credentials_uses_configured_secret_for_api_key_client_id() {
+        let app = test_app_state(Arc::new(crate::MappedFeatureCache::new(10)));
+        let req = TestRequest::default()
+            .insert_header(("x-api-key", "client"))
+            .to_http_request();
+
+        let auth = resolve_ofrep_credentials(&app, &req);
+        assert_eq!(auth, Some(("client".to_string(), "secret".to_string())));
+    }
+
+    #[tokio::test]
+    async fn resolve_ofrep_credentials_keeps_empty_secret_for_other_client_id() {
+        let app = test_app_state(Arc::new(crate::MappedFeatureCache::new(10)));
+        let bearer = TestRequest::default()
+            .insert_header(("authorization", "Bearer other-client"))
+            .to_http_request();
+        let api_key = TestRequest::default()
+            .insert_header(("x-api-key", "other-client"))
+            .to_http_request();
+
+        assert_eq!(
+            resolve_ofrep_credentials(&app, &bearer),
+            Some(("other-client".to_string(), String::new()))
+        );
+        assert_eq!(
+            resolve_ofrep_credentials(&app, &api_key),
+            Some(("other-client".to_string(), String::new()))
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_ofrep_credentials_requires_explicit_headers() {
+        let app = test_app_state(Arc::new(crate::MappedFeatureCache::new(10)));
+        let req = TestRequest::default().to_http_request();
+
+        assert!(resolve_ofrep_credentials(&app, &req).is_none());
+    }
+
+    /// Minimal backend that only accepts the configured test credentials
+    /// (`client` / `secret`) and records every secret it receives.
+    #[derive(Clone, Default)]
+    struct OfrepMockBackend {
+        seen_secrets: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl OfrepMockBackend {
+        /// Records the secret and returns the rejection status, if any.
+        fn reject_credentials(
+            &self,
+            client_id: &str,
+            client_secret: &str,
+        ) -> Option<tonic::Status> {
+            self.seen_secrets
+                .lock()
+                .unwrap()
+                .push(client_secret.to_string());
+            if client_secret.is_empty() {
+                return Some(tonic::Status::invalid_argument("client_secret is required"));
+            }
+            if client_id != "client" || client_secret != "secret" {
+                return Some(tonic::Status::unauthenticated("invalid client credentials"));
+            }
+            None
+        }
+    }
+
+    #[tonic::async_trait]
+    impl backend_pb::feature_evaluation_server::FeatureEvaluation for OfrepMockBackend {
+        type StreamUpdatesStream = tokio_stream::wrappers::ReceiverStream<
+            Result<backend_pb::FeatureUpdate, tonic::Status>,
+        >;
+
+        async fn evaluate(
+            &self,
+            _request: tonic::Request<backend_pb::EvaluateRequest>,
+        ) -> Result<tonic::Response<backend_pb::EvaluateResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not used in OFREP tests"))
+        }
+
+        async fn get_feature_by_key(
+            &self,
+            request: tonic::Request<backend_pb::GetFeatureByKeyRequest>,
+        ) -> Result<tonic::Response<backend_pb::GetFeatureByKeyResponse>, tonic::Status> {
+            let req = request.into_inner();
+            if let Some(status) = self.reject_credentials(&req.client_id, &req.client_secret) {
+                return Err(status);
+            }
+            Ok(tonic::Response::new(backend_pb::GetFeatureByKeyResponse {
+                feature: Some(backend_pb::FeatureFull {
+                    id: "feature-1".to_string(),
+                    key: req.feature_key,
+                    description: String::new(),
+                    feature_type: "Simple".to_string(),
+                    team_id: "team-1".to_string(),
+                    created_at: "2026-03-26T00:00:00Z".to_string(),
+                    kill_switch_enabled: true,
+                    kill_switch_activated_at: String::new(),
+                    rollback_scheduled_at: String::new(),
+                    stages: vec![backend_pb::FeatureStageFull {
+                        id: "stage-1".to_string(),
+                        environment_id: "env-1".to_string(),
+                        order_index: 0,
+                        position: "Start".to_string(),
+                        enabled: true,
+                        criterias: vec![],
+                    }],
+                    dependencies: vec![],
+                    active: true,
+                    variants: vec![],
+                }),
+            }))
+        }
+
+        async fn get_client_info(
+            &self,
+            request: tonic::Request<backend_pb::GetClientInfoRequest>,
+        ) -> Result<tonic::Response<backend_pb::GetClientInfoResponse>, tonic::Status> {
+            let req = request.into_inner();
+            if let Some(status) = self.reject_credentials(&req.client_id, &req.client_secret) {
+                return Err(status);
+            }
+            Ok(tonic::Response::new(backend_pb::GetClientInfoResponse {
+                id: req.client_id,
+                team_id: "team-1".to_string(),
+                name: "test client".to_string(),
+                description: String::new(),
+                enabled: true,
+                client_type: "Backend".to_string(),
+                web_origins: vec![],
+                environment_id: "env-1".to_string(),
+            }))
+        }
+
+        async fn push_user_assignments(
+            &self,
+            _request: tonic::Request<tonic::Streaming<backend_pb::UserFlagAssignment>>,
+        ) -> Result<tonic::Response<backend_pb::Ack>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not used in OFREP tests"))
+        }
+
+        async fn list_user_assignments(
+            &self,
+            _request: tonic::Request<backend_pb::ListUserFlagAssignmentsRequest>,
+        ) -> Result<tonic::Response<backend_pb::ListUserFlagAssignmentsResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used in OFREP tests"))
+        }
+
+        async fn stream_updates(
+            &self,
+            _request: tonic::Request<tonic::Streaming<backend_pb::StreamRequest>>,
+        ) -> Result<tonic::Response<Self::StreamUpdatesStream>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not used in OFREP tests"))
+        }
+
+        async fn push_evaluation_events(
+            &self,
+            _request: tonic::Request<backend_pb::PushEvaluationEventsRequest>,
+        ) -> Result<tonic::Response<backend_pb::PushEvaluationEventsResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used in OFREP tests"))
+        }
+
+        async fn track_metrics(
+            &self,
+            _request: tonic::Request<backend_pb::TrackMetricRequest>,
+        ) -> Result<tonic::Response<backend_pb::TrackMetricResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not used in OFREP tests"))
+        }
+    }
+
+    /// Start the OFREP mock backend and return an `AppState` (configured
+    /// credentials `client` / `secret`) wired to it, without retry delays.
+    async fn ofrep_app_with_mock_backend() -> (crate::AppState, OfrepMockBackend) {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind mock backend listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let backend = OfrepMockBackend::default();
+        let router = tonic::transport::Server::builder().add_service(
+            backend_pb::feature_evaluation_server::FeatureEvaluationServer::new(backend.clone()),
+        );
+        tokio::spawn(async move {
+            router
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .expect("mock backend should run");
+        });
+
+        let mut app = test_app_state(Arc::new(crate::MappedFeatureCache::new(10)));
+        let channel = Endpoint::from_shared(format!("http://{addr}"))
+            .expect("valid gRPC endpoint")
+            .connect_lazy();
+        app.grpc = Arc::new(tokio::sync::Mutex::new(
+            pb::feature_evaluation_client::FeatureEvaluationClient::new(channel),
+        ));
+        app.retry_config = crate::config::RetryConfig {
+            base_delay_ms: 1,
+            max_attempts: 0,
+            ..crate::config::RetryConfig::default()
+        };
+        (app, backend)
+    }
+
+    #[actix_web::test]
+    async fn ofrep_single_flag_with_configured_client_id_uses_configured_secret() {
+        let (app_state, backend) = ofrep_app_with_mock_backend().await;
+        let service =
+            actix_test::init_service(App::new().app_data(web::Data::new(app_state)).route(
+                "/ofrep/v1/evaluate/flags/{key}",
+                web::post().to(ofrep_evaluate_flag),
+            ))
+            .await;
+
+        let req = actix_test::TestRequest::post()
+            .uri("/ofrep/v1/evaluate/flags/my-flag")
+            .insert_header(("authorization", "Bearer client"))
+            .set_json(serde_json::json!({ "context": { "targetingKey": "u1" } }))
+            .to_request();
+        let resp = actix_test::call_service(&service, req).await;
+
+        assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+        let body: serde_json::Value = actix_test::read_body_json(resp).await;
+        assert_eq!(body["key"], serde_json::json!("my-flag"));
+        assert_eq!(body["value"], serde_json::json!(true));
+
+        let seen = backend.seen_secrets.lock().unwrap().clone();
+        assert!(!seen.is_empty(), "expected backend calls");
+        assert!(
+            seen.iter().all(|secret| secret == "secret"),
+            "backend saw secrets {seen:?}"
+        );
+    }
+
+    #[actix_web::test]
+    async fn ofrep_bulk_with_configured_client_id_uses_configured_secret() {
+        let (app_state, backend) = ofrep_app_with_mock_backend().await;
+        let service =
+            actix_test::init_service(App::new().app_data(web::Data::new(app_state)).route(
+                "/ofrep/v1/evaluate/flags",
+                web::post().to(ofrep_evaluate_flags_bulk),
+            ))
+            .await;
+
+        let req = actix_test::TestRequest::post()
+            .uri("/ofrep/v1/evaluate/flags")
+            .insert_header(("x-api-key", "client"))
+            .set_json(serde_json::json!({ "context": { "targetingKey": "u1" } }))
+            .to_request();
+        let resp = actix_test::call_service(&service, req).await;
+
+        assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+        let seen = backend.seen_secrets.lock().unwrap().clone();
+        assert_eq!(seen, vec!["secret".to_string()]);
     }
 
     #[test]

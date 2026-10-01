@@ -42,7 +42,7 @@ Review of `feature-toggle-backend/`, `feature-edge-server/` and `evaluation-engi
 | [ ] | [B02](issues/B02-duplicate-key-check-substring-match.md) | Duplicate-key checks reject valid keys (`check` vs `checkout`) | Medium | backend | Yes (intended) | B01 |
 | [ ] | [B03](issues/B03-stream-updates-cross-team.md) | Stream updates are not filtered by team | Critical | backend | Yes (intended) | — |
 | [ ] | [B04](issues/B04-stream-snapshot-deadlock-and-lost-updates.md) | Stream snapshot hangs above 64 features and loses updates | Critical | backend | Minor | — |
-| [ ] | [B05](issues/B05-ofrep-empty-client-secret.md) | OFREP sends an empty client secret, so OFREP never works | Critical | edge | Yes (intended) | — |
+| [x] | [B05](issues/B05-ofrep-empty-client-secret.md) | OFREP sends an empty client secret, so OFREP never works | Critical | edge | Yes (intended) | — |
 | [ ] | [B06](issues/B06-ofrep-auth-error-status.md) | OFREP returns 502 for bad credentials instead of 401/403 | Low | edge | Yes (OFREP only) | B05 |
 | [ ] | [B07](issues/B07-retry-backoff-math.md) | Retry backoff is base^n (500 ms, 250 s, 34.7 h) | High | edge | Waits only | — |
 | [ ] | [B08](issues/B08-retry-permanent-grpc-errors.md) | Edge retries permanent gRPC errors | Medium | edge | Fail fast | — |
