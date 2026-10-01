@@ -247,3 +247,134 @@ async fn test_set_stage_criteria_rejects_variant_from_other_feature() {
     let _ = repo.delete_feature(foreign_feature).await;
     let _ = repo.delete_feature(primary_feature).await;
 }
+
+/// Serializes rows for comparison. Rule-group order comes from a HashMap in
+/// both the single and batch paths, so it is sorted by id; the order of the
+/// rows themselves is compared by id as well where SQL does not define it.
+fn comparable<T: serde::Serialize>(rows: &[T]) -> Vec<serde_json::Value> {
+    let mut values: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|row| {
+            let mut value = serde_json::to_value(row).expect("serializable row");
+            if let Some(groups) = value
+                .get_mut("rule_groups")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                groups.sort_by_key(|group| group["id"].to_string());
+            }
+            value
+        })
+        .collect();
+    values.sort_by_key(|value| value["id"].to_string());
+    values
+}
+
+#[tokio::test]
+async fn test_batch_loaders_match_per_id_loaders_for_seeded_team() {
+    let pool = init_pg_pool().await;
+    let repo = feature::feature_repository(pool);
+    let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+
+    let features = repo
+        .get_features(team_id, None, None)
+        .await
+        .expect("seeded features");
+    let feature_ids: Vec<Uuid> = features.iter().map(|f| f.id).collect();
+
+    // Stages
+    let stages_by_feature = repo
+        .get_feature_stages_batch(&feature_ids)
+        .await
+        .expect("stages batch");
+    let mut stage_ids = Vec::new();
+    for feature_id in &feature_ids {
+        let single = repo
+            .get_feature_stages(*feature_id)
+            .await
+            .expect("stages of one feature");
+        let batch = stages_by_feature
+            .get(feature_id)
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            comparable(&batch),
+            comparable(&single),
+            "stages of {feature_id}"
+        );
+        stage_ids.extend(single.iter().map(|stage| stage.id));
+    }
+    assert!(!stage_ids.is_empty(), "seed data should have stages");
+
+    // Criteria, priority order within each stage included
+    let criteria_by_stage = repo
+        .get_stage_criteria_batch(team_id, &stage_ids)
+        .await
+        .expect("criteria batch");
+    let mut criteria_seen = 0;
+    for stage_id in &stage_ids {
+        let single = repo
+            .get_stage_criteria(*stage_id)
+            .await
+            .expect("criteria of one stage");
+        let batch = criteria_by_stage.get(stage_id).cloned().unwrap_or_default();
+        let order = |rows: &[feature_toggle_backend::database::entity::StageCriterion]| {
+            rows.iter().map(|c| (c.priority, c.id)).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            order(&batch),
+            order(&single),
+            "criteria order of {stage_id}"
+        );
+        assert_eq!(
+            comparable(&batch),
+            comparable(&single),
+            "criteria of {stage_id}"
+        );
+        criteria_seen += single.len();
+    }
+    assert!(criteria_seen > 0, "seed data should have stage criteria");
+
+    // Variants, created_at order within each feature included
+    let variants_by_feature = repo
+        .get_feature_variants_batch(&feature_ids)
+        .await
+        .expect("variants batch");
+    for feature_id in &feature_ids {
+        let single = repo
+            .get_feature_variants(*feature_id)
+            .await
+            .expect("variants of one feature");
+        let batch = variants_by_feature
+            .get(feature_id)
+            .cloned()
+            .unwrap_or_default();
+        let created = |rows: &[feature_toggle_backend::database::entity::FeatureVariant]| {
+            rows.iter().map(|v| v.created_at).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            created(&batch),
+            created(&single),
+            "variant order of {feature_id}"
+        );
+        assert_eq!(
+            comparable(&batch),
+            comparable(&single),
+            "variants of {feature_id}"
+        );
+    }
+
+    // Empty input runs no query and returns nothing.
+    assert!(repo.get_feature_stages_batch(&[]).await.unwrap().is_empty());
+    assert!(
+        repo.get_stage_criteria_batch(team_id, &[])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        repo.get_feature_variants_batch(&[])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}

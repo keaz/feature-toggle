@@ -63,7 +63,7 @@ Review of `feature-toggle-backend/`, `feature-edge-server/` and `evaluation-engi
 | Done | ID | Title | Severity | Crate | Behavior change | Depends on |
 |---|---|---|---|---|---|---|
 | [ ] | [P01](issues/P01-purge-assignments-hot-path.md) | `purge_assignments_for_feature` is O(all assignments) on hot paths (steps 1–2 fixed on `perf/p01-purge-assignments`; step 3 open) | High | edge | No (steps 1–2) | B18 (step 3 only) |
-| [ ] | [P02](issues/P02-snapshot-n-plus-one-queries.md) | N+1 queries (3–5 per stage) on snapshot and Evaluate | High | backend | No | — |
+| [x] | [P02](issues/P02-snapshot-n-plus-one-queries.md) | N+1 queries (3–5 per stage) on snapshot and Evaluate | High | backend | No | — |
 | [x] | [P03](issues/P03-batched-assignment-upsert.md) | One DB upsert per assignment row | Medium | backend | Minor | B11 |
 | [x] | [P04](issues/P04-cache-client-auth-failures.md) | Failed client-info lookups not cached | Low | edge | No | B06, B08 |
 

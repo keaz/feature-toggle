@@ -570,6 +570,30 @@ pub trait FeatureRepository: Send + Sync {
         feature_id: Uuid,
     ) -> Result<Vec<crate::database::entity::FeatureVariant>, Error>;
 
+    // Batched loaders for mapping many features at once (snapshot, Evaluate).
+    // Each returns the same rows as the per-id method, grouped by id; ids
+    // without rows are absent from the map.
+
+    /// Stages of the given features, keyed by feature id.
+    async fn get_feature_stages_batch(
+        &self,
+        feature_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, Vec<FeaturePipelineStage>>, Error>;
+
+    /// Criteria of the given stages, keyed by stage id. All stages must belong
+    /// to features of `team_id`, whose contexts resolve `IN` condition values.
+    async fn get_stage_criteria_batch(
+        &self,
+        team_id: Uuid,
+        stage_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, Vec<crate::database::entity::StageCriterion>>, Error>;
+
+    /// Variants of the given features, keyed by feature id.
+    async fn get_feature_variants_batch(
+        &self,
+        feature_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, Vec<crate::database::entity::FeatureVariant>>, Error>;
+
     // New (deployment workflow): request stage change
     async fn request_stage_change(
         &self,
@@ -2043,193 +2067,63 @@ impl FeatureRepository for FeatureRepositoryImpl {
         Ok(stages)
     }
 
+    async fn get_feature_stages_batch(
+        &self,
+        feature_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, Vec<FeaturePipelineStage>>, Error> {
+        let mut stages_by_feature: HashMap<Uuid, Vec<FeaturePipelineStage>> = HashMap::new();
+        if feature_ids.is_empty() {
+            return Ok(stages_by_feature);
+        }
+
+        // No ORDER BY, like get_feature_stages: rows of one feature keep the
+        // order the per-feature query returns.
+        let result = sqlx::query_as!(
+            FeaturePipelineStageRow,
+            r#"SELECT id, feature_id, environment_id, order_index, parent_stage_id, position, status, enabled
+            FROM features_pipeline_stages WHERE feature_id = ANY($1)"#,
+            feature_ids
+        )
+        .fetch_all(&self.pool)
+        .await;
+
+        let rows = handle_error(None, result)?;
+        for r in rows {
+            stages_by_feature
+                .entry(r.feature_id)
+                .or_default()
+                .push(FeaturePipelineStage {
+                    id: r.id,
+                    feature_id: r.feature_id,
+                    environment_id: r.environment_id,
+                    order_index: r.order_index,
+                    parent_stage_id: r.parent_stage_id,
+                    position: r.position,
+                    enabled: r.enabled,
+                    status: r.status,
+                });
+        }
+        Ok(stages_by_feature)
+    }
+
     async fn get_stage_criteria(
         &self,
         stage_id: Uuid,
     ) -> Result<Vec<crate::database::entity::StageCriterion>, Error> {
-        // Determine team_id for this stage to resolve context-derived values
-        let team_id = sqlx::query_scalar!(
-            r#"SELECT f.team_id
-               FROM features_pipeline_stages fps
-               JOIN features f ON f.id = fps.feature_id
-               WHERE fps.id = $1"#,
-            stage_id
-        )
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(Error::DatabaseError)?;
+        let mut conn = self.pool.acquire().await.map_err(Error::DatabaseError)?;
+        Self::get_stage_criteria_conn(&mut conn, stage_id).await
+    }
 
-        if team_id.is_none() {
-            return Err(Error::NotFound(stage_id));
+    async fn get_stage_criteria_batch(
+        &self,
+        team_id: Uuid,
+        stage_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, Vec<crate::database::entity::StageCriterion>>, Error> {
+        if stage_ids.is_empty() {
+            return Ok(HashMap::new());
         }
-        let team_id = team_id.unwrap();
-
-        // Preload context entries keyed by context key
-        let context_rows = sqlx::query!(
-            r#"SELECT c.key, COALESCE(ce.value, '') as "value!"
-               FROM contexts c
-               LEFT JOIN context_entries ce ON ce.context_id = c.id
-               WHERE c.team_id = $1"#,
-            team_id
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(Error::DatabaseError)?;
-        let mut context_value_map: std::collections::HashMap<String, Vec<String>> =
-            std::collections::HashMap::new();
-        for row in context_rows {
-            if !row.value.is_empty() {
-                context_value_map
-                    .entry(row.key)
-                    .or_default()
-                    .push(row.value);
-            }
-        }
-
-        let rows = sqlx::query!(
-            r#"SELECT sc.id, sc.stage_id, sc.priority,
-                      sc.variant_selection_mode::text as "variant_selection_mode!",
-                      sc.selected_variant_control
-               FROM feature_stage_criteria sc
-               WHERE sc.stage_id = $1
-               ORDER BY sc.priority ASC, sc.id"#,
-            stage_id
-        )
-        .fetch_all(&self.pool)
-        .await;
-        let rows = handle_error(Some(stage_id), rows)?;
-
-        let criteria_ids: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
-        let mut allocations_map: std::collections::HashMap<
-            Uuid,
-            Vec<crate::database::entity::VariantAllocationSimple>,
-        > = std::collections::HashMap::new();
-
-        if !criteria_ids.is_empty() {
-            let allocations = sqlx::query!(
-                r#"SELECT criteria_id, variant_control, weight
-                   FROM variant_allocations
-                   WHERE criteria_id = ANY($1)
-                   ORDER BY variant_control"#,
-                &criteria_ids
-            )
-            .fetch_all(&self.pool)
-            .await;
-
-            let allocations = handle_error(None, allocations)?;
-            for alloc in allocations {
-                allocations_map.entry(alloc.criteria_id).or_default().push(
-                    crate::database::entity::VariantAllocationSimple {
-                        variant_control: alloc.variant_control,
-                        weight: alloc.weight,
-                    },
-                );
-            }
-        }
-
-        let mut rule_groups_by_criteria: std::collections::HashMap<
-            Uuid,
-            std::collections::HashMap<
-                Uuid,
-                (
-                    crate::database::entity::LogicOperator,
-                    Vec<crate::database::entity::CompoundRuleCondition>,
-                ),
-            >,
-        > = std::collections::HashMap::new();
-
-        if !criteria_ids.is_empty() {
-            let rule_rows = sqlx::query!(
-                r#"SELECT rg.id as group_id, rg.criteria_id, rg.logic_operator,
-                          rc.id as "condition_id?", rc.context_key as "context_key?",
-                          rc.operator as "operator?", rc.value as "value?",
-                          rc.order_index as "order_index?"
-                   FROM rule_groups rg
-                   LEFT JOIN rule_conditions rc ON rc.group_id = rg.id
-                   WHERE rg.criteria_id = ANY($1)
-                   ORDER BY rg.created_at, rc.order_index"#,
-                &criteria_ids
-            )
-            .fetch_all(&self.pool)
-            .await;
-
-            let rule_rows = handle_error(None, rule_rows)?;
-
-            for row in rule_rows {
-                let by_group = rule_groups_by_criteria.entry(row.criteria_id).or_default();
-
-                let entry = by_group.entry(row.group_id).or_insert_with(|| {
-                    let logic_operator = match row.logic_operator.to_uppercase().as_str() {
-                        "OR" => crate::database::entity::LogicOperator::Or,
-                        _ => crate::database::entity::LogicOperator::And,
-                    };
-                    (logic_operator, Vec::new())
-                });
-
-                if let (Some(condition_id), Some(context_key), Some(operator), Some(order_index)) = (
-                    row.condition_id,
-                    row.context_key,
-                    row.operator,
-                    row.order_index,
-                ) {
-                    let mut value = row.value.unwrap_or(serde_json::Value::Null);
-                    if operator.eq_ignore_ascii_case("IN")
-                        && let Some(key_str) = value.as_str()
-                        && let Some(entries) = context_value_map.get(key_str)
-                    {
-                        value = serde_json::Value::Array(
-                            entries
-                                .iter()
-                                .map(|v| serde_json::Value::String(v.clone()))
-                                .collect(),
-                        );
-                    }
-                    entry
-                        .1
-                        .push(crate::database::entity::CompoundRuleCondition {
-                            id: condition_id,
-                            context_key,
-                            operator,
-                            value,
-                            order_index,
-                        });
-                }
-            }
-        }
-
-        let mut out = Vec::new();
-        for r in rows {
-            let rule_groups = rule_groups_by_criteria
-                .remove(&r.id)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|(group_id, (logic_operator, conditions))| {
-                    crate::database::entity::CompoundRuleGroup {
-                        id: group_id,
-                        logic_operator,
-                        conditions,
-                    }
-                })
-                .collect();
-
-            let variant_selection_mode = match r.variant_selection_mode.to_uppercase().as_str() {
-                "SPECIFIC_VARIANT" => {
-                    crate::database::entity::VariantSelectionMode::SpecificVariant
-                }
-                _ => crate::database::entity::VariantSelectionMode::WeightedSplit,
-            };
-
-            out.push(crate::database::entity::StageCriterion {
-                id: r.id,
-                stage_id: r.stage_id,
-                priority: r.priority,
-                rule_groups,
-                variant_allocations: allocations_map.remove(&r.id).unwrap_or_default(),
-                variant_selection_mode,
-                selected_variant_control: r.selected_variant_control,
-            });
-        }
-        Ok(out)
+        let mut conn = self.pool.acquire().await.map_err(Error::DatabaseError)?;
+        Self::load_stage_criteria_conn(&mut conn, team_id, stage_ids).await
     }
 
     async fn set_stage_criteria(
@@ -2737,6 +2631,46 @@ impl FeatureRepository for FeatureRepositoryImpl {
         .fetch_all(&self.pool)
         .await;
         handle_error(Some(feature_id), variants)
+    }
+
+    async fn get_feature_variants_batch(
+        &self,
+        feature_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, Vec<crate::database::entity::FeatureVariant>>, Error> {
+        let mut variants_by_feature: HashMap<Uuid, Vec<crate::database::entity::FeatureVariant>> =
+            HashMap::new();
+        if feature_ids.is_empty() {
+            return Ok(variants_by_feature);
+        }
+
+        let variants = sqlx::query_as!(
+            crate::database::entity::FeatureVariant,
+            r#"
+            SELECT
+                id,
+                feature_id,
+                control,
+                value,
+                value_type AS "value_type: crate::database::entity::VariantValueType",
+                description,
+                created_at,
+                updated_at
+            FROM feature_variants
+            WHERE feature_id = ANY($1)
+            ORDER BY feature_id, created_at
+            "#,
+            feature_ids
+        )
+        .fetch_all(&self.pool)
+        .await;
+
+        for variant in handle_error(None, variants)? {
+            variants_by_feature
+                .entry(variant.feature_id)
+                .or_default()
+                .push(variant);
+        }
+        Ok(variants_by_feature)
     }
 
     async fn request_stage_change(
@@ -4153,188 +4087,7 @@ impl FeatureRepositoryTx for FeatureRepositoryImpl {
         conn: &mut PgConnection,
         stage_id: Uuid,
     ) -> Result<Vec<crate::database::entity::StageCriterion>, Error> {
-        let team_id = sqlx::query_scalar!(
-            r#"SELECT f.team_id
-               FROM features_pipeline_stages fps
-               JOIN features f ON f.id = fps.feature_id
-               WHERE fps.id = $1"#,
-            stage_id
-        )
-        .fetch_optional(&mut *conn)
-        .await
-        .map_err(Error::DatabaseError)?;
-
-        if team_id.is_none() {
-            return Err(Error::NotFound(stage_id));
-        }
-        let team_id = team_id.unwrap();
-
-        let context_rows = sqlx::query!(
-            r#"SELECT c.key, COALESCE(ce.value, '') as "value!"
-               FROM contexts c
-               LEFT JOIN context_entries ce ON ce.context_id = c.id
-               WHERE c.team_id = $1"#,
-            team_id
-        )
-        .fetch_all(&mut *conn)
-        .await
-        .map_err(Error::DatabaseError)?;
-
-        let mut context_value_map: std::collections::HashMap<String, Vec<String>> =
-            std::collections::HashMap::new();
-        for row in context_rows {
-            if !row.value.is_empty() {
-                context_value_map
-                    .entry(row.key)
-                    .or_default()
-                    .push(row.value);
-            }
-        }
-
-        let rows = sqlx::query!(
-            r#"SELECT sc.id, sc.stage_id, sc.priority,
-                      sc.variant_selection_mode::text as "variant_selection_mode!",
-                      sc.selected_variant_control
-               FROM feature_stage_criteria sc
-               WHERE sc.stage_id = $1
-               ORDER BY sc.priority ASC, sc.id"#,
-            stage_id
-        )
-        .fetch_all(&mut *conn)
-        .await;
-        let rows = handle_error(Some(stage_id), rows)?;
-
-        let criteria_ids: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
-        let mut allocations_map: std::collections::HashMap<
-            Uuid,
-            Vec<crate::database::entity::VariantAllocationSimple>,
-        > = std::collections::HashMap::new();
-
-        if !criteria_ids.is_empty() {
-            let allocations = sqlx::query!(
-                r#"SELECT criteria_id, variant_control, weight
-                   FROM variant_allocations
-                   WHERE criteria_id = ANY($1)
-                   ORDER BY variant_control"#,
-                &criteria_ids
-            )
-            .fetch_all(&mut *conn)
-            .await;
-
-            let allocations = handle_error(None, allocations)?;
-            for alloc in allocations {
-                allocations_map.entry(alloc.criteria_id).or_default().push(
-                    crate::database::entity::VariantAllocationSimple {
-                        variant_control: alloc.variant_control,
-                        weight: alloc.weight,
-                    },
-                );
-            }
-        }
-
-        let mut rule_groups_by_criteria: std::collections::HashMap<
-            Uuid,
-            std::collections::HashMap<
-                Uuid,
-                (
-                    crate::database::entity::LogicOperator,
-                    Vec<crate::database::entity::CompoundRuleCondition>,
-                ),
-            >,
-        > = std::collections::HashMap::new();
-
-        if !criteria_ids.is_empty() {
-            let rule_rows = sqlx::query!(
-                r#"SELECT rg.id as group_id, rg.criteria_id, rg.logic_operator,
-                          rc.id as "condition_id?", rc.context_key as "context_key?",
-                          rc.operator as "operator?", rc.value as "value?",
-                          rc.order_index as "order_index?"
-                   FROM rule_groups rg
-                   LEFT JOIN rule_conditions rc ON rc.group_id = rg.id
-                   WHERE rg.criteria_id = ANY($1)
-                   ORDER BY rg.created_at, rc.order_index"#,
-                &criteria_ids
-            )
-            .fetch_all(&mut *conn)
-            .await;
-
-            let rule_rows = handle_error(None, rule_rows)?;
-
-            for row in rule_rows {
-                let by_group = rule_groups_by_criteria.entry(row.criteria_id).or_default();
-
-                let entry = by_group.entry(row.group_id).or_insert_with(|| {
-                    let logic_operator = match row.logic_operator.to_uppercase().as_str() {
-                        "OR" => crate::database::entity::LogicOperator::Or,
-                        _ => crate::database::entity::LogicOperator::And,
-                    };
-                    (logic_operator, Vec::new())
-                });
-
-                if let (Some(condition_id), Some(context_key), Some(operator), Some(order_index)) = (
-                    row.condition_id,
-                    row.context_key,
-                    row.operator,
-                    row.order_index,
-                ) {
-                    let mut value = row.value.unwrap_or(serde_json::Value::Null);
-                    if operator.eq_ignore_ascii_case("IN")
-                        && let Some(key_str) = value.as_str()
-                        && let Some(entries) = context_value_map.get(key_str)
-                    {
-                        value = serde_json::Value::Array(
-                            entries
-                                .iter()
-                                .map(|v| serde_json::Value::String(v.clone()))
-                                .collect(),
-                        );
-                    }
-                    entry
-                        .1
-                        .push(crate::database::entity::CompoundRuleCondition {
-                            id: condition_id,
-                            context_key,
-                            operator,
-                            value,
-                            order_index,
-                        });
-                }
-            }
-        }
-
-        let mut out = Vec::new();
-        for r in rows {
-            let rule_groups = rule_groups_by_criteria
-                .remove(&r.id)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|(group_id, (logic_operator, conditions))| {
-                    crate::database::entity::CompoundRuleGroup {
-                        id: group_id,
-                        logic_operator,
-                        conditions,
-                    }
-                })
-                .collect();
-
-            let variant_selection_mode = match r.variant_selection_mode.to_uppercase().as_str() {
-                "SPECIFIC_VARIANT" => {
-                    crate::database::entity::VariantSelectionMode::SpecificVariant
-                }
-                _ => crate::database::entity::VariantSelectionMode::WeightedSplit,
-            };
-
-            out.push(crate::database::entity::StageCriterion {
-                id: r.id,
-                stage_id: r.stage_id,
-                priority: r.priority,
-                variant_selection_mode,
-                selected_variant_control: r.selected_variant_control,
-                variant_allocations: allocations_map.remove(&r.id).unwrap_or_default(),
-                rule_groups,
-            });
-        }
-        Ok(out)
+        Self::get_stage_criteria_conn(conn, stage_id).await
     }
 
     async fn set_stage_criteria_tx(
@@ -4586,6 +4339,217 @@ impl FeatureRepositoryTx for FeatureRepositoryImpl {
 
 // Helper methods for FeatureRepositoryImpl (not part of trait)
 impl FeatureRepositoryImpl {
+    /// Criteria of one stage. Fails with `NotFound` when the stage does not
+    /// exist. Shared by the pool and transaction variants.
+    async fn get_stage_criteria_conn(
+        conn: &mut PgConnection,
+        stage_id: Uuid,
+    ) -> Result<Vec<crate::database::entity::StageCriterion>, Error> {
+        // Determine team_id for this stage to resolve context-derived values
+        let team_id = sqlx::query_scalar!(
+            r#"SELECT f.team_id
+               FROM features_pipeline_stages fps
+               JOIN features f ON f.id = fps.feature_id
+               WHERE fps.id = $1"#,
+            stage_id
+        )
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(Error::DatabaseError)?;
+
+        let Some(team_id) = team_id else {
+            return Err(Error::NotFound(stage_id));
+        };
+
+        let mut criteria_by_stage =
+            Self::load_stage_criteria_conn(conn, team_id, &[stage_id]).await?;
+        Ok(criteria_by_stage.remove(&stage_id).unwrap_or_default())
+    }
+
+    /// Loads the criteria of the given stages, with their rule groups,
+    /// conditions and variant allocations, grouped by stage id. Within a stage
+    /// the criteria are ordered by priority, then id. An `IN` condition whose
+    /// value names a context of `team_id` is expanded to that context's
+    /// entries. Runs at most five queries, whatever the number of stages.
+    async fn load_stage_criteria_conn(
+        conn: &mut PgConnection,
+        team_id: Uuid,
+        stage_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, Vec<crate::database::entity::StageCriterion>>, Error> {
+        let mut criteria_by_stage: HashMap<Uuid, Vec<crate::database::entity::StageCriterion>> =
+            HashMap::new();
+        if stage_ids.is_empty() {
+            return Ok(criteria_by_stage);
+        }
+
+        let rows = sqlx::query!(
+            r#"SELECT sc.id, sc.stage_id, sc.priority,
+                      sc.variant_selection_mode::text as "variant_selection_mode!",
+                      sc.selected_variant_control
+               FROM feature_stage_criteria sc
+               WHERE sc.stage_id = ANY($1)
+               ORDER BY sc.stage_id, sc.priority ASC, sc.id"#,
+            stage_ids
+        )
+        .fetch_all(&mut *conn)
+        .await;
+        let rows = handle_error(None, rows)?;
+        if rows.is_empty() {
+            return Ok(criteria_by_stage);
+        }
+
+        // Preload context entries keyed by context key
+        let context_rows = sqlx::query!(
+            r#"SELECT c.key, COALESCE(ce.value, '') as "value!"
+               FROM contexts c
+               LEFT JOIN context_entries ce ON ce.context_id = c.id
+               WHERE c.team_id = $1"#,
+            team_id
+        )
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(Error::DatabaseError)?;
+        let mut context_value_map: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for row in context_rows {
+            if !row.value.is_empty() {
+                context_value_map
+                    .entry(row.key)
+                    .or_default()
+                    .push(row.value);
+            }
+        }
+
+        let criteria_ids: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
+        let mut allocations_map: std::collections::HashMap<
+            Uuid,
+            Vec<crate::database::entity::VariantAllocationSimple>,
+        > = std::collections::HashMap::new();
+
+        let allocations = sqlx::query!(
+            r#"SELECT criteria_id, variant_control, weight
+                   FROM variant_allocations
+                   WHERE criteria_id = ANY($1)
+                   ORDER BY variant_control"#,
+            &criteria_ids
+        )
+        .fetch_all(&mut *conn)
+        .await;
+
+        let allocations = handle_error(None, allocations)?;
+        for alloc in allocations {
+            allocations_map.entry(alloc.criteria_id).or_default().push(
+                crate::database::entity::VariantAllocationSimple {
+                    variant_control: alloc.variant_control,
+                    weight: alloc.weight,
+                },
+            );
+        }
+
+        let mut rule_groups_by_criteria: std::collections::HashMap<
+            Uuid,
+            std::collections::HashMap<
+                Uuid,
+                (
+                    crate::database::entity::LogicOperator,
+                    Vec<crate::database::entity::CompoundRuleCondition>,
+                ),
+            >,
+        > = std::collections::HashMap::new();
+
+        let rule_rows = sqlx::query!(
+            r#"SELECT rg.id as group_id, rg.criteria_id, rg.logic_operator,
+                          rc.id as "condition_id?", rc.context_key as "context_key?",
+                          rc.operator as "operator?", rc.value as "value?",
+                          rc.order_index as "order_index?"
+                   FROM rule_groups rg
+                   LEFT JOIN rule_conditions rc ON rc.group_id = rg.id
+                   WHERE rg.criteria_id = ANY($1)
+                   ORDER BY rg.created_at, rc.order_index"#,
+            &criteria_ids
+        )
+        .fetch_all(&mut *conn)
+        .await;
+
+        let rule_rows = handle_error(None, rule_rows)?;
+
+        for row in rule_rows {
+            let by_group = rule_groups_by_criteria.entry(row.criteria_id).or_default();
+
+            let entry = by_group.entry(row.group_id).or_insert_with(|| {
+                let logic_operator = match row.logic_operator.to_uppercase().as_str() {
+                    "OR" => crate::database::entity::LogicOperator::Or,
+                    _ => crate::database::entity::LogicOperator::And,
+                };
+                (logic_operator, Vec::new())
+            });
+
+            if let (Some(condition_id), Some(context_key), Some(operator), Some(order_index)) = (
+                row.condition_id,
+                row.context_key,
+                row.operator,
+                row.order_index,
+            ) {
+                let mut value = row.value.unwrap_or(serde_json::Value::Null);
+                if operator.eq_ignore_ascii_case("IN")
+                    && let Some(key_str) = value.as_str()
+                    && let Some(entries) = context_value_map.get(key_str)
+                {
+                    value = serde_json::Value::Array(
+                        entries
+                            .iter()
+                            .map(|v| serde_json::Value::String(v.clone()))
+                            .collect(),
+                    );
+                }
+                entry
+                    .1
+                    .push(crate::database::entity::CompoundRuleCondition {
+                        id: condition_id,
+                        context_key,
+                        operator,
+                        value,
+                        order_index,
+                    });
+            }
+        }
+
+        for r in rows {
+            let rule_groups = rule_groups_by_criteria
+                .remove(&r.id)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(group_id, (logic_operator, conditions))| {
+                    crate::database::entity::CompoundRuleGroup {
+                        id: group_id,
+                        logic_operator,
+                        conditions,
+                    }
+                })
+                .collect();
+
+            let variant_selection_mode = match r.variant_selection_mode.to_uppercase().as_str() {
+                "SPECIFIC_VARIANT" => {
+                    crate::database::entity::VariantSelectionMode::SpecificVariant
+                }
+                _ => crate::database::entity::VariantSelectionMode::WeightedSplit,
+            };
+
+            criteria_by_stage.entry(r.stage_id).or_default().push(
+                crate::database::entity::StageCriterion {
+                    id: r.id,
+                    stage_id: r.stage_id,
+                    priority: r.priority,
+                    rule_groups,
+                    variant_allocations: allocations_map.remove(&r.id).unwrap_or_default(),
+                    variant_selection_mode,
+                    selected_variant_control: r.selected_variant_control,
+                },
+            );
+        }
+        Ok(criteria_by_stage)
+    }
+
     async fn create_feature_variants(
         &self,
         tx: &mut Transaction<'_, Postgres>,
@@ -4812,188 +4776,7 @@ impl FeatureRepositoryImpl {
         conn: &mut PgConnection,
         stage_id: Uuid,
     ) -> Result<Vec<crate::database::entity::StageCriterion>, Error> {
-        let team_id = sqlx::query_scalar!(
-            r#"SELECT f.team_id
-               FROM features_pipeline_stages fps
-               JOIN features f ON f.id = fps.feature_id
-               WHERE fps.id = $1"#,
-            stage_id
-        )
-        .fetch_optional(&mut *conn)
-        .await
-        .map_err(Error::DatabaseError)?;
-
-        if team_id.is_none() {
-            return Err(Error::NotFound(stage_id));
-        }
-        let team_id = team_id.unwrap();
-
-        let context_rows = sqlx::query!(
-            r#"SELECT c.key, COALESCE(ce.value, '') as "value!"
-               FROM contexts c
-               LEFT JOIN context_entries ce ON ce.context_id = c.id
-               WHERE c.team_id = $1"#,
-            team_id
-        )
-        .fetch_all(&mut *conn)
-        .await
-        .map_err(Error::DatabaseError)?;
-
-        let mut context_value_map: std::collections::HashMap<String, Vec<String>> =
-            std::collections::HashMap::new();
-        for row in context_rows {
-            if !row.value.is_empty() {
-                context_value_map
-                    .entry(row.key)
-                    .or_default()
-                    .push(row.value);
-            }
-        }
-
-        let rows = sqlx::query!(
-            r#"SELECT sc.id, sc.stage_id, sc.priority,
-                      sc.variant_selection_mode::text as "variant_selection_mode!",
-                      sc.selected_variant_control
-               FROM feature_stage_criteria sc
-               WHERE sc.stage_id = $1
-               ORDER BY sc.priority ASC, sc.id"#,
-            stage_id
-        )
-        .fetch_all(&mut *conn)
-        .await;
-        let rows = handle_error(Some(stage_id), rows)?;
-
-        let criteria_ids: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
-        let mut allocations_map: std::collections::HashMap<
-            Uuid,
-            Vec<crate::database::entity::VariantAllocationSimple>,
-        > = std::collections::HashMap::new();
-
-        if !criteria_ids.is_empty() {
-            let allocations = sqlx::query!(
-                r#"SELECT criteria_id, variant_control, weight
-                   FROM variant_allocations
-                   WHERE criteria_id = ANY($1)
-                   ORDER BY variant_control"#,
-                &criteria_ids
-            )
-            .fetch_all(&mut *conn)
-            .await;
-
-            let allocations = handle_error(None, allocations)?;
-            for alloc in allocations {
-                allocations_map.entry(alloc.criteria_id).or_default().push(
-                    crate::database::entity::VariantAllocationSimple {
-                        variant_control: alloc.variant_control,
-                        weight: alloc.weight,
-                    },
-                );
-            }
-        }
-
-        let mut rule_groups_by_criteria: std::collections::HashMap<
-            Uuid,
-            std::collections::HashMap<
-                Uuid,
-                (
-                    crate::database::entity::LogicOperator,
-                    Vec<crate::database::entity::CompoundRuleCondition>,
-                ),
-            >,
-        > = std::collections::HashMap::new();
-
-        if !criteria_ids.is_empty() {
-            let rule_rows = sqlx::query!(
-                r#"SELECT rg.id as group_id, rg.criteria_id, rg.logic_operator,
-                          rc.id as "condition_id?", rc.context_key as "context_key?",
-                          rc.operator as "operator?", rc.value as "value?",
-                          rc.order_index as "order_index?"
-                   FROM rule_groups rg
-                   LEFT JOIN rule_conditions rc ON rc.group_id = rg.id
-                   WHERE rg.criteria_id = ANY($1)
-                   ORDER BY rg.created_at, rc.order_index"#,
-                &criteria_ids
-            )
-            .fetch_all(&mut *conn)
-            .await;
-
-            let rule_rows = handle_error(None, rule_rows)?;
-
-            for row in rule_rows {
-                let by_group = rule_groups_by_criteria.entry(row.criteria_id).or_default();
-
-                let entry = by_group.entry(row.group_id).or_insert_with(|| {
-                    let logic_operator = match row.logic_operator.to_uppercase().as_str() {
-                        "OR" => crate::database::entity::LogicOperator::Or,
-                        _ => crate::database::entity::LogicOperator::And,
-                    };
-                    (logic_operator, Vec::new())
-                });
-
-                if let (Some(condition_id), Some(context_key), Some(operator), Some(order_index)) = (
-                    row.condition_id,
-                    row.context_key,
-                    row.operator,
-                    row.order_index,
-                ) {
-                    let mut value = row.value.unwrap_or(serde_json::Value::Null);
-                    if operator.eq_ignore_ascii_case("IN")
-                        && let Some(key_str) = value.as_str()
-                        && let Some(entries) = context_value_map.get(key_str)
-                    {
-                        value = serde_json::Value::Array(
-                            entries
-                                .iter()
-                                .map(|v| serde_json::Value::String(v.clone()))
-                                .collect(),
-                        );
-                    }
-                    entry
-                        .1
-                        .push(crate::database::entity::CompoundRuleCondition {
-                            id: condition_id,
-                            context_key,
-                            operator,
-                            value,
-                            order_index,
-                        });
-                }
-            }
-        }
-
-        let mut out = Vec::new();
-        for r in rows {
-            let rule_groups = rule_groups_by_criteria
-                .remove(&r.id)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|(group_id, (logic_operator, conditions))| {
-                    crate::database::entity::CompoundRuleGroup {
-                        id: group_id,
-                        logic_operator,
-                        conditions,
-                    }
-                })
-                .collect();
-
-            let variant_selection_mode = match r.variant_selection_mode.to_uppercase().as_str() {
-                "SPECIFIC_VARIANT" => {
-                    crate::database::entity::VariantSelectionMode::SpecificVariant
-                }
-                _ => crate::database::entity::VariantSelectionMode::WeightedSplit,
-            };
-
-            out.push(crate::database::entity::StageCriterion {
-                id: r.id,
-                stage_id: r.stage_id,
-                priority: r.priority,
-                variant_selection_mode,
-                selected_variant_control: r.selected_variant_control,
-                variant_allocations: allocations_map.remove(&r.id).unwrap_or_default(),
-                rule_groups,
-            });
-        }
-        Ok(out)
+        Self::get_stage_criteria_conn(conn, stage_id).await
     }
 
     async fn set_stage_criteria_tx(

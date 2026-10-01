@@ -8,6 +8,7 @@ use feature_toggle_backend::grpc::pb::{EvaluateRequest, GetFeatureByKeyRequest, 
 use feature_toggle_backend::grpc::{
     FeatureEvaluationSvc, feature_evaluation_server::FeatureEvaluationServer,
 };
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use tokio::sync::broadcast;
 use tokio::time::{Duration, sleep};
@@ -126,6 +127,51 @@ fn test_stage(feature_id: Uuid, environment_id: Uuid, enabled: bool) -> db::Feat
     }
 }
 
+/// Builds a `get_feature_stages_batch` mock from a per-feature closure. Like
+/// the real repository, features without stages are absent from the map.
+fn stages_batch<F>(
+    per_feature: F,
+) -> impl Fn(&[Uuid]) -> Result<HashMap<Uuid, Vec<db::FeaturePipelineStage>>, Error>
+where
+    F: Fn(Uuid) -> Result<Vec<db::FeaturePipelineStage>, Error>,
+{
+    move |feature_ids| batch_by_id(feature_ids, &per_feature)
+}
+
+/// Builds a `get_stage_criteria_batch` mock from a per-stage closure.
+fn criteria_batch<F>(
+    per_stage: F,
+) -> impl Fn(Uuid, &[Uuid]) -> Result<HashMap<Uuid, Vec<db::StageCriterion>>, Error>
+where
+    F: Fn(Uuid) -> Result<Vec<db::StageCriterion>, Error>,
+{
+    move |_team_id, stage_ids| batch_by_id(stage_ids, &per_stage)
+}
+
+/// Builds a `get_feature_variants_batch` mock from a per-feature closure.
+fn variants_batch<F>(
+    per_feature: F,
+) -> impl Fn(&[Uuid]) -> Result<HashMap<Uuid, Vec<db::FeatureVariant>>, Error>
+where
+    F: Fn(Uuid) -> Result<Vec<db::FeatureVariant>, Error>,
+{
+    move |feature_ids| batch_by_id(feature_ids, &per_feature)
+}
+
+fn batch_by_id<T>(
+    ids: &[Uuid],
+    per_id: &impl Fn(Uuid) -> Result<Vec<T>, Error>,
+) -> Result<HashMap<Uuid, Vec<T>>, Error> {
+    let mut out = HashMap::new();
+    for id in ids {
+        let rows = per_id(*id)?;
+        if !rows.is_empty() {
+            out.insert(*id, rows);
+        }
+    }
+    Ok(out)
+}
+
 /// Builds a `get_feature_by_key` mock from a keyed `get_features` mock closure:
 /// the exact-key lookup returns the feature whose key equals the request.
 fn exact_key_lookup<F>(features: F) -> impl Fn(Uuid, String) -> Result<Option<db::Feature>, Error>
@@ -182,8 +228,8 @@ async fn evaluate_validation_errors() {
     let feature_id = Uuid::new_v4();
     let stage_id = Uuid::new_v4();
     feature_mock
-        .expect_get_feature_stages()
-        .returning(move |fid| {
+        .expect_get_feature_stages_batch()
+        .returning(stages_batch(move |fid| {
             if fid == feature_id {
                 Ok(vec![db::FeaturePipelineStage {
                     id: stage_id,
@@ -198,7 +244,7 @@ async fn evaluate_validation_errors() {
             } else {
                 Ok(vec![])
             }
-        });
+        }));
     feature_mock
         .expect_get_features()
         .returning(move |_team, key, _ftype| {
@@ -239,8 +285,8 @@ async fn evaluate_validation_errors() {
             res
         });
     feature_mock
-        .expect_get_stage_criteria()
-        .returning(|_sid| Ok(Vec::new()));
+        .expect_get_stage_criteria_batch()
+        .returning(criteria_batch(|_sid| Ok(Vec::new())));
 
     let (tx, _rx) = broadcast::channel::<pb::FeatureUpdate>(8);
     let (addr, _server) =
@@ -358,8 +404,8 @@ async fn evaluate_auth_and_success() {
     let feature_id = Uuid::new_v4();
     let stage_id = Uuid::new_v4();
     feature_mock
-        .expect_get_feature_stages()
-        .returning(move |fid| {
+        .expect_get_feature_stages_batch()
+        .returning(stages_batch(move |fid| {
             if fid == feature_id {
                 Ok(vec![db::FeaturePipelineStage {
                     id: stage_id,
@@ -374,7 +420,7 @@ async fn evaluate_auth_and_success() {
             } else {
                 Ok(vec![])
             }
-        });
+        }));
     feature_mock
         .expect_get_feature_by_key()
         .returning(exact_key_lookup(move |_team, key, _ftype| {
@@ -415,8 +461,8 @@ async fn evaluate_auth_and_success() {
             res
         }));
     feature_mock
-        .expect_get_stage_criteria()
-        .returning(|_sid| Ok(Vec::new()));
+        .expect_get_stage_criteria_batch()
+        .returning(criteria_batch(|_sid| Ok(Vec::new())));
 
     let (tx, _rx) = broadcast::channel::<pb::FeatureUpdate>(8);
     let (addr, _server) =
@@ -576,17 +622,17 @@ async fn evaluate_returns_false_for_stage_disabled_feature() {
             }
         }));
     feature_mock
-        .expect_get_feature_stages()
-        .returning(move |id| {
+        .expect_get_feature_stages_batch()
+        .returning(stages_batch(move |id| {
             if id == feature_id {
                 Ok(vec![test_stage(feature_id, env_id, false)])
             } else {
                 Ok(vec![])
             }
-        });
+        }));
     feature_mock
-        .expect_get_stage_criteria()
-        .returning(|_sid| Ok(Vec::new()));
+        .expect_get_stage_criteria_batch()
+        .returning(criteria_batch(|_sid| Ok(Vec::new())));
 
     let (tx, _rx) = broadcast::channel::<pb::FeatureUpdate>(8);
     let (addr, _server) =
@@ -669,17 +715,17 @@ async fn evaluate_returns_false_for_dependency_disabled_by_kill_switch() {
             }
         });
     feature_mock
-        .expect_get_feature_stages()
-        .returning(move |id| {
+        .expect_get_feature_stages_batch()
+        .returning(stages_batch(move |id| {
             if id == root_id || id == dependency_id {
                 Ok(vec![test_stage(id, env_id, true)])
             } else {
                 Ok(vec![])
             }
-        });
+        }));
     feature_mock
-        .expect_get_stage_criteria()
-        .returning(|_sid| Ok(Vec::new()));
+        .expect_get_stage_criteria_batch()
+        .returning(criteria_batch(|_sid| Ok(Vec::new())));
 
     let (tx, _rx) = broadcast::channel::<pb::FeatureUpdate>(8);
     let (addr, _server) =
@@ -740,8 +786,8 @@ async fn get_feature_by_key_and_stream_branches() {
     let feature_id = Uuid::new_v4();
     let stage_id = Uuid::new_v4();
     feature_mock
-        .expect_get_feature_stages()
-        .returning(move |fid| {
+        .expect_get_feature_stages_batch()
+        .returning(stages_batch(move |fid| {
             if fid == feature_id {
                 Ok(vec![db::FeaturePipelineStage {
                     id: stage_id,
@@ -756,7 +802,7 @@ async fn get_feature_by_key_and_stream_branches() {
             } else {
                 Ok(vec![])
             }
-        });
+        }));
     let features_by_key =
         move |_team: Uuid, key: Option<String>, _ftype: Option<db::FeatureType>| {
             let res: Result<Vec<db::Feature>, Error> = match key.as_deref() {
@@ -802,8 +848,8 @@ async fn get_feature_by_key_and_stream_branches() {
         .expect_get_feature_by_key()
         .returning(exact_key_lookup(features_by_key));
     feature_mock
-        .expect_get_stage_criteria()
-        .returning(|_sid| Ok(Vec::new()));
+        .expect_get_stage_criteria_batch()
+        .returning(criteria_batch(|_sid| Ok(Vec::new())));
 
     let (addr, _server) = start_server_with_repos(
         Box::new(feature_mock),
@@ -1223,8 +1269,8 @@ async fn stream_empty_subscription_sends_full_snapshot() {
     let feature_a_id = Uuid::new_v4();
     let feature_b_id = Uuid::new_v4();
     feature_mock
-        .expect_get_feature_stages()
-        .returning(|_fid| Ok(Vec::new()));
+        .expect_get_feature_stages_batch()
+        .returning(stages_batch(|_fid| Ok(Vec::new())));
     feature_mock
         .expect_get_features()
         .returning(move |_team, key, _ftype| {
@@ -1271,8 +1317,8 @@ async fn stream_empty_subscription_sends_full_snapshot() {
             }
         });
     feature_mock
-        .expect_get_stage_criteria()
-        .returning(|_sid| Ok(Vec::new()));
+        .expect_get_stage_criteria_batch()
+        .returning(criteria_batch(|_sid| Ok(Vec::new())));
 
     let (addr, _server) =
         start_server_with_repos(Box::new(feature_mock), Box::new(client_mock), updates_tx).await;
@@ -1357,8 +1403,8 @@ async fn stream_subscriptions_are_connection_scoped() {
     let feature_a_id = Uuid::new_v4();
     let feature_b_id = Uuid::new_v4();
     feature_mock
-        .expect_get_feature_stages()
-        .returning(|_fid| Ok(Vec::new()));
+        .expect_get_feature_stages_batch()
+        .returning(stages_batch(|_fid| Ok(Vec::new())));
     let features_by_key =
         move |_team: Uuid, key: Option<String>, _ftype: Option<db::FeatureType>| match key
             .as_deref()
@@ -1434,8 +1480,8 @@ async fn stream_subscriptions_are_connection_scoped() {
         .expect_get_feature_by_key()
         .returning(exact_key_lookup(features_by_key));
     feature_mock
-        .expect_get_stage_criteria()
-        .returning(|_sid| Ok(Vec::new()));
+        .expect_get_stage_criteria_batch()
+        .returning(criteria_batch(|_sid| Ok(Vec::new())));
 
     let (addr, _server) = start_server_with_repos(
         Box::new(feature_mock),
@@ -1607,8 +1653,8 @@ async fn requested_keys_are_cleared_when_last_stream_disconnects() {
     let feature_a_id = Uuid::new_v4();
     let feature_b_id = Uuid::new_v4();
     feature_mock
-        .expect_get_feature_stages()
-        .returning(|_fid| Ok(Vec::new()));
+        .expect_get_feature_stages_batch()
+        .returning(stages_batch(|_fid| Ok(Vec::new())));
     let features_by_key =
         move |_team: Uuid, key: Option<String>, _ftype: Option<db::FeatureType>| match key
             .as_deref()
@@ -1684,8 +1730,8 @@ async fn requested_keys_are_cleared_when_last_stream_disconnects() {
         .expect_get_feature_by_key()
         .returning(exact_key_lookup(features_by_key));
     feature_mock
-        .expect_get_stage_criteria()
-        .returning(|_sid| Ok(Vec::new()));
+        .expect_get_stage_criteria_batch()
+        .returning(criteria_batch(|_sid| Ok(Vec::new())));
 
     let (addr, _server) =
         start_server_with_repos(Box::new(feature_mock), Box::new(client_mock), updates_tx).await;
@@ -1866,8 +1912,8 @@ async fn stream_snapshot_larger_than_channel_capacity_completes() {
 
     let mut feature_mock = MockFeatureRepository::new();
     feature_mock
-        .expect_get_feature_stages()
-        .returning(|_fid| Ok(Vec::new()));
+        .expect_get_feature_stages_batch()
+        .returning(stages_batch(|_fid| Ok(Vec::new())));
     feature_mock
         .expect_get_features()
         .returning(move |_team, _key, _ftype| {
@@ -1916,8 +1962,8 @@ async fn stream_forwards_update_broadcast_during_snapshot_read() {
 
     let mut feature_mock = MockFeatureRepository::new();
     feature_mock
-        .expect_get_feature_stages()
-        .returning(|_fid| Ok(Vec::new()));
+        .expect_get_feature_stages_batch()
+        .returning(stages_batch(|_fid| Ok(Vec::new())));
     let tx_clone = updates_tx.clone();
     feature_mock
         .expect_get_features()
@@ -1974,8 +2020,8 @@ async fn stream_drops_upserts_from_other_teams() {
 
     let mut feature_mock = MockFeatureRepository::new();
     feature_mock
-        .expect_get_feature_stages()
-        .returning(|_fid| Ok(Vec::new()));
+        .expect_get_feature_stages_batch()
+        .returning(stages_batch(|_fid| Ok(Vec::new())));
     feature_mock
         .expect_get_features()
         .returning(move |_team, _key, _ftype| {
@@ -2035,8 +2081,8 @@ async fn get_feature_by_key_returns_exact_key_match() {
     let checkout_v2_id = Uuid::new_v4();
     let mut feature_mock = MockFeatureRepository::new();
     feature_mock
-        .expect_get_feature_stages()
-        .returning(|_fid| Ok(Vec::new()));
+        .expect_get_feature_stages_batch()
+        .returning(stages_batch(|_fid| Ok(Vec::new())));
     // The list/search query matches substrings, ordered by key.
     feature_mock
         .expect_get_features()
@@ -2086,8 +2132,8 @@ async fn stream_keys_snapshot_sends_delete_for_missing_key() {
     let present_id = Uuid::new_v4();
     let mut feature_mock = MockFeatureRepository::new();
     feature_mock
-        .expect_get_feature_stages()
-        .returning(|_fid| Ok(Vec::new()));
+        .expect_get_feature_stages_batch()
+        .returning(stages_batch(|_fid| Ok(Vec::new())));
     feature_mock
         .expect_get_feature_by_key()
         .returning(move |_team, key| match key.as_str() {
@@ -2159,8 +2205,8 @@ async fn stream_forwards_deletes_only_to_owning_team() {
 
     let mut feature_mock = MockFeatureRepository::new();
     feature_mock
-        .expect_get_feature_stages()
-        .returning(|_fid| Ok(Vec::new()));
+        .expect_get_feature_stages_batch()
+        .returning(stages_batch(|_fid| Ok(Vec::new())));
     feature_mock
         .expect_get_features()
         .returning(move |_team, _key, _ftype| {
@@ -2225,4 +2271,599 @@ async fn stream_forwards_deletes_only_to_owning_team() {
         own.feature.is_none(),
         "internal team tag must not reach the edge"
     );
+}
+
+/// Feature data for the mapping pin test: three features (one Contextual,
+/// one depending on another), several stages, criteria with rule groups,
+/// conditions, allocations and variants.
+#[derive(Clone)]
+struct MappingFixture {
+    team_id: Uuid,
+    env_1: Uuid,
+    env_2: Uuid,
+    features: Vec<db::Feature>,
+    stages: std::collections::HashMap<Uuid, Vec<db::FeaturePipelineStage>>,
+    criteria: std::collections::HashMap<Uuid, Vec<db::StageCriterion>>,
+    variants: std::collections::HashMap<Uuid, Vec<db::FeatureVariant>>,
+}
+
+fn fixed_uuid(n: u128) -> Uuid {
+    Uuid::from_u128(0x0000_0000_0000_4000_8000_0000_0000_0000 | n)
+}
+
+fn mapping_fixture() -> MappingFixture {
+    use chrono::TimeZone;
+    let team_id = fixed_uuid(1);
+    let env_1 = fixed_uuid(2);
+    let env_2 = fixed_uuid(3);
+    let created_at = chrono::Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 5).unwrap();
+
+    let feature_a = fixed_uuid(10);
+    let feature_b = fixed_uuid(11);
+    let feature_d = fixed_uuid(12);
+    let build = |id: Uuid, key: &str, feature_type: db::FeatureType, deps: Vec<Uuid>| {
+        let mut feature = test_feature(
+            id,
+            key,
+            team_id,
+            true,
+            true,
+            deps.into_iter()
+                .map(|depends_on_id| db::FeatureDependency {
+                    feature_id: id,
+                    depends_on_id,
+                })
+                .collect(),
+        );
+        feature.feature_type = feature_type;
+        feature.created_at = created_at;
+        feature.rollback_scheduled_at = None;
+        feature.description = Some(format!("{key} description"));
+        feature
+    };
+    let features = vec![
+        build(feature_a, "pin-a", db::FeatureType::Simple, vec![]),
+        build(feature_b, "pin-b", db::FeatureType::Contextual, vec![]),
+        build(feature_d, "pin-d", db::FeatureType::Simple, vec![feature_a]),
+    ];
+
+    let stage = |id: Uuid, feature_id: Uuid, environment_id: Uuid, order_index: i32, enabled| {
+        db::FeaturePipelineStage {
+            id,
+            feature_id,
+            environment_id,
+            order_index,
+            parent_stage_id: None,
+            position: format!("{{\"x\":{order_index},\"y\":0}}"),
+            enabled,
+            status: if enabled { "DEPLOYED" } else { "NOT_DEPLOYED" }.into(),
+        }
+    };
+    let stage_a1 = fixed_uuid(20);
+    let stage_a2 = fixed_uuid(21);
+    let stage_b1 = fixed_uuid(22);
+    let stage_d1 = fixed_uuid(23);
+    let stages = std::collections::HashMap::from([
+        (
+            feature_a,
+            vec![
+                stage(stage_a1, feature_a, env_1, 0, true),
+                stage(stage_a2, feature_a, env_2, 1, false),
+            ],
+        ),
+        (feature_b, vec![stage(stage_b1, feature_b, env_1, 0, true)]),
+        (feature_d, vec![stage(stage_d1, feature_d, env_1, 0, true)]),
+    ]);
+
+    let condition =
+        |n: u128, key: &str, operator: &str, value, order_index| db::CompoundRuleCondition {
+            id: fixed_uuid(n),
+            context_key: key.into(),
+            operator: operator.into(),
+            value,
+            order_index,
+        };
+    let criteria = std::collections::HashMap::from([
+        (
+            stage_a1,
+            vec![
+                db::StageCriterion {
+                    id: fixed_uuid(30),
+                    stage_id: stage_a1,
+                    priority: 0,
+                    rule_groups: vec![
+                        db::CompoundRuleGroup {
+                            id: fixed_uuid(40),
+                            logic_operator: db::LogicOperator::And,
+                            conditions: vec![
+                                condition(50, "country", "EQUALS", serde_json::json!("US"), 0),
+                                condition(51, "plan", "IN", serde_json::json!(["pro", "team"]), 1),
+                            ],
+                        },
+                        db::CompoundRuleGroup {
+                            id: fixed_uuid(41),
+                            logic_operator: db::LogicOperator::Or,
+                            conditions: vec![condition(
+                                52,
+                                "age",
+                                "GREATER_THAN",
+                                serde_json::json!(18),
+                                0,
+                            )],
+                        },
+                    ],
+                    variant_allocations: vec![
+                        db::VariantAllocationSimple {
+                            variant_control: "off".into(),
+                            weight: 40,
+                        },
+                        db::VariantAllocationSimple {
+                            variant_control: "on".into(),
+                            weight: 60,
+                        },
+                    ],
+                    variant_selection_mode: db::VariantSelectionMode::WeightedSplit,
+                    selected_variant_control: None,
+                },
+                db::StageCriterion {
+                    id: fixed_uuid(31),
+                    stage_id: stage_a1,
+                    priority: 1,
+                    rule_groups: vec![],
+                    variant_allocations: vec![],
+                    variant_selection_mode: db::VariantSelectionMode::SpecificVariant,
+                    selected_variant_control: Some("on".into()),
+                },
+            ],
+        ),
+        (
+            stage_b1,
+            vec![db::StageCriterion {
+                id: fixed_uuid(32),
+                stage_id: stage_b1,
+                priority: 0,
+                rule_groups: vec![db::CompoundRuleGroup {
+                    id: fixed_uuid(42),
+                    logic_operator: db::LogicOperator::And,
+                    conditions: vec![condition(
+                        53,
+                        "country",
+                        "EQUALS",
+                        serde_json::json!("DE"),
+                        0,
+                    )],
+                }],
+                variant_allocations: vec![],
+                variant_selection_mode: db::VariantSelectionMode::SpecificVariant,
+                selected_variant_control: Some("blue".into()),
+            }],
+        ),
+    ]);
+
+    let variant = |n: u128, control: &str, value: serde_json::Value| db::FeatureVariant {
+        id: fixed_uuid(n),
+        feature_id: feature_b,
+        control: control.into(),
+        value,
+        value_type: db::VariantValueType::Json,
+        description: None,
+        created_at,
+        updated_at: created_at,
+    };
+    let variants = std::collections::HashMap::from([(
+        feature_b,
+        vec![
+            variant(60, "red", serde_json::json!({"r": 1})),
+            variant(61, "blue", serde_json::json!("#00f")),
+        ],
+    )]);
+
+    MappingFixture {
+        team_id,
+        env_1,
+        env_2,
+        features,
+        stages,
+        criteria,
+        variants,
+    }
+}
+
+/// Wires the feature, stage, criteria and variant loaders of the mock to the
+/// fixture.
+fn mapping_repo_mock(fixture: &MappingFixture) -> MockFeatureRepository {
+    let mut feature_mock = MockFeatureRepository::new();
+
+    let features = fixture.features.clone();
+    let team_id = fixture.team_id;
+    feature_mock
+        .expect_get_features()
+        .returning(move |team, key, _ftype| {
+            assert_eq!(team, team_id);
+            assert!(key.is_none());
+            Ok(features.clone())
+        });
+    let features = fixture.features.clone();
+    feature_mock
+        .expect_get_feature_by_key()
+        .returning(move |_team, key| Ok(features.iter().find(|f| f.key == key).cloned()));
+    let features = fixture.features.clone();
+    feature_mock
+        .expect_get_feature_by_id()
+        .returning(move |id| {
+            features
+                .iter()
+                .find(|f| f.id == id)
+                .cloned()
+                .ok_or(Error::NotFound(id))
+        });
+
+    let stages = fixture.stages.clone();
+    feature_mock
+        .expect_get_feature_stages_batch()
+        .returning(stages_batch(move |feature_id| {
+            Ok(stages.get(&feature_id).cloned().unwrap_or_default())
+        }));
+    let criteria = fixture.criteria.clone();
+    feature_mock
+        .expect_get_stage_criteria_batch()
+        .returning(criteria_batch(move |stage_id| {
+            Ok(criteria.get(&stage_id).cloned().unwrap_or_default())
+        }));
+    let variants = fixture.variants.clone();
+    feature_mock
+        .expect_get_feature_variants_batch()
+        .returning(variants_batch(move |feature_id| {
+            Ok(variants.get(&feature_id).cloned().unwrap_or_default())
+        }));
+
+    feature_mock
+}
+
+fn expected_mapping_messages(fixture: &MappingFixture) -> Vec<pb::FeatureFull> {
+    let team_id = fixture.team_id.to_string();
+    let created_at = "2026-01-02T03:04:05+00:00".to_string();
+    let condition =
+        |n: u128, key: &str, operator: &str, value: &str, order_index| pb::RuleCondition {
+            id: fixed_uuid(n).to_string(),
+            context_key: key.into(),
+            operator: operator.into(),
+            value: value.into(),
+            order_index,
+        };
+    let stage = |n: u128, env: Uuid, order_index: i32, enabled, criterias| pb::FeatureStageFull {
+        id: fixed_uuid(n).to_string(),
+        environment_id: env.to_string(),
+        order_index,
+        position: format!("{{\"x\":{order_index},\"y\":0}}"),
+        enabled,
+        criterias,
+    };
+    let feature =
+        |n: u128, key: &str, feature_type: &str, stages, dependencies, variants| pb::FeatureFull {
+            id: fixed_uuid(n).to_string(),
+            key: key.into(),
+            description: format!("{key} description"),
+            feature_type: feature_type.into(),
+            team_id: team_id.clone(),
+            created_at: created_at.clone(),
+            kill_switch_enabled: true,
+            kill_switch_activated_at: String::new(),
+            rollback_scheduled_at: String::new(),
+            stages,
+            dependencies,
+            active: true,
+            variants,
+        };
+
+    vec![
+        feature(
+            10,
+            "pin-a",
+            "Simple",
+            vec![
+                stage(
+                    20,
+                    fixture.env_1,
+                    0,
+                    true,
+                    vec![
+                        pb::StageCriterionFull {
+                            id: fixed_uuid(30).to_string(),
+                            stage_id: fixed_uuid(20).to_string(),
+                            priority: 0,
+                            rule_groups: vec![
+                                pb::RuleGroup {
+                                    id: fixed_uuid(40).to_string(),
+                                    logic_operator: "AND".into(),
+                                    conditions: vec![
+                                        condition(50, "country", "EQUALS", "\"US\"", 0),
+                                        condition(51, "plan", "IN", "[\"pro\",\"team\"]", 1),
+                                    ],
+                                },
+                                pb::RuleGroup {
+                                    id: fixed_uuid(41).to_string(),
+                                    logic_operator: "OR".into(),
+                                    conditions: vec![condition(52, "age", "GREATER_THAN", "18", 0)],
+                                },
+                            ],
+                            variant_allocations: vec![
+                                pb::VariantAllocation {
+                                    variant_control: "off".into(),
+                                    weight: 40,
+                                },
+                                pb::VariantAllocation {
+                                    variant_control: "on".into(),
+                                    weight: 60,
+                                },
+                            ],
+                            variant_selection_mode: "WEIGHTED_SPLIT".into(),
+                            selected_variant_control: String::new(),
+                        },
+                        pb::StageCriterionFull {
+                            id: fixed_uuid(31).to_string(),
+                            stage_id: fixed_uuid(20).to_string(),
+                            priority: 1,
+                            rule_groups: vec![],
+                            variant_allocations: vec![],
+                            variant_selection_mode: "SPECIFIC_VARIANT".into(),
+                            selected_variant_control: "on".into(),
+                        },
+                    ],
+                ),
+                stage(21, fixture.env_2, 1, false, vec![]),
+            ],
+            vec![],
+            vec![],
+        ),
+        feature(
+            11,
+            "pin-b",
+            "Contextual",
+            vec![stage(
+                22,
+                fixture.env_1,
+                0,
+                true,
+                vec![pb::StageCriterionFull {
+                    id: fixed_uuid(32).to_string(),
+                    stage_id: fixed_uuid(22).to_string(),
+                    priority: 0,
+                    rule_groups: vec![pb::RuleGroup {
+                        id: fixed_uuid(42).to_string(),
+                        logic_operator: "AND".into(),
+                        conditions: vec![condition(53, "country", "EQUALS", "\"DE\"", 0)],
+                    }],
+                    variant_allocations: vec![],
+                    variant_selection_mode: "SPECIFIC_VARIANT".into(),
+                    selected_variant_control: "blue".into(),
+                }],
+            )],
+            vec![],
+            vec![
+                pb::FeatureVariant {
+                    control: "red".into(),
+                    value: "{\"r\":1}".into(),
+                },
+                pb::FeatureVariant {
+                    control: "blue".into(),
+                    value: "\"#00f\"".into(),
+                },
+            ],
+        ),
+        feature(
+            12,
+            "pin-d",
+            "Simple",
+            vec![stage(23, fixture.env_1, 0, true, vec![])],
+            vec![pb::FeatureDependencyFull {
+                feature_id: fixed_uuid(12).to_string(),
+                depends_on_id: fixed_uuid(10).to_string(),
+            }],
+            vec![],
+        ),
+    ]
+}
+
+/// Pins the exact snapshot, GetFeatureByKey and Evaluate output of the
+/// feature mapping, so batching the child-row loads (P02) cannot change it.
+#[tokio::test]
+async fn feature_mapping_output_is_pinned() {
+    let fixture = mapping_fixture();
+    let expected = expected_mapping_messages(&fixture);
+    let (updates_tx, _updates_rx) = broadcast::channel::<pb::FeatureUpdate>(8);
+    let (cid, sec) = client_ids();
+    let client_id = Uuid::parse_str(&cid).unwrap();
+    let client_mock = stream_client_mock(client_id, fixture.team_id, sec.clone());
+
+    let (addr, _server) = start_server_with_repos(
+        Box::new(mapping_repo_mock(&fixture)),
+        Box::new(client_mock),
+        updates_tx,
+    )
+    .await;
+
+    // Full snapshot
+    let (mut stream, _tx) = open_update_stream(addr, cid.clone(), sec.clone(), vec![]).await;
+    let mut snapshot = Vec::new();
+    while snapshot.len() < expected.len() {
+        let update = recv_update_with_timeout(&mut stream, Duration::from_secs(2))
+            .await
+            .expect("snapshot ended early");
+        assert_eq!(update.action, pb::feature_update::Action::Snapshot as i32);
+        snapshot.push(update.feature.expect("snapshot carries a feature"));
+    }
+    assert_eq!(snapshot, expected);
+
+    // GetFeatureByKey
+    let mut client = FeatureEvaluationClient::connect(format!("http://{}", addr))
+        .await
+        .unwrap();
+    for expected_feature in &expected {
+        let response = client
+            .get_feature_by_key(GetFeatureByKeyRequest {
+                client_id: cid.clone(),
+                client_secret: sec.clone(),
+                feature_key: expected_feature.key.clone(),
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(response.feature.as_ref(), Some(expected_feature));
+    }
+
+    // Evaluate, including the dependency graph of pin-d
+    let context = |pairs: &[(&str, &str)]| {
+        pairs
+            .iter()
+            .map(|(key, value)| pb::Context {
+                key: (*key).into(),
+                value: (*value).into(),
+            })
+            .collect::<Vec<_>>()
+    };
+    let cases = [
+        (
+            "pin-a",
+            fixture.env_1,
+            context(&[("bucketingKey", "u1"), ("country", "US"), ("plan", "pro")]),
+        ),
+        (
+            "pin-a",
+            fixture.env_1,
+            context(&[("bucketingKey", "u2"), ("country", "FR")]),
+        ),
+        (
+            "pin-a",
+            fixture.env_2,
+            context(&[("bucketingKey", "u1"), ("country", "US"), ("plan", "pro")]),
+        ),
+        (
+            "pin-b",
+            fixture.env_1,
+            context(&[("bucketingKey", "u1"), ("country", "DE")]),
+        ),
+        (
+            "pin-b",
+            fixture.env_1,
+            context(&[("bucketingKey", "u1"), ("country", "US")]),
+        ),
+        (
+            "pin-d",
+            fixture.env_1,
+            context(&[("bucketingKey", "u1"), ("country", "US"), ("plan", "pro")]),
+        ),
+        ("pin-d", fixture.env_2, context(&[("bucketingKey", "u1")])),
+    ];
+    let mut results = Vec::new();
+    for (key, env, context) in cases {
+        let response = client
+            .evaluate(EvaluateRequest {
+                client_id: cid.clone(),
+                client_secret: sec.clone(),
+                feature_key: key.into(),
+                environment_id: env.to_string(),
+                context,
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        results.push(response.enabled);
+    }
+    // Values recorded from the per-stage implementation before P02.
+    assert_eq!(
+        results,
+        vec![true, true, false, false, false, true, false],
+        "evaluate results"
+    );
+}
+
+/// A snapshot loads stages, criteria and variants with one batched call each,
+/// however many features and stages it covers. The per-id loaders have no
+/// expectation, so calling them would fail the stream.
+#[tokio::test]
+async fn stream_snapshot_loads_child_rows_with_one_call_per_kind() {
+    let fixture = mapping_fixture();
+    let expected = expected_mapping_messages(&fixture);
+    let (updates_tx, _updates_rx) = broadcast::channel::<pb::FeatureUpdate>(8);
+    let (cid, sec) = client_ids();
+    let client_id = Uuid::parse_str(&cid).unwrap();
+    let client_mock = stream_client_mock(client_id, fixture.team_id, sec.clone());
+
+    let mut feature_mock = MockFeatureRepository::new();
+    let features = fixture.features.clone();
+    feature_mock
+        .expect_get_features()
+        .returning(move |_team, _key, _ftype| Ok(features.clone()));
+
+    let all_feature_ids: std::collections::BTreeSet<Uuid> =
+        fixture.features.iter().map(|f| f.id).collect();
+    let all_stage_ids: std::collections::BTreeSet<Uuid> = fixture
+        .stages
+        .values()
+        .flatten()
+        .map(|stage| stage.id)
+        .collect();
+    let contextual_ids: std::collections::BTreeSet<Uuid> = fixture
+        .features
+        .iter()
+        .filter(|f| matches!(f.feature_type, db::FeatureType::Contextual))
+        .map(|f| f.id)
+        .collect();
+    let team_id = fixture.team_id;
+
+    let stages = fixture.stages.clone();
+    feature_mock
+        .expect_get_feature_stages_batch()
+        .withf(move |ids| {
+            ids.iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                == all_feature_ids
+        })
+        .times(1)
+        .returning(stages_batch(move |feature_id| {
+            Ok(stages.get(&feature_id).cloned().unwrap_or_default())
+        }));
+    let criteria = fixture.criteria.clone();
+    feature_mock
+        .expect_get_stage_criteria_batch()
+        .withf(move |team, ids| {
+            *team == team_id
+                && ids
+                    .iter()
+                    .copied()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    == all_stage_ids
+        })
+        .times(1)
+        .returning(criteria_batch(move |stage_id| {
+            Ok(criteria.get(&stage_id).cloned().unwrap_or_default())
+        }));
+    let variants = fixture.variants.clone();
+    feature_mock
+        .expect_get_feature_variants_batch()
+        .withf(move |ids| {
+            ids.iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                == contextual_ids
+        })
+        .times(1)
+        .returning(variants_batch(move |feature_id| {
+            Ok(variants.get(&feature_id).cloned().unwrap_or_default())
+        }));
+
+    let (addr, _server) =
+        start_server_with_repos(Box::new(feature_mock), Box::new(client_mock), updates_tx).await;
+    let (mut stream, _tx) = open_update_stream(addr, cid, sec, vec![]).await;
+    let mut snapshot = Vec::new();
+    while snapshot.len() < expected.len() {
+        let update = recv_update_with_timeout(&mut stream, Duration::from_secs(2))
+            .await
+            .expect("snapshot ended early");
+        snapshot.push(update.feature.expect("snapshot carries a feature"));
+    }
+    assert_eq!(snapshot, expected);
 }

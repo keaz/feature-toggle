@@ -247,6 +247,83 @@ struct EngineFeatureBase {
     variants: Vec<engine::FeatureVariant>,
 }
 
+/// Number of features mapped per batched child-row load in a stream snapshot.
+const SNAPSHOT_MAPPING_BATCH_SIZE: usize = 200;
+
+/// Stages, criteria and variants of a set of features, loaded with one
+/// batched query per kind instead of several queries per stage.
+#[derive(Default)]
+struct FeatureChildren {
+    stages: std::collections::HashMap<Uuid, Vec<db::FeaturePipelineStage>>,
+    criteria: std::collections::HashMap<Uuid, Vec<db::StageCriterion>>,
+    variants: std::collections::HashMap<Uuid, Vec<db::FeatureVariant>>,
+}
+
+fn db_error_status(e: crate::Error) -> Status {
+    Status::internal(format!("db error: {}", e))
+}
+
+impl FeatureChildren {
+    async fn load(
+        repo: &dyn crate::database::feature::FeatureRepository,
+        features: &[&db::Feature],
+    ) -> Result<Self, crate::Error> {
+        if features.is_empty() {
+            return Ok(Self::default());
+        }
+
+        let feature_ids = features.iter().map(|f| f.id).collect::<Vec<_>>();
+        let stages = repo.get_feature_stages_batch(&feature_ids).await?;
+
+        // Criteria resolve context values against the team's contexts, so
+        // they are loaded per team (in practice a single team).
+        let mut stage_ids_by_team: std::collections::BTreeMap<Uuid, Vec<Uuid>> =
+            std::collections::BTreeMap::new();
+        for feature in features {
+            if let Some(feature_stages) = stages.get(&feature.id) {
+                stage_ids_by_team
+                    .entry(feature.team_id)
+                    .or_default()
+                    .extend(feature_stages.iter().map(|stage| stage.id));
+            }
+        }
+        let mut criteria = std::collections::HashMap::new();
+        for (team_id, stage_ids) in stage_ids_by_team {
+            criteria.extend(repo.get_stage_criteria_batch(team_id, &stage_ids).await?);
+        }
+
+        // Variants are only mapped for Contextual features.
+        let contextual_ids = features
+            .iter()
+            .filter(|f| matches!(f.feature_type, db::FeatureType::Contextual))
+            .map(|f| f.id)
+            .collect::<Vec<_>>();
+        let variants = if contextual_ids.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            repo.get_feature_variants_batch(&contextual_ids).await?
+        };
+
+        Ok(Self {
+            stages,
+            criteria,
+            variants,
+        })
+    }
+
+    fn stages_of(&self, feature_id: Uuid) -> &[db::FeaturePipelineStage] {
+        self.stages.get(&feature_id).map_or(&[], Vec::as_slice)
+    }
+
+    fn criteria_of(&self, stage_id: Uuid) -> Vec<db::StageCriterion> {
+        self.criteria.get(&stage_id).cloned().unwrap_or_default()
+    }
+
+    fn variants_of(&self, feature_id: Uuid) -> Vec<db::FeatureVariant> {
+        self.variants.get(&feature_id).cloned().unwrap_or_default()
+    }
+}
+
 pub struct FeatureEvaluationSvc {
     pool: sqlx::PgPool,
     // Shared (not boxed) so long-lived stream tasks can read snapshots after
@@ -519,10 +596,15 @@ impl FeatureEvaluationSvc {
             feature_graph.insert(dependency_feature.id, dependency_feature);
         }
 
+        let graph_features = feature_graph.values().collect::<Vec<_>>();
+        let children = FeatureChildren::load(repo.as_ref(), &graph_features)
+            .await
+            .map_err(db_error_status)?;
+
         let mut base_map: std::collections::HashMap<Uuid, EngineFeatureBase> =
             std::collections::HashMap::new();
         for feature in feature_graph.values() {
-            let (stages, variants) = self.map_db_feature_payload_to_engine(feature).await?;
+            let (stages, variants) = Self::map_db_feature_payload_to_engine(feature, &children);
             base_map.insert(
                 feature.id,
                 EngineFeatureBase {
@@ -552,22 +634,14 @@ impl FeatureEvaluationSvc {
         ))
     }
 
-    async fn map_db_feature_payload_to_engine(
-        &self,
+    fn map_db_feature_payload_to_engine(
         feature: &db::Feature,
-    ) -> Result<(Vec<engine::FeatureStage>, Vec<engine::FeatureVariant>), Status> {
-        let repo = &self.feature_repo;
-
-        let db_stages = repo
-            .get_feature_stages(feature.id)
-            .await
-            .map_err(|e| Status::internal(format!("db error: {}", e)))?;
+        children: &FeatureChildren,
+    ) -> (Vec<engine::FeatureStage>, Vec<engine::FeatureVariant>) {
+        let db_stages = children.stages_of(feature.id);
         let mut stages = Vec::with_capacity(db_stages.len());
         for stage in db_stages {
-            let criterias = repo
-                .get_stage_criteria(stage.id)
-                .await
-                .map_err(|e| Status::internal(format!("db error: {}", e)))?;
+            let criterias = children.criteria_of(stage.id);
 
             let mapped_criteria = criterias
                 .into_iter()
@@ -661,9 +735,8 @@ impl FeatureEvaluationSvc {
         }
 
         let variants = if matches!(feature.feature_type, db::FeatureType::Contextual) {
-            repo.get_feature_variants(feature.id)
-                .await
-                .map_err(|e| Status::internal(format!("db error: {}", e)))?
+            children
+                .variants_of(feature.id)
                 .into_iter()
                 .map(|variant| engine::FeatureVariant {
                     control: variant.control,
@@ -674,7 +747,7 @@ impl FeatureEvaluationSvc {
             vec![]
         };
 
-        Ok((stages, variants))
+        (stages, variants)
     }
 
     fn build_engine_dependency_graph(
@@ -745,21 +818,34 @@ impl FeatureEvaluationSvc {
         repo: &dyn crate::database::feature::FeatureRepository,
         f: db::Feature,
     ) -> Result<pb::FeatureFull, Status> {
-        // Map stages and load criterias for each
-        let stages = repo.get_feature_stages(f.id).await;
-        if stages.is_err() {
-            return Err(Status::internal(format!(
-                "db error: {}",
-                stages.err().unwrap()
-            )));
-        }
-        let stages = stages.unwrap();
+        let children = FeatureChildren::load(repo, &[&f])
+            .await
+            .map_err(db_error_status)?;
+        Ok(Self::map_db_feature_to_full_with_children(f, &children))
+    }
+
+    /// Maps many features with one batched load of their stages, criteria and
+    /// variants, keeping the input order.
+    async fn map_db_features_to_full_with_repo(
+        repo: &dyn crate::database::feature::FeatureRepository,
+        features: Vec<db::Feature>,
+    ) -> Result<Vec<pb::FeatureFull>, crate::Error> {
+        let children = FeatureChildren::load(repo, &features.iter().collect::<Vec<_>>()).await?;
+        Ok(features
+            .into_iter()
+            .map(|f| Self::map_db_feature_to_full_with_children(f, &children))
+            .collect())
+    }
+
+    fn map_db_feature_to_full_with_children(
+        f: db::Feature,
+        children: &FeatureChildren,
+    ) -> pb::FeatureFull {
+        // Map stages with their criterias
+        let stages = children.stages_of(f.id);
         let mut stage_msgs: Vec<pb::FeatureStageFull> = Vec::with_capacity(stages.len());
         for s in stages.iter() {
-            let crits = repo
-                .get_stage_criteria(s.id)
-                .await
-                .map_err(|e| Status::internal(format!("db error: {}", e)))?;
+            let crits = children.criteria_of(s.id);
             let criterias = crits
                 .into_iter()
                 .map(|c| {
@@ -838,10 +924,7 @@ impl FeatureEvaluationSvc {
 
         // Load variants from database only for Contextual features
         let variant_msgs = if matches!(f.feature_type, db::FeatureType::Contextual) {
-            let db_variants = repo
-                .get_feature_variants(f.id)
-                .await
-                .map_err(|e| Status::internal(format!("db error: {}", e)))?;
+            let db_variants = children.variants_of(f.id);
 
             db_variants
                 .into_iter()
@@ -854,7 +937,7 @@ impl FeatureEvaluationSvc {
             vec![]
         };
 
-        let feature = pb::FeatureFull {
+        pb::FeatureFull {
             id: f.id.to_string(),
             key: f.key,
             description: f.description.unwrap_or_default(),
@@ -874,9 +957,7 @@ impl FeatureEvaluationSvc {
             stages: stage_msgs,
             dependencies: deps,
             variants: variant_msgs,
-        };
-
-        Ok(feature)
+        }
     }
 
     /// Reads the initial stream snapshot and sends each feature as a Snapshot update.
@@ -943,18 +1024,31 @@ impl FeatureEvaluationSvc {
                 .await;
         }
 
-        // Send each feature as a snapshot update
-        for f in features_to_send {
-            let full = Self::map_db_feature_to_full_with_repo(feature_repo, f).await?;
-            let _ = out_tx
-                .send(Ok(pb::FeatureUpdate {
-                    message_id: uuid::Uuid::new_v4().to_string(),
-                    action: pb::feature_update::Action::Snapshot as i32,
-                    feature: Some(full),
-                    feature_key: String::new(),
-                    error: String::new(),
-                }))
-                .await;
+        // Send each feature as a snapshot update. Child rows are loaded in
+        // batches, so the query count does not grow with stages per feature.
+        let mut features_to_send = features_to_send.into_iter();
+        loop {
+            let batch = features_to_send
+                .by_ref()
+                .take(SNAPSHOT_MAPPING_BATCH_SIZE)
+                .collect::<Vec<_>>();
+            if batch.is_empty() {
+                break;
+            }
+            let mapped = Self::map_db_features_to_full_with_repo(feature_repo, batch)
+                .await
+                .map_err(db_error_status)?;
+            for full in mapped {
+                let _ = out_tx
+                    .send(Ok(pb::FeatureUpdate {
+                        message_id: uuid::Uuid::new_v4().to_string(),
+                        action: pb::feature_update::Action::Snapshot as i32,
+                        feature: Some(full),
+                        feature_key: String::new(),
+                        error: String::new(),
+                    }))
+                    .await;
+            }
         }
 
         log::info!("gRPC: Snapshot sent successfully");
