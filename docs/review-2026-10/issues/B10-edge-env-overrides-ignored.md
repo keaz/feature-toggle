@@ -4,7 +4,7 @@
 |---|---|
 | Type | Bug (configuration) |
 | Severity | High |
-| Status | Confirmed (code traced, checked against config-rs 0.14.1 source) |
+| Status | Fixed on branch fix/b10-edge-env-overrides |
 | Crate | `feature-edge-server` |
 | Behavior change | Yes: env vars that are documented but ignored today start to apply. See "Behavior impact". |
 

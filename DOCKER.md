@@ -76,6 +76,8 @@ docker run -d \
 - `EDGE_CLIENT_ID`: Client ID for authentication
 - `EDGE_CLIENT_SECRET`: Client secret for authentication
 
+The image ships without a `config.toml`, so these four variables are required when no config file is mounted. Any other setting can also be set with an `EDGE_` variable. For settings inside a section (such as `[grpc]` or `[flush]`), separate the section and the key with a double underscore (`__`), for example `EDGE_GRPC__TIMEOUT_SECS=15` or `EDGE_FLUSH__ASSIGNMENT_FLUSH_SECS=5`. A single underscore there (`EDGE_GRPC_TIMEOUT_SECS`) is ignored. The old `EDGE_GRPC_COMPRESSION` still works but is deprecated in favor of `EDGE_GRPC__COMPRESSION`, which wins if both are set. Environment variables override values from a mounted `config.toml`. See `feature-edge-server/CONFIG.md` for all settings.
+
 ## Development
 
 ### Local Development Setup

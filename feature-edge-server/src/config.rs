@@ -283,19 +283,53 @@ impl RetryConfig {
     }
 }
 
-/// Load configuration from file and environment variables
-/// Environment variables override file settings with EDGE_ prefix
+/// Load configuration from file and environment variables.
+///
+/// Environment variables with the `EDGE_` prefix override file settings. A single
+/// `_` follows the prefix and `__` separates nesting levels, so `EDGE_CLIENT_SECRET`
+/// sets `client_secret` and `EDGE_GRPC__TIMEOUT_SECS` sets `grpc.timeout_secs`.
+///
+/// The legacy `EDGE_GRPC_COMPRESSION` is still honoured (with a deprecation warning)
+/// unless `EDGE_GRPC__COMPRESSION` is also set, in which case the new form wins.
 pub fn load_config() -> Result<EdgeConfig, config::ConfigError> {
     let config_file =
         std::env::var("EDGE_CONFIG_FILE").unwrap_or_else(|_| "config.toml".to_string());
 
-    let settings = config::Config::builder()
+    let mut builder = config::Config::builder()
         // Start with default config file
-        .add_source(config::File::with_name(&config_file).required(false))
-        // Override with environment variables (EDGE_BACKEND_GRPC, etc.)
+        .add_source(config::File::with_name(&config_file).required(false));
+
+    // Back-compat: before `__` became the nesting separator, `EDGE_GRPC_COMPRESSION`
+    // mapped to `grpc.compression`. Apply it explicitly, but only when the new
+    // `EDGE_GRPC__COMPRESSION` is absent so the new form wins when both are set.
+    if let Ok(legacy) = std::env::var("EDGE_GRPC_COMPRESSION") {
+        if std::env::var_os("EDGE_GRPC__COMPRESSION").is_some() {
+            tracing::warn!(
+                "EDGE_GRPC_COMPRESSION is deprecated and ignored because EDGE_GRPC__COMPRESSION is set"
+            );
+        } else {
+            tracing::warn!("EDGE_GRPC_COMPRESSION is deprecated; use EDGE_GRPC__COMPRESSION");
+            builder = builder.set_override("grpc.compression", legacy)?;
+        }
+    }
+
+    // `try_parsing` below would turn credentials like `0123` or `1e5` into numbers,
+    // so read them verbatim. Overrides take precedence over the environment source.
+    for (var, key) in [
+        ("EDGE_CLIENT_ID", "client_id"),
+        ("EDGE_CLIENT_SECRET", "client_secret"),
+    ] {
+        if let Ok(value) = std::env::var(var) {
+            builder = builder.set_override(key, value)?;
+        }
+    }
+
+    let settings = builder
+        // Override with environment variables (EDGE_BACKEND_GRPC, EDGE_GRPC__TIMEOUT_SECS, etc.)
         .add_source(
             config::Environment::with_prefix("EDGE")
-                .separator("_")
+                .prefix_separator("_")
+                .separator("__")
                 .try_parsing(true),
         )
         .build()?;
@@ -385,5 +419,194 @@ mod tests {
         assert_eq!(config.evaluation_flush_interval(), Duration::from_secs(30));
         assert_eq!(config.assignment_flush_batch_size(), 1000);
         assert_eq!(config.evaluation_flush_batch_size(), 500);
+    }
+
+    mod load_config_env {
+        use super::super::*;
+        use std::path::PathBuf;
+        use std::sync::Mutex;
+
+        /// Env vars are process-global, so every test that touches them holds this lock.
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+        const BASE_CONFIG: &str = r#"
+backend_grpc = "http://from-file:50051"
+http_addr = "127.0.0.1:9999"
+client_id = "file-client-id"
+client_secret = "file-client-secret"
+
+[grpc]
+timeout_secs = 3
+"#;
+
+        /// Clears every `EDGE_*` var, sets the requested ones, and restores the
+        /// original environment on drop (also when the test panics).
+        struct EnvGuard {
+            saved: Vec<(String, String)>,
+            config_path: Option<PathBuf>,
+            _lock: std::sync::MutexGuard<'static, ()>,
+        }
+
+        impl EnvGuard {
+            fn new(config_contents: Option<&str>, vars: &[(&str, &str)]) -> Self {
+                let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                let saved: Vec<(String, String)> = std::env::vars()
+                    .filter(|(k, _)| k.to_ascii_uppercase().starts_with("EDGE_"))
+                    .collect();
+                for (k, _) in &saved {
+                    // SAFETY: ENV_LOCK serialises env access in these tests.
+                    unsafe { std::env::remove_var(k) };
+                }
+
+                let unique = format!(
+                    "edge-config-test-{}-{}.toml",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                );
+                let path = std::env::temp_dir().join(unique);
+                let config_path = match config_contents {
+                    Some(contents) => {
+                        std::fs::write(&path, contents).unwrap();
+                        Some(path.clone())
+                    }
+                    None => None,
+                };
+                // Always point at the temp path so a stray ./config.toml is never read.
+                unsafe { std::env::set_var("EDGE_CONFIG_FILE", &path) };
+                for (k, v) in vars {
+                    unsafe { std::env::set_var(k, v) };
+                }
+
+                Self {
+                    saved,
+                    config_path,
+                    _lock: lock,
+                }
+            }
+        }
+
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                let current: Vec<String> = std::env::vars()
+                    .map(|(k, _)| k)
+                    .filter(|k| k.to_ascii_uppercase().starts_with("EDGE_"))
+                    .collect();
+                for k in current {
+                    unsafe { std::env::remove_var(k) };
+                }
+                for (k, v) in &self.saved {
+                    unsafe { std::env::set_var(k, v) };
+                }
+                if let Some(path) = &self.config_path {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+
+        #[test]
+        fn file_values_load_without_env_overrides() {
+            let _env = EnvGuard::new(Some(BASE_CONFIG), &[]);
+            let cfg = load_config().expect("config should load");
+            assert_eq!(cfg.backend_grpc, "http://from-file:50051");
+            assert_eq!(cfg.client_secret, "file-client-secret");
+            assert_eq!(cfg.grpc.timeout_secs, 3);
+            assert!(matches!(cfg.grpc.compression, GrpcCompression::None));
+        }
+
+        #[test]
+        fn edge_client_secret_overrides_file() {
+            let _env = EnvGuard::new(Some(BASE_CONFIG), &[("EDGE_CLIENT_SECRET", "x")]);
+            let cfg = load_config().expect("config should load");
+            assert_eq!(cfg.client_secret, "x");
+            assert_eq!(cfg.client_id, "file-client-id");
+        }
+
+        #[test]
+        fn credential_env_vars_are_not_parsed_as_numbers() {
+            let _env = EnvGuard::new(
+                Some(BASE_CONFIG),
+                &[("EDGE_CLIENT_ID", "1e5"), ("EDGE_CLIENT_SECRET", "0123")],
+            );
+            let cfg = load_config().expect("config should load");
+            assert_eq!(cfg.client_id, "1e5");
+            assert_eq!(cfg.client_secret, "0123");
+        }
+
+        #[test]
+        fn top_level_env_vars_override_file() {
+            let _env = EnvGuard::new(
+                Some(BASE_CONFIG),
+                &[
+                    ("EDGE_BACKEND_GRPC", "http://env-backend:50051"),
+                    ("EDGE_HTTP_ADDR", "0.0.0.0:8081"),
+                    ("EDGE_CLIENT_ID", "env-client-id"),
+                ],
+            );
+            let cfg = load_config().expect("config should load");
+            assert_eq!(cfg.backend_grpc, "http://env-backend:50051");
+            assert_eq!(cfg.http_addr, "0.0.0.0:8081");
+            assert_eq!(cfg.client_id, "env-client-id");
+        }
+
+        #[test]
+        fn double_underscore_overrides_nested_grpc_timeout() {
+            let _env = EnvGuard::new(Some(BASE_CONFIG), &[("EDGE_GRPC__TIMEOUT_SECS", "7")]);
+            let cfg = load_config().expect("config should load");
+            assert_eq!(cfg.grpc.timeout_secs, 7);
+        }
+
+        #[test]
+        fn legacy_grpc_compression_still_applies() {
+            let _env = EnvGuard::new(Some(BASE_CONFIG), &[("EDGE_GRPC_COMPRESSION", "gzip")]);
+            let cfg = load_config().expect("config should load");
+            assert!(matches!(cfg.grpc.compression, GrpcCompression::Gzip));
+        }
+
+        #[test]
+        fn new_grpc_compression_form_applies() {
+            let _env = EnvGuard::new(Some(BASE_CONFIG), &[("EDGE_GRPC__COMPRESSION", "gzip")]);
+            let cfg = load_config().expect("config should load");
+            assert!(matches!(cfg.grpc.compression, GrpcCompression::Gzip));
+        }
+
+        #[test]
+        fn new_grpc_compression_form_wins_over_legacy() {
+            let _env = EnvGuard::new(
+                Some("[grpc]\ncompression = \"gzip\"\n"),
+                &[
+                    ("EDGE_BACKEND_GRPC", "http://env-backend:50051"),
+                    ("EDGE_HTTP_ADDR", "0.0.0.0:8081"),
+                    ("EDGE_CLIENT_ID", "env-client-id"),
+                    ("EDGE_CLIENT_SECRET", "env-secret"),
+                    ("EDGE_GRPC_COMPRESSION", "gzip"),
+                    ("EDGE_GRPC__COMPRESSION", "none"),
+                ],
+            );
+            let cfg = load_config().expect("config should load");
+            assert!(matches!(cfg.grpc.compression, GrpcCompression::None));
+        }
+
+        #[test]
+        fn docker_env_vars_work_without_config_file() {
+            // Mirrors the `docker run` example in DOCKER.md: the image ships no config.toml.
+            let _env = EnvGuard::new(
+                None,
+                &[
+                    ("EDGE_BACKEND_GRPC", "http://backend-host:50051"),
+                    ("EDGE_HTTP_ADDR", "0.0.0.0:8081"),
+                    ("EDGE_CLIENT_ID", "your-client-id"),
+                    ("EDGE_CLIENT_SECRET", "your-client-secret"),
+                ],
+            );
+            let cfg = load_config().expect("config should load from env only");
+            assert_eq!(cfg.backend_grpc, "http://backend-host:50051");
+            assert_eq!(cfg.http_addr, "0.0.0.0:8081");
+            assert_eq!(cfg.client_id, "your-client-id");
+            assert_eq!(cfg.client_secret, "your-client-secret");
+            assert_eq!(cfg.grpc.timeout_secs, 10);
+        }
     }
 }
