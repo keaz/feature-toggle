@@ -40,6 +40,8 @@ pub enum Error {
     AccountDisabled,
     #[error("Requesters cannot approve their own request")]
     SelfApprovalNotAllowed,
+    #[error("At least one enabled administrator must remain")]
+    LastAdminRequired,
 }
 
 pub async fn run() -> std::io::Result<()> {

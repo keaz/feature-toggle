@@ -323,6 +323,7 @@ fn rest_error_message(err: &RestError) -> String {
         | RestError::Unauthorized { message, .. }
         | RestError::AccountDisabled { message }
         | RestError::SelfApprovalNotAllowed { message }
+        | RestError::LastAdminRequired { message }
         | RestError::InvalidRefreshToken { message }
         | RestError::RefreshTokenReused { message }
         | RestError::Forbidden { message, .. }

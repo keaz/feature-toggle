@@ -53,6 +53,8 @@ pub enum RestError {
     AccountDisabled { message: String },
     #[error("Self approval not allowed")]
     SelfApprovalNotAllowed { message: String },
+    #[error("Last admin required")]
+    LastAdminRequired { message: String },
     #[error("Invalid refresh token")]
     InvalidRefreshToken { message: String },
     #[error("Refresh token reused")]
@@ -117,6 +119,14 @@ impl RestError {
         }
     }
 
+    /// 409 `last_admin_required`: the update would disable or demote the last
+    /// enabled administrator.
+    pub fn last_admin_required() -> Self {
+        Self::LastAdminRequired {
+            message: "At least one enabled administrator must remain".to_string(),
+        }
+    }
+
     /// 401 `invalid_refresh_token`: unknown or expired refresh token, or its user
     /// is missing or disabled.
     pub fn invalid_refresh_token() -> Self {
@@ -166,6 +176,7 @@ impl RestError {
             Self::Unauthorized { .. } => "unauthorized",
             Self::AccountDisabled { .. } => "account_disabled",
             Self::SelfApprovalNotAllowed { .. } => "self_approval_not_allowed",
+            Self::LastAdminRequired { .. } => "last_admin_required",
             Self::InvalidRefreshToken { .. } => "invalid_refresh_token",
             Self::RefreshTokenReused { .. } => "refresh_token_reused",
             Self::Forbidden { .. } => "forbidden",
@@ -183,6 +194,7 @@ impl RestError {
             | Self::Internal { message, .. }
             | Self::AccountDisabled { message }
             | Self::SelfApprovalNotAllowed { message }
+            | Self::LastAdminRequired { message }
             | Self::InvalidRefreshToken { message }
             | Self::RefreshTokenReused { message } => message,
         }
@@ -198,6 +210,7 @@ impl RestError {
             | Self::Internal { code, .. } => code.as_deref(),
             Self::AccountDisabled { .. }
             | Self::SelfApprovalNotAllowed { .. }
+            | Self::LastAdminRequired { .. }
             | Self::InvalidRefreshToken { .. }
             | Self::RefreshTokenReused { .. } => None,
         }
@@ -213,6 +226,7 @@ impl RestError {
             | Self::Internal { details, .. } => details.as_ref(),
             Self::AccountDisabled { .. }
             | Self::SelfApprovalNotAllowed { .. }
+            | Self::LastAdminRequired { .. }
             | Self::InvalidRefreshToken { .. }
             | Self::RefreshTokenReused { .. } => None,
         }
@@ -233,7 +247,7 @@ impl ResponseError for RestError {
         match self {
             Self::NotFound { .. } => StatusCode::NOT_FOUND,
             Self::InvalidInput { .. } => StatusCode::BAD_REQUEST,
-            Self::Conflict { .. } => StatusCode::CONFLICT,
+            Self::Conflict { .. } | Self::LastAdminRequired { .. } => StatusCode::CONFLICT,
             Self::Unauthorized { .. }
             | Self::AccountDisabled { .. }
             | Self::InvalidRefreshToken { .. }
@@ -260,6 +274,7 @@ impl From<crate::Error> for RestError {
             crate::Error::Unauthorized(msg) => RestError::unauthorized(msg),
             crate::Error::AccountDisabled => RestError::account_disabled("Account is disabled"),
             crate::Error::SelfApprovalNotAllowed => RestError::self_approval_not_allowed(),
+            crate::Error::LastAdminRequired => RestError::last_admin_required(),
         }
     }
 }
@@ -332,6 +347,18 @@ impl From<crate::logic::canary::CanaryLogicError> for RestError {
 mod tests {
     use super::*;
     use actix_web::body::to_bytes;
+
+    #[actix_web::test]
+    async fn last_admin_required_maps_to_409_with_last_admin_required_error() {
+        let err = RestError::from(crate::Error::LastAdminRequired);
+        assert_eq!(err.status_code(), StatusCode::CONFLICT);
+
+        let resp = err.error_response();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body = to_bytes(resp.into_body()).await.expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(json["error"], "last_admin_required");
+    }
 
     #[actix_web::test]
     async fn account_disabled_maps_to_401_with_account_disabled_error() {

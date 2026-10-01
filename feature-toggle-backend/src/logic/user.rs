@@ -56,6 +56,9 @@ pub trait UserLogic: Send + Sync {
     ) -> Result<ApiUser, Error>;
     async fn authenticate_user(&self, username: String, password: String)
     -> Result<ApiUser, Error>;
+    /// Non-transactional user update. It does not revoke tokens when a user is
+    /// disabled and does not enforce the last-admin guard, so it must not be wired
+    /// to REST. Use `user_tx::update_user_in_tx` instead.
     async fn update_user(
         &self,
         id: ID,
@@ -353,6 +356,11 @@ impl UserLogic for UserLogicImpl {
         })
     }
 
+    /// Non-transactional user update.
+    ///
+    /// This does not revoke tokens when a user is disabled and does not enforce the
+    /// last-admin guard. It must not be wired to REST; use
+    /// `user_tx::update_user_in_tx`, which does both.
     async fn update_user(
         &self,
         id: ID,

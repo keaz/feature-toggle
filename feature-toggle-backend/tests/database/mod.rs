@@ -9,6 +9,7 @@ mod environment_test;
 mod feature_evaluation_test;
 mod feature_test;
 mod jwt_secret_test;
+mod last_admin_test;
 mod metrics_test;
 mod notification_test;
 mod pipeline_test;

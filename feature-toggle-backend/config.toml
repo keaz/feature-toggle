@@ -15,6 +15,9 @@ grpc_addr = "0.0.0.0:50051"
 # refresh token returned by POST /api/v1/auth/login and POST /api/v1/auth/refresh.
 # Values below 1 are raised to 1. After a JWT signing-secret rotation, tokens
 # signed by the previous secret stay valid for access_token_ttl_minutes.
+# System-client (M2M) tokens signed by a rotated secret stop working
+# access_token_ttl_minutes after the rotation, and legacy tokens without a `kid`
+# stop at the first rotation. Re-issue M2M tokens after every rotation.
 [auth]
 access_token_ttl_minutes = 30
 refresh_token_ttl_days = 7

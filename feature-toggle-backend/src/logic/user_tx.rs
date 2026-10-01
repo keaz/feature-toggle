@@ -116,6 +116,45 @@ where
     })
 }
 
+/// Rejects with `Error::LastAdminRequired` when `user_id` is currently an enabled
+/// admin and no other enabled admin exists. System-client shadow users do not count.
+///
+/// Locks every enabled admin row until the transaction ends, so two concurrent
+/// updates that would each remove the last two admins are serialized: the second
+/// one re-reads the admin set after the first commits and is rejected.
+async fn ensure_another_admin_remains(conn: &mut PgConnection, user_id: Uuid) -> Result<(), Error> {
+    // Cheap pre-check without locks: only an enabled, non-shadow admin can be "the last admin".
+    let is_enabled_admin: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM users \
+         WHERE id = $1 AND is_admin = TRUE AND enabled = TRUE \
+           AND id NOT IN (SELECT id FROM system_clients))",
+    )
+    .bind(user_id)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(Error::DatabaseError)?;
+    if !is_enabled_admin {
+        return Ok(());
+    }
+
+    let admin_ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM users \
+         WHERE is_admin = TRUE AND enabled = TRUE \
+           AND id NOT IN (SELECT id FROM system_clients) \
+         ORDER BY id \
+         FOR UPDATE",
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(Error::DatabaseError)?;
+
+    // Re-check after locking: the target may have been disabled by a concurrent update.
+    if admin_ids.contains(&user_id) && admin_ids.iter().all(|id| *id == user_id) {
+        return Err(Error::LastAdminRequired);
+    }
+    Ok(())
+}
+
 /// Update an existing user within a transaction.
 ///
 /// This function performs user update and activity logging
@@ -141,6 +180,12 @@ where
     }
 
     let input_enabled = input.enabled;
+
+    // Disabling or demoting an admin must leave at least one enabled admin, or the
+    // anonymous admin bootstrap endpoint would open again.
+    if input.enabled == Some(false) || input.is_admin == Some(false) {
+        ensure_another_admin_remains(conn, user_id).await?;
+    }
 
     // Update user within transaction
     let updated = repo

@@ -84,6 +84,8 @@ A preflight carries no credentials, so the client is not checked.
 - `Web` client and `Origin` missing or not allowed: `403` with `Vary: Origin`. OFREP returns `{"errorCode": "FORBIDDEN", ...}`; `/evaluate` returns `{"error": "FORBIDDEN", "message": "..."}`.
 - `Backend` client: the request is served without CORS headers, whatever the `Origin`.
 
+`401` responses carry no CORS headers, because the client is not known before authentication. A browser therefore reports an opaque network error, not a readable `401`, when the SDK key is wrong.
+
 ## Endpoints
 
 - GET /health
