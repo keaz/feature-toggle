@@ -105,6 +105,7 @@ export interface ApprovalPolicy extends BaseEntity {
     description?: string;
     requiredApprovers: number;
     approverRoleIds: string[];
+    approverUserIds: string[];
     appliesTo: string;
     environmentIds?: string[];
     autoApproveAfterHours?: number;

@@ -184,6 +184,7 @@ export function createApprovalPolicyFixture(overrides: Partial<{
     description: string;
     requiredApprovers: number;
     approverRoleIds: string[];
+    approverUserIds: string[];
     appliesTo: 'all' | 'production_only' | 'specific_environments';
     environmentIds: string[];
     autoApproveAfterHours: number;
@@ -196,6 +197,7 @@ export function createApprovalPolicyFixture(overrides: Partial<{
         environmentIds: overrides.environmentIds,
         requiredApprovers: overrides.requiredApprovers || 1,
         approverRoleIds: overrides.approverRoleIds || ['00000000-0000-0000-0000-000000000003'],
+        approverUserIds: overrides.approverUserIds || [],
         autoApproveAfterHours: overrides.autoApproveAfterHours,
         enabled: overrides.enabled ?? true,
     };

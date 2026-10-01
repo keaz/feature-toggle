@@ -546,6 +546,7 @@ describe('Feature API', () => {
 
         it('should emergency disable a feature', async () => {
             const response = await client.post(`/features/${testFeatureId}/emergency-disable`, {
+                reason: 'API test emergency disable',
                 rollbackInMinutes: 0,
             });
 
@@ -560,6 +561,7 @@ describe('Feature API', () => {
         it('should return 404 for non-existent feature', async () => {
             const fakeId = '00000000-0000-0000-0000-000000000000';
             const response = await client.post(`/features/${fakeId}/emergency-disable`, {
+                reason: 'API test emergency disable',
                 rollbackInMinutes: 0,
             });
 
@@ -569,6 +571,7 @@ describe('Feature API', () => {
         it('should return 401 without authentication', async () => {
             const unauthClient = createApiClient();
             const response = await unauthClient.post(`/features/${testFeatureId}/emergency-disable`, {
+                reason: 'API test emergency disable',
                 rollbackInMinutes: 0,
             });
 

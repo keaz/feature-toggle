@@ -179,6 +179,7 @@ describe('Approval API', () => {
                 name: createApprovalPolicyFixture().name,
                 requiredApprovers: 1,
                 approverRoleIds: [],
+                approverUserIds: [],
                 appliesTo: 'all',
             });
 
