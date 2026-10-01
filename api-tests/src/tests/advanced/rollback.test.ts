@@ -181,7 +181,8 @@ describe('Feature Rollback', () => {
 
         it('should emergency disable feature', async () => {
             const response = await client.post(`/features/${testFeatureId}/emergency-disable`, {
-                rollbackInMinutes: 30,
+                reason: 'API test emergency disable',
+                rollbackInMinutes: 0,
             });
 
             expectSuccess(response);
@@ -190,18 +191,22 @@ describe('Feature Rollback', () => {
         it('should verify feature is completely disabled', async () => {
             const response = await client.get(`/features/${testFeatureId}`);
             expectSuccess(response);
-            expect(response.data.killSwitchEnabled).toBe(true);
+            // killSwitchEnabled = false means the kill switch is active (feature off).
+            expect(response.data.killSwitchEnabled).toBe(false);
+            expect(response.data.enabled).toBe(false);
         });
 
         it('should recover from emergency disable', async () => {
-            const response = await client.post(`/features/${testFeatureId}/emergency-enable`);
+            const response = await client.post(`/features/${testFeatureId}/emergency-enable`, {
+                reason: 'API test recovery',
+            });
             expectSuccess(response);
         });
 
         it('should verify feature is recovered', async () => {
             const response = await client.get(`/features/${testFeatureId}`);
             expectSuccess(response);
-            expect(response.data.killSwitchEnabled).toBe(false);
+            expect(response.data.killSwitchEnabled).toBe(true);
         });
     });
 

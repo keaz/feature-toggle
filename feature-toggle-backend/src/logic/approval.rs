@@ -380,8 +380,21 @@ impl ApprovalLogicImpl {
             r#"
             SELECT COALESCE(ARRAY_AGG(DISTINCT u.id ORDER BY u.id), '{}'::uuid[])
             FROM users u
-            JOIN user_teams ut ON ut.user_id = u.id
-            WHERE ut.team_id = $1
+            WHERE (
+                  EXISTS (
+                      SELECT 1 FROM user_teams ut
+                      WHERE ut.user_id = u.id AND ut.team_id = $1
+                  )
+                  -- A system client's shadow user is not a team member, but it
+                  -- belongs to its client's team while the client is active.
+                  OR EXISTS (
+                      SELECT 1 FROM system_clients sc
+                      WHERE sc.id = u.id
+                        AND sc.team_id = $1
+                        AND sc.enabled = TRUE
+                        AND sc.expires_at > NOW()
+                  )
+              )
               AND u.enabled = TRUE
               AND EXISTS (
                   SELECT 1
