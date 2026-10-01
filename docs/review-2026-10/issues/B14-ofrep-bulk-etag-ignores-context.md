@@ -4,7 +4,7 @@
 |---|---|
 | Type | Bug (correctness, HTTP caching) |
 | Severity | Medium (OFREP is unusable until B05 is fixed, so this is hidden today) |
-| Status | Verified (independent code trace) |
+| Status | Fixed on branch `fix/b14-ofrep-bulk-etag-context` |
 | Crate | `feature-edge-server` |
 | Behavior change | Yes, intended: 304 only when config **and** context match |
 | Depends on | [B05](B05-ofrep-empty-client-secret.md) (to observe it) |
