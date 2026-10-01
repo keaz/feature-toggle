@@ -363,6 +363,16 @@ async fn create_provider(pool: &PgPool, idp: &MockIdp, opts: ProviderOpts) -> Te
     TestProvider { id, slug }
 }
 
+/// Deletes the providers of this mock IdP (their identities, states and codes
+/// cascade); provisioned users stay, as other tests' users do.
+async fn cleanup(pool: &PgPool, idp: &MockIdp) {
+    sqlx::query("DELETE FROM sso_providers WHERE issuer_url = $1")
+        .bind(&idp.issuer)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
 struct AuthRequest {
     state: String,
     nonce: String,
@@ -675,6 +685,7 @@ async fn jit_login_provisions_user_and_exchange_issues_one_session() {
     assert_eq!(body["error"], "invalid_sso_code");
     let replay = callback(&app, &provider.slug, code, &auth.state).await;
     assert_eq!(sso_error(&replay).as_deref(), Some("sso_state_invalid"));
+    cleanup(&pool, &idp).await;
 }
 
 #[actix_web::test]
@@ -722,6 +733,7 @@ async fn existing_identity_logs_in_the_same_user_and_refreshes_email() {
     let (status, body) = exchange(&app, &code).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["user"]["id"], user_id.to_string());
+    cleanup(&pool, &idp).await;
 }
 
 #[actix_web::test]
@@ -805,6 +817,7 @@ async fn email_linking_requires_setting_verified_email_and_a_human_account() {
         sso_error(&location).as_deref(),
         Some("sso_linking_not_allowed")
     );
+    cleanup(&pool, &idp).await;
 }
 
 #[actix_web::test]
@@ -890,6 +903,7 @@ async fn domain_jit_and_disabled_rules_reject_login() {
         sso_error(&location).as_deref(),
         Some("sso_account_disabled")
     );
+    cleanup(&pool, &idp).await;
 }
 
 #[actix_web::test]
@@ -985,6 +999,7 @@ async fn invalid_id_tokens_are_rejected() {
         .await;
         assert_eq!(sso_error(&location).as_deref(), Some("sso_token_invalid"));
     }
+    cleanup(&pool, &idp).await;
 }
 
 #[actix_web::test]
@@ -1047,6 +1062,7 @@ async fn unknown_kid_refetches_jwks_once() {
     })
     .await;
     assert_eq!(sso_error(&location).as_deref(), Some("sso_token_invalid"));
+    cleanup(&pool, &idp).await;
 }
 
 #[actix_web::test]
@@ -1126,6 +1142,7 @@ async fn state_and_provider_errors_redirect_with_codes() {
             "{slug}"
         );
     }
+    cleanup(&pool, &idp).await;
 }
 
 #[actix_web::test]
@@ -1155,6 +1172,7 @@ async fn open_redirect_attempts_are_dropped() {
             "{evil}: {location}"
         );
     }
+    cleanup(&pool, &idp).await;
 }
 
 #[actix_web::test]
@@ -1188,6 +1206,7 @@ async fn expired_exchange_code_is_rejected() {
     assert_eq!(body["error"], "invalid_sso_code");
     let (status, _) = exchange(&app, "").await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+    cleanup(&pool, &idp).await;
 }
 
 #[actix_web::test]
@@ -1226,6 +1245,7 @@ async fn missing_email_falls_back_to_userinfo_then_fails() {
     })
     .await;
     assert_eq!(sso_error(&location).as_deref(), Some("sso_email_missing"));
+    cleanup(&pool, &idp).await;
 }
 
 #[actix_web::test]
@@ -1241,11 +1261,14 @@ async fn client_secret_post_is_used_when_basic_is_not_offered() {
     })
     .await;
     one_time_code(&location);
-    let state = idp.state.lock().unwrap();
-    let call = state.token_calls.last().unwrap();
-    assert!(call.basic.is_none());
-    assert_eq!(call.form["client_secret"], CLIENT_SECRET);
-    assert_eq!(call.form["client_id"], CLIENT_ID);
+    {
+        let state = idp.state.lock().unwrap();
+        let call = state.token_calls.last().unwrap();
+        assert!(call.basic.is_none());
+        assert_eq!(call.form["client_secret"], CLIENT_SECRET);
+        assert_eq!(call.form["client_id"], CLIENT_ID);
+    }
+    cleanup(&pool, &idp).await;
 }
 
 #[actix_web::test]
