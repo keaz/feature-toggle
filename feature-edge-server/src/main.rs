@@ -20,41 +20,22 @@ mod pb {
 
 #[derive(Clone, Debug)]
 pub struct CachedAssignment {
-    /// Served value. `None` for assignments warmed up from the backend, which
-    /// persists only the variant name: the value is then resolved from the
-    /// feature when served.
-    pub value: Option<serde_json::Value>,
+    pub value: serde_json::Value,
     pub variant: Option<String>,
     pub reason: evaluation_engine::EvaluationReason,
 }
 
 impl CachedAssignment {
-    /// The result to serve for `feature`, or `None` when the assigned variant
-    /// no longer exists and the caller must evaluate afresh. Without a
-    /// variant the value is `true`, as in a fresh evaluation.
-    pub fn into_result(
-        self,
-        flag_key: &str,
-        feature: &evaluation_engine::Feature,
-    ) -> Option<evaluation_engine::EvaluationResult> {
-        let value = match (self.value, &self.variant) {
-            (Some(value), _) => value,
-            (None, None) => serde_json::Value::Bool(true),
-            (None, Some(control)) => feature
-                .variants
-                .iter()
-                .find(|variant| &variant.control == control)?
-                .value
-                .clone(),
-        };
-        Some(evaluation_engine::EvaluationResult {
+    /// The cached result, served as is for `flag_key`.
+    pub fn into_result(self, flag_key: &str) -> evaluation_engine::EvaluationResult {
+        evaluation_engine::EvaluationResult {
             flag_key: flag_key.to_string(),
-            value,
+            value: self.value,
             variant: self.variant,
             reason: self.reason,
             error_code: None,
             metadata: None,
-        })
+        }
     }
 }
 
@@ -645,12 +626,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         retry_config: cfg.retry.clone(),
     };
 
-    // On startup, fetch persisted user assignments from backend and warm the cache
-    match grpc_client::load_user_assignments(&state).await {
-        Ok(n) => info!("loaded {} user assignments from backend", n),
-        Err(e) => error!("failed to load user assignments: {}", e),
-    }
-
     // Start stream sync task
     let stream_state = state.clone();
     let grpc_addr_clone = cfg.backend_grpc.clone();
@@ -742,7 +717,7 @@ mod tests {
 
     fn sticky_true() -> CachedAssignment {
         CachedAssignment {
-            value: Some(serde_json::json!(true)),
+            value: serde_json::json!(true),
             variant: None,
             reason: evaluation_engine::EvaluationReason::TargetingMatch,
         }
@@ -860,7 +835,7 @@ mod tests {
             feature_id,
             "env-1",
             CachedAssignment {
-                value: Some(serde_json::json!(true)),
+                value: serde_json::json!(true),
                 variant: None,
                 reason: evaluation_engine::EvaluationReason::TargetingMatch,
             },
@@ -870,7 +845,7 @@ mod tests {
             feature_id,
             "env-1",
             CachedAssignment {
-                value: Some(serde_json::json!(true)),
+                value: serde_json::json!(true),
                 variant: None,
                 reason: evaluation_engine::EvaluationReason::TargetingMatch,
             },
@@ -880,7 +855,7 @@ mod tests {
             "other",
             "env",
             CachedAssignment {
-                value: Some(serde_json::json!(true)),
+                value: serde_json::json!(true),
                 variant: None,
                 reason: evaluation_engine::EvaluationReason::TargetingMatch,
             },

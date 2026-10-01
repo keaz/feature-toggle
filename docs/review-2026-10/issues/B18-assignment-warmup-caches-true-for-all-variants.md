@@ -45,3 +45,7 @@ Today the full snapshot at stream start runs `purge_assignments_for_feature` for
 
 - Warmed-up assignments return the same value that a fresh evaluation of that variant returns.
 - `cargo test -p feature-edge-server` passes.
+
+## Follow-up
+
+The startup warm-up this issue fixed was removed later (`load_user_assignments` and `warm_assignment_cache` in `feature-edge-server/src/grpc_client.rs`): the first stream snapshot always cleared the warmed entries, so the load never affected served results. `CachedAssignment.value` is a plain value again, because only the warm-up produced entries without one.
