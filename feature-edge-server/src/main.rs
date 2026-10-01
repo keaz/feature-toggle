@@ -167,6 +167,12 @@ impl PendingAssignments {
     pub fn clear(&self) {
         while self.queue.pop().is_some() {}
     }
+
+    /// True when nothing is queued, counting entries of purged features too.
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
 }
 
 /// How long a rejected client credential is remembered. Kept short because a

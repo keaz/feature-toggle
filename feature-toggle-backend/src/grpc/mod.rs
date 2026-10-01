@@ -39,13 +39,10 @@ impl crate::logic::user_flag::UserFlagLogic for NoopUserFlagLogic {
             "user flag logic not available".into(),
         ))
     }
-    async fn upsert_after_auth(
+    async fn upsert_many_after_auth(
         &self,
-        _user_id: &str,
-        _feature_id: &str,
-        _environment_id: &str,
-        _assigned: bool,
-        _variant: Option<String>,
+        _team_id: uuid::Uuid,
+        _rows: Vec<crate::logic::user_flag::UserAssignmentInput>,
     ) -> Result<(), crate::logic::user_flag::UserFlagLogicError> {
         Ok(())
     }
@@ -287,6 +284,36 @@ impl Clone for FeatureEvaluationSvc {
             requested_keys: self.requested_keys.clone(),
             active_subscriptions: self.active_subscriptions.clone(),
         }
+    }
+}
+
+/// Rows buffered from a `PushUserAssignments` stream per DB write.
+const ASSIGNMENT_UPSERT_CHUNK_SIZE: usize = 500;
+
+fn assignment_input(m: pb::UserFlagAssignment) -> crate::logic::user_flag::UserAssignmentInput {
+    crate::logic::user_flag::UserAssignmentInput {
+        user_id: m.user_id,
+        feature_id: m.feature_id,
+        environment_id: m.environment_id,
+        assigned: m.assigned,
+        variant: if m.variant.is_empty() {
+            None
+        } else {
+            Some(m.variant)
+        },
+    }
+}
+
+fn assignment_upsert_status(err: crate::logic::user_flag::UserFlagLogicError) -> Status {
+    match err {
+        crate::logic::user_flag::UserFlagLogicError::InvalidInput(m) => Status::invalid_argument(m),
+        crate::logic::user_flag::UserFlagLogicError::PermissionDenied(m) => {
+            Status::permission_denied(m)
+        }
+        crate::logic::user_flag::UserFlagLogicError::DatabaseError(e) => {
+            Status::internal(format!("db error: {}", e))
+        }
+        _ => Status::internal("unexpected error"),
     }
 }
 
@@ -1149,13 +1176,13 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
             None => return Err(Status::invalid_argument("empty stream")),
         };
 
-        // Authenticate using logic
-        match self
+        // Authenticate using logic; every row in the stream must belong to this team
+        let team_id = match self
             .user_flag_logic
             .authenticate_client(&first_msg.client_id, &first_msg.client_secret)
             .await
         {
-            Ok(_) => {}
+            Ok(team_id) => team_id,
             Err(e) => {
                 return Err(match e {
                     crate::logic::user_flag::UserFlagLogicError::InvalidInput(m) => {
@@ -1175,67 +1202,31 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
                     }
                 });
             }
-        }
-
-        // Process the first payload then the rest via logic
-        let variant = if first_msg.variant.is_empty() {
-            None
-        } else {
-            Some(first_msg.variant)
         };
-        if let Err(e) = self
-            .user_flag_logic
-            .upsert_after_auth(
-                &first_msg.user_id,
-                &first_msg.feature_id,
-                &first_msg.environment_id,
-                first_msg.assigned,
-                variant,
-            )
-            .await
-        {
-            return Err(match e {
-                crate::logic::user_flag::UserFlagLogicError::InvalidInput(m) => {
-                    Status::invalid_argument(m)
-                }
-                crate::logic::user_flag::UserFlagLogicError::DatabaseError(e) => {
-                    Status::internal(format!("db error: {}", e))
-                }
-                _ => Status::internal("unexpected error"),
-            });
-        }
 
-        while let Some(msg) = stream.next().await {
-            match msg {
-                Ok(m) => {
-                    let variant = if m.variant.is_empty() {
-                        None
-                    } else {
-                        Some(m.variant)
-                    };
-                    if let Err(e) = self
-                        .user_flag_logic
-                        .upsert_after_auth(
-                            &m.user_id,
-                            &m.feature_id,
-                            &m.environment_id,
-                            m.assigned,
-                            variant,
-                        )
-                        .await
-                    {
-                        return Err(match e {
-                            crate::logic::user_flag::UserFlagLogicError::InvalidInput(m) => {
-                                Status::invalid_argument(m)
-                            }
-                            crate::logic::user_flag::UserFlagLogicError::DatabaseError(e) => {
-                                Status::internal(format!("db error: {}", e))
-                            }
-                            _ => Status::internal("unexpected error"),
-                        });
-                    }
+        // Buffer the stream (first payload included) into chunks: one ownership
+        // check and one upsert per chunk instead of a round trip per row.
+        let mut chunk = Vec::with_capacity(ASSIGNMENT_UPSERT_CHUNK_SIZE);
+        chunk.push(assignment_input(first_msg));
+        loop {
+            let end_of_stream = match stream.next().await {
+                Some(Ok(m)) => {
+                    chunk.push(assignment_input(m));
+                    false
                 }
-                Err(e) => return Err(Status::internal(format!("stream error: {}", e))),
+                Some(Err(e)) => return Err(Status::internal(format!("stream error: {}", e))),
+                None => true,
+            };
+            if chunk.len() >= ASSIGNMENT_UPSERT_CHUNK_SIZE || (end_of_stream && !chunk.is_empty()) {
+                let rows =
+                    std::mem::replace(&mut chunk, Vec::with_capacity(ASSIGNMENT_UPSERT_CHUNK_SIZE));
+                self.user_flag_logic
+                    .upsert_many_after_auth(team_id, rows)
+                    .await
+                    .map_err(assignment_upsert_status)?;
+            }
+            if end_of_stream {
+                break;
             }
         }
 

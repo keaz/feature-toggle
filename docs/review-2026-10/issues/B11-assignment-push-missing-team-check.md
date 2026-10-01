@@ -4,7 +4,7 @@
 |---|---|
 | Type | Bug (security, tenant isolation) |
 | Severity | High |
-| Status | Verified (independent code trace) |
+| Status | Fixed on branch `fix/b11-assignment-team-check` |
 | Crate | `feature-toggle-backend` |
 | Behavior change | Yes, intended: pushes for unknown or other-team feature/environment IDs are rejected |
 | Related | [P03](P03-batched-assignment-upsert.md) (same code path; do B11 first or together) |

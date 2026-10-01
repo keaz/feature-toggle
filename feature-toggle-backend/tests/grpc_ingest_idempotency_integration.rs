@@ -14,6 +14,10 @@ use uuid::Uuid;
 const SEEDED_CLIENT_ID: &str = "a1b2c3d4-0000-4000-8000-000000000001";
 const SEEDED_CLIENT_SECRET: &str = "TEST_WEB_KEY_1";
 const SEEDED_ENV_ID: &str = "51ecc366-f1cd-4d3d-ab73-fa60bad98f27";
+// "Test Feature", owned by the seeded client's team (51ecc366-...).
+const SEEDED_FEATURE_ID: &str = "51ecc366-f1cd-4d3d-ab73-fa60bad98f27";
+// A seeded team other than the seeded client's team.
+const OTHER_TEAM_ID: &str = "3eef17bc-9e06-411d-b5f4-7a786e68bb96";
 
 async fn start_server(pool: sqlx::PgPool) -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -213,8 +217,8 @@ async fn push_user_assignments_upserts_duplicate_deliveries() {
 
     let test_suffix = Uuid::new_v4().to_string();
     let user_id = format!("grpc-idempotency-user-{test_suffix}");
-    let feature_id = Uuid::new_v4();
-    let environment_id = Uuid::new_v4();
+    let feature_id = Uuid::parse_str(SEEDED_FEATURE_ID).unwrap();
+    let environment_id = Uuid::parse_str(SEEDED_ENV_ID).unwrap();
     let assignment = pb::UserFlagAssignment {
         user_id: user_id.clone(),
         feature_id: feature_id.to_string(),
@@ -264,4 +268,274 @@ async fn push_user_assignments_upserts_duplicate_deliveries() {
     .expect("cleanup should succeed");
 
     server_handle.abort();
+}
+
+async fn count_assignments_for_user(pool: &sqlx::PgPool, user_id: &str) -> i64 {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::bigint FROM user_flag_assignments WHERE user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_one(pool)
+    .await
+    .expect("count query should succeed")
+}
+
+#[tokio::test]
+async fn push_user_assignments_rejects_feature_of_another_team() {
+    if std::env::var("DATABASE_URL").is_err() {
+        eprintln!("Skipping test: DATABASE_URL is not set");
+        return;
+    }
+
+    let pool = init_pg_pool().await;
+    run_migrations(&pool)
+        .await
+        .expect("feature evaluation migrations should be applied");
+
+    let test_suffix = Uuid::new_v4().to_string();
+    let other_team_id = Uuid::parse_str(OTHER_TEAM_ID).unwrap();
+    let foreign_feature_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO features (id, key, feature_type, team_id) VALUES ($1, $2, 'Simple', $3)",
+    )
+    .bind(foreign_feature_id)
+    .bind(format!("b11-foreign-feature-{test_suffix}"))
+    .bind(other_team_id)
+    .execute(&pool)
+    .await
+    .expect("insert other-team feature");
+
+    let (addr, server_handle) = start_server(pool.clone()).await;
+    let mut client = FeatureEvaluationClient::connect(format!("http://{}", addr))
+        .await
+        .expect("connect grpc client");
+
+    let user_id = format!("b11-foreign-feature-user-{test_suffix}");
+    let assignment = pb::UserFlagAssignment {
+        user_id: user_id.clone(),
+        feature_id: foreign_feature_id.to_string(),
+        environment_id: SEEDED_ENV_ID.to_string(),
+        assigned: true,
+        client_id: SEEDED_CLIENT_ID.to_string(),
+        client_secret: SEEDED_CLIENT_SECRET.to_string(),
+        variant: "attacker-variant".to_string(),
+    };
+
+    let result = client
+        .push_user_assignments(tokio_stream::iter(vec![assignment]))
+        .await;
+    let rows = count_assignments_for_user(&pool, &user_id).await;
+
+    sqlx::query("DELETE FROM user_flag_assignments WHERE user_id = $1")
+        .bind(&user_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup assignments");
+    sqlx::query("DELETE FROM features WHERE id = $1")
+        .bind(foreign_feature_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup feature");
+    server_handle.abort();
+
+    let status = result.expect_err("push for another team's feature must be rejected");
+    assert_eq!(status.code(), tonic::Code::PermissionDenied, "{status:?}");
+    assert_eq!(
+        rows, 0,
+        "no assignment row may be written for another team's feature"
+    );
+}
+
+#[tokio::test]
+async fn push_user_assignments_rejects_environment_of_another_team() {
+    if std::env::var("DATABASE_URL").is_err() {
+        eprintln!("Skipping test: DATABASE_URL is not set");
+        return;
+    }
+
+    let pool = init_pg_pool().await;
+    run_migrations(&pool)
+        .await
+        .expect("feature evaluation migrations should be applied");
+
+    let test_suffix = Uuid::new_v4().to_string();
+    let other_team_id = Uuid::parse_str(OTHER_TEAM_ID).unwrap();
+    let foreign_env_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO environments (id, name, active, team_id) VALUES ($1, $2, true, $3)")
+        .bind(foreign_env_id)
+        .bind(format!("b11-foreign-env-{test_suffix}"))
+        .bind(other_team_id)
+        .execute(&pool)
+        .await
+        .expect("insert other-team environment");
+
+    let (addr, server_handle) = start_server(pool.clone()).await;
+    let mut client = FeatureEvaluationClient::connect(format!("http://{}", addr))
+        .await
+        .expect("connect grpc client");
+
+    let user_id = format!("b11-foreign-env-user-{test_suffix}");
+    let own_row = pb::UserFlagAssignment {
+        user_id: user_id.clone(),
+        feature_id: SEEDED_FEATURE_ID.to_string(),
+        environment_id: foreign_env_id.to_string(),
+        assigned: true,
+        client_id: SEEDED_CLIENT_ID.to_string(),
+        client_secret: SEEDED_CLIENT_SECRET.to_string(),
+        variant: String::new(),
+    };
+    let unknown_ids_user = format!("b11-unknown-ids-user-{test_suffix}");
+    let unknown_ids = pb::UserFlagAssignment {
+        user_id: unknown_ids_user.clone(),
+        feature_id: Uuid::new_v4().to_string(),
+        environment_id: Uuid::new_v4().to_string(),
+        assigned: true,
+        client_id: SEEDED_CLIENT_ID.to_string(),
+        client_secret: SEEDED_CLIENT_SECRET.to_string(),
+        variant: String::new(),
+    };
+
+    let foreign_env_result = client
+        .push_user_assignments(tokio_stream::iter(vec![own_row]))
+        .await;
+    let unknown_ids_result = client
+        .push_user_assignments(tokio_stream::iter(vec![unknown_ids]))
+        .await;
+    let foreign_env_rows = count_assignments_for_user(&pool, &user_id).await;
+    let unknown_ids_rows = count_assignments_for_user(&pool, &unknown_ids_user).await;
+
+    sqlx::query("DELETE FROM user_flag_assignments WHERE user_id = ANY($1)")
+        .bind(vec![user_id.clone(), unknown_ids_user.clone()])
+        .execute(&pool)
+        .await
+        .expect("cleanup assignments");
+    sqlx::query("DELETE FROM environments WHERE id = $1")
+        .bind(foreign_env_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup environment");
+    server_handle.abort();
+
+    let status =
+        foreign_env_result.expect_err("push for another team's environment must be rejected");
+    assert_eq!(status.code(), tonic::Code::PermissionDenied, "{status:?}");
+    assert_eq!(foreign_env_rows, 0);
+
+    let status =
+        unknown_ids_result.expect_err("push for unknown feature/environment must be rejected");
+    assert_eq!(status.code(), tonic::Code::PermissionDenied, "{status:?}");
+    assert_eq!(unknown_ids_rows, 0);
+}
+
+fn seeded_assignment(
+    user_id: &str,
+    variant: &str,
+    with_credentials: bool,
+) -> pb::UserFlagAssignment {
+    pb::UserFlagAssignment {
+        user_id: user_id.to_string(),
+        feature_id: SEEDED_FEATURE_ID.to_string(),
+        environment_id: SEEDED_ENV_ID.to_string(),
+        assigned: true,
+        client_id: if with_credentials {
+            SEEDED_CLIENT_ID.to_string()
+        } else {
+            String::new()
+        },
+        client_secret: if with_credentials {
+            SEEDED_CLIENT_SECRET.to_string()
+        } else {
+            String::new()
+        },
+        variant: variant.to_string(),
+    }
+}
+
+#[tokio::test]
+async fn push_user_assignments_keeps_last_write_for_duplicate_keys_in_one_stream() {
+    if std::env::var("DATABASE_URL").is_err() {
+        eprintln!("Skipping test: DATABASE_URL is not set");
+        return;
+    }
+
+    let pool = init_pg_pool().await;
+    run_migrations(&pool)
+        .await
+        .expect("feature evaluation migrations should be applied");
+    let (addr, server_handle) = start_server(pool.clone()).await;
+    let mut client = FeatureEvaluationClient::connect(format!("http://{}", addr))
+        .await
+        .expect("connect grpc client");
+
+    let user_id = format!("p03-last-write-user-{}", Uuid::new_v4());
+    let result = client
+        .push_user_assignments(tokio_stream::iter(vec![
+            seeded_assignment(&user_id, "variant-a", true),
+            seeded_assignment(&user_id, "variant-b", false),
+        ]))
+        .await;
+
+    let stored = sqlx::query_as::<_, (Option<String>,)>(
+        "SELECT variant FROM user_flag_assignments WHERE user_id = $1",
+    )
+    .bind(&user_id)
+    .fetch_all(&pool)
+    .await
+    .expect("query stored assignments");
+
+    sqlx::query("DELETE FROM user_flag_assignments WHERE user_id = $1")
+        .bind(&user_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup assignments");
+    server_handle.abort();
+
+    result.expect("push with a repeated key should succeed");
+    assert_eq!(stored, vec![(Some("variant-b".to_string()),)]);
+}
+
+#[tokio::test]
+async fn push_user_assignments_stores_every_row_of_a_large_stream() {
+    if std::env::var("DATABASE_URL").is_err() {
+        eprintln!("Skipping test: DATABASE_URL is not set");
+        return;
+    }
+
+    let pool = init_pg_pool().await;
+    run_migrations(&pool)
+        .await
+        .expect("feature evaluation migrations should be applied");
+    let (addr, server_handle) = start_server(pool.clone()).await;
+    let mut client = FeatureEvaluationClient::connect(format!("http://{}", addr))
+        .await
+        .expect("connect grpc client");
+
+    // More than two backend chunks, with a partial last chunk.
+    const ROWS: usize = 1500;
+    let prefix = format!("p03-large-stream-{}-", Uuid::new_v4());
+    let messages: Vec<_> = (0..ROWS)
+        .map(|i| seeded_assignment(&format!("{prefix}{i}"), "variant-a", i == 0))
+        .collect();
+
+    let result = client
+        .push_user_assignments(tokio_stream::iter(messages))
+        .await;
+
+    let count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::bigint FROM user_flag_assignments WHERE user_id LIKE $1",
+    )
+    .bind(format!("{prefix}%"))
+    .fetch_one(&pool)
+    .await
+    .expect("count stored assignments");
+
+    sqlx::query("DELETE FROM user_flag_assignments WHERE user_id LIKE $1")
+        .bind(format!("{prefix}%"))
+        .execute(&pool)
+        .await
+        .expect("cleanup assignments");
+    server_handle.abort();
+
+    result.expect("large push should succeed");
+    assert_eq!(count, ROWS as i64);
 }

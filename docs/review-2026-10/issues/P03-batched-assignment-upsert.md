@@ -4,7 +4,7 @@
 |---|---|
 | Type | Performance (DB round trips) |
 | Severity | Medium |
-| Status | Verified (code traced) |
+| Status | Fixed on branch `perf/p03-batched-assignment-upsert` |
 | Crate | `feature-toggle-backend` |
 | Behavior change | Minor (see "Behavior impact") |
 | Depends on | [B11](B11-assignment-push-missing-team-check.md) (same code path; do B11 first) |

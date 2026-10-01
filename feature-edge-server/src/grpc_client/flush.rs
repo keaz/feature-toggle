@@ -4,8 +4,76 @@ use std::sync::atomic::Ordering;
 use tokio_retry::RetryIf;
 use tracing::{error, info, warn};
 
+/// Build the client-streaming request body for an assignment push. Only the
+/// first message carries the edge credentials.
+fn assignment_stream(
+    app: &AppState,
+    assignments: Vec<UserAssignment>,
+) -> impl tokio_stream::Stream<Item = pb::UserFlagAssignment> + use<> {
+    let client_id = app.client_id.clone();
+    let client_secret = app.client_secret.clone();
+    tokio_stream::iter(assignments.into_iter().enumerate().map(move |(idx, a)| {
+        pb::UserFlagAssignment {
+            user_id: a.user_id,
+            feature_id: a.feature_id,
+            environment_id: a.environment_id,
+            assigned: a.assigned,
+            client_id: if idx == 0 {
+                client_id.clone()
+            } else {
+                String::new()
+            },
+            client_secret: if idx == 0 {
+                client_secret.clone()
+            } else {
+                String::new()
+            },
+            variant: a.variant.unwrap_or_default(),
+        }
+    }))
+}
+
+/// The backend rejected a batch with `PermissionDenied`: at least one row names
+/// a feature or environment outside the edge client's team (for example an
+/// assignment of an SDK client from another team, or of a deleted feature).
+/// Retrying the same batch can never succeed, so push the rows one by one,
+/// drop the rows that are rejected again and requeue rows that hit any other
+/// error. Returns the number of rows stored and whether any row was requeued.
+async fn push_rows_individually(
+    app: &AppState,
+    client: &mut pb::feature_evaluation_client::FeatureEvaluationClient<tonic::transport::Channel>,
+    assignments: Vec<UserAssignment>,
+) -> (usize, bool) {
+    let mut stored = 0usize;
+    let mut requeued = false;
+    for assignment in assignments {
+        match client
+            .push_user_assignments(assignment_stream(app, vec![assignment.clone()]))
+            .await
+        {
+            Ok(_) => stored += 1,
+            Err(e) if e.code() == tonic::Code::PermissionDenied => {
+                warn!(
+                    "Dropping user assignment (user '{}', feature '{}', environment '{}') rejected by backend: {}",
+                    assignment.user_id,
+                    assignment.feature_id,
+                    assignment.environment_id,
+                    e.message()
+                );
+            }
+            Err(e) => {
+                error!("Failed to push user assignment: {}", e);
+                app.pending_assignments.push(assignment);
+                requeued = true;
+            }
+        }
+    }
+    (stored, requeued)
+}
+
 /// Flush queued sticky user-assignment writes. Failed batches are requeued so
 /// the edge does not drop locally observed assignments during transient outages.
+/// Rows the backend permanently rejects (`PermissionDenied`) are dropped.
 pub async fn run_flush_task(app: AppState) {
     let batch_size = app.assignment_flush_batch_size.max(1);
     loop {
@@ -43,27 +111,7 @@ pub async fn run_flush_task(app: AppState) {
             let assignments: Vec<UserAssignment> = dedup.into_values().collect();
             let assignment_count = assignments.len();
 
-            let client_id = app.client_id.clone();
-            let client_secret = app.client_secret.clone();
-            let stream = tokio_stream::iter(assignments.clone().into_iter().enumerate().map(
-                move |(idx, a)| pb::UserFlagAssignment {
-                    user_id: a.user_id,
-                    feature_id: a.feature_id,
-                    environment_id: a.environment_id,
-                    assigned: a.assigned,
-                    client_id: if idx == 0 {
-                        client_id.clone()
-                    } else {
-                        String::new()
-                    },
-                    client_secret: if idx == 0 {
-                        client_secret.clone()
-                    } else {
-                        String::new()
-                    },
-                    variant: a.variant.unwrap_or_default(),
-                },
-            ));
+            let stream = assignment_stream(&app, assignments.clone());
 
             let mut client = {
                 let guard = app.grpc.lock().await;
@@ -74,6 +122,24 @@ pub async fn run_flush_task(app: AppState) {
                 Ok(_) => {
                     total_unique += assignment_count;
                     batches += 1;
+                }
+                Err(e) if e.code() == tonic::Code::PermissionDenied => {
+                    warn!(
+                        "Backend rejected an assignment batch ({}); pushing rows individually",
+                        e.message()
+                    );
+                    let (stored, requeued) =
+                        push_rows_individually(&app, &mut client, assignments).await;
+                    total_unique += stored;
+                    batches += 1;
+                    if requeued {
+                        warn!(
+                            "Will retry on next flush cycle ({}s)",
+                            app.flush_interval.as_secs()
+                        );
+                        failed = true;
+                        break;
+                    }
                 }
                 Err(e) => {
                     error!("Failed to push user assignments: {}", e);
