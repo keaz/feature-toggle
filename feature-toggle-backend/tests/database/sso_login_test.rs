@@ -71,6 +71,7 @@ struct IdpState {
     jwks: Value,
     auth_methods: Vec<String>,
     userinfo_email: Option<String>,
+    userinfo_groups: Option<Value>,
     grants: HashMap<String, Grant>,
     token_calls: Vec<TokenCall>,
     jwks_fetches: usize,
@@ -194,6 +195,7 @@ async fn idp_userinfo(req: HttpRequest, state: web::Data<Mutex<IdpState>>) -> Ht
         "sub": sub,
         "email": state.userinfo_email,
         "email_verified": true,
+        "groups": state.userinfo_groups,
     }))
 }
 
@@ -211,6 +213,7 @@ async fn start_idp() -> MockIdp {
             "client_secret_post".to_string(),
         ],
         userinfo_email: None,
+        userinfo_groups: None,
         grants: HashMap::new(),
         token_calls: Vec::new(),
         jwks_fetches: 0,
@@ -1759,4 +1762,94 @@ async fn deleting_a_role_or_team_removes_its_group_mappings() {
         .execute(&pool)
         .await
         .unwrap();
+}
+
+#[actix_web::test]
+async fn groups_from_userinfo_sync_roles_and_teams_across_logins() {
+    let pool = init_pg_pool().await;
+    let app = build_app(&pool).await;
+    let idp = start_idp().await;
+    let provider = create_provider(&pool, &idp, ProviderOpts::default()).await;
+    let role_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+    let team_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO teams (id, name, description) VALUES ($1, $2, 'sync')")
+        .bind(team_id)
+        .bind(format!("sync-team-{team_id}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    for (group, kind, target) in [
+        ("fluxgate-devs", "role", Some(role_id)),
+        ("fluxgate-devs", "team", Some(team_id)),
+    ] {
+        sqlx::query(
+            "INSERT INTO sso_group_mappings (id, provider_id, group_value, target_type, target_id)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(provider.id)
+        .bind(group)
+        .bind(kind)
+        .bind(target)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    // The id_token has no groups claim: userinfo supplies them.
+    let sub = unique("sub");
+    *USERINFO_SUB.lock().unwrap() = sub.clone();
+    idp.state.lock().unwrap().userinfo_groups = Some(json!(["fluxgate-devs"]));
+    let email = format!("{sub}@example.com");
+    let location = login_with(&app, &idp, &provider.slug, None, |a| {
+        sign(&claims(&idp, &a.nonce, &sub, &email))
+    })
+    .await;
+    let code = one_time_code(&location);
+    let user_id = identity_user(&pool, &provider, &sub).await.unwrap();
+    let (status, _) = exchange(&app, &code).await;
+    assert_eq!(status, StatusCode::OK);
+    let roles: Vec<(Uuid, String)> =
+        sqlx::query_as("SELECT role_id, source FROM user_roles WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(roles, vec![(role_id, "sso".to_string())]);
+    let teams: Vec<(Uuid, String)> =
+        sqlx::query_as("SELECT team_id, source FROM user_teams WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(teams, vec![(team_id, "sso".to_string())]);
+
+    // The group is gone at the IdP: authoritative sync removes both.
+    idp.state.lock().unwrap().userinfo_groups = Some(json!([]));
+    let location = login_with(&app, &idp, &provider.slug, None, |a| {
+        sign(&claims(&idp, &a.nonce, &sub, &email))
+    })
+    .await;
+    one_time_code(&location);
+    let remaining: i64 = sqlx::query_scalar(
+        "SELECT (SELECT count(*) FROM user_roles WHERE user_id = $1)
+              + (SELECT count(*) FROM user_teams WHERE user_id = $1)",
+    )
+    .bind(user_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(remaining, 0);
+
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM teams WHERE id = $1")
+        .bind(team_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    cleanup(&pool, &idp).await;
 }

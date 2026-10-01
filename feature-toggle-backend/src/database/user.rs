@@ -174,6 +174,27 @@ pub trait UserRepositoryTx: UserRepository {
         id: Uuid,
         team_ids: Vec<Uuid>,
     ) -> Result<(), Error>;
+    /// `(is_admin, admin_source)` of the user.
+    async fn get_admin_state_tx(
+        &self,
+        conn: &mut PgConnection,
+        id: Uuid,
+    ) -> Result<(bool, Option<String>), Error>;
+    /// Sets `is_admin` with its source (`Some("sso")` when granting, `None` when
+    /// revoking). Only used by SSO group sync.
+    async fn set_admin_with_source_tx(
+        &self,
+        conn: &mut PgConnection,
+        id: Uuid,
+        is_admin: bool,
+        source: Option<&str>,
+    ) -> Result<(), Error>;
+    /// The subset of `team_ids` that still exist.
+    async fn existing_team_ids_tx(
+        &self,
+        conn: &mut PgConnection,
+        team_ids: Vec<Uuid>,
+    ) -> Result<Vec<Uuid>, Error>;
     /// The user whose email matches case-insensitively (oldest first if the
     /// case-sensitive unique constraint lets several differ only in case).
     async fn find_user_by_email_ci_tx(
@@ -310,8 +331,8 @@ impl UserRepository for UserRepositoryImpl {
     async fn create_user(&self, input: CreateUser) -> Result<User, Error> {
         let id = Uuid::new_v4();
         let result = sqlx::query!(
-            r#"INSERT INTO users (id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, is_temporary_password)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            r#"INSERT INTO users (id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, is_temporary_password, admin_source)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                RETURNING id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, enabled, created_at, updated_at, last_login, is_temporary_password, auth_source"#,
             id,
             input.username,
@@ -321,7 +342,8 @@ impl UserRepository for UserRepositoryImpl {
             input.email,
             input.mobile_number,
             input.is_admin,
-            input.is_temporary_password
+            input.is_temporary_password,
+            input.is_admin.then_some("manual")
         )
         .fetch_one(&self.pool)
         .await;
@@ -350,7 +372,8 @@ impl UserRepository for UserRepositoryImpl {
         ensure_not_system_client(&self.pool, input.id).await?;
         let result = sqlx::query!(
             r#"UPDATE users
-               SET first_name = $1, last_name = $2, email = $3, mobile_number = $4, is_admin = $5, enabled = $6, updated_at = now()
+               SET first_name = $1, last_name = $2, email = $3, mobile_number = $4, is_admin = $5, enabled = $6, updated_at = now(),
+                   admin_source = CASE WHEN NOT $5 THEN NULL WHEN is_admin THEN admin_source ELSE 'manual' END
                WHERE id = $7
                RETURNING id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, enabled, created_at, updated_at, last_login, is_temporary_password, auth_source"#,
             input.first_name.unwrap_or(existing.first_name),
@@ -707,8 +730,8 @@ impl UserRepositoryImpl {
     ) -> Result<User, Error> {
         let id = Uuid::new_v4();
         let result = sqlx::query!(
-            r#"INSERT INTO users (id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, is_temporary_password)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            r#"INSERT INTO users (id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, is_temporary_password, admin_source)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                RETURNING id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, enabled, created_at, updated_at, last_login, is_temporary_password, auth_source"#,
             id,
             input.username,
@@ -718,7 +741,8 @@ impl UserRepositoryImpl {
             input.email,
             input.mobile_number,
             input.is_admin,
-            input.is_temporary_password
+            input.is_temporary_password,
+            input.is_admin.then_some("manual")
         )
         .fetch_one(&mut *conn)
         .await;
@@ -749,7 +773,8 @@ impl UserRepositoryImpl {
     ) -> Result<User, Error> {
         let result = sqlx::query!(
             r#"UPDATE users
-               SET first_name = $1, last_name = $2, email = $3, mobile_number = $4, is_admin = $5, enabled = $6, updated_at = now()
+               SET first_name = $1, last_name = $2, email = $3, mobile_number = $4, is_admin = $5, enabled = $6, updated_at = now(),
+                   admin_source = CASE WHEN NOT $5 THEN NULL WHEN is_admin THEN admin_source ELSE 'manual' END
                WHERE id = $7
                RETURNING id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, enabled, created_at, updated_at, last_login, is_temporary_password, auth_source"#,
             input.first_name.unwrap_or(existing.first_name),
@@ -898,6 +923,54 @@ impl UserRepositoryTx for UserRepositoryImpl {
         team_ids: Vec<Uuid>,
     ) -> Result<(), Error> {
         Self::remove_sso_user_teams_internal(conn, id, team_ids).await
+    }
+
+    async fn get_admin_state_tx(
+        &self,
+        conn: &mut PgConnection,
+        id: Uuid,
+    ) -> Result<(bool, Option<String>), Error> {
+        let row = handle_error(
+            Some(id),
+            sqlx::query!("SELECT is_admin, admin_source FROM users WHERE id = $1", id)
+                .fetch_one(&mut *conn)
+                .await,
+        )?;
+        Ok((row.is_admin, row.admin_source))
+    }
+
+    async fn set_admin_with_source_tx(
+        &self,
+        conn: &mut PgConnection,
+        id: Uuid,
+        is_admin: bool,
+        source: Option<&str>,
+    ) -> Result<(), Error> {
+        handle_error(
+            Some(id),
+            sqlx::query!(
+                "UPDATE users SET is_admin = $2, admin_source = $3, updated_at = now() WHERE id = $1",
+                id,
+                is_admin,
+                source
+            )
+            .execute(&mut *conn)
+            .await,
+        )?;
+        Ok(())
+    }
+
+    async fn existing_team_ids_tx(
+        &self,
+        conn: &mut PgConnection,
+        team_ids: Vec<Uuid>,
+    ) -> Result<Vec<Uuid>, Error> {
+        handle_error(
+            None,
+            sqlx::query_scalar!("SELECT id FROM teams WHERE id = ANY($1)", &team_ids)
+                .fetch_all(&mut *conn)
+                .await,
+        )
     }
 
     async fn find_user_by_email_ci_tx(

@@ -238,6 +238,9 @@ pub struct IdTokenClaims {
     pub family_name: Option<String>,
     pub name: Option<String>,
     pub raw: serde_json::Value,
+    /// Userinfo claims, when fetched and their `sub` matched. Group sync falls back
+    /// to them when the id_token carries no groups claim.
+    pub userinfo: Option<serde_json::Value>,
 }
 
 fn string_claim(claims: &serde_json::Value, name: &str) -> Option<String> {
@@ -271,6 +274,7 @@ impl IdTokenClaims {
             family_name: string_claim(&raw, "family_name"),
             name: string_claim(&raw, "name"),
             raw,
+            userinfo: None,
         })
     }
 
@@ -283,6 +287,7 @@ impl IdTokenClaims {
                 "userinfo sub does not match id_token sub".to_string(),
             ));
         }
+        self.userinfo = Some(userinfo.clone());
         if self.email.is_none() {
             self.email = string_claim(userinfo, "email");
             self.email_verified = claim_is_true(userinfo, "email_verified");

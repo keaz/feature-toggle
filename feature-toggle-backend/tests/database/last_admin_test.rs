@@ -18,7 +18,7 @@ use sqlx::{PgConnection, PgPool};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-static ADMIN_STATE_LOCK: Mutex<()> = Mutex::const_new(());
+pub static ADMIN_STATE_LOCK: Mutex<()> = Mutex::const_new(());
 
 async fn create_admin(pool: &PgPool) -> Uuid {
     let suffix = Uuid::new_v4();

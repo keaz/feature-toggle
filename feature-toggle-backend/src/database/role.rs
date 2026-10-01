@@ -102,6 +102,12 @@ pub trait RoleRepositoryTx: RoleRepository {
         user_id: Uuid,
         role_ids: Vec<Uuid>,
     ) -> Result<(), Error>;
+    /// The subset of `role_ids` that still exist.
+    async fn existing_role_ids_tx(
+        &self,
+        conn: &mut PgConnection,
+        role_ids: Vec<Uuid>,
+    ) -> Result<Vec<Uuid>, Error>;
 }
 
 /// Returns a repository that also implements RoleRepositoryTx for transaction support.
@@ -550,6 +556,19 @@ impl RoleRepositoryTx for RoleRepositoryImpl {
         user_id: Uuid,
     ) -> Result<Vec<Uuid>, Error> {
         Self::list_sso_role_ids_internal(conn, user_id).await
+    }
+
+    async fn existing_role_ids_tx(
+        &self,
+        conn: &mut PgConnection,
+        role_ids: Vec<Uuid>,
+    ) -> Result<Vec<Uuid>, Error> {
+        handle_error(
+            None,
+            sqlx::query_scalar!("SELECT id FROM roles WHERE id = ANY($1)", &role_ids)
+                .fetch_all(&mut *conn)
+                .await,
+        )
     }
 
     async fn add_sso_user_roles_tx(

@@ -18,6 +18,8 @@ use subtle::ConstantTimeEq;
 use utoipa::{IntoParams, ToSchema};
 
 use crate::database::activity_log::ActivityLogRepository;
+use crate::database::role::role_repository_tx;
+use crate::database::sso_group_mapping::sso_group_mapping_repository_tx;
 use crate::database::sso_login_code::{sso_login_code_repository, sso_login_code_repository_tx};
 use crate::database::sso_login_state::{NewSsoLoginState, sso_login_state_repository};
 use crate::database::sso_provider::sso_provider_repository;
@@ -382,7 +384,12 @@ async fn finish_login(
         .await
         .map_err(provider_error)?;
 
-    if claims.email.is_none()
+    // Userinfo is needed for a missing email, or for groups when the id_token has
+    // none and role sync is on.
+    let needs_groups = provider.role_sync_mode != "off"
+        && crate::logic::sso_role_sync::claim_at_path(&claims.raw, &provider.groups_claim)
+            .is_none();
+    if (claims.email.is_none() || needs_groups)
         && metadata.userinfo_endpoint.is_some()
         && let Some(access_token) = tokens.access_token.as_deref()
     {
@@ -399,6 +406,8 @@ async fn finish_login(
     let users = user_repository_tx(pool.clone());
     let identities = user_identity_repository_tx(pool.clone());
     let codes = sso_login_code_repository_tx(pool.clone());
+    let roles = role_repository_tx(pool.clone());
+    let mappings = sso_group_mapping_repository_tx(pool.clone());
     let mut tx = pool
         .begin()
         .await
@@ -409,6 +418,8 @@ async fn finish_login(
             users: &users,
             identities: &identities,
             codes: &codes,
+            roles: &roles,
+            mappings: &mappings,
             activity,
         },
         &provider,

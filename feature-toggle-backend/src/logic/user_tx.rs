@@ -123,7 +123,10 @@ where
 /// Locks every enabled admin row until the transaction ends, so two concurrent
 /// updates that would each remove the last two admins are serialized: the second
 /// one re-reads the admin set after the first commits and is rejected.
-async fn ensure_another_admin_remains(conn: &mut PgConnection, user_id: Uuid) -> Result<(), Error> {
+pub(crate) async fn ensure_another_admin_remains(
+    conn: &mut PgConnection,
+    user_id: Uuid,
+) -> Result<(), Error> {
     // Cheap pre-check without locks: only an enabled, non-shadow admin can be "the last admin".
     let is_enabled_admin: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM users \

@@ -4,6 +4,8 @@
 
 use crate::database::activity_log::{ActivityLogRepository, CreateActivityLog};
 use crate::database::entity::SsoProvider;
+use crate::database::role::RoleRepositoryTx;
+use crate::database::sso_group_mapping::SsoGroupMappingRepositoryTx;
 use crate::database::sso_login_code::{NewSsoLoginCode, SsoLoginCodeRepositoryTx};
 use crate::database::user::{CreateSsoUser, User, UserRepositoryTx};
 use crate::database::user_identity::{CreateUserIdentity, UserIdentityRepositoryTx};
@@ -12,7 +14,7 @@ use crate::logic::sso_login::{
     LOGIN_CODE_TTL_SECONDS, SsoLoginError, USER_EMAIL_COLUMN_LIMIT, USER_NAME_COLUMN_LIMIT,
     derive_names, email_domain_allowed, truncate_chars, username_base, username_candidate,
 };
-use crate::logic::sso_role_sync::sync_roles_from_claims;
+use crate::logic::sso_role_sync::{SyncRepos, sync_roles_from_claims};
 use crate::utils::activity_logger::{activity_types, entity_types};
 use chrono::{Duration, Utc};
 use sqlx::PgConnection;
@@ -42,10 +44,12 @@ impl std::fmt::Debug for CompletedSsoLogin {
 }
 
 /// Repositories used by [`complete_sso_login_in_tx`].
-pub struct SsoLoginRepos<'a, U, I, C> {
+pub struct SsoLoginRepos<'a, U, I, C, R, M> {
     pub users: &'a U,
     pub identities: &'a I,
     pub codes: &'a C,
+    pub roles: &'a R,
+    pub mappings: &'a M,
     pub activity: &'a dyn ActivityLogRepository,
 }
 
@@ -58,9 +62,9 @@ pub struct SsoLoginRepos<'a, U, I, C> {
 /// enabled). A disabled user is rejected after resolution. The user's `last_login`
 /// is set later, when the exchange issues a session. Any error leaves the
 /// transaction to be rolled back.
-pub async fn complete_sso_login_in_tx<U, I, C>(
+pub async fn complete_sso_login_in_tx<U, I, C, R, M>(
     conn: &mut PgConnection,
-    repos: SsoLoginRepos<'_, U, I, C>,
+    repos: SsoLoginRepos<'_, U, I, C, R, M>,
     provider: &SsoProvider,
     claims: &IdTokenClaims,
 ) -> Result<CompletedSsoLogin, SsoLoginError>
@@ -68,6 +72,8 @@ where
     U: UserRepositoryTx,
     I: UserIdentityRepositoryTx,
     C: SsoLoginCodeRepositoryTx,
+    R: RoleRepositoryTx,
+    M: SsoGroupMappingRepositoryTx,
 {
     let email = claims.email.as_deref().ok_or(SsoLoginError::EmailMissing)?;
     if email.chars().count() > USER_EMAIL_COLUMN_LIMIT || !email.contains('@') {
@@ -148,7 +154,20 @@ where
         return Err(SsoLoginError::AccountDisabled);
     }
 
-    sync_roles_from_claims(conn, repos.activity, provider, user.id, &claims.raw).await?;
+    sync_roles_from_claims(
+        conn,
+        SyncRepos {
+            users: repos.users,
+            roles: repos.roles,
+            mappings: repos.mappings,
+            activity: repos.activity,
+        },
+        provider,
+        user.id,
+        &claims.raw,
+        claims.userinfo.as_ref(),
+    )
+    .await?;
 
     let code = random_token();
     repos
