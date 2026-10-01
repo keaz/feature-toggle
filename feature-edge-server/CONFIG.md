@@ -318,6 +318,8 @@ Memory usage estimate: Each feature uses approximately 1-5 KB depending on confi
 
 **LRU Eviction:** When the cache reaches `max_capacity`, the least recently used features are automatically evicted to make room for new ones. This prevents unbounded memory growth while maintaining performance for frequently accessed features.
 
+**Rejected client credentials:** When the backend rejects a client ID and secret (wrong secret, unknown client or disabled client), the edge remembers the rejection for 30 seconds and answers repeated requests with the same credentials without calling the backend. A client that is created or re-enabled right after a failed attempt can therefore be rejected for up to 30 seconds. Transient backend errors are not cached.
+
 ## Troubleshooting
 
 ### Configuration Not Loading

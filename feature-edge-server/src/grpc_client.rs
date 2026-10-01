@@ -139,6 +139,17 @@ async fn fetch_client_info_via_grpc_uncached(
     }
 }
 
+/// Client-info failures that cannot change on retry: bad credentials, an
+/// unknown client or a disabled client. Only these are cached; transient
+/// failures always go back to the backend.
+fn is_cacheable_auth_failure(code: tonic::Code) -> bool {
+    use tonic::Code::*;
+    matches!(
+        code,
+        Unauthenticated | InvalidArgument | NotFound | PermissionDenied
+    )
+}
+
 /// Get client info from cache or fetch from backend
 /// This is the high-level function that uses caching
 pub async fn get_or_fetch_client_info(
@@ -167,9 +178,26 @@ pub async fn try_get_or_fetch_client_info(
     if let Some(cached) = app.client_info_cache.get(&cache_key).await {
         return Ok(cached);
     }
+    if let Some(code) = app.client_info_cache.get_failure(&cache_key).await {
+        return Err(tonic::Status::new(
+            code,
+            "client credentials rejected (cached)",
+        ));
+    }
 
     // Cache miss - fetch from backend
-    let client_info = fetch_client_info_via_grpc_uncached(app, client_id, client_secret).await?;
+    let client_info = match fetch_client_info_via_grpc_uncached(app, client_id, client_secret).await
+    {
+        Ok(info) => info,
+        Err(status) => {
+            if is_cacheable_auth_failure(status.code()) {
+                app.client_info_cache
+                    .insert_failure(cache_key, status.code())
+                    .await;
+            }
+            return Err(status);
+        }
+    };
 
     // Store in cache for future requests
     app.client_info_cache
@@ -1092,6 +1120,68 @@ mod tests {
 
         assert_eq!(result.map(|info| info.team_id), Some("team-1".to_string()));
         assert_eq!(state.client_info_attempts.load(Ordering::SeqCst), 3);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn client_info_permanent_auth_failures_are_cached() {
+        for code in [
+            tonic::Code::Unauthenticated,
+            tonic::Code::InvalidArgument,
+            tonic::Code::NotFound,
+            tonic::Code::PermissionDenied,
+        ] {
+            let (app, state, server) = app_with_mock_backend().await;
+            script_errors(&state, &[code; 2]);
+
+            for _ in 0..2 {
+                let result = try_get_or_fetch_client_info(&app, "client", "bad-secret").await;
+                assert_eq!(result.map_err(|s| s.code()).err(), Some(code));
+            }
+
+            assert_eq!(
+                state.client_info_attempts.load(Ordering::SeqCst),
+                1,
+                "{code:?} should be served from the failure cache"
+            );
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn client_info_transient_failures_are_not_cached() {
+        let (mut app, state, server) = app_with_mock_backend().await;
+        app.retry_config = retry_config(1, 0);
+        script_errors(&state, &[tonic::Code::Unavailable; 2]);
+
+        for _ in 0..2 {
+            let result = try_get_or_fetch_client_info(&app, "client", "secret").await;
+            assert_eq!(
+                result.map_err(|s| s.code()).err(),
+                Some(tonic::Code::Unavailable)
+            );
+        }
+
+        assert_eq!(state.client_info_attempts.load(Ordering::SeqCst), 2);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn client_info_failure_cache_does_not_block_corrected_secret() {
+        let (app, state, server) = app_with_mock_backend().await;
+        script_errors(&state, &[tonic::Code::Unauthenticated]);
+
+        assert!(
+            try_get_or_fetch_client_info(&app, "client", "old-secret")
+                .await
+                .is_err()
+        );
+        let info = try_get_or_fetch_client_info(&app, "client", "new-secret")
+            .await
+            .expect("corrected secret should reach the backend");
+
+        assert_eq!(info.team_id, "team-1");
+        assert_eq!(state.client_info_attempts.load(Ordering::SeqCst), 2);
         server.abort();
     }
 
