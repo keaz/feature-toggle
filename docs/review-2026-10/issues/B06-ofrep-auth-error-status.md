@@ -56,4 +56,4 @@ Use the mock backend in `feature-edge-server/src/grpc_client.rs` tests. Make the
 
 ## Update (2026-10-01): error body
 
-OFREP 401/403 bodies are now `{"errorCode": "UNAUTHORIZED" | "FORBIDDEN", "errorDetails": "..."}` instead of `errorCode: "GENERAL"`. Feature-fetch auth failures map to 401/403 as well. Missing or malformed SDK keys return 401 with the same body. `/evaluate` still returns 502 when the configured client cannot be authenticated.
+OFREP 401/403 bodies are now `{"errorCode": "UNAUTHORIZED" | "FORBIDDEN", "errorDetails": "..."}` instead of `errorCode: "GENERAL"`. Feature-fetch auth failures map to 401/403 as well. Missing or malformed SDK keys and an `environment_id` mismatch return 401 with the same body. `/evaluate` still returns 502 when the configured client cannot be authenticated.

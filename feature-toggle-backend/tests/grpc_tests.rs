@@ -390,6 +390,54 @@ async fn evaluate_validation_errors() {
     assert_eq!(err.code(), tonic::Code::NotFound);
 }
 
+/// `GetClientInfo` checks the secret before the client status, so a wrong
+/// secret never reveals that a client exists but is disabled.
+#[tokio::test]
+async fn get_client_info_checks_secret_before_disabled_status() {
+    let disabled_id = Uuid::new_v4();
+    let team_id = Uuid::new_v4();
+    let mut client_mock = MockClientRepository::new();
+    client_mock.expect_get_client_by_id().returning(move |id| {
+        if id == disabled_id {
+            Ok(db::Client {
+                id,
+                team_id,
+                environment_id: team_id,
+                name: "Disabled".into(),
+                description: None,
+                enabled: false,
+                client_type: db::ClientType::Backend,
+                api_key: "DISABLED_KEY".into(),
+                web_origins: None,
+            })
+        } else {
+            Err(Error::NotFound(id))
+        }
+    });
+    let (tx, _rx) = broadcast::channel::<pb::FeatureUpdate>(8);
+    let (addr, _server) = start_server_with_repos(
+        Box::new(MockFeatureRepository::new()),
+        Box::new(client_mock),
+        tx,
+    )
+    .await;
+    let mut client = FeatureEvaluationClient::connect(format!("http://{addr}"))
+        .await
+        .unwrap();
+
+    let info = |secret: &str| pb::GetClientInfoRequest {
+        client_id: disabled_id.to_string(),
+        client_secret: secret.into(),
+    };
+    let err = client.get_client_info(info("WRONG")).await.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::Unauthenticated);
+    let err = client
+        .get_client_info(info("DISABLED_KEY"))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::PermissionDenied);
+}
+
 #[tokio::test]
 async fn evaluate_auth_and_success() {
     use chrono::{Duration as ChronoDuration, Utc};
@@ -515,6 +563,18 @@ async fn evaluate_auth_and_success() {
     };
     let err = client.evaluate(req).await.unwrap_err();
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
+
+    // disabled client with a wrong secret: no disabled-status disclosure
+    let req = EvaluateRequest {
+        feature_key: "Test Feature".into(),
+        environment_id: valid_env_id(),
+        context: vec![],
+        feature_id: String::new(),
+        client_id: disabled_id.to_string(),
+        client_secret: "WRONG".into(),
+    };
+    let err = client.evaluate(req).await.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::Unauthenticated);
 
     // wrong secret
     let req = EvaluateRequest {

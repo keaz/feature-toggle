@@ -40,7 +40,6 @@ const baseUrl = __ENV.BASE_URL || 'http://localhost:8081';
 // Client authentication (from environment or defaults)
 // Get these from: node populate_test_data.js output or database
 const sdkKey = __ENV.SDK_KEY || ''; // <clientId>.<apiKey>
-const clientSecret = __ENV.CLIENT_SECRET || '';
 
 // Test options
 export const options = {
@@ -93,14 +92,6 @@ const USER_IDS = [
     'user-100', 'user-200', 'user-300', 'user-400', 'user-500',
 ];
 
-// Environment IDs (from populate_test_data.js)
-// Use actual UUID after running populate script
-const ENVIRONMENT_IDS = [
-    'bf06820b-3ff6-4235-b7c6-91b27f5ef9a6',
-    '9646bb30-6bbe-48d8-89eb-a0200d4c95ce',
-    '7c7efb52-018f-4140-87ae-e42322ffa94d',
-];
-
 function randomElement(arr) {
     return arr[Math.floor(Math.random() * arr.length)];
 }
@@ -143,7 +134,6 @@ SETUP:
     const warmupRes = http.post(`${baseUrl}/ofrep/v1/evaluate/flags/NewCheckoutFlow`, JSON.stringify({
         context: {
             targetingKey: 'warmup-user',
-            environment_id: 'E-Commerce-Dev',
         }
     }), { headers });
 
@@ -155,14 +145,12 @@ SETUP:
 export default function (data) {
     const featureKey = randomElement(FEATURE_KEYS);
     const userId = randomElement(USER_IDS);
-    const envId = randomElement(ENVIRONMENT_IDS);
 
     // OFREP request body format
     const payload = JSON.stringify({
         context: {
             targetingKey: userId,
             // Additional attributes are passed as custom properties
-            environment_id: envId,
             platform: 'web',
             version: '2.1.0',
             userTier: 'premium',  // For contextual features

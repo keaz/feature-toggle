@@ -67,7 +67,7 @@ After each test run, the following files are generated in `tests/results/`:
 ```bash
 # Run all load tiers
 for tier in 1x 2x 5x 10x; do
-  k6 run --env LOAD_TIER=$tier tests/load_test.js
+  k6 run --env LOAD_TIER=$tier --env SDK_KEY=<clientId>.<apiKey> tests/load_test.js
 done
 
 # Combine CSVs for charting
@@ -86,7 +86,7 @@ docker run -d -p 8086:8086 influxdb:1.8
 
 # Run k6 with InfluxDB output
 k6 run --out influxdb=http://localhost:8086/k6 \
-       --env LOAD_TIER=1x tests/load_test.js
+       --env LOAD_TIER=1x --env SDK_KEY=<clientId>.<apiKey> tests/load_test.js
 ```
 
 ### Option 3: k6 Cloud (Built-in Charts)
@@ -167,7 +167,7 @@ k6 run --env LOAD_TIER=1x --env SDK_KEY=<clientId>.<apiKey> tests/load_test.js
 ### Unique Users Test (No Cache)
 Generates unique user IDs for **every request**, measuring worst-case performance:
 ```bash
-k6 run --env LOAD_TIER=1x tests/load_test_unique_users.js
+k6 run --env LOAD_TIER=1x --env SDK_KEY=<clientId>.<apiKey> tests/load_test_unique_users.js
 ```
 
 **Use this to:**
@@ -205,7 +205,7 @@ This means tests failed. Common causes:
 |-------|----------|
 | Edge server not running | `make up` or `docker ps` |
 | Features not deployed | Run `node populate_test_data.js` |
-| Wrong environment IDs | Update `ENVIRONMENT_IDS` in test script |
+| 401 responses | Set `SDK_KEY` to `<clientId>.<apiKey>`; the environment comes from the client |
 | Wrong client credentials | Update `config.toml` with client from database |
 | Backend not accessible | Check `backend_grpc` in `config.toml` |
 
@@ -223,8 +223,7 @@ curl -X POST http://localhost:8081/ofrep/v1/evaluate/flags/NewCheckoutFlow \
   -H "Content-Type: application/json" \
   -d '{
     "context": {
-      "targetingKey": "test-user",
-      "environment_id": "bf06820b-3ff6-4235-b7c6-91b27f5ef9a6"
+      "targetingKey": "test-user"
     }
   }'
 ```

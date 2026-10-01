@@ -29,7 +29,8 @@ The edge forwards the client ID and API key to the backend (`GetClientInfo` and 
 | No `Authorization: Bearer` and no `X-API-Key` header | 401 | `UNAUTHORIZED` |
 | Malformed key: no `.`, empty client ID or API key, client ID not a UUID | 401 | `UNAUTHORIZED` |
 | Unknown client or wrong API key | 401 | `UNAUTHORIZED` |
-| Client disabled | 403 | `FORBIDDEN` |
+| Client disabled (correct API key) | 403 | `FORBIDDEN` |
+| Context `environment_id` differs from the client's environment | 401 | `UNAUTHORIZED` |
 | `Web` client and `Origin` missing or not in the client's web origins (see [CORS](#cors)) | 403 | `FORBIDDEN` |
 | Backend unavailable or failing (after retries) | 502 | (plain-text body) |
 
@@ -44,7 +45,13 @@ The edge forwards the client ID and API key to the backend (`GetClientInfo` and 
 
 Authentication failures are never retried against the backend; only transient gRPC failures (for example `Unavailable`) are retried, and they end in 502 if the backend stays unavailable.
 
-The edge caches **successful** authentications only, keyed by client ID and a SHA-256 hash of the API key, for `cache.client_ttl_secs` (default 300 seconds). A wrong API key for a cached client ID still goes to the backend and fails. A client that is disabled or whose API key is rotated stays accepted by the edge for up to that TTL.
+The edge caches authentication results, keyed by client ID and a SHA-256 hash of the API key:
+
+- Successes are cached for `cache.client_ttl_secs` (default 300 seconds). A client that is disabled or whose API key is rotated stays accepted by the edge for up to that TTL.
+- Rejections (bad key, unknown client, disabled client) are cached for 30 seconds, so a repeated bad key reaches the backend once. A client created or re-enabled after a rejection is rejected for up to that long. Transient backend failures are never cached.
+- Because the API key hash is part of the key, a cached success never accepts a different API key, and a cached rejection never blocks the correct one.
+
+The backend checks the API key before the client status, so a wrong key for a disabled client gets 401, not 403.
 
 ### `/evaluate`: edge-configured client
 
@@ -74,7 +81,7 @@ A preflight carries no credentials, so the client is not checked.
   Access-Control-Expose-Headers: ETag
   Vary: Origin
   ```
-- `Web` client and `Origin` missing or not allowed: `403`. OFREP returns `{"errorCode": "FORBIDDEN", ...}`; `/evaluate` returns `{"error": "FORBIDDEN", "message": "..."}`.
+- `Web` client and `Origin` missing or not allowed: `403` with `Vary: Origin`. OFREP returns `{"errorCode": "FORBIDDEN", ...}`; `/evaluate` returns `{"error": "FORBIDDEN", "message": "..."}`.
 - `Backend` client: the request is served without CORS headers, whatever the `Origin`.
 
 ## Endpoints
@@ -128,7 +135,7 @@ A preflight carries no credentials, so the client is not checked.
       "variant": "enabled"
     }
     ```
-  - Errors: `400` empty `targetingKey`, `401` / `403` as described above, `404` `FLAG_NOT_FOUND`, `502` backend unavailable.
+  - Errors: `400` empty `targetingKey`, `401` / `403` as described above (including `environment_id` mismatch), `404` `FLAG_NOT_FOUND`, `502` backend unavailable.
 
 - POST /ofrep/v1/evaluate/flags
   - OFREP bulk evaluation for all cached flags of the caller's team. Requires an SDK key.

@@ -10,8 +10,8 @@ use evaluation_engine as engine;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::atomic::Ordering;
-use tracing::error;
 use tracing::info as info_log;
+use tracing::{error, warn};
 use utoipa::ToSchema;
 
 #[derive(Deserialize, ToSchema, Clone)]
@@ -582,15 +582,15 @@ fn cors_origin_for_client(
     }
 
     match origin.map(|value| value.to_str()) {
-        Some(Ok(origin)) => error!(
+        Some(Ok(origin)) => warn!(
             "Origin '{}' not allowed for web client '{}'",
             origin, client_info.name
         ),
-        Some(Err(_)) => error!(
+        Some(Err(_)) => warn!(
             "Unreadable Origin header for web client '{}'",
             client_info.name
         ),
-        None => error!(
+        None => warn!(
             "Missing Origin header for web client '{}'",
             client_info.name
         ),
@@ -746,10 +746,10 @@ pub async fn evaluate_handler(
     note_configured_client_team(&app, &client_id, &client_info);
 
     let Ok(cors_origin) = cors_origin_for_client(&http_req, &client_info) else {
-        return HttpResponse::Forbidden().json(EdgeErrorResponse {
+        return origin_not_allowed(HttpResponse::Forbidden().json(EdgeErrorResponse {
             error: "FORBIDDEN".to_string(),
             message: "Origin is not allowed for this client".to_string(),
-        });
+        }));
     };
 
     let response = match evaluate_for_client(
@@ -1083,6 +1083,23 @@ fn ofrep_backend_auth_failure(status: &tonic::Status) -> Option<HttpResponse> {
     }
 }
 
+/// OFREP 401 for a context `environment_id` other than the client's.
+fn ofrep_environment_mismatch() -> HttpResponse {
+    ofrep_auth_error(
+        StatusCode::UNAUTHORIZED,
+        "environment_id does not match the client's environment",
+    )
+}
+
+/// Response for a `Web` client whose origin is not allowed. Carries
+/// `Vary: Origin` because the outcome depends on the `Origin` header.
+fn origin_not_allowed(mut response: HttpResponse) -> HttpResponse {
+    response
+        .headers_mut()
+        .append(header::VARY, HeaderValue::from_static("Origin"));
+    response
+}
+
 /// An OFREP caller whose SDK key and origin were accepted.
 struct OfrepCaller {
     credentials: SdkCredentials,
@@ -1126,10 +1143,10 @@ async fn authenticate_ofrep(
     note_configured_client_team(app, &credentials.client_id, &client_info);
 
     let cors_origin = cors_origin_for_client(http_req, &client_info).map_err(|_| {
-        ofrep_auth_error(
+        origin_not_allowed(ofrep_auth_error(
             StatusCode::FORBIDDEN,
             "Origin is not allowed for this client",
-        )
+        ))
     })?;
 
     Ok(OfrepCaller {
@@ -1460,15 +1477,15 @@ async fn ofrep_evaluate_flag_for(
             ));
         }
         Err(status) => {
+            if let Some(response) = ofrep_backend_auth_failure(&status) {
+                return response;
+            }
             error!(
                 "OFREP fetch failed for '{}': code={:?} msg={}",
                 feature_key,
                 status.code(),
                 status.message()
             );
-            if let Some(response) = ofrep_backend_auth_failure(&status) {
-                return response;
-            }
             return actix_web::error::ErrorBadGateway("Failed to fetch feature from backend")
                 .error_response();
         }
@@ -1477,8 +1494,7 @@ async fn ofrep_evaluate_flag_for(
 
     let environment_id = caller.client_info.environment_id.clone();
     let Ok(context) = normalize_ofrep_context_environment(req.context, &environment_id) else {
-        return actix_web::error::ErrorUnauthorized("Environment mismatch for client")
-            .error_response();
+        return ofrep_environment_mismatch();
     };
 
     let response = evaluate_ofrep_feature(app, feature_key, feature, environment_id, context).await;
@@ -1544,8 +1560,7 @@ async fn ofrep_evaluate_flags_bulk_for(
 
     let environment_id = caller.client_info.environment_id.clone();
     let Ok(context) = normalize_ofrep_context_environment(req.context, &environment_id) else {
-        return actix_web::error::ErrorUnauthorized("Environment mismatch for client")
-            .error_response();
+        return ofrep_environment_mismatch();
     };
 
     let mut features = Vec::new();
@@ -1783,6 +1798,18 @@ mod tests {
     }
 
     #[test]
+    fn extract_auth_prefers_authorization_over_api_key() {
+        let req = TestRequest::default()
+            .insert_header(("authorization", format!("Bearer {}", configured_sdk_key())))
+            .insert_header(("x-api-key", sdk_key(OTHER_CLIENT_ID, OTHER_SECRET)))
+            .to_http_request();
+        assert_eq!(
+            extract_auth_from_headers(&req),
+            Ok(credentials(CONFIGURED_CLIENT_ID, CONFIGURED_SECRET))
+        );
+    }
+
+    #[test]
     fn extract_auth_never_falls_back_to_bare_client_id() {
         for (name, value) in [
             ("authorization", format!("Bearer {CONFIGURED_CLIENT_ID}")),
@@ -1867,8 +1894,9 @@ mod tests {
         }
 
         /// Records the secret and authenticates like the real backend:
-        /// empty secret `InvalidArgument`, unknown client `NotFound`, disabled
-        /// client `PermissionDenied`, wrong secret `Unauthenticated`.
+        /// empty secret `InvalidArgument`, unknown client `NotFound`, wrong
+        /// secret `Unauthenticated`, then (right secret) disabled client
+        /// `PermissionDenied`.
         #[allow(clippy::result_large_err)]
         fn authenticate(
             &self,
@@ -1885,11 +1913,11 @@ mod tests {
             let Some(client) = self.clients.lock().unwrap().get(client_id).cloned() else {
                 return Err(tonic::Status::not_found("client not found"));
             };
-            if !client.enabled {
-                return Err(tonic::Status::permission_denied("client is disabled"));
-            }
             if client.secret != client_secret {
                 return Err(tonic::Status::unauthenticated("invalid client_secret"));
+            }
+            if !client.enabled {
+                return Err(tonic::Status::permission_denied("client is disabled"));
             }
             Ok(client)
         }
@@ -2244,28 +2272,93 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn ofrep_auth_failures_are_not_cached() {
+    async fn ofrep_repeated_bad_key_is_served_from_failure_cache() {
         let (app_state, backend) = ofrep_app_with_mock_backend().await;
-        let mut disabled = MockClient::backend(OTHER_SECRET);
-        disabled.enabled = false;
-        backend.set_client(OTHER_CLIENT_ID, disabled);
         let service = actix_test::init_service(
             App::new()
                 .app_data(web::Data::new(app_state))
                 .configure(configure_routes),
         )
         .await;
-        let key = sdk_key(OTHER_CLIENT_ID, OTHER_SECRET);
 
-        let req = ofrep_request(false, &[bearer(&key)]).to_request();
-        let resp = actix_test::call_service(&service, req).await;
-        assert_eq!(resp.status(), actix_web::http::StatusCode::FORBIDDEN);
+        let wrong = sdk_key(CONFIGURED_CLIENT_ID, "wrong-secret");
+        for _ in 0..3 {
+            let req = ofrep_request(false, &[bearer(&wrong)]).to_request();
+            let resp = actix_test::call_service(&service, req).await;
+            assert_eq!(resp.status(), actix_web::http::StatusCode::UNAUTHORIZED);
+            let body: serde_json::Value = actix_test::read_body_json(resp).await;
+            assert_eq!(body["errorCode"], serde_json::json!("UNAUTHORIZED"));
+        }
+        assert_eq!(
+            backend.client_info_calls.load(Ordering::SeqCst),
+            1,
+            "repeated bad key should hit the backend once"
+        );
 
-        // Re-enabled client works at once: the rejection was not cached.
-        backend.set_client(OTHER_CLIENT_ID, MockClient::backend(OTHER_SECRET));
-        let req = ofrep_request(false, &[bearer(&key)]).to_request();
+        // The cached failure does not block the correct secret.
+        let req = ofrep_request(false, &[bearer(&configured_sdk_key())]).to_request();
         let resp = actix_test::call_service(&service, req).await;
         assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+        assert_eq!(backend.client_info_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[actix_web::test]
+    async fn ofrep_transient_client_info_failure_is_not_cached() {
+        let (app_state, backend) = ofrep_app_with_mock_backend().await;
+        *backend.client_info_error.lock().unwrap() = Some(tonic::Code::Unavailable);
+        let service = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(app_state))
+                .configure(configure_routes),
+        )
+        .await;
+
+        let req = ofrep_request(false, &[bearer(&configured_sdk_key())]).to_request();
+        let resp = actix_test::call_service(&service, req).await;
+        assert_eq!(resp.status(), actix_web::http::StatusCode::BAD_GATEWAY);
+
+        // Backend recovers: the next request reaches it and succeeds.
+        *backend.client_info_error.lock().unwrap() = None;
+        let req = ofrep_request(false, &[bearer(&configured_sdk_key())]).to_request();
+        let resp = actix_test::call_service(&service, req).await;
+        assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+        assert_eq!(backend.client_info_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[actix_web::test]
+    async fn ofrep_authorization_header_wins_over_api_key() {
+        use actix_web::http::StatusCode;
+        let wrong = sdk_key(CONFIGURED_CLIENT_ID, "wrong-secret");
+        for (bearer_key, api_key, expected) in [
+            (configured_sdk_key(), wrong.clone(), StatusCode::OK),
+            (
+                wrong.clone(),
+                configured_sdk_key(),
+                StatusCode::UNAUTHORIZED,
+            ),
+        ] {
+            let (app_state, _backend) = ofrep_app_with_mock_backend().await;
+            let req = ofrep_request(false, &[bearer(&bearer_key), ("x-api-key", api_key)]);
+            let resp = call_routes(app_state, req).await;
+            assert_eq!(resp.status, expected);
+        }
+    }
+
+    #[actix_web::test]
+    async fn ofrep_environment_mismatch_returns_json_401() {
+        for bulk in [false, true] {
+            let (app_state, _backend) = ofrep_app_with_mock_backend().await;
+            let req = actix_test::TestRequest::post()
+                .uri(ofrep_uri(bulk))
+                .insert_header(bearer(&configured_sdk_key()))
+                .set_json(serde_json::json!({
+                    "context": { "targetingKey": "u1", "environment_id": "env-other" }
+                }));
+
+            let resp = call_routes(app_state, req).await;
+
+            assert_ofrep_auth_error(&resp, "UNAUTHORIZED", &format!("bulk={bulk}"));
+        }
     }
 
     #[actix_web::test]
@@ -2479,6 +2572,7 @@ mod tests {
 
                 assert_ofrep_auth_error(&resp, "FORBIDDEN", &context);
                 assert!(resp.has_no_cors_headers(), "{context}");
+                assert_eq!(resp.header("vary"), Some("Origin"), "{context}");
             }
         }
     }
@@ -2540,6 +2634,7 @@ mod tests {
             assert_eq!(resp.status, StatusCode::FORBIDDEN, "origin={origin:?}");
             assert_eq!(resp.body["error"], serde_json::json!("FORBIDDEN"));
             assert!(resp.has_no_cors_headers(), "origin={origin:?}");
+            assert_eq!(resp.header("vary"), Some("Origin"), "origin={origin:?}");
         }
 
         // Configured client is a Backend client: served, no CORS headers.

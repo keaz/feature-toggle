@@ -80,13 +80,6 @@ const FEATURE_KEYS = [
     // 'AdvancedFilters',
 ];
 
-// Environment IDs
-const ENVIRONMENT_IDS = [
-    'bf06820b-3ff6-4235-b7c6-91b27f5ef9a6',
-    '9646bb30-6bbe-48d8-89eb-a0200d4c95ce',
-    '7c7efb52-018f-4140-87ae-e42322ffa94d',
-];
-
 // User tier options for contextual features
 const USER_TIERS = ['free', 'basic', 'premium', 'enterprise'];
 
@@ -138,7 +131,6 @@ This measures WORST-CASE performance with no assignment caching.
     const warmupRes = http.post(`${baseUrl}/ofrep/v1/evaluate/flags/NewCheckoutFlow`, JSON.stringify({
         context: {
             targetingKey: 'warmup-unique-user',
-            environment_id: ENVIRONMENT_IDS[0],
         }
     }), { headers });
 
@@ -150,14 +142,12 @@ This measures WORST-CASE performance with no assignment caching.
 export default function (data) {
     const featureKey = randomElement(FEATURE_KEYS);
     const uniqueUserId = generateUniqueUserId();
-    const envId = randomElement(ENVIRONMENT_IDS);
     const userTier = randomElement(USER_TIERS);
 
     // OFREP request body with unique user
     const payload = JSON.stringify({
         context: {
             targetingKey: uniqueUserId, // UNIQUE on every request
-            environment_id: envId,
             platform: 'web',
             version: '2.1.0',
             userTier: userTier,

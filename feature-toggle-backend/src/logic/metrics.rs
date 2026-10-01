@@ -190,16 +190,17 @@ impl MetricLogic for MetricLogicImpl {
             .await
             .map_err(|e| MetricLogicError::InvalidInput(e.to_string()))?;
 
-        if !client.enabled {
-            return Err(MetricLogicError::PermissionDenied(
-                "client is disabled".into(),
-            ));
-        }
-        if client.api_key != client_secret {
-            return Err(MetricLogicError::Unauthenticated(
-                "client_secret mismatch".into(),
-            ));
-        }
+        // Secret first, then status (see `verify_client_credentials`).
+        crate::logic::client::verify_client_credentials(&client, client_secret).map_err(
+            |rejection| match rejection {
+                crate::logic::client::ClientCredentialRejection::InvalidSecret => {
+                    MetricLogicError::Unauthenticated("client_secret mismatch".into())
+                }
+                crate::logic::client::ClientCredentialRejection::Disabled => {
+                    MetricLogicError::PermissionDenied("client is disabled".into())
+                }
+            },
+        )?;
 
         self.track_metrics_for_team(client.team_id, events).await
     }

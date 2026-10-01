@@ -8,7 +8,7 @@ use std::time::Duration;
 use tokio_retry::RetryIf;
 use tonic::codec::CompressionEncoding;
 use tonic::transport::{Channel, Endpoint};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 pub use flush::{run_evaluation_flush_task, run_flush_task};
 pub use stream::run_stream_task;
@@ -93,6 +93,15 @@ pub async fn fetch_feature_via_grpc(
             info!("Feature '{}' not found in backend", feature_key);
             Ok(None)
         }
+        Err(status) if is_auth_failure(status.code()) => {
+            warn!(
+                "Backend rejected credentials for feature '{}': code={:?} msg={}",
+                feature_key,
+                status.code(),
+                status.message()
+            );
+            Err(status)
+        }
         Err(status) => {
             error!(
                 "gRPC GetFeatureByKey error after retries for feature '{}': code={:?} msg={}",
@@ -134,6 +143,15 @@ async fn fetch_client_info_via_grpc_uncached(
             info!("Successfully fetched client info for: {}", client_id);
             Ok(client_info)
         }
+        Err(e) if is_auth_failure(e.code()) => {
+            warn!(
+                "Backend rejected credentials of client '{}': code={:?} msg={}",
+                client_id,
+                e.code(),
+                e.message()
+            );
+            Err(e)
+        }
         Err(e) => {
             error!(
                 "gRPC GetClientInfo error after retries for client '{}': {}",
@@ -171,12 +189,25 @@ pub(crate) fn client_info_cache_key(client_id: &str, client_secret: &str) -> Str
     key
 }
 
+/// Client-info failures that cannot change on retry: bad credentials, an
+/// unknown client or a disabled client. Only these are cached; transient
+/// failures always go back to the backend. None of them is retried either
+/// (see [`is_transient`]).
+fn is_auth_failure(code: tonic::Code) -> bool {
+    use tonic::Code::*;
+    matches!(
+        code,
+        Unauthenticated | InvalidArgument | NotFound | PermissionDenied
+    )
+}
+
 /// Like [`get_or_fetch_client_info`], but returns the backend status on
 /// failure so callers can tell bad credentials from an unavailable backend.
 ///
-/// Only successful authentications are cached (bounded by the configured
-/// TTL). Every failure goes back to the backend, so a wrong secret for a
-/// cached client ID still fails, and a re-enabled client works at once.
+/// Successes are cached for the configured client TTL, auth failures for a
+/// short fixed TTL. Both caches are keyed by client ID plus secret hash, so a
+/// wrong secret is never served from a cached success, and a rejected secret
+/// does not block the correct one.
 #[allow(clippy::result_large_err)]
 pub async fn try_get_or_fetch_client_info(
     app: &AppState,
@@ -188,8 +219,25 @@ pub async fn try_get_or_fetch_client_info(
     if let Some(cached) = app.client_info_cache.get(&cache_key).await {
         return Ok(cached);
     }
+    if let Some(code) = app.client_info_cache.get_failure(&cache_key).await {
+        return Err(tonic::Status::new(
+            code,
+            "client credentials rejected (cached)",
+        ));
+    }
 
-    let client_info = fetch_client_info_via_grpc_uncached(app, client_id, client_secret).await?;
+    let client_info = match fetch_client_info_via_grpc_uncached(app, client_id, client_secret).await
+    {
+        Ok(info) => info,
+        Err(status) => {
+            if is_auth_failure(status.code()) {
+                app.client_info_cache
+                    .insert_failure(cache_key, status.code())
+                    .await;
+            }
+            return Err(status);
+        }
+    };
 
     app.client_info_cache
         .insert(cache_key, client_info.clone())
@@ -1672,7 +1720,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn client_info_auth_failures_are_not_cached() {
+    async fn client_info_auth_failures_are_cached() {
         for code in [
             tonic::Code::Unauthenticated,
             tonic::Code::InvalidArgument,
@@ -1687,11 +1735,11 @@ mod tests {
                 assert_eq!(result.map_err(|s| s.code()).err(), Some(code));
             }
 
-            // One call per request: not retried and not cached.
+            // Not retried, and the second request is served from the cache.
             assert_eq!(
                 state.client_info_attempts.load(Ordering::SeqCst),
-                2,
-                "{code:?} should reach the backend on every request"
+                1,
+                "{code:?} should be served from the failure cache"
             );
             server.abort();
         }
