@@ -4,7 +4,7 @@
 |---|---|
 | Type | Bug (correctness) |
 | Severity | Medium |
-| Status | Confirmed (code traced) |
+| Status | Fixed on branch `fix/b02-duplicate-key-exact-match` |
 | Crate | `feature-toggle-backend` |
 | Behavior change | Yes, intended: keys that only contain an existing key become allowed |
 | Related | [B01](B01-feature-key-lookup-substring-match.md) (do B01 first and reuse its exact-key method) |

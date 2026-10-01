@@ -52,6 +52,13 @@ pub trait FeatureCrudLogic: Send + Sync {
         name: Option<String>,
         feature_type: Option<ModelFeatureType>,
     ) -> Result<Vec<Feature>, Error>;
+    /// Features in a team whose key equals `key` ignoring case (no substring
+    /// matching). Used by key conflict checks.
+    async fn get_features_by_key_ignore_case(
+        &self,
+        team_id: ID,
+        key: String,
+    ) -> Result<Vec<Feature>, Error>;
     async fn get_features_filtered(
         &self,
         team_id: ID,
@@ -231,6 +238,11 @@ mockall::mock! {
             team_id: ID,
             name: Option<String>,
             feature_type: Option<ModelFeatureType>,
+        ) -> Result<Vec<Feature>, Error>;
+        async fn get_features_by_key_ignore_case(
+            &self,
+            team_id: ID,
+            key: String,
         ) -> Result<Vec<Feature>, Error>;
         async fn get_features_filtered(
             &self,
@@ -847,6 +859,23 @@ impl FeatureCrudLogic for FeatureLogicImpl {
                 dependency_status,
                 approval_status,
             )
+            .await?;
+
+        Ok(features
+            .into_iter()
+            .map(Self::map_entity_to_api_feature)
+            .collect())
+    }
+
+    async fn get_features_by_key_ignore_case(
+        &self,
+        team_id: ID,
+        key: String,
+    ) -> Result<Vec<Feature>, Error> {
+        let team_id = Uuid::try_from(team_id).map_err(|e| Error::InvalidInput(e.to_string()))?;
+        let features = self
+            .repository
+            .get_features_by_key_ignore_case(team_id, key)
             .await?;
 
         Ok(features

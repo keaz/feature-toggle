@@ -246,7 +246,7 @@ async fn ensure_feature_key_unique_for_update(
         .map_err(RestError::from)?;
 
     let existing = logic
-        .get_features(feature.team_id.clone(), Some(key.to_string()), None)
+        .get_features_by_key_ignore_case(feature.team_id.clone(), key.to_string())
         .await
         .map_err(RestError::from)?;
 
@@ -2444,12 +2444,10 @@ mod tests {
             .times(1)
             .returning(move |_| Ok(feature.clone()));
         mock_feature_logic
-            .expect_get_features()
-            .withf(move |id, name, _| {
-                id.to_string() == team_id.to_string() && name.as_deref() == Some("checkout")
-            })
+            .expect_get_features_by_key_ignore_case()
+            .withf(move |id, key| id.to_string() == team_id.to_string() && key == "checkout")
             .times(1)
-            .returning(move |_, _, _| Ok(vec![duplicate.clone()]));
+            .returning(move |_, _| Ok(vec![duplicate.clone()]));
 
         let mock_feature_repo = MockFeatureRepository::new();
         let mock_env_logic = MockEnvironmentLogic::new();
@@ -2687,5 +2685,54 @@ mod tests {
         // The edge drops its id index entry on Delete, so the Delete for the old
         // key must come before the Upsert that re-adds the same id.
         assert!(delete_pos < upsert_pos);
+    }
+
+    #[actix_web::test]
+    async fn rename_key_conflict_check_uses_exact_key_lookup() {
+        let team_id = Uuid::new_v4();
+        let feature_id = Uuid::new_v4();
+        let feature = sample_feature(feature_id, team_id);
+
+        // No `expect_get_features`: the substring search must not be used for
+        // the conflict check (mockall panics on an unexpected call).
+        let mut mock_feature_logic = MockFeatureLogic::new();
+        mock_feature_logic
+            .expect_get_feature_by_id()
+            .returning(move |_| Ok(feature.clone()));
+        mock_feature_logic
+            .expect_get_features_by_key_ignore_case()
+            .withf(move |id, key| id.to_string() == team_id.to_string() && key == "pay")
+            .times(1)
+            .returning(|_, _| Ok(vec![]));
+
+        let result =
+            ensure_feature_key_unique_for_update(&mock_feature_logic, &ID::from(feature_id), "pay")
+                .await;
+        assert!(result.is_ok(), "rename without exact match must be allowed");
+    }
+
+    #[actix_web::test]
+    async fn rename_key_to_case_variant_of_itself_is_allowed() {
+        let team_id = Uuid::new_v4();
+        let feature_id = Uuid::new_v4();
+        let feature = sample_feature(feature_id, team_id);
+        let same_feature = feature.clone();
+
+        let mut mock_feature_logic = MockFeatureLogic::new();
+        mock_feature_logic
+            .expect_get_feature_by_id()
+            .returning(move |_| Ok(feature.clone()));
+        mock_feature_logic
+            .expect_get_features_by_key_ignore_case()
+            .times(1)
+            .returning(move |_, _| Ok(vec![same_feature.clone()]));
+
+        let result = ensure_feature_key_unique_for_update(
+            &mock_feature_logic,
+            &ID::from(feature_id),
+            "Checkout",
+        )
+        .await;
+        assert!(result.is_ok(), "the feature itself is not a conflict");
     }
 }

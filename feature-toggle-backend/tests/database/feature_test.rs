@@ -1629,3 +1629,81 @@ async fn test_get_feature_by_key_matches_exact_key_only() {
     search_keys.sort();
     assert_eq!(search_keys, vec!["checkout", "checkout-v2"]);
 }
+
+fn simple_create_feature(team_id: Uuid, key: &str) -> CreateFeature {
+    CreateFeature {
+        team_id,
+        key: key.to_string(),
+        description: None,
+        feature_type: FeatureType::Simple,
+        lifecycle_stage: "active".to_string(),
+        owner: None,
+        purpose: None,
+        reference_url: None,
+        expires_at: None,
+        cleanup_reason: None,
+        tags: vec![],
+        stages: vec![],
+        dependencies: vec![],
+        variants: None,
+    }
+}
+
+#[tokio::test]
+async fn test_create_feature_key_conflict_is_exact_and_case_insensitive() {
+    let pool = init_pg_pool().await;
+    let repository = feature::feature_repository(pool.clone());
+
+    // Fresh team so the test does not depend on seed data. Deleting the team
+    // at the end cascades to the features created here.
+    let team_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO teams (id, name, description) VALUES ($1, $2, $3)")
+        .bind(team_id)
+        .bind(format!("b02-key-conflict-{team_id}"))
+        .bind("Duplicate feature key check test")
+        .execute(&pool)
+        .await
+        .expect("create test team");
+
+    let checkout = repository
+        .create_feature(simple_create_feature(team_id, "checkout"))
+        .await;
+    // Only a substring of an existing key: must be allowed.
+    let substring = repository
+        .create_feature(simple_create_feature(team_id, "check"))
+        .await;
+    // `_` must not act as a LIKE wildcard ("check_ut" would match "checkout").
+    let wildcard = repository
+        .create_feature(simple_create_feature(team_id, "check_ut"))
+        .await;
+    let duplicate = repository
+        .create_feature(simple_create_feature(team_id, "checkout"))
+        .await;
+    let case_variant = repository
+        .create_feature(simple_create_feature(team_id, "Checkout"))
+        .await;
+
+    sqlx::query("DELETE FROM teams WHERE id = $1")
+        .bind(team_id)
+        .execute(&pool)
+        .await
+        .expect("delete test team");
+
+    checkout.expect("create checkout");
+    substring.expect("a key that only contains an existing key must be allowed");
+    wildcard.expect("`_` in a key must not act as a wildcard");
+    assert!(
+        matches!(
+            duplicate,
+            Err(feature_toggle_backend::Error::RecordAlreadyExists(_))
+        ),
+        "exact duplicate must be rejected, got {duplicate:?}"
+    );
+    assert!(
+        matches!(
+            case_variant,
+            Err(feature_toggle_backend::Error::RecordAlreadyExists(_))
+        ),
+        "case-variant duplicate must stay rejected, got {case_variant:?}"
+    );
+}
