@@ -211,52 +211,6 @@ pub async fn try_get_or_fetch_client_info(
     Ok(client_info)
 }
 
-/// Load user assignments from backend on startup
-pub async fn load_user_assignments(app: &AppState) -> Result<usize, tonic::Status> {
-    let req = pb::ListUserFlagAssignmentsRequest {
-        client_id: app.client_id.clone(),
-        client_secret: app.client_secret.clone(),
-        environment_id: String::new(),
-        feature_id: String::new(),
-    };
-    let mut client = app.grpc.lock().await.clone();
-    let resp = client.list_user_assignments(req).await?.into_inner();
-    Ok(warm_assignment_cache(app, resp.assignments))
-}
-
-/// Seed the sticky assignment cache with persisted assignments. Returns the
-/// number of cached entries.
-pub(crate) fn warm_assignment_cache(
-    app: &AppState,
-    assignments: Vec<pb::UserFlagAssignment>,
-) -> usize {
-    let mut count = 0usize;
-    for a in assignments.into_iter() {
-        if a.assigned {
-            app.assigned_cache.insert(
-                &a.user_id,
-                &a.feature_id,
-                &a.environment_id,
-                crate::CachedAssignment {
-                    // Only the variant name is persisted; its value is
-                    // resolved from the feature when served.
-                    value: None,
-                    variant: if a.variant.is_empty() {
-                        None
-                    } else {
-                        Some(a.variant)
-                    },
-                    // When loading from database, we don't have the original reason
-                    // Use TargetingMatch as a reasonable default for assigned users
-                    reason: evaluation_engine::EvaluationReason::TargetingMatch,
-                },
-            );
-            count += 1;
-        }
-    }
-    count
-}
-
 /// Build a gRPC endpoint with standard configuration
 /// Backend endpoint built from the `[grpc]` settings. Used by both the
 /// direct-call client and the update stream.
@@ -853,7 +807,7 @@ mod tests {
 
     fn cached_assignment() -> crate::CachedAssignment {
         crate::CachedAssignment {
-            value: Some(serde_json::json!(true)),
+            value: serde_json::json!(true),
             variant: None,
             reason: evaluation_engine::EvaluationReason::Static,
         }
@@ -1409,7 +1363,7 @@ mod tests {
             "stale-id",
             "env-1",
             crate::CachedAssignment {
-                value: Some(serde_json::json!(true)),
+                value: serde_json::json!(true),
                 variant: None,
                 reason: evaluation_engine::EvaluationReason::Static,
             },

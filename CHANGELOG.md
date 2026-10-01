@@ -22,6 +22,10 @@ All notable user-visible changes to FluxGate are recorded here.
   **When it takes effect:** backend REST and gRPC evaluations change immediately after the backend is upgraded. Edge servers change once they run the new engine; users who already have a cached truthy result for `F` on an edge keep it until `F` is re-synced (the next upsert or snapshot of `F`, in practice the next edge restart or reconnect).
 - **Edges keep recorded sticky assignments when an enabled flag is updated (edge).** An Upsert or Snapshot of a flag dropped that flag's assignments that were queued but not yet sent to the backend (up to one flush interval, 10 s by default), including on every reconnect snapshot. They are now kept and sent while the flag stays enabled. Cached results are still cleared on every update, so users are evaluated against the new config exactly as before; only the backend's assignment records are more complete. A kill-switched flag still drops both.
 
+### Removed
+
+- **Edge no longer loads persisted sticky assignments at startup (edge).** On startup the edge called `ListUserAssignments` and filled its assignment cache, but the first stream snapshot cleared every flag's cached assignments right after, so the load cost one backend call per start and never changed a served result. The call and its cache-filling code are gone. Served results, the assignment flush and the backend RPC are unchanged.
+
 ### Security
 
 - **Backend container no longer logs the database password.** `scripts/backend-entrypoint.sh` printed the full `DATABASE_URL` and an "Extracted password" line at startup, so the PostgreSQL password ended up in container logs. It now prints the URL with the credentials replaced by `***`. Rotate the database password if these logs were shipped anywhere others can read.
