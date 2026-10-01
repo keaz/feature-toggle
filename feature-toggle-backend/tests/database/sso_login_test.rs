@@ -72,6 +72,8 @@ struct IdpState {
     auth_methods: Vec<String>,
     userinfo_email: Option<String>,
     userinfo_groups: Option<Value>,
+    /// Subject the userinfo endpoint reports (set by the test using it).
+    userinfo_sub: String,
     grants: HashMap<String, Grant>,
     token_calls: Vec<TokenCall>,
     jwks_fetches: usize,
@@ -190,7 +192,7 @@ async fn idp_userinfo(req: HttpRequest, state: web::Data<Mutex<IdpState>>) -> Ht
         return HttpResponse::Unauthorized().finish();
     }
     let state = state.lock().unwrap();
-    let sub = USERINFO_SUB.lock().unwrap().clone();
+    let sub = state.userinfo_sub.clone();
     HttpResponse::Ok().json(json!({
         "sub": sub,
         "email": state.userinfo_email,
@@ -198,9 +200,6 @@ async fn idp_userinfo(req: HttpRequest, state: web::Data<Mutex<IdpState>>) -> Ht
         "groups": state.userinfo_groups,
     }))
 }
-
-/// Subject the userinfo endpoint reports (set by the test using it).
-static USERINFO_SUB: Mutex<String> = Mutex::new(String::new());
 
 async fn start_idp() -> MockIdp {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -214,6 +213,7 @@ async fn start_idp() -> MockIdp {
         ],
         userinfo_email: None,
         userinfo_groups: None,
+        userinfo_sub: String::new(),
         grants: HashMap::new(),
         token_calls: Vec::new(),
         jwks_fetches: 0,
@@ -1557,7 +1557,7 @@ async fn missing_email_falls_back_to_userinfo_then_fails() {
 
     let sub = unique("sub");
     let email = format!("{}@example.com", unique("userinfo"));
-    *USERINFO_SUB.lock().unwrap() = sub.clone();
+    idp.state.lock().unwrap().userinfo_sub = sub.clone();
     idp.state.lock().unwrap().userinfo_email = Some(email.clone());
     let location = login_with(&app, &idp, &provider.slug, None, |a| {
         let mut c = claims(&idp, &a.nonce, &sub, "unused");
@@ -1576,7 +1576,7 @@ async fn missing_email_falls_back_to_userinfo_then_fails() {
 
     idp.state.lock().unwrap().userinfo_email = None;
     let sub = unique("sub");
-    *USERINFO_SUB.lock().unwrap() = sub.clone();
+    idp.state.lock().unwrap().userinfo_sub = sub.clone();
     let location = login_with(&app, &idp, &provider.slug, None, |a| {
         let mut c = claims(&idp, &a.nonce, &sub, "unused");
         c.as_object_mut().unwrap().remove("email");
@@ -1798,7 +1798,7 @@ async fn groups_from_userinfo_sync_roles_and_teams_across_logins() {
 
     // The id_token has no groups claim: userinfo supplies them.
     let sub = unique("sub");
-    *USERINFO_SUB.lock().unwrap() = sub.clone();
+    idp.state.lock().unwrap().userinfo_sub = sub.clone();
     idp.state.lock().unwrap().userinfo_groups = Some(json!(["fluxgate-devs"]));
     let email = format!("{sub}@example.com");
     let location = login_with(&app, &idp, &provider.slug, None, |a| {
