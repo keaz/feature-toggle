@@ -12,7 +12,10 @@ use tracing::{error, info};
 pub use flush::{run_evaluation_flush_task, run_flush_task};
 pub use stream::run_stream_task;
 #[cfg(test)]
-pub(crate) use stream::{handle_feature_update, prepare_for_full_resync, send_initial_subscribe};
+pub(crate) use stream::{
+    SnapshotSweep, handle_feature_update, handle_stream_update, prepare_for_full_resync,
+    send_initial_subscribe,
+};
 
 #[derive(Clone, Debug)]
 pub struct UserAssignment {
@@ -318,6 +321,20 @@ mod tests {
         scripted_errors: std::sync::Mutex<std::collections::VecDeque<tonic::Code>>,
         /// Feature ids of assignment rows the mock accepted.
         accepted_assignment_features: std::sync::Mutex<Vec<String>>,
+        /// One script per `StreamUpdates` call, in call order. Once they run
+        /// out, streams stay open without messages.
+        stream_scripts: std::sync::Mutex<std::collections::VecDeque<StreamScript>>,
+        stream_calls: AtomicUsize,
+        /// Senders of streams kept open, so they do not end.
+        open_streams: std::sync::Mutex<
+            Vec<tokio::sync::mpsc::Sender<Result<backend_pb::FeatureUpdate, Status>>>,
+        >,
+    }
+
+    struct StreamScript {
+        messages: Vec<backend_pb::FeatureUpdate>,
+        /// When false, the stream ends after the messages.
+        keep_open: bool,
     }
 
     impl MockBackendState {
@@ -449,8 +466,27 @@ mod tests {
             &self,
             _request: Request<tonic::Streaming<backend_pb::StreamRequest>>,
         ) -> Result<Response<Self::StreamUpdatesStream>, Status> {
-            let (_tx, rx) =
-                tokio::sync::mpsc::channel::<Result<backend_pb::FeatureUpdate, Status>>(1);
+            self.state.stream_calls.fetch_add(1, Ordering::SeqCst);
+            let script = self
+                .state
+                .stream_scripts
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(StreamScript {
+                    messages: Vec::new(),
+                    keep_open: true,
+                });
+            let (tx, rx) = tokio::sync::mpsc::channel::<Result<backend_pb::FeatureUpdate, Status>>(
+                script.messages.len() + 1,
+            );
+            for message in script.messages {
+                tx.try_send(Ok(message))
+                    .expect("stream script fits the channel");
+            }
+            if script.keep_open {
+                self.state.open_streams.lock().unwrap().push(tx);
+            }
             Ok(Response::new(ReceiverStream::new(rx)))
         }
 
@@ -805,6 +841,109 @@ mod tests {
         assert!(mapped_cache.get_by_id("gone-id").await.is_none());
     }
 
+    fn delete_update(feature_key: &str) -> crate::pb::FeatureUpdate {
+        crate::pb::FeatureUpdate {
+            action: crate::pb::feature_update::Action::Delete as i32,
+            feature: None,
+            feature_key: feature_key.to_string(),
+            error: String::new(),
+            message_id: String::new(),
+        }
+    }
+
+    fn cached_assignment() -> crate::CachedAssignment {
+        crate::CachedAssignment {
+            value: Some(serde_json::json!(true)),
+            variant: None,
+            reason: evaluation_engine::EvaluationReason::Static,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_delete_of_old_key_after_rename_keeps_renamed_feature() {
+        use crate::pb::feature_update::Action;
+        let mapped_cache = Arc::new(crate::MappedFeatureCache::new(100));
+        let app_state = test_app_state(mapped_cache.clone());
+
+        let mut old = team_feature_full("renamed-id", "old-key", "team-1");
+        old.dependencies = vec![crate::pb::FeatureDependencyFull {
+            depends_on_id: "dep-id".to_string(),
+            ..Default::default()
+        }];
+        let mut new = old.clone();
+        new.key = "new-key".to_string();
+
+        handle_feature_update(&app_state, feature_update(Action::Upsert, old)).await;
+        // The renamed feature's Upsert arrives before the old key's Delete.
+        handle_feature_update(&app_state, feature_update(Action::Upsert, new)).await;
+        app_state
+            .assigned_cache
+            .insert("user-1", "renamed-id", "env-1", cached_assignment());
+
+        assert!(!handle_feature_update(&app_state, delete_update("old-key")).await);
+        mapped_cache.run_pending_tasks().await;
+
+        assert!(mapped_cache.get("old-key").await.is_none());
+        assert_eq!(
+            mapped_cache
+                .get("new-key")
+                .await
+                .expect("renamed feature")
+                .id,
+            "renamed-id"
+        );
+        assert_eq!(
+            mapped_cache
+                .get_by_id("renamed-id")
+                .await
+                .expect("id index of the renamed feature")
+                .key,
+            "new-key"
+        );
+        assert_eq!(
+            mapped_cache.get_dependency_ids("renamed-id").await,
+            vec!["dep-id".to_string()]
+        );
+        // The renamed feature's own Upsert already purged its assignments;
+        // the stale Delete must not drop ones recorded after it.
+        assert!(
+            app_state
+                .assigned_cache
+                .get("user-1", "renamed-id", "env-1")
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_plain_delete_removes_id_index_dependencies_and_assignments() {
+        use crate::pb::feature_update::Action;
+        let mapped_cache = Arc::new(crate::MappedFeatureCache::new(100));
+        let app_state = test_app_state(mapped_cache.clone());
+
+        let mut feature = team_feature_full("plain-id", "plain-key", "team-1");
+        feature.dependencies = vec![crate::pb::FeatureDependencyFull {
+            depends_on_id: "dep-id".to_string(),
+            ..Default::default()
+        }];
+        handle_feature_update(&app_state, feature_update(Action::Upsert, feature)).await;
+        app_state
+            .assigned_cache
+            .insert("user-1", "plain-id", "env-1", cached_assignment());
+
+        assert!(!handle_feature_update(&app_state, delete_update("plain-key")).await);
+        mapped_cache.run_pending_tasks().await;
+
+        assert!(mapped_cache.get("plain-key").await.is_none());
+        assert!(mapped_cache.get_by_id("plain-id").await.is_none());
+        assert!(mapped_cache.get_dependency_ids("plain-id").await.is_empty());
+        assert!(
+            app_state
+                .assigned_cache
+                .get("user-1", "plain-id", "env-1")
+                .is_none()
+        );
+    }
+
     fn team_feature_full(id: &str, key: &str, team_id: &str) -> crate::pb::FeatureFull {
         crate::pb::FeatureFull {
             id: id.to_string(),
@@ -834,6 +973,271 @@ mod tests {
             error: String::new(),
             message_id: String::new(),
         }
+    }
+
+    fn snapshot_complete() -> crate::pb::FeatureUpdate {
+        crate::pb::FeatureUpdate {
+            action: crate::pb::feature_update::Action::SnapshotComplete as i32,
+            feature: None,
+            feature_key: String::new(),
+            error: String::new(),
+            message_id: String::new(),
+        }
+    }
+
+    /// Puts `key` (owned by `team_id`) in the cache, plus one cached assignment.
+    async fn cache_feature(app_state: &crate::AppState, id: &str, key: &str, team_id: &str) {
+        app_state
+            .mapped_cache
+            .insert(
+                team_id,
+                Arc::new(crate::handlers::map_proto_to_engine(&team_feature_full(
+                    id, key, team_id,
+                ))),
+            )
+            .await;
+        app_state
+            .assigned_cache
+            .insert("user-1", id, "env-1", cached_assignment());
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_complete_sweeps_own_team_keys_missing_from_snapshot() {
+        use crate::pb::feature_update::Action;
+        let mapped_cache = Arc::new(crate::MappedFeatureCache::new(100));
+        let app_state = test_app_state(mapped_cache.clone());
+        cache_feature(&app_state, "stale-id", "stale", "team-1").await;
+        cache_feature(&app_state, "kept-id", "kept", "team-1").await;
+        cache_feature(&app_state, "renamed-id", "old-name", "team-1").await;
+        cache_feature(&app_state, "foreign-id", "foreign", "team-2").await;
+
+        let mut sweep = SnapshotSweep::start(&[]);
+        for feature in [
+            team_feature_full("kept-id", "kept", "team-1"),
+            // Renamed while the edge was disconnected: same id, new key.
+            team_feature_full("renamed-id", "new-name", "team-1"),
+        ] {
+            assert!(
+                !handle_stream_update(
+                    &app_state,
+                    &mut sweep,
+                    feature_update(Action::Snapshot, feature)
+                )
+                .await
+            );
+        }
+        app_state
+            .assigned_cache
+            .insert("user-1", "kept-id", "env-1", cached_assignment());
+        assert!(!handle_stream_update(&app_state, &mut sweep, snapshot_complete()).await);
+        mapped_cache.run_pending_tasks().await;
+
+        assert!(mapped_cache.get("stale").await.is_none());
+        assert!(mapped_cache.get_by_id("stale-id").await.is_none());
+        assert!(
+            app_state
+                .assigned_cache
+                .get("user-1", "stale-id", "env-1")
+                .is_none()
+        );
+        assert!(mapped_cache.get("kept").await.is_some());
+        assert!(
+            app_state
+                .assigned_cache
+                .get("user-1", "kept-id", "env-1")
+                .is_some()
+        );
+        assert!(mapped_cache.get("old-name").await.is_none());
+        assert_eq!(
+            mapped_cache
+                .get_by_id("renamed-id")
+                .await
+                .expect("renamed feature by id")
+                .key,
+            "new-name"
+        );
+        // Another team's entry is not the edge's to sweep.
+        assert!(mapped_cache.get("foreign").await.is_some());
+        assert!(
+            app_state
+                .assigned_cache
+                .get("user-1", "foreign-id", "env-1")
+                .is_some()
+        );
+
+        // A repeated marker without a new snapshot sweeps nothing.
+        handle_stream_update(
+            &app_state,
+            &mut sweep,
+            feature_update(
+                Action::Upsert,
+                team_feature_full("live-id", "live", "team-1"),
+            ),
+        )
+        .await;
+        handle_stream_update(&app_state, &mut sweep, snapshot_complete()).await;
+        assert!(mapped_cache.get("live").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_no_sweep_when_stream_drops_before_snapshot_complete() {
+        use crate::pb::feature_update::Action;
+        let mapped_cache = Arc::new(crate::MappedFeatureCache::new(100));
+        let app_state = test_app_state(mapped_cache.clone());
+        cache_feature(&app_state, "stale-id", "stale", "team-1").await;
+
+        // The connection drops after part of the snapshot; the next one gets
+        // a snapshot from an older backend that never sends the marker.
+        for _connection in 0..2 {
+            let mut sweep = SnapshotSweep::start(&[]);
+            handle_stream_update(
+                &app_state,
+                &mut sweep,
+                feature_update(
+                    Action::Snapshot,
+                    team_feature_full("kept-id", "kept", "team-1"),
+                ),
+            )
+            .await;
+        }
+        mapped_cache.run_pending_tasks().await;
+
+        assert!(mapped_cache.get("stale").await.is_some());
+        assert!(mapped_cache.get("kept").await.is_some());
+        assert!(
+            app_state
+                .assigned_cache
+                .get("user-1", "stale-id", "env-1")
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_keyed_snapshot_sweeps_only_requested_keys() {
+        use crate::pb::feature_update::Action;
+        let mapped_cache = Arc::new(crate::MappedFeatureCache::new(100));
+        let app_state = test_app_state(mapped_cache.clone());
+        cache_feature(&app_state, "requested-id", "requested", "team-1").await;
+        cache_feature(&app_state, "unrequested-id", "unrequested", "team-1").await;
+        cache_feature(&app_state, "kept-id", "kept", "team-1").await;
+
+        let mut sweep = SnapshotSweep::start(&["requested".to_string(), "kept".to_string()]);
+        handle_stream_update(
+            &app_state,
+            &mut sweep,
+            feature_update(
+                Action::Snapshot,
+                team_feature_full("kept-id", "kept", "team-1"),
+            ),
+        )
+        .await;
+        handle_stream_update(&app_state, &mut sweep, snapshot_complete()).await;
+        mapped_cache.run_pending_tasks().await;
+
+        assert!(mapped_cache.get("requested").await.is_none());
+        assert!(mapped_cache.get("kept").await.is_some());
+        assert!(
+            mapped_cache.get("unrequested").await.is_some(),
+            "keys outside a keyed snapshot must not be swept"
+        );
+    }
+
+    fn backend_feature(id: &str, key: &str) -> backend_pb::FeatureFull {
+        backend_pb::FeatureFull {
+            id: id.to_string(),
+            key: key.to_string(),
+            feature_type: "Simple".to_string(),
+            team_id: "team-1".to_string(),
+            active: true,
+            ..Default::default()
+        }
+    }
+
+    fn backend_update(
+        action: backend_pb::feature_update::Action,
+        feature: Option<backend_pb::FeatureFull>,
+    ) -> backend_pb::FeatureUpdate {
+        backend_pb::FeatureUpdate {
+            action: action as i32,
+            feature,
+            ..Default::default()
+        }
+    }
+
+    async fn stream_task_with_script(
+        scripts: Vec<StreamScript>,
+    ) -> (
+        crate::AppState,
+        Arc<MockBackendState>,
+        Vec<tokio::task::JoinHandle<()>>,
+    ) {
+        let (endpoint, state, server_handle) = start_mock_backend().await;
+        state.stream_scripts.lock().unwrap().extend(scripts);
+        let mapped_cache = Arc::new(crate::MappedFeatureCache::new(100));
+        let mut app_state = test_app_state_with_endpoint(mapped_cache, &endpoint);
+        app_state.retry_config.stream_initial_delay_secs = 1;
+        cache_feature(&app_state, "stale-id", "stale", "team-1").await;
+        let task = tokio::spawn(run_stream_task(
+            app_state.clone(),
+            endpoint,
+            crate::config::GrpcConfig::default(),
+        ));
+        (app_state, state, vec![task, server_handle])
+    }
+
+    #[tokio::test]
+    async fn stream_task_sweeps_stale_keys_after_snapshot_complete() {
+        use backend_pb::feature_update::Action;
+        let (app_state, _state, handles) = stream_task_with_script(vec![StreamScript {
+            messages: vec![
+                backend_update(Action::Snapshot, Some(backend_feature("fresh-id", "fresh"))),
+                backend_update(Action::SnapshotComplete, None),
+            ],
+            keep_open: true,
+        }])
+        .await;
+
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while app_state.mapped_cache.get("stale").await.is_some() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("stale key should be swept after the snapshot completes");
+        assert!(app_state.mapped_cache.get("fresh").await.is_some());
+
+        handles.iter().for_each(|handle| handle.abort());
+    }
+
+    #[tokio::test]
+    async fn stream_task_keeps_cache_when_stream_ends_before_snapshot_complete() {
+        use backend_pb::feature_update::Action;
+        let (app_state, state, handles) = stream_task_with_script(vec![StreamScript {
+            messages: vec![backend_update(
+                Action::Snapshot,
+                Some(backend_feature("fresh-id", "fresh")),
+            )],
+            keep_open: false,
+        }])
+        .await;
+
+        // The first stream ends without a marker; wait for the reconnect.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while state.stream_calls.load(Ordering::SeqCst) < 2 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("edge should reconnect after the stream ends");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        assert!(app_state.mapped_cache.get("fresh").await.is_some());
+        assert!(
+            app_state.mapped_cache.get("stale").await.is_some(),
+            "an incomplete snapshot must not sweep"
+        );
+
+        handles.iter().for_each(|handle| handle.abort());
     }
 
     #[tokio::test]

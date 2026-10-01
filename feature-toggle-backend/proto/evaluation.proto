@@ -129,7 +129,18 @@ message StreamRequest {
 
 message FeatureUpdate {
   string message_id = 1;
-  enum Action { UPSERT = 0; DELETE = 1; SNAPSHOT = 2; HEARTBEAT = 3; ERROR = 4; }
+  enum Action {
+    UPSERT = 0;
+    DELETE = 1;
+    SNAPSHOT = 2;
+    HEARTBEAT = 3;
+    ERROR = 4;
+    // Sent once per stream, after the last SNAPSHOT (and the DELETEs of a keyed
+    // snapshot), only when the whole initial snapshot was sent. Carries no
+    // feature. Receivers may then drop cached features of the snapshot's scope
+    // that the snapshot did not contain. Older receivers ignore it.
+    SNAPSHOT_COMPLETE = 5;
+  }
   Action action = 2;
   FeatureFull feature = 3; // used for UPSERT/SNAPSHOT
   string feature_key = 4;  // used for DELETE

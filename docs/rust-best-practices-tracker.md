@@ -40,7 +40,7 @@ This document tracks non-database Rust best-practice improvements identified dur
 ### P2
 
 - [ ] Enforce formatting and linting in CI (`cargo fmt --check`, `cargo clippy`).
-- [ ] Remove stale backup artifact `feature-edge-server/src/main.rs.backup` after confirming it is not needed.
+- [x] Remove stale backup artifact `feature-edge-server/src/main.rs.backup` after confirming it is not needed.
 
 ## Suggested validation commands
 

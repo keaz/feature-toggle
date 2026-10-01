@@ -50,13 +50,13 @@ Review of `feature-toggle-backend/`, `feature-edge-server/` and `evaluation-engi
 | [x] | [B10](issues/B10-edge-env-overrides-ignored.md) | `EDGE_*` env overrides are silently ignored | High | edge | Yes (env starts applying) | — |
 | [x] | [B11](issues/B11-assignment-push-missing-team-check.md) | `push_user_assignments` writes other teams' assignments | High | backend | Yes (intended) | — |
 | [x] | [B12](issues/B12-evaluation-timestamp-fallback-breaks-dedupe.md) | Missing evaluation timestamp becomes `now()` and breaks dedupe | Low | backend | Small | — |
-| [ ] | [B13](issues/B13-dependency-bucketing-uses-root-key.md) | Dependencies bucketed with the root flag key | High | engine | **Yes, user-visible, needs sign-off** | — |
+| [x] | [B13](issues/B13-dependency-bucketing-uses-root-key.md) | Dependencies bucketed with the root flag key | High | engine | **Yes, user-visible, needs sign-off** | — |
 | [x] | [B14](issues/B14-ofrep-bulk-etag-ignores-context.md) | OFREP bulk ETag ignores context, so 304 returns stale results | Medium | edge | Yes (intended) | B05 |
 | [x] | [B15](issues/B15-stale-flags-after-reconnect-or-rename.md) | Stale flags after reconnect or rename; new flags missed | High | backend + edge | Yes (intended) | B01, B03, B04 |
 | [x] | [B16](issues/B16-edge-cache-not-team-scoped.md) | Edge cache not team-scoped; bulk lists other teams' flags | High | edge | Yes (intended) | B03 |
 | [x] | [B17](issues/B17-assignment-list-missing-environment-filter.md) | Assignment list by environment returns all environments | Medium | backend | Yes (intended) | — |
 | [x] | [B18](issues/B18-assignment-warmup-caches-true-for-all-variants.md) | Assignment warm-up caches `true` for every variant (masked) | Medium | edge | No (latent) | — |
-| [ ] | [B19](issues/B19-non-boolean-dependency-blocks-dependents.md) | Non-boolean dependency blocks dependents | Medium | engine | **Needs decision** | — |
+| [x] | [B19](issues/B19-non-boolean-dependency-blocks-dependents.md) | Non-boolean dependency blocks dependents | Medium | engine | **Needs decision** | — |
 
 ### Performance
 

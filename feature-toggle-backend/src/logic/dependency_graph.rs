@@ -1,5 +1,7 @@
 use crate::Error;
+use crate::database::entity::{FeatureType, FeatureVariant};
 use crate::database::feature::FeatureRepository;
+use serde_json::Value as JsonValue;
 use std::collections::{HashMap, HashSet, VecDeque};
 use uuid::Uuid;
 
@@ -76,6 +78,136 @@ where
     }
 
     Ok(())
+}
+
+/// Whether a flag can serve values other than the JSON booleans `true`/`false`.
+///
+/// The evaluation engine passes a dependency only when it evaluates to the JSON
+/// boolean `true`, so a feature may only depend on boolean flags. A flag is
+/// **non-boolean** when both hold:
+///
+/// - it is a `Contextual` feature. Only Contextual features hand their variants
+///   to the engine; a `Simple` feature always serves `true`/`false`, whatever
+///   its stored variants hold;
+/// - at least one of its variants has a stored `value` that is not a JSON
+///   boolean. `value_type` is only a hint: the engine checks the stored value,
+///   so a `Boolean`-typed variant holding the string `"true"` is non-boolean.
+///
+/// All variants count, not only those a criterion currently serves, because
+/// criteria change through other endpoints. A Contextual flag without variants
+/// is boolean (it serves `true` when it matches).
+pub fn is_non_boolean_flag<'a>(
+    feature_type: &FeatureType,
+    variant_values: impl IntoIterator<Item = &'a JsonValue>,
+) -> bool {
+    matches!(feature_type, FeatureType::Contextual)
+        && variant_values.into_iter().any(|value| !value.is_boolean())
+}
+
+fn first_non_boolean_variant(variants: &[FeatureVariant]) -> Option<&FeatureVariant> {
+    variants.iter().find(|variant| !variant.value.is_boolean())
+}
+
+/// Rejects dependencies that are being **added** to `feature_key` when they
+/// point at a non-boolean flag (see [`is_non_boolean_flag`]).
+///
+/// Dependencies already present in `previous_dependencies` are not re-checked,
+/// so features saved before this rule existed keep working when they are edited
+/// for unrelated reasons.
+pub async fn ensure_added_dependencies_are_boolean<R>(
+    repo: &R,
+    feature_key: &str,
+    previous_dependencies: &[Uuid],
+    new_dependencies: &[Uuid],
+) -> Result<(), Error>
+where
+    R: FeatureRepository + ?Sized,
+{
+    let previous: HashSet<Uuid> = previous_dependencies.iter().copied().collect();
+    let mut seen = HashSet::new();
+    let added: Vec<Uuid> = new_dependencies
+        .iter()
+        .copied()
+        .filter(|id| !previous.contains(id) && seen.insert(*id))
+        .collect();
+    if added.is_empty() {
+        return Ok(());
+    }
+
+    let variants_by_feature = repo.get_feature_variants_batch(&added).await?;
+    for dependency_id in added {
+        let Some(variant) = variants_by_feature
+            .get(&dependency_id)
+            .and_then(|variants| first_non_boolean_variant(variants))
+        else {
+            continue;
+        };
+
+        let dependency = repo.get_feature_by_id(dependency_id).await?;
+        if !matches!(dependency.feature_type, FeatureType::Contextual) {
+            continue;
+        }
+
+        return Err(Error::InvalidInput(format!(
+            "Feature '{feature_key}' cannot depend on '{}': it is a non-boolean flag \
+             (variant '{}' serves {}). A dependency passes only when it evaluates to true, \
+             so features can only depend on boolean flags",
+            dependency.key, variant.control, variant.value
+        )));
+    }
+
+    Ok(())
+}
+
+/// Rejects a change that turns a depended-on feature into a non-boolean flag
+/// (see [`is_non_boolean_flag`]), which would block all of its dependents.
+///
+/// `was_non_boolean` is the feature's state before the change. A feature that
+/// was already non-boolean is not re-checked, so existing data stays editable.
+pub async fn ensure_depended_on_flag_stays_boolean<'a, R>(
+    repo: &R,
+    team_id: Uuid,
+    feature_id: Uuid,
+    feature_key: &str,
+    was_non_boolean: bool,
+    new_feature_type: &FeatureType,
+    new_variant_values: impl IntoIterator<Item = &'a JsonValue>,
+) -> Result<(), Error>
+where
+    R: FeatureRepository + ?Sized,
+{
+    if was_non_boolean || !is_non_boolean_flag(new_feature_type, new_variant_values) {
+        return Ok(());
+    }
+
+    let mut dependents: Vec<String> = repo
+        .get_features(team_id, None, None)
+        .await?
+        .into_iter()
+        .filter(|feature| {
+            feature.id != feature_id
+                && feature
+                    .dependencies
+                    .iter()
+                    .any(|dependency| dependency.depends_on_id == feature_id)
+        })
+        .map(|feature| feature.key)
+        .collect();
+    if dependents.is_empty() {
+        return Ok(());
+    }
+    dependents.sort();
+
+    Err(Error::InvalidInput(format!(
+        "Feature '{feature_key}' cannot serve non-boolean variant values while other features \
+         depend on it ({}). A dependency passes only when it evaluates to true; remove those \
+         dependencies first or keep the variant values boolean",
+        dependents
+            .iter()
+            .map(|key| format!("'{key}'"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )))
 }
 
 pub async fn ensure_rollout_dependencies_safe<R>(
@@ -319,6 +451,33 @@ mod tests {
                 "NOT_DEPLOYED".to_string()
             },
         }
+    }
+
+    #[test]
+    fn is_non_boolean_flag_follows_engine_semantics() {
+        use serde_json::json;
+
+        let contextual = FeatureType::Contextual;
+        let simple = FeatureType::Simple;
+
+        assert!(!is_non_boolean_flag(&contextual, &[]));
+        assert!(!is_non_boolean_flag(
+            &contextual,
+            &[json!(true), json!(false)]
+        ));
+        assert!(is_non_boolean_flag(
+            &contextual,
+            &[json!(true), json!("dark")]
+        ));
+        assert!(is_non_boolean_flag(&contextual, &[json!(1)]));
+        assert!(is_non_boolean_flag(
+            &contextual,
+            &[json!({"theme": "dark"})]
+        ));
+        // The engine checks the stored value, not value_type: "true" is a string.
+        assert!(is_non_boolean_flag(&contextual, &[json!("true")]));
+        // Simple features never hand variants to the engine.
+        assert!(!is_non_boolean_flag(&simple, &[json!("dark"), json!(42)]));
     }
 
     #[tokio::test]

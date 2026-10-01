@@ -4,6 +4,7 @@ mod client_integration;
 mod compound_rules_test;
 mod context_test;
 mod criteria_test;
+mod dependency_value_type_test;
 mod environment_test;
 mod feature_evaluation_test;
 mod feature_test;

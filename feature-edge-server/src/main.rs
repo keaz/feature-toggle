@@ -188,13 +188,22 @@ pub struct ClientInfoCache {
 }
 
 impl ClientInfoCache {
-    /// Create a new ClientInfoCache with TTL
+    /// Create a new ClientInfoCache with TTL and the default capacity.
     pub fn new(ttl: Duration) -> Self {
-        tracing::info!("Initializing ClientInfoCache with TTL={:?}", ttl);
+        Self::with_capacity(ttl, 1000)
+    }
+
+    /// Create a new ClientInfoCache holding up to `capacity` client credentials.
+    pub fn with_capacity(ttl: Duration, capacity: u64) -> Self {
+        tracing::info!(
+            "Initializing ClientInfoCache with TTL={:?}, max_capacity={}",
+            ttl,
+            capacity
+        );
         Self {
             cache: moka::future::Cache::builder()
                 .time_to_live(ttl)
-                .max_capacity(1000) // Support up to 1000 different clients
+                .max_capacity(capacity)
                 .build(),
             failures: moka::future::Cache::builder()
                 .time_to_live(CLIENT_INFO_FAILURE_TTL)
@@ -431,24 +440,38 @@ impl MappedFeatureCache {
 
     /// Invalidate feature by key
     pub async fn invalidate(&self, key: &str) {
-        // Get the feature to find its ID before invalidating
-        if let Some(entry) = self.by_key.get(key).await {
-            self.by_id.invalidate(&entry.feature.id).await;
-            self.dependency_ids.invalidate(&entry.feature.id).await;
-        }
-        self.by_key.invalidate(key).await;
+        let _ = self.delete_by_key(key).await;
     }
 
-    /// Delete feature by key and return its ID
+    /// Delete the entry cached under `key`. Returns the feature id when the
+    /// feature left the cache, i.e. its id index still pointed at `key`.
+    ///
+    /// A rename keeps the feature id, so the id index may already point at the
+    /// new key (its Upsert arrived first). Then only the old key entry is
+    /// dropped, the id and dependency indices stay with the live entry, and
+    /// `None` is returned.
     pub async fn delete_by_key(&self, key: &str) -> Option<String> {
         let entry = self.by_key.get(key).await?;
         let id = entry.feature.id.clone();
 
         self.by_key.invalidate(key).await;
+        let id_owner = self.by_id.get(&id).await;
+        if id_owner.is_some_and(|owner| owner != key) {
+            return None;
+        }
         self.by_id.invalidate(&id).await;
         self.dependency_ids.invalidate(&id).await;
 
         Some(id)
+    }
+
+    /// Keys of all cached features that belong to `team_id`.
+    pub fn keys_for_team(&self, team_id: &str) -> Vec<String> {
+        self.by_key
+            .iter()
+            .filter(|(_, entry)| &*entry.team_id == team_id)
+            .map(|(key, _)| key.to_string())
+            .collect()
     }
 
     /// Get all feature keys
@@ -594,7 +617,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let state = AppState {
         mapped_cache: Arc::new(MappedFeatureCache::new(cfg.cache.max_capacity)),
-        client_info_cache: Arc::new(ClientInfoCache::new(cfg.cache.client_ttl())),
+        client_info_cache: Arc::new(ClientInfoCache::with_capacity(
+            cfg.cache.client_ttl(),
+            cfg.cache.client_max_capacity,
+        )),
         grpc: Arc::new(tokio::sync::Mutex::new(grpc_client)),
         client_id: cfg.client_id.clone(),
         client_secret: cfg.client_secret.clone(),
@@ -671,6 +697,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     use tonic::transport::Endpoint;
+
+    #[test]
+    fn client_info_cache_uses_configured_capacity() {
+        let cache = ClientInfoCache::with_capacity(Duration::from_secs(60), 25);
+        assert_eq!(cache.cache.policy().max_capacity(), Some(25));
+        let default = ClientInfoCache::new(Duration::from_secs(60));
+        assert_eq!(default.cache.policy().max_capacity(), Some(1000));
+    }
 
     fn test_state() -> AppState {
         let mapped_cache = Arc::new(MappedFeatureCache::new(1000));

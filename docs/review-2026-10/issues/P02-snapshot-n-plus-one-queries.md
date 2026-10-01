@@ -64,3 +64,13 @@ Notes:
 - A snapshot's query count no longer grows with the number of stages per feature.
 - Snapshot and Evaluate output are unchanged.
 - `cargo test -p feature-toggle-backend` passes, and Docker builds with `SQLX_OFFLINE=true`.
+
+## Follow-up (branch `review-followups`)
+
+The optional parts left after the main fix are done, with output unchanged:
+
+- **Evaluate dependencies:** `map_db_feature_to_engine` loads the dependency graph one level at a time with the new `FeatureRepository::get_features_by_ids` (one feature query plus one dependency query per level) instead of `get_feature_by_id` per dependency. Cycle protection and the error for a missing dependency (`db error: Record does not exists for the id <first missing id in breadth-first order>`) are unchanged.
+- **Keyed snapshots:** `send_stream_snapshot` looks up all subscribed keys with one exact, case-sensitive, team-scoped query (`get_features_by_keys`, `f.key = ANY($keys)`) instead of `get_feature_by_key` per key. The Delete per missing key, the Deletes-before-Snapshots order and the final SnapshotComplete marker are unchanged.
+- **Live updates:** `broadcast::map_db_feature_to_full_for_broadcast`, the context-update broadcast in `logic/context.rs` and the kill-switch scheduler mapper now all use `grpc::map_features_to_full`, the same batched mapping as the snapshot (`FeatureChildren`). The two copied mappers are gone. A context update loads all referencing features with one `get_features_by_ids` call and maps them in batches of 200.
+- **Tests:** `evaluate_multi_level_dependency_output_is_pinned`, `keyed_snapshot_output_is_pinned`, `broadcast_mapping_output_is_pinned` and `context_update_broadcast_output_is_pinned` in `tests/grpc_tests.rs` were run on the old code first and assert the call counts of the new code. DB tests `test_get_features_by_keys_matches_exact_keys_only` and `test_get_features_by_ids_matches_get_feature_by_id` compare the batch lookups with the single ones. A one-off dump of every seeded feature through the broadcast, context, kill-switch and Evaluate mappers, plus keyed snapshots per team, was identical before and after (rule-group order normalized, which is a HashMap order in both).
+

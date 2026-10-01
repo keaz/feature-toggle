@@ -248,7 +248,22 @@ struct EngineFeatureBase {
 }
 
 /// Number of features mapped per batched child-row load in a stream snapshot.
-const SNAPSHOT_MAPPING_BATCH_SIZE: usize = 200;
+pub(crate) const SNAPSHOT_MAPPING_BATCH_SIZE: usize = 200;
+
+/// Maps features to `pb::FeatureFull` with one batched load of their stages,
+/// criteria and variants, keeping the input order. This is the one mapping
+/// used by snapshots, `GetFeatureByKey` and live updates. Only Contextual
+/// features carry variants.
+pub(crate) async fn map_features_to_full(
+    repo: &dyn crate::database::feature::FeatureRepository,
+    features: Vec<db::Feature>,
+) -> Result<Vec<pb::FeatureFull>, crate::Error> {
+    let children = FeatureChildren::load(repo, &features.iter().collect::<Vec<_>>()).await?;
+    Ok(features
+        .into_iter()
+        .map(|f| FeatureEvaluationSvc::map_db_feature_to_full_with_children(f, &children))
+        .collect())
+}
 
 /// Stages, criteria and variants of a set of features, loaded with one
 /// batched query per kind instead of several queries per stage.
@@ -569,31 +584,41 @@ impl FeatureEvaluationSvc {
 
         let mut feature_graph: std::collections::HashMap<Uuid, db::Feature> =
             std::collections::HashMap::new();
-        let mut queue: std::collections::VecDeque<Uuid> = root
-            .dependencies
-            .iter()
-            .map(|dependency| dependency.depends_on_id)
-            .collect();
-
         feature_graph.insert(root.id, root);
 
-        while let Some(feature_id) = queue.pop_front() {
-            if feature_graph.contains_key(&feature_id) {
-                continue;
-            }
-
-            let dependency_feature = repo
-                .get_feature_by_id(feature_id)
+        // Walk the dependency graph breadth first, loading each level with one
+        // query. Ids already in the graph are skipped, which also stops cycles.
+        let mut frontier = Self::unseen_dependency_ids(
+            feature_graph.values().map(|feature| &feature.dependencies),
+            &feature_graph,
+        );
+        while !frontier.is_empty() {
+            let mut loaded: std::collections::HashMap<Uuid, db::Feature> = repo
+                .get_features_by_ids(&frontier)
                 .await
-                .map_err(|e| Status::internal(format!("db error: {}", e)))?;
+                .map_err(db_error_status)?
+                .into_iter()
+                .map(|feature| (feature.id, feature))
+                .collect();
 
-            for nested_dependency in &dependency_feature.dependencies {
-                if !feature_graph.contains_key(&nested_dependency.depends_on_id) {
-                    queue.push_back(nested_dependency.depends_on_id);
-                }
+            // Same error as the per-dependency lookup it replaces: the first
+            // missing id in breadth-first order.
+            let mut level = Vec::with_capacity(frontier.len());
+            for feature_id in &frontier {
+                let feature = loaded
+                    .remove(feature_id)
+                    .ok_or_else(|| db_error_status(crate::Error::NotFound(*feature_id)))?;
+                level.push(feature);
             }
 
-            feature_graph.insert(dependency_feature.id, dependency_feature);
+            frontier = Self::unseen_dependency_ids(
+                level.iter().map(|feature| &feature.dependencies),
+                &feature_graph,
+            );
+            for feature in level {
+                feature_graph.insert(feature.id, feature);
+            }
+            frontier.retain(|id| !feature_graph.contains_key(id));
         }
 
         let graph_features = feature_graph.values().collect::<Vec<_>>();
@@ -632,6 +657,20 @@ impl FeatureEvaluationSvc {
             &mut memo,
             &mut visiting,
         ))
+    }
+
+    /// Dependency ids of `dependency_lists` that are not in `graph`, in order
+    /// of first appearance and without duplicates.
+    fn unseen_dependency_ids<'a>(
+        dependency_lists: impl Iterator<Item = &'a Vec<db::FeatureDependency>>,
+        graph: &std::collections::HashMap<Uuid, db::Feature>,
+    ) -> Vec<Uuid> {
+        let mut seen = std::collections::HashSet::new();
+        dependency_lists
+            .flatten()
+            .map(|dependency| dependency.depends_on_id)
+            .filter(|id| !graph.contains_key(id) && seen.insert(*id))
+            .collect()
     }
 
     fn map_db_feature_payload_to_engine(
@@ -818,23 +857,10 @@ impl FeatureEvaluationSvc {
         repo: &dyn crate::database::feature::FeatureRepository,
         f: db::Feature,
     ) -> Result<pb::FeatureFull, Status> {
-        let children = FeatureChildren::load(repo, &[&f])
+        let mut mapped = map_features_to_full(repo, vec![f])
             .await
             .map_err(db_error_status)?;
-        Ok(Self::map_db_feature_to_full_with_children(f, &children))
-    }
-
-    /// Maps many features with one batched load of their stages, criteria and
-    /// variants, keeping the input order.
-    async fn map_db_features_to_full_with_repo(
-        repo: &dyn crate::database::feature::FeatureRepository,
-        features: Vec<db::Feature>,
-    ) -> Result<Vec<pb::FeatureFull>, crate::Error> {
-        let children = FeatureChildren::load(repo, &features.iter().collect::<Vec<_>>()).await?;
-        Ok(features
-            .into_iter()
-            .map(|f| Self::map_db_feature_to_full_with_children(f, &children))
-            .collect())
+        Ok(mapped.remove(0))
     }
 
     fn map_db_feature_to_full_with_children(
@@ -922,7 +948,8 @@ impl FeatureEvaluationSvc {
             })
             .collect::<Vec<_>>();
 
-        // Load variants from database only for Contextual features
+        // Only Contextual features carry variants, in snapshots and live
+        // updates alike.
         let variant_msgs = if matches!(f.feature_type, db::FeatureType::Contextual) {
             let db_variants = children.variants_of(f.id);
 
@@ -960,7 +987,8 @@ impl FeatureEvaluationSvc {
         }
     }
 
-    /// Reads the initial stream snapshot and sends each feature as a Snapshot update.
+    /// Reads the initial stream snapshot and sends each feature as a Snapshot
+    /// update, then one SnapshotComplete marker once everything was sent.
     async fn send_stream_snapshot(
         feature_repo: &dyn crate::database::feature::FeatureRepository,
         team_id: Uuid,
@@ -989,15 +1017,22 @@ impl FeatureEvaluationSvc {
                         subscription_keys.len(),
                         client_id
                     );
+                    // One exact-key query for all keys, then the per-key
+                    // results in key iteration order, as one lookup per key
+                    // would produce them.
+                    let keys = subscription_keys.iter().cloned().collect::<Vec<_>>();
+                    let mut by_key = feature_repo
+                        .get_features_by_keys(team_id, &keys)
+                        .await
+                        .map_err(|e| Status::internal(format!("db error: {}", e)))?
+                        .into_iter()
+                        .map(|feature| (feature.key.clone(), feature))
+                        .collect::<std::collections::HashMap<_, _>>();
                     let mut all_features = Vec::new();
-                    for feature_key in &subscription_keys {
-                        let feature = feature_repo
-                            .get_feature_by_key(team_id, feature_key.clone())
-                            .await
-                            .map_err(|e| Status::internal(format!("db error: {}", e)))?;
-                        match feature {
+                    for feature_key in keys {
+                        match by_key.remove(&feature_key) {
                             Some(feature) => all_features.push(feature),
-                            None => missing_keys.push(feature_key.clone()),
+                            None => missing_keys.push(feature_key),
                         }
                     }
                     all_features
@@ -1011,7 +1046,8 @@ impl FeatureEvaluationSvc {
         );
 
         // Deletes go before Snapshots: after a rename, the old and new keys
-        // share a feature id, and the edge drops that id's index on Delete.
+        // share a feature id, and older edges drop that id's index on any
+        // Delete. Current edges keep it when it already points at the new key.
         for feature_key in missing_keys {
             let _ = out_tx
                 .send(Ok(pb::FeatureUpdate {
@@ -1035,7 +1071,7 @@ impl FeatureEvaluationSvc {
             if batch.is_empty() {
                 break;
             }
-            let mapped = Self::map_db_features_to_full_with_repo(feature_repo, batch)
+            let mapped = map_features_to_full(feature_repo, batch)
                 .await
                 .map_err(db_error_status)?;
             for full in mapped {
@@ -1050,6 +1086,18 @@ impl FeatureEvaluationSvc {
                     .await;
             }
         }
+
+        // Tell the edge the snapshot is whole, so it can drop cached keys the
+        // snapshot did not contain. Never sent when the snapshot failed above.
+        let _ = out_tx
+            .send(Ok(pb::FeatureUpdate {
+                message_id: uuid::Uuid::new_v4().to_string(),
+                action: pb::feature_update::Action::SnapshotComplete as i32,
+                feature: None,
+                feature_key: String::new(),
+                error: String::new(),
+            }))
+            .await;
 
         log::info!("gRPC: Snapshot sent successfully");
         Ok(())

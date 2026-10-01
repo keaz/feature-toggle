@@ -23,7 +23,10 @@ services:
     ports:
       - "8080:8080"
     restart: unless-stopped
-    # Uncomment the following line to mount your own config.toml
+    # Uncomment the following lines to mount your own config.toml. The
+    # entrypoint (scripts/backend-entrypoint.sh) copies /app/config/config.toml
+    # to /app/config.toml, which the backend reads; without a mount it uses the
+    # image's default config.
     # volumes:
     #   - ./your-config.toml:/app/config/config.toml:ro
 

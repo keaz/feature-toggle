@@ -6,8 +6,8 @@
   },
   "protobuf": {
     "proto_file": "proto/evaluation.proto",
-    "proto_sha256": "dc1b2bc033a286141a5c95c2ddbcb1b7eb45fdad2451b7504414311163fa2d8c",
+    "proto_sha256": "afac339b46a149761f7ba6a62b57b1c7ef35779469e46bf81602c7847c069786",
     "descriptor_file": "proto/evaluation_descriptor.pb",
-    "descriptor_sha256": "67cc114e3145defbc5b8bb796ce4302c1c6b59c685f0970850b542c644f1f9ac"
+    "descriptor_sha256": "73561722c04af5839236c650962b12b1e4b0c281da23835e9ca91cc1f0dcfe5e"
   }
 }

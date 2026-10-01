@@ -97,6 +97,40 @@ The evaluator supports:
 - dependency graph evaluation
 - structured dependency-block reasons in evaluation metadata
 
+### Bucketing and weighted splits
+
+A weighted split places each user in a bucket from `SHA256("<flag key>:<targetingKey>")`, mapped to the range 0–100. The same targeting key always lands in the same bucket for the same flag, and different flags bucket independently because the flag key is part of the hash.
+
+### Feature dependencies
+
+A feature can depend on other features. When feature `F` depends on `D`, `F` is evaluated as follows:
+
+1. If `F` is disabled (kill switch), the result is `false`.
+2. Each dependency is evaluated. If any dependency does not pass, `F` returns `false` with reason `DISABLED` and a `dependencyBlock` entry in the result metadata that names the dependency and the block code.
+3. Otherwise `F`'s own stage and criteria are evaluated as usual.
+
+**A dependency is evaluated exactly as if it were evaluated directly for the same context.** It uses the same targeting key, environment and attributes as the request, and it is bucketed with its **own** key, not the key of the flag that depends on it. In practice:
+
+- A user who gets `true` from `D` when `D` is evaluated directly also passes the `D` check inside `F`, and a user who gets `false` from `D` is blocked from `F`.
+- If `D` is a 10% rollout, `F` reaches exactly those 10% of users (further narrowed by `F`'s own rules).
+- `F`'s own weighted split is independent of `D`'s split. With `D` = 50/50 and `F` = {a: 50, b: 50}, both `a` and `b` are served to users who pass `D`.
+
+Dependencies are resolved recursively (a dependency can have its own dependencies), each one bucketed with its own key. Cycles are detected and reported with the `DEPENDENCY_CYCLE_DETECTED` block code.
+
+#### Dependencies must be boolean flags
+
+A dependency passes only when it evaluates to the JSON boolean `true`. Any other value blocks the dependent flag, including the strings, numbers and objects that multivariate flags serve (block code `DEPENDENCY_EVALUATION_FAILED`). Such a dependency would block its dependents for every user who receives a non-boolean value, so the backend rejects it when it is saved.
+
+A flag counts as **non-boolean** when it is a `CONTEXTUAL` feature and at least one of its variants has a stored value that is not `true` or `false`. The stored value decides, not the declared value type, so a variant of type boolean holding the string `"true"` is non-boolean. Every variant counts, not only the ones a criterion currently serves. `SIMPLE` features always serve `true`/`false` and are always boolean, as are contextual features without variants.
+
+The backend returns `400 invalid_input` when:
+
+- a feature is created with, or updated to add, a dependency on a non-boolean flag;
+- a flag that other features depend on is changed to become non-boolean, either by new variant values or by switching it from `SIMPLE` to `CONTEXTUAL` when it has stored non-boolean variants;
+- a version rollback (`POST /api/v1/features/{id}/versions/{version_id}/rollback`) would do either of the above.
+
+Configurations saved before this rule existed keep working: editing a feature without adding a new non-boolean dependency, or editing a flag that was already non-boolean, is not rejected. Those dependencies still block their dependents at evaluation time until they are removed.
+
 ### Rollout safety
 
 Recent backend changes added stronger rollout controls:

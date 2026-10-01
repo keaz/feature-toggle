@@ -1632,6 +1632,135 @@ async fn test_get_feature_by_key_matches_exact_key_only() {
     assert_eq!(search_keys, vec!["checkout", "checkout-v2"]);
 }
 
+/// Debug form of a feature with its dependencies sorted, for comparing
+/// lookups whose dependency order is unspecified.
+fn feature_fingerprint(mut feature: feature_toggle_backend::database::entity::Feature) -> String {
+    feature
+        .dependencies
+        .sort_by_key(|dependency| dependency.depends_on_id);
+    format!("{feature:?}")
+}
+
+#[tokio::test]
+async fn test_get_features_by_keys_matches_exact_keys_only() {
+    let pool = init_pg_pool().await;
+    let repository = feature::feature_repository(pool.clone());
+
+    // Two fresh teams with a shared key; deleting the teams cascades.
+    let team_id = create_uniqueness_test_team(&pool, "batch-keys").await;
+    let other_team_id = create_uniqueness_test_team(&pool, "batch-keys-other").await;
+    let mut created = Vec::new();
+    for (team, key) in [
+        (team_id, "checkout"),
+        (team_id, "checkout-v2"),
+        (other_team_id, "checkout"),
+    ] {
+        created.push(
+            repository
+                .create_feature(simple_create_feature(team, key))
+                .await,
+        );
+    }
+
+    let requested = ["checkout", "check", "Checkout", "checkout-v2", "missing"]
+        .map(String::from)
+        .to_vec();
+    let batch = repository.get_features_by_keys(team_id, &requested).await;
+    let mut single = Vec::new();
+    for key in &requested {
+        single.push(repository.get_feature_by_key(team_id, key.clone()).await);
+    }
+    let empty = repository.get_features_by_keys(team_id, &[]).await;
+
+    delete_uniqueness_test_team(&pool, team_id).await;
+    delete_uniqueness_test_team(&pool, other_team_id).await;
+    for result in created {
+        result.expect("create feature");
+    }
+
+    // Same features as one exact, case-sensitive lookup per key.
+    let mut batch = batch
+        .expect("batch lookup should succeed")
+        .into_iter()
+        .map(feature_fingerprint)
+        .collect::<Vec<_>>();
+    batch.sort();
+    let mut single = single
+        .into_iter()
+        .filter_map(|result| result.expect("lookup should succeed"))
+        .map(feature_fingerprint)
+        .collect::<Vec<_>>();
+    single.sort();
+    assert_eq!(single.len(), 2, "only checkout and checkout-v2 match");
+    assert_eq!(batch, single);
+    assert!(empty.expect("empty lookup should succeed").is_empty());
+}
+
+#[tokio::test]
+async fn test_get_features_by_ids_matches_get_feature_by_id() {
+    let pool = init_pg_pool().await;
+    let repository = feature::feature_repository(pool.clone());
+
+    // Own team, so tests running in parallel cannot add or delete features
+    // between the batch and the single lookups. Includes dependencies and an
+    // unknown id.
+    let team_id = create_uniqueness_test_team(&pool, "batch-by-ids").await;
+    let leaf = repository
+        .create_feature(simple_create_feature(team_id, "batch-leaf"))
+        .await
+        .expect("create leaf");
+    let middle = repository
+        .create_feature(CreateFeature {
+            dependencies: vec![leaf],
+            ..simple_create_feature(team_id, "batch-middle")
+        })
+        .await
+        .expect("create middle");
+    let top = repository
+        .create_feature(CreateFeature {
+            dependencies: vec![middle, leaf],
+            ..simple_create_feature(team_id, "batch-top")
+        })
+        .await
+        .expect("create top");
+    let mut ids = vec![top, middle, leaf];
+    ids.push(Uuid::new_v4());
+
+    let mut batch = repository
+        .get_features_by_ids(&ids)
+        .await
+        .expect("batch lookup should succeed")
+        .into_iter()
+        .map(feature_fingerprint)
+        .collect::<Vec<_>>();
+    batch.sort();
+
+    let mut single = Vec::new();
+    for id in &ids {
+        match repository.get_feature_by_id(*id).await {
+            Ok(feature) => single.push(feature_fingerprint(feature)),
+            Err(feature_toggle_backend::Error::NotFound(_)) => {}
+            Err(e) => panic!("lookup failed: {e}"),
+        }
+    }
+    single.sort();
+    delete_uniqueness_test_team(&pool, team_id).await;
+
+    assert_eq!(
+        single.len(),
+        ids.len() - 1,
+        "only the unknown id is missing"
+    );
+    assert_eq!(batch, single);
+    assert!(
+        repository
+            .get_features_by_ids(&[])
+            .await
+            .expect("empty lookup should succeed")
+            .is_empty()
+    );
+}
+
 fn simple_create_feature(team_id: Uuid, key: &str) -> CreateFeature {
     CreateFeature {
         team_id,

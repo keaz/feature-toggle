@@ -127,10 +127,18 @@ pub struct CacheConfig {
     /// Client info cache TTL in seconds
     #[serde(default = "default_client_ttl")]
     pub client_ttl_secs: u64,
+
+    /// Maximum number of client credentials whose info is cached
+    #[serde(default = "default_client_max_capacity")]
+    pub client_max_capacity: u64,
 }
 
 fn default_max_capacity() -> u64 {
     10000
+}
+
+fn default_client_max_capacity() -> u64 {
+    1000
 }
 
 fn default_client_ttl() -> u64 {
@@ -227,6 +235,7 @@ impl Default for CacheConfig {
         Self {
             max_capacity: default_max_capacity(),
             client_ttl_secs: default_client_ttl(),
+            client_max_capacity: default_client_max_capacity(),
         }
     }
 }
@@ -353,9 +362,18 @@ mod tests {
         let config = CacheConfig {
             max_capacity: 5000,
             client_ttl_secs: 600,
+            client_max_capacity: 200,
         };
         assert_eq!(config.max_capacity, 5000);
         assert_eq!(config.client_ttl_secs, 600);
+    }
+
+    #[test]
+    fn test_cache_config_client_max_capacity_default_and_override() {
+        assert_eq!(CacheConfig::default().client_max_capacity, 1000);
+        let parsed: CacheConfig = toml::from_str("client_max_capacity = 50").unwrap();
+        assert_eq!(parsed.client_max_capacity, 50);
+        assert_eq!(parsed.max_capacity, 10000);
     }
 
     #[test]

@@ -75,130 +75,45 @@ struct ContextLogicImpl {
     updates_tx: tokio::sync::broadcast::Sender<crate::grpc::pb::FeatureUpdate>,
 }
 
-// Helper to map DB Feature to gRPC FeatureFull using repository to load criteria
-async fn map_db_feature_to_full_for_broadcast(
-    repo: &dyn FeatureRepository,
-    f: crate::database::entity::Feature,
-) -> Result<crate::grpc::pb::FeatureFull, crate::Error> {
-    use crate::grpc::pb;
-    // stages with criterias
-    let stages = repo.get_feature_stages(f.id).await?;
-    let mut stage_msgs: Vec<pb::FeatureStageFull> = Vec::with_capacity(stages.len());
-    for s in stages.iter() {
-        let crits = repo.get_stage_criteria(s.id).await?;
-        let criterias = crits
-            .into_iter()
-            .map(|c| {
-                // Map rule groups
-                let rule_groups = c
-                    .rule_groups
+impl ContextLogicImpl {
+    /// Sends an Upsert for each of the features, in the given order. Features
+    /// and their child rows are loaded in batches; a batch that fails to load
+    /// is skipped.
+    async fn broadcast_feature_upserts(&self, feature_ids: Vec<Uuid>) {
+        for chunk in feature_ids.chunks(crate::grpc::SNAPSHOT_MAPPING_BATCH_SIZE) {
+            let mut by_id = match self.feature_repo.get_features_by_ids(chunk).await {
+                Ok(features) => features
                     .into_iter()
-                    .map(|group| pb::RuleGroup {
-                        id: group.id.to_string(),
-                        logic_operator: match group.logic_operator {
-                            crate::database::entity::LogicOperator::And => "AND".to_string(),
-                            crate::database::entity::LogicOperator::Or => "OR".to_string(),
-                        },
-                        conditions: group
-                            .conditions
-                            .into_iter()
-                            .map(|cond| pb::RuleCondition {
-                                id: cond.id.to_string(),
-                                context_key: cond.context_key,
-                                operator: cond.operator,
-                                value: cond.value.to_string(),
-                                order_index: cond.order_index,
-                            })
-                            .collect(),
-                    })
-                    .collect();
-
-                // Map variant allocations
-                let variant_allocations = c
-                    .variant_allocations
-                    .into_iter()
-                    .map(|alloc| pb::VariantAllocation {
-                        variant_control: alloc.variant_control,
-                        weight: alloc.weight,
-                    })
-                    .collect();
-
-                pb::StageCriterionFull {
-                    id: c.id.to_string(),
-                    stage_id: c.stage_id.to_string(),
-                    priority: c.priority,
-                    rule_groups,
-                    variant_allocations,
-                    variant_selection_mode: match c.variant_selection_mode {
-                        crate::database::entity::VariantSelectionMode::WeightedSplit => {
-                            "WEIGHTED_SPLIT".to_string()
-                        }
-                        crate::database::entity::VariantSelectionMode::SpecificVariant => {
-                            "SPECIFIC_VARIANT".to_string()
-                        }
-                    },
-                    selected_variant_control: c.selected_variant_control.unwrap_or_default(),
+                    .map(|feature| (feature.id, feature))
+                    .collect::<std::collections::HashMap<_, _>>(),
+                Err(e) => {
+                    log::warn!("Failed to load features for context update broadcast: {e}");
+                    continue;
                 }
-            })
-            .collect::<Vec<_>>();
-
-        stage_msgs.push(pb::FeatureStageFull {
-            id: s.id.to_string(),
-            environment_id: s.environment_id.to_string(),
-            order_index: s.order_index,
-            position: s.position.clone(),
-            enabled: s.enabled,
-            criterias,
-        });
+            };
+            let features = chunk
+                .iter()
+                .filter_map(|id| by_id.remove(id))
+                .collect::<Vec<_>>();
+            let mapped =
+                match crate::grpc::map_features_to_full(&*self.feature_repo, features).await {
+                    Ok(mapped) => mapped,
+                    Err(e) => {
+                        log::warn!("Failed to map features for context update broadcast: {e}");
+                        continue;
+                    }
+                };
+            for full in mapped {
+                let _ = self.updates_tx.send(crate::grpc::pb::FeatureUpdate {
+                    message_id: uuid::Uuid::new_v4().to_string(),
+                    action: crate::grpc::pb::feature_update::Action::Upsert as i32,
+                    feature: Some(full),
+                    feature_key: String::new(),
+                    error: String::new(),
+                });
+            }
+        }
     }
-
-    let deps = f
-        .dependencies
-        .iter()
-        .map(|d| pb::FeatureDependencyFull {
-            feature_id: d.feature_id.to_string(),
-            depends_on_id: d.depends_on_id.to_string(),
-        })
-        .collect::<Vec<_>>();
-
-    // Load variants from database only for Contextual features
-    use crate::database::entity::FeatureType as EntityFeatureType;
-    let variant_msgs = if matches!(f.feature_type, EntityFeatureType::Contextual) {
-        let db_variants = repo.get_feature_variants(f.id).await?;
-
-        db_variants
-            .into_iter()
-            .map(|v| pb::FeatureVariant {
-                control: v.control,
-                value: serde_json::to_string(&v.value).unwrap_or_default(),
-            })
-            .collect::<Vec<_>>()
-    } else {
-        vec![]
-    };
-
-    let feature = pb::FeatureFull {
-        id: f.id.to_string(),
-        key: f.key,
-        description: f.description.unwrap_or_default(),
-        feature_type: format!("{:?}", f.feature_type),
-        team_id: f.team_id.to_string(),
-        active: f.active,
-        created_at: f.created_at.to_rfc3339(),
-        kill_switch_enabled: f.kill_switch_enabled,
-        kill_switch_activated_at: f
-            .kill_switch_activated_at
-            .map(|dt| dt.to_rfc3339())
-            .unwrap_or_default(),
-        rollback_scheduled_at: f
-            .rollback_scheduled_at
-            .map(|dt| dt.to_rfc3339())
-            .unwrap_or_default(),
-        stages: stage_msgs,
-        dependencies: deps,
-        variants: variant_msgs,
-    };
-    Ok(feature)
 }
 
 #[async_trait::async_trait]
@@ -321,20 +236,7 @@ impl ContextLogic for ContextLogicImpl {
                 .get_feature_ids_by_context_id(id_uuid)
                 .await
         {
-            for fid in feature_ids {
-                if let Ok(db_feature) = self.feature_repo.get_feature_by_id(fid).await
-                    && let Ok(full) =
-                        map_db_feature_to_full_for_broadcast(&*self.feature_repo, db_feature).await
-                {
-                    let _ = self.updates_tx.send(crate::grpc::pb::FeatureUpdate {
-                        message_id: uuid::Uuid::new_v4().to_string(),
-                        action: crate::grpc::pb::feature_update::Action::Upsert as i32,
-                        feature: Some(full),
-                        feature_key: String::new(),
-                        error: String::new(),
-                    });
-                }
-            }
+            self.broadcast_feature_upserts(feature_ids).await;
         }
 
         Ok(map_db_to_model(updated))
@@ -547,49 +449,48 @@ mod tests {
             .returning(move |_| Ok(vec![feature_id]));
 
         // Feature fetch for broadcast
-        feature_repo.expect_get_feature_by_id().returning(move |_| {
-            Ok(entity::Feature {
-                id: feature_id,
-                key: "example".into(),
-                description: None,
-                feature_type: entity::FeatureType::Contextual,
-                team_id,
-                active: true,
-                created_at: chrono::Utc::now(),
-                kill_switch_enabled: false,
-                kill_switch_activated_at: None,
-                rollback_scheduled_at: None,
-                emergency_override_reason: None,
-                emergency_override_expires_at: None,
-                emergency_override_actor_id: None,
-                emergency_override_applied_at: None,
-                lifecycle_stage: "active".to_string(),
-                owner: None,
-                purpose: None,
-                reference_url: None,
-                expires_at: None,
-                cleanup_reason: None,
-                tags: vec![],
-                archived_at: None,
-                deprecated_at: None,
-                deprecation_notice: None,
-                last_evaluated_at: None,
-                evaluation_count_7d: 0,
-                evaluation_count_30d: 0,
-                evaluation_count_90d: 0,
-                dependencies: vec![],
-            })
-        });
+        feature_repo
+            .expect_get_features_by_ids()
+            .returning(move |_| {
+                Ok(vec![entity::Feature {
+                    id: feature_id,
+                    key: "example".into(),
+                    description: None,
+                    feature_type: entity::FeatureType::Contextual,
+                    team_id,
+                    active: true,
+                    created_at: chrono::Utc::now(),
+                    kill_switch_enabled: false,
+                    kill_switch_activated_at: None,
+                    rollback_scheduled_at: None,
+                    emergency_override_reason: None,
+                    emergency_override_expires_at: None,
+                    emergency_override_actor_id: None,
+                    emergency_override_applied_at: None,
+                    lifecycle_stage: "active".to_string(),
+                    owner: None,
+                    purpose: None,
+                    reference_url: None,
+                    expires_at: None,
+                    cleanup_reason: None,
+                    tags: vec![],
+                    archived_at: None,
+                    deprecated_at: None,
+                    deprecation_notice: None,
+                    last_evaluated_at: None,
+                    evaluation_count_7d: 0,
+                    evaluation_count_30d: 0,
+                    evaluation_count_90d: 0,
+                    dependencies: vec![],
+                }])
+            });
 
         feature_repo
-            .expect_get_feature_stages()
-            .returning(|_| Ok(vec![]));
+            .expect_get_feature_stages_batch()
+            .returning(|_| Ok(std::collections::HashMap::new()));
         feature_repo
-            .expect_get_stage_criteria()
-            .returning(|_| Ok(vec![]));
-        feature_repo
-            .expect_get_feature_variants()
-            .returning(|_| Ok(vec![]));
+            .expect_get_feature_variants_batch()
+            .returning(|_| Ok(std::collections::HashMap::new()));
 
         let (tx, mut rx) = tokio::sync::broadcast::channel::<pb::FeatureUpdate>(4);
         let logic = super::context_logic(Box::new(repo), Box::new(feature_repo), tx.clone());
