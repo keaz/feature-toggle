@@ -240,6 +240,23 @@ describe('Feature API', () => {
             expectStatus(duplicate, 409); // Conflict
         });
 
+        it('should allow a key that only contains an existing key', async () => {
+            const base = uniqueName('b02');
+            const existing = await client.post(
+                `/teams/${testTeamId}/features`,
+                createFeatureFixture({ key: `${base}-checkout`, environmentId: testEnvironmentId })
+            );
+            expectStatus(existing, 201);
+            createdIds.push(existing.data.id);
+
+            const shorter = await client.post(
+                `/teams/${testTeamId}/features`,
+                createFeatureFixture({ key: `${base}-check`, environmentId: testEnvironmentId })
+            );
+            expectStatus(shorter, 201);
+            createdIds.push(shorter.data.id);
+        });
+
         it('should reject empty key', async () => {
             const response = await client.post(`/teams/${testTeamId}/features`, {
                 key: '',
@@ -330,6 +347,29 @@ describe('Feature API', () => {
             // Verify update via GET (workaround for backend returning stale data)
             const getResponse = await client.get(`/features/${testFeatureId}`);
             expect(getResponse.data.key).toBe(newKey);
+        });
+
+        it('should allow renaming to a key that is a substring of another key', async () => {
+            const base = uniqueName('b02');
+            const existing = await client.post(
+                `/teams/${testTeamId}/features`,
+                createFeatureFixture({ key: `${base}-payment`, environmentId: testEnvironmentId })
+            );
+            expectStatus(existing, 201);
+            createdIds.push(existing.data.id);
+
+            const renamed = await client.post(
+                `/teams/${testTeamId}/features`,
+                createFeatureFixture({ key: `${base}-renamed`, environmentId: testEnvironmentId })
+            );
+            expectStatus(renamed, 201);
+            createdIds.push(renamed.data.id);
+
+            const response = await updateFeature(client, renamed.data.id, { key: `${base}-pay` });
+            expectSuccess(response);
+
+            const getResponse = await client.get(`/features/${renamed.data.id}`);
+            expect(getResponse.data.key).toBe(`${base}-pay`);
         });
 
         it('should update feature description', async () => {

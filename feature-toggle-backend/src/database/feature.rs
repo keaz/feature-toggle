@@ -465,6 +465,14 @@ pub trait FeatureRepository: Send + Sync {
         team_id: Uuid,
         key: String,
     ) -> Result<Option<Feature>, Error>;
+    /// Returns the features in a team whose key equals `key` ignoring case.
+    /// Used by key conflict checks: no substring or wildcard matching, but
+    /// case variants (`Checkout` vs `checkout`) still count as a conflict.
+    async fn get_features_by_key_ignore_case(
+        &self,
+        team_id: Uuid,
+        key: String,
+    ) -> Result<Vec<Feature>, Error>;
     async fn get_features_filtered(
         &self,
         team_id: Uuid,
@@ -1857,13 +1865,11 @@ impl FeatureRepositoryImpl {
     }
 
     async fn check_feature_exists(&self, input: &CreateFeature) -> Result<(), Error> {
-        let existing_feature = self
-            .get_features(input.team_id, Some(input.key.clone()), None)
-            .await;
+        let existing_features = self
+            .get_features_by_key_ignore_case(input.team_id, input.key.clone())
+            .await?;
 
-        if let Ok(existing_feature) = existing_feature
-            && !existing_feature.is_empty()
-        {
+        if !existing_features.is_empty() {
             return Err(Error::RecordAlreadyExists(format!(
                 "Feature with key '{}' already exists",
                 input.key
@@ -2323,6 +2329,31 @@ impl FeatureRepository for FeatureRepositoryImpl {
         self.hydrate_feature_dependencies(&mut features).await?;
 
         Ok(features.pop())
+    }
+
+    async fn get_features_by_key_ignore_case(
+        &self,
+        team_id: Uuid,
+        key: String,
+    ) -> Result<Vec<Feature>, Error> {
+        let mut query_builder = sqlx::QueryBuilder::new(FEATURE_SELECT);
+        query_builder.push(" WHERE f.team_id = ").push_bind(team_id);
+        query_builder
+            .push(" AND lower(f.key) = lower(")
+            .push_bind(key)
+            .push(")");
+        query_builder.push(" ORDER BY f.key");
+
+        let result = query_builder
+            .build_query_as::<FeatureWithStageRow>()
+            .fetch_all(&self.pool)
+            .await;
+
+        let features_rows = handle_error(None, result)?;
+        let mut features = Self::map_rows_to_feature_list(features_rows);
+        self.hydrate_feature_dependencies(&mut features).await?;
+
+        Ok(features)
     }
 
     async fn get_features_filtered(
