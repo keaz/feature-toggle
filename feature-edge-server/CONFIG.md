@@ -2,22 +2,26 @@
 
 ## Overview
 
-The Feature Toggle Edge Server uses a configuration file (`config.toml`) for all settings, with support for environment variable overrides. This approach provides flexibility for different deployment environments while maintaining sensible defaults.
+The Feature Toggle Edge Server reads its settings from an optional configuration file (`config.toml`) and from environment variables, which override the file. The sectioned settings (`[grpc]`, `[flush]`, `[retry]` and `[cache]`) have built-in defaults. The four top-level settings do not, so every deployment must supply them.
 
 ## Configuration File
 
-The edge server looks for a `config.toml` file in the current working directory. If the file is not found, it will use default values.
+The edge server reads `config.toml` from the current working directory. To use a different file, set `EDGE_CONFIG_FILE` to its path.
 
-### Default Configuration
+The file is optional. If it is missing (including when `EDGE_CONFIG_FILE` points to a path that does not exist), the edge server is configured from environment variables alone. In that case `backend_grpc`, `http_addr`, `client_id` and `client_secret` must all be set through `EDGE_BACKEND_GRPC`, `EDGE_HTTP_ADDR`, `EDGE_CLIENT_ID` and `EDGE_CLIENT_SECRET`. These four settings have no default: if any of them is missing from both the file and the environment, the edge server fails at startup with a `Failed to load configuration` error that names the missing field.
+
+### Example Configuration
+
+The top-level values below are examples (the client credentials match the client seeded by `init.sql` for local use). Every value in the sections is the built-in default, so those lines can be left out.
 
 ```toml
-# Backend gRPC server address
+# Required: backend gRPC server address
 backend_grpc = "http://127.0.0.1:50051"
 
-# HTTP server listening address
+# Required: HTTP server listening address
 http_addr = "0.0.0.0:8081"
 
-# Client credentials for authentication
+# Required: client credentials for authentication
 client_id = "a1b2c3d4-0000-4000-8000-000000000001"
 client_secret = "TEST_WEB_KEY_1"
 
@@ -43,6 +47,9 @@ concurrency_limit = 256
 # Enable TCP_NODELAY
 tcp_nodelay = true
 
+# Request compression: "none" or "gzip"
+compression = "none"
+
 [flush]
 # Assignment flush interval in seconds
 assignment_flush_secs = 10
@@ -50,11 +57,20 @@ assignment_flush_secs = 10
 # Evaluation events flush interval in seconds
 evaluation_flush_secs = 30
 
+# Evaluation event queue capacity (bounded channel)
+evaluation_event_queue_capacity = 10000
+
+# Max assignments per gRPC stream flush
+assignment_flush_batch_size = 1000
+
+# Max evaluation events per gRPC request
+evaluation_flush_batch_size = 500
+
 [retry]
-# Base delay for retries in milliseconds
+# Base delay for exponential backoff in milliseconds
 base_delay_ms = 500
 
-# Maximum number of retry attempts
+# Maximum number of retries after the first attempt
 max_attempts = 3
 
 # Retry only applies to transient gRPC failures; NotFound is treated as a
@@ -73,6 +89,9 @@ stream_max_delay_secs = 30
 [cache]
 # Maximum number of features to cache (LRU eviction when exceeded)
 max_capacity = 10000
+
+# Client info cache TTL in seconds
+client_ttl_secs = 300
 ```
 
 ## Environment Variable Overrides
@@ -83,6 +102,10 @@ All configuration values can be overridden using environment variables with the 
 - Nested sections: `EDGE_<SECTION>__<KEY>` (e.g., `EDGE_GRPC__TIMEOUT_SECS` sets `grpc.timeout_secs`, `EDGE_FLUSH__ASSIGNMENT_FLUSH_SECS` sets `flush.assignment_flush_secs`)
 
 A nested variable written with a single underscore (e.g. `EDGE_GRPC_TIMEOUT_SECS`) does not match any setting and is ignored.
+
+Values that look like numbers or booleans are parsed as such. `EDGE_CLIENT_ID` and `EDGE_CLIENT_SECRET` are the exception: they are always read verbatim as strings, so credentials such as `0123` or `1e5` keep their exact form.
+
+`EDGE_CONFIG_FILE` is not a setting. It selects the configuration file (see [Configuration File](#configuration-file)).
 
 **Deprecated:** `EDGE_GRPC_COMPRESSION` (single underscore) is still accepted for `grpc.compression` and logs a deprecation warning. Use `EDGE_GRPC__COMPRESSION` instead. If both are set, `EDGE_GRPC__COMPRESSION` wins.
 
@@ -118,17 +141,19 @@ export EDGE_CACHE__MAX_CAPACITY=50000
 
 ## Configuration Precedence
 
-Environment variables take precedence over values in `config.toml`, which in turn take precedence over hardcoded defaults.
+Environment variables take precedence over values in `config.toml`, which in turn take precedence over built-in defaults.
 
 1. **Environment variables** (highest priority)
 2. **config.toml file**
-3. **Default values** (lowest priority)
+3. **Default values** (lowest priority; only the settings in `[grpc]`, `[flush]`, `[retry]` and `[cache]` have them)
 
 ## Docker Deployment
 
+The image runs from `/app` and ships without a `config.toml`, so either mount one at `/app/config.toml` or set the four required settings through environment variables.
+
 ### Using config.toml
 
-Mount your configuration file into the container:
+Mount your configuration file into the container. It must contain `backend_grpc`, `http_addr`, `client_id` and `client_secret`:
 
 ```yaml
 services:
@@ -160,7 +185,7 @@ services:
 
 ### Hybrid Approach
 
-Combine both for maximum flexibility:
+Combine both for maximum flexibility. Together, the mounted file and the environment must supply all four required settings; in this example the file provides `http_addr`:
 
 ```yaml
 services:
@@ -262,12 +287,14 @@ spec:
 
 ### Top-Level Settings
 
-| Setting | Type | Default | Description |
-|---------|------|---------|-------------|
-| `backend_grpc` | String | `http://127.0.0.1:50051` | Backend gRPC server address |
-| `http_addr` | String | `0.0.0.0:8081` | HTTP server listening address |
-| `client_id` | String | `a1b2c3d4-0000-4000-8000-000000000001` | Client ID for authentication |
-| `client_secret` | String | `TEST_WEB_KEY_1` | Client secret for authentication |
+These settings have no default. Each one must be set in `config.toml` or through its environment variable, or the edge server fails to start.
+
+| Setting | Type | Default | Environment variable | Description |
+|---------|------|---------|----------------------|-------------|
+| `backend_grpc` | String | None (required) | `EDGE_BACKEND_GRPC` | Backend gRPC server address, for example `http://127.0.0.1:50051` |
+| `http_addr` | String | None (required) | `EDGE_HTTP_ADDR` | HTTP server listening address, for example `0.0.0.0:8081` |
+| `client_id` | String | None (required) | `EDGE_CLIENT_ID` | Client ID for authentication |
+| `client_secret` | String | None (required) | `EDGE_CLIENT_SECRET` | Client secret for authentication |
 
 ### gRPC Settings (`[grpc]`)
 
@@ -280,7 +307,7 @@ spec:
 | `keep_alive_while_idle` | bool | true | Keep connection alive while idle |
 | `concurrency_limit` | usize | 256 | Maximum concurrent requests |
 | `tcp_nodelay` | bool | true | Enable TCP_NODELAY |
-| `compression` | String | `none` | gRPC request compression (`none` or `gzip`) |
+| `compression` | String | `none` | gRPC request compression (`none` or `gzip`, lowercase) |
 
 ### Flush Settings (`[flush]`)
 
@@ -288,16 +315,16 @@ spec:
 |---------|------|---------|-------------|
 | `assignment_flush_secs` | u64 | 10 | Assignment flush interval in seconds |
 | `evaluation_flush_secs` | u64 | 30 | Evaluation events flush interval in seconds |
-| `evaluation_event_queue_capacity` | usize | 10000 | Evaluation event queue capacity (bounded channel) |
-| `assignment_flush_batch_size` | usize | 1000 | Max assignments per gRPC stream flush |
-| `evaluation_flush_batch_size` | usize | 500 | Max evaluation events per gRPC request |
+| `evaluation_event_queue_capacity` | usize | 10000 | Evaluation event queue capacity (bounded channel; values below 1 are treated as 1) |
+| `assignment_flush_batch_size` | usize | 1000 | Max assignments per gRPC stream flush (values below 1 are treated as 1) |
+| `evaluation_flush_batch_size` | usize | 500 | Max evaluation events per gRPC request (values below 1 are treated as 1) |
 
 ### Retry Settings (`[retry]`)
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `base_delay_ms` | u64 | 500 | Base delay for retries in milliseconds |
-| `max_attempts` | usize | 3 | Maximum number of retry attempts |
+| `base_delay_ms` | u64 | 500 | Base delay for retries in milliseconds; the delay doubles on each retry, capped at 16 times this value |
+| `max_attempts` | usize | 3 | Maximum number of retries after the first attempt (`0` disables retries) |
 | `stream_initial_delay_secs` | u64 | 1 | Initial delay for stream reconnection in seconds |
 | `stream_max_delay_secs` | u64 | 30 | Maximum delay for stream reconnection in seconds; lagged streams trigger a full snapshot resync on reconnect |
 
@@ -306,6 +333,7 @@ spec:
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `max_capacity` | u64 | 10000 | Maximum number of features to cache (LRU eviction when exceeded) |
+| `client_ttl_secs` | u64 | 300 | How long client info fetched from the backend is cached, in seconds |
 
 **Cache Capacity Recommendations:**
 
@@ -324,7 +352,9 @@ Memory usage estimate: Each feature uses approximately 1-5 KB depending on confi
 
 ### Configuration Not Loading
 
-1. **Check file location**: Ensure `config.toml` is in the current working directory when starting the edge server.
+1. **Check file location**: Ensure `config.toml` is in the current working directory when starting the edge server, or that `EDGE_CONFIG_FILE` points to it. A missing file is not reported as an error; the edge server simply runs without it.
+
+   If startup fails with `Failed to load configuration: missing field ...`, one of the required settings (`backend_grpc`, `http_addr`, `client_id`, `client_secret`) is set neither in the file nor in the environment.
 
 2. **Check file format**: Verify the TOML syntax is correct:
    ```bash
@@ -369,7 +399,7 @@ Memory usage estimate: Each feature uses approximately 1-5 KB depending on confi
    max_capacity = 20000  # Increase from default 10000
    ```
 
-3. **Check cache statistics**: Monitor the edge server logs for cache eviction messages. If you see frequent evictions, consider increasing capacity.
+3. **Check the configured capacity**: The edge server does not log individual evictions, but it logs the capacity in use at startup (`Initializing MappedFeatureCache with max_capacity=...`). Confirm that it matches the value you intended.
 
 ## Migration from Environment Variables
 
@@ -387,8 +417,8 @@ export EDGE_BACKEND_GRPC="http://backend:50051"
 export EDGE_HTTP_ADDR="0.0.0.0:8081"
 export EDGE_CLIENT_ID="my-client-id"
 export EDGE_CLIENT_SECRET="my-secret"
-export EDGE_ASSIGNMENT_FLUSH_SECS="10"
-export EDGE_EVALUATION_FLUSH_SECS="30"
+export EDGE_FLUSH__ASSIGNMENT_FLUSH_SECS="10"
+export EDGE_FLUSH__EVALUATION_FLUSH_SECS="30"
 ```
 
 **After:**
