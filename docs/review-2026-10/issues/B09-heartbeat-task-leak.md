@@ -4,7 +4,7 @@
 |---|---|
 | Type | Bug (resource leak) |
 | Severity | Medium |
-| Status | Confirmed (code traced) |
+| Status | Fixed on branch `fix/b09-heartbeat-leak` |
 | Crate | `feature-edge-server` |
 | Behavior change | No |
 
