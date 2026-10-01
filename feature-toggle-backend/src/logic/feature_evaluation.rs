@@ -198,6 +198,7 @@ impl FeatureEvaluationLogic for FeatureEvaluationLogicImpl {
             evaluation_success: true, // Legacy method assumes success
             evaluation_value: Some(serde_json::json!(evaluation_result)),
             variant: None, // Legacy method doesn't support variants
+            ingest_dedupe_key: None,
         };
 
         let result = self.repository.create_evaluation(evaluation).await?;
@@ -468,6 +469,7 @@ mod tests {
             evaluation_success: true,
             evaluation_value: Some(json!(true)),
             variant: None,
+            ingest_dedupe_key: None,
         }
     }
 

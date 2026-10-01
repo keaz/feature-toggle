@@ -53,6 +53,12 @@ pub struct CreateFeatureEvaluation {
     pub evaluation_value: Option<serde_json::Value>,
     /// The variant name that was served (if applicable)
     pub variant: Option<String>,
+    /// Stable stand-in for `evaluated_at` in the ingest fingerprint. Set when
+    /// the producer sent no usable timestamp and `evaluated_at` holds the
+    /// receive time instead, so that a retried request still maps to the
+    /// same fingerprint. `None` means the fingerprint uses `evaluated_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingest_dedupe_key: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -69,14 +75,26 @@ struct EvaluationIngestFingerprint<'a> {
     evaluation_success: bool,
     evaluation_value: &'a Option<serde_json::Value>,
     variant: &'a Option<String>,
+    // Skipped when absent so fingerprints of timestamped events stay
+    // byte-identical to the ones already stored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ingest_dedupe_key: Option<&'a str>,
 }
 
-fn evaluation_ingest_fingerprint(evaluation: &CreateFeatureEvaluation) -> String {
+pub(crate) fn evaluation_ingest_fingerprint(evaluation: &CreateFeatureEvaluation) -> String {
+    let ingest_dedupe_key = evaluation.ingest_dedupe_key.as_deref();
+    // With a dedupe key, `evaluated_at` is a receive time that differs on
+    // every retry, so it must not be part of the fingerprint.
+    let evaluated_at_unix_ms = if ingest_dedupe_key.is_some() {
+        0
+    } else {
+        evaluation.evaluated_at.timestamp_millis()
+    };
     let payload = EvaluationIngestFingerprint {
         feature_key: &evaluation.feature_key,
         environment_id: &evaluation.environment_id,
         client_id: evaluation.client_id,
-        evaluated_at_unix_ms: evaluation.evaluated_at.timestamp_millis(),
+        evaluated_at_unix_ms,
         evaluation_result: evaluation.evaluation_result,
         evaluation_context: &evaluation.evaluation_context,
         user_context: &evaluation.user_context,
@@ -84,6 +102,7 @@ fn evaluation_ingest_fingerprint(evaluation: &CreateFeatureEvaluation) -> String
         evaluation_success: evaluation.evaluation_success,
         evaluation_value: &evaluation.evaluation_value,
         variant: &evaluation.variant,
+        ingest_dedupe_key,
     };
     let encoded = serde_json::to_vec(&payload).expect("evaluation fingerprint serialization");
     let mut hasher = Sha256::new();
@@ -1014,7 +1033,35 @@ mod tests {
             evaluation_success: true,
             evaluation_value: Some(json!(true)),
             variant: None,
+            ingest_dedupe_key: None,
         }
+    }
+
+    /// Pins the fingerprint of an evaluation with a producer timestamp. Rows
+    /// already stored carry this value, so it must not change, or a retry
+    /// that spans a deploy would be stored twice.
+    #[test]
+    fn ingest_fingerprint_for_timestamped_event_is_stable() {
+        let evaluation = CreateFeatureEvaluation {
+            feature_key: "checkout".to_string(),
+            environment_id: "env-123".to_string(),
+            client_id: Uuid::parse_str("a1b2c3d4-0000-4000-8000-000000000001").unwrap(),
+            evaluated_at: DateTime::from_timestamp_millis(1_700_000_000_123).unwrap(),
+            #[allow(deprecated)]
+            evaluation_result: true,
+            evaluation_context: Some(json!({"bucketingKey": "user-1"})),
+            user_context: Some("user-1".to_string()),
+            prior_assignment: false,
+            evaluation_success: true,
+            evaluation_value: Some(json!(true)),
+            variant: Some("on".to_string()),
+            ingest_dedupe_key: None,
+        };
+
+        assert_eq!(
+            evaluation_ingest_fingerprint(&evaluation),
+            "1ddd235685198b78c845b8a2c754422e24ae51ba1de23d5f0aac1542cc1bab92"
+        );
     }
 
     #[test]
