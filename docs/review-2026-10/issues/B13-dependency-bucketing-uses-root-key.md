@@ -4,7 +4,7 @@
 |---|---|
 | Type | Bug (evaluation correctness) |
 | Severity | High |
-| Status | Verified (independent code trace) |
+| Status | Fixed on branch review-followups |
 | Crate | `evaluation-engine` (used by backend and edge) |
 | Behavior change | **Yes, user-visible.** Some users' results for dependent flags change. Needs maintainer sign-off and a release note. |
 | Related | [B19](B19-non-boolean-dependency-blocks-dependents.md) |

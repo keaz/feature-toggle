@@ -487,8 +487,17 @@ fn evaluate_compound_rules(rule_groups: &[RuleGroup], ctx: &ContextObject) -> bo
         .any(|group| evaluate_rule_group(group, ctx))
 }
 
+/// Evaluates a stage's criteria for one feature.
+///
+/// `bucket_key` is the key of the feature whose stage is being evaluated. It is
+/// hashed together with the targeting key (`SHA256("<bucket_key>:<targetingKey>")`)
+/// to place the user in a weighted split. For the flag being evaluated directly
+/// this is `FeatureEvaluationContext::flag_key`; for a dependency it is the
+/// dependency's own key, so a dependency buckets a user exactly as it would if
+/// it were evaluated directly.
 fn passes_stage_criteria(
     ec: &FeatureEvaluationContext,
+    bucket_key: &str,
     stage: &FeatureStage,
 ) -> CriteriaEvaluationResult {
     // If no criteria defined, treat as pass-through (stage gating only)
@@ -519,7 +528,7 @@ fn passes_stage_criteria(
 
         // Precompute user bucket percentage
         let mut hasher = Sha256::new();
-        hasher.update(ec.flag_key.as_bytes());
+        hasher.update(bucket_key.as_bytes());
         hasher.update(b":");
         hasher.update(sticky_val.as_bytes());
         let digest = hasher.finalize();
@@ -654,8 +663,15 @@ fn dependency_blocked_result(
     }
 }
 
+/// Evaluates `feature`, resolving its dependencies recursively.
+///
+/// `bucket_key` is the key used for percentage bucketing of `feature` (see
+/// [`passes_stage_criteria`]). The root call passes the request's `flag_key`;
+/// each dependency is evaluated with its own `dependency.key`. The rest of the
+/// context (targeting key, environment, attributes) is shared unchanged.
 fn evaluate_with_memo(
     evaluation_context: &FeatureEvaluationContext,
+    bucket_key: &str,
     feature: &Feature,
     memo: &mut HashMap<String, EvaluationResult>,
     visiting: &mut Vec<(String, String)>,
@@ -734,8 +750,16 @@ fn evaluate_with_memo(
                 );
             }
 
-            let dep_result =
-                evaluate_with_memo(evaluation_context, dependency, memo, visiting, visiting_set);
+            // Evaluate the dependency as if it were requested directly: same
+            // context, but bucketed with the dependency's own key (B13).
+            let dep_result = evaluate_with_memo(
+                evaluation_context,
+                &dependency.key,
+                dependency,
+                memo,
+                visiting,
+                visiting_set,
+            );
             if !dep_result.value.as_bool().unwrap_or(false) {
                 let code = dependency_block_code_from_result(&dep_result);
                 let message = match dep_result.error_code {
@@ -795,7 +819,7 @@ fn evaluate_with_memo(
         }
 
         // Evaluate stage criteria
-        let criteria_result = passes_stage_criteria(evaluation_context, stage);
+        let criteria_result = passes_stage_criteria(evaluation_context, bucket_key, stage);
 
         if !criteria_result.matched {
             return EvaluationResult {
@@ -829,6 +853,26 @@ fn evaluate_with_memo(
     result
 }
 
+/// Evaluates `feature` for `evaluation_context`.
+///
+/// # Bucketing
+///
+/// Weighted splits place a user in a bucket from
+/// `SHA256("<flag key>:<targetingKey>")`. The flag being evaluated is bucketed
+/// with `evaluation_context.flag_key`.
+///
+/// # Dependencies
+///
+/// Every entry in `feature.dependencies` must pass before the feature's own
+/// stage is evaluated. A dependency is evaluated exactly as if it were evaluated
+/// directly for the same context: same targeting key, environment and
+/// attributes, and bucketed with the dependency's **own** key. A user who gets
+/// `true` from dependency `D` when `D` is evaluated directly therefore also
+/// passes the `D` check inside any flag that depends on `D`, and the dependent
+/// flag's own weighted split is independent of `D`'s split.
+///
+/// A dependency passes only when its value is the JSON boolean `true`; see the
+/// dependency check in `evaluate_with_memo` for how other values are treated.
 pub fn evaluate(
     evaluation_context: &FeatureEvaluationContext,
     feature: &Feature,
@@ -838,6 +882,7 @@ pub fn evaluate(
     let mut visiting_set = HashSet::new();
     evaluate_with_memo(
         evaluation_context,
+        &evaluation_context.flag_key,
         feature,
         &mut memo,
         &mut visiting,

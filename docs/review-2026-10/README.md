@@ -50,7 +50,7 @@ Review of `feature-toggle-backend/`, `feature-edge-server/` and `evaluation-engi
 | [x] | [B10](issues/B10-edge-env-overrides-ignored.md) | `EDGE_*` env overrides are silently ignored | High | edge | Yes (env starts applying) | — |
 | [x] | [B11](issues/B11-assignment-push-missing-team-check.md) | `push_user_assignments` writes other teams' assignments | High | backend | Yes (intended) | — |
 | [x] | [B12](issues/B12-evaluation-timestamp-fallback-breaks-dedupe.md) | Missing evaluation timestamp becomes `now()` and breaks dedupe | Low | backend | Small | — |
-| [ ] | [B13](issues/B13-dependency-bucketing-uses-root-key.md) | Dependencies bucketed with the root flag key | High | engine | **Yes, user-visible, needs sign-off** | — |
+| [x] | [B13](issues/B13-dependency-bucketing-uses-root-key.md) | Dependencies bucketed with the root flag key | High | engine | **Yes, user-visible, needs sign-off** | — |
 | [x] | [B14](issues/B14-ofrep-bulk-etag-ignores-context.md) | OFREP bulk ETag ignores context, so 304 returns stale results | Medium | edge | Yes (intended) | B05 |
 | [x] | [B15](issues/B15-stale-flags-after-reconnect-or-rename.md) | Stale flags after reconnect or rename; new flags missed | High | backend + edge | Yes (intended) | B01, B03, B04 |
 | [x] | [B16](issues/B16-edge-cache-not-team-scoped.md) | Edge cache not team-scoped; bulk lists other teams' flags | High | edge | Yes (intended) | B03 |

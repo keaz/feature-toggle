@@ -601,3 +601,205 @@ fn evaluate_dependency_cycle_is_detected_and_blocked() {
         "cyclePath should be included for cycle errors"
     );
 }
+
+// ============================================
+// Dependency bucketing (B13)
+// ============================================
+
+fn weighted_criterion(allocations: &[(&str, i32)]) -> StageCriterion {
+    StageCriterion {
+        priority: 0,
+        rule_groups: vec![],
+        variant_allocations: allocations
+            .iter()
+            .map(|(control, weight)| VariantAllocation {
+                variant_control: (*control).to_string(),
+                weight: *weight,
+            })
+            .collect(),
+        variant_selection_mode: VariantSelectionMode::WeightedSplit,
+        selected_variant_control: None,
+    }
+}
+
+fn variant(control: &str, value: serde_json::Value) -> FeatureVariant {
+    FeatureVariant {
+        control: control.to_string(),
+        value,
+    }
+}
+
+/// D: a 50/50 boolean split ({off: false, on: true}).
+fn weighted_boolean_dependency() -> Feature {
+    mk_feature(
+        "dep-d",
+        "flag-d",
+        "Contextual",
+        true,
+        true,
+        vec![stage(
+            "env-a",
+            true,
+            None,
+            vec![weighted_criterion(&[("off", 50), ("on", 50)])],
+        )],
+        vec![variant("off", json!(false)), variant("on", json!(true))],
+    )
+}
+
+#[test]
+fn dependency_is_bucketed_with_its_own_key() {
+    let dependency = weighted_boolean_dependency();
+    let mut dependent = mk_feature(
+        "dep-f",
+        "flag-f",
+        "Contextual",
+        true,
+        true,
+        vec![stage("env-a", true, None, vec![])],
+        vec![],
+    );
+    dependent.dependencies = vec![dependency.clone()];
+
+    let mut dependent_true = 0;
+    for i in 0..1000 {
+        let targeting_key = format!("user-{i}");
+        let f_result = evaluation_engine::evaluate(
+            &mk_ctx("flag-f", "env-a", &targeting_key, &[]),
+            &dependent,
+        );
+        let d_result = evaluation_engine::evaluate(
+            &mk_ctx("flag-d", "env-a", &targeting_key, &[]),
+            &dependency,
+        );
+
+        // F has no criteria of its own, so F is true exactly when D passes.
+        assert_eq!(
+            f_result.value, d_result.value,
+            "dependency result inside F must equal evaluating D directly for {targeting_key}"
+        );
+        if f_result.value == json!(true) {
+            dependent_true += 1;
+        }
+    }
+
+    // Sanity: the 50/50 split actually splits the population.
+    assert!(
+        (350..=650).contains(&dependent_true),
+        "expected roughly half of users to pass D, got {dependent_true}"
+    );
+}
+
+#[test]
+fn dependent_weighted_variants_are_independent_of_dependency_bucket() {
+    let dependency = weighted_boolean_dependency();
+    let mut dependent = mk_feature(
+        "dep-f",
+        "flag-f",
+        "Contextual",
+        true,
+        true,
+        vec![stage(
+            "env-a",
+            true,
+            None,
+            vec![weighted_criterion(&[("a", 50), ("b", 50)])],
+        )],
+        vec![variant("a", json!(true)), variant("b", json!(true))],
+    );
+    dependent.dependencies = vec![dependency];
+
+    let mut served = HashMap::new();
+    for i in 0..1000 {
+        let targeting_key = format!("user-{i}");
+        let result = evaluation_engine::evaluate(
+            &mk_ctx("flag-f", "env-a", &targeting_key, &[]),
+            &dependent,
+        );
+        if let Some(variant) = result.variant {
+            *served.entry(variant).or_insert(0) += 1;
+        }
+    }
+
+    for expected in ["a", "b"] {
+        let count = served.get(expected).copied().unwrap_or(0);
+        assert!(
+            count >= 100,
+            "variant {expected} should be served to a fair share of users, got {count} ({served:?})"
+        );
+    }
+}
+
+/// Golden values recorded before the B13 change. A flag evaluated directly
+/// (the root of an evaluation) must keep bucketing on `flagKey:targetingKey`
+/// exactly as before, with or without dependencies.
+#[test]
+fn root_bucketing_is_unchanged() {
+    let allocations = [("v1", 25), ("v2", 25), ("v3", 50)];
+    let standalone = mk_feature(
+        "root-id",
+        "checkout-redesign",
+        "Contextual",
+        true,
+        true,
+        vec![stage(
+            "env-a",
+            true,
+            None,
+            vec![weighted_criterion(&allocations)],
+        )],
+        vec![
+            variant("v1", json!("one")),
+            variant("v2", json!("two")),
+            variant("v3", json!("three")),
+        ],
+    );
+
+    // Same flag, now with an always-true dependency that has its own split.
+    let always_true_dependency = mk_feature(
+        "always-id",
+        "always-on",
+        "Contextual",
+        true,
+        true,
+        vec![stage(
+            "env-a",
+            true,
+            None,
+            vec![weighted_criterion(&[("x", 50), ("y", 50)])],
+        )],
+        vec![variant("x", json!(true)), variant("y", json!(true))],
+    );
+    let mut with_dependency = standalone.clone();
+    with_dependency.dependencies = vec![always_true_dependency];
+
+    for (targeting_key, expected_variant) in GOLDEN_ROOT_VARIANTS {
+        let ctx = mk_ctx("checkout-redesign", "env-a", targeting_key, &[]);
+        for feature in [&standalone, &with_dependency] {
+            let result = evaluation_engine::evaluate(&ctx, feature);
+            assert_eq!(
+                result.variant.as_deref(),
+                Some(*expected_variant),
+                "root bucketing changed for {targeting_key}"
+            );
+            assert_eq!(result.flag_key, "checkout-redesign");
+        }
+    }
+}
+
+const GOLDEN_ROOT_VARIANTS: &[(&str, &str)] = &[
+    ("user-1", "v3"),
+    ("user-2", "v2"),
+    ("user-3", "v3"),
+    ("user-4", "v3"),
+    ("user-5", "v1"),
+    ("user-6", "v3"),
+    ("user-7", "v1"),
+    ("user-8", "v3"),
+    ("alice", "v3"),
+    ("bob", "v3"),
+    ("carol", "v1"),
+    ("dave", "v3"),
+    ("3f2c9a10-7b1e-4c55-9d2e-0a8b1c2d3e4f", "v2"),
+    ("org-42:user-7", "v1"),
+];

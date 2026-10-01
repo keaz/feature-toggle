@@ -97,6 +97,26 @@ The evaluator supports:
 - dependency graph evaluation
 - structured dependency-block reasons in evaluation metadata
 
+### Bucketing and weighted splits
+
+A weighted split places each user in a bucket from `SHA256("<flag key>:<targetingKey>")`, mapped to the range 0–100. The same targeting key always lands in the same bucket for the same flag, and different flags bucket independently because the flag key is part of the hash.
+
+### Feature dependencies
+
+A feature can depend on other features. When feature `F` depends on `D`, `F` is evaluated as follows:
+
+1. If `F` is disabled (kill switch), the result is `false`.
+2. Each dependency is evaluated. If any dependency does not pass, `F` returns `false` with reason `DISABLED` and a `dependencyBlock` entry in the result metadata that names the dependency and the block code.
+3. Otherwise `F`'s own stage and criteria are evaluated as usual.
+
+**A dependency is evaluated exactly as if it were evaluated directly for the same context.** It uses the same targeting key, environment and attributes as the request, and it is bucketed with its **own** key, not the key of the flag that depends on it. In practice:
+
+- A user who gets `true` from `D` when `D` is evaluated directly also passes the `D` check inside `F`, and a user who gets `false` from `D` is blocked from `F`.
+- If `D` is a 10% rollout, `F` reaches exactly those 10% of users (further narrowed by `F`'s own rules).
+- `F`'s own weighted split is independent of `D`'s split. With `D` = 50/50 and `F` = {a: 50, b: 50}, both `a` and `b` are served to users who pass `D`.
+
+Dependencies are resolved recursively (a dependency can have its own dependencies), each one bucketed with its own key. Cycles are detected and reported with the `DEPENDENCY_CYCLE_DETECTED` block code.
+
 ### Rollout safety
 
 Recent backend changes added stronger rollout controls:
