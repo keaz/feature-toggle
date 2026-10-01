@@ -544,6 +544,13 @@ impl AppState {
         self.pending_assignments.purge_feature(feature_id);
     }
 
+    /// Drop the feature's cached results so its current config applies, but
+    /// keep assignments that are already recorded and wait to be flushed.
+    /// Used when a still-enabled feature is updated or re-snapshotted.
+    pub fn clear_cached_assignments_for_feature(&self, feature_id: &str) {
+        self.assigned_cache.remove_feature(feature_id);
+    }
+
     pub fn purge_all_assignments(&self) {
         self.assigned_cache.clear();
         self.pending_assignments.clear();

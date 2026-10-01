@@ -143,11 +143,21 @@ pub(crate) async fn handle_feature_update(app: &AppState, update: pb::FeatureUpd
                     .collect::<Vec<_>>();
 
                 let engine_feature = std::sync::Arc::new(crate::handlers::map_proto_to_engine(&f));
+                let enabled = engine_feature.enabled;
                 app.mapped_cache
                     .insert_with_dependencies(&f.team_id, engine_feature, dependency_ids)
                     .await;
 
-                app.purge_assignments_for_feature(&feature_id).await;
+                // Cached results always go, so the new config applies. Pending
+                // assignments are facts already served to users: keep them while
+                // the feature stays enabled (P01 step 3), so a reconnect snapshot
+                // or an unrelated edit no longer loses up to one flush interval
+                // of them. A disabled feature drops them, as before.
+                if enabled {
+                    app.clear_cached_assignments_for_feature(&feature_id);
+                } else {
+                    app.purge_assignments_for_feature(&feature_id).await;
+                }
             }
         }
         x if x == Action::Delete as i32 => {

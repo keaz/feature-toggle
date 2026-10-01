@@ -944,6 +944,79 @@ mod tests {
         );
     }
 
+    fn pending_assignment(feature_id: &str) -> UserAssignment {
+        UserAssignment {
+            user_id: "user-1".to_string(),
+            feature_id: feature_id.to_string(),
+            environment_id: "env-1".to_string(),
+            assigned: true,
+            variant: None,
+        }
+    }
+
+    /// P01 step 3: an Upsert or Snapshot of a still-enabled feature clears its
+    /// cached results (so the new config applies) but keeps assignments that
+    /// were already recorded and wait to be flushed.
+    #[tokio::test]
+    async fn test_upsert_of_enabled_feature_keeps_pending_assignments() {
+        use crate::pb::feature_update::Action;
+        let mapped_cache = Arc::new(crate::MappedFeatureCache::new(100));
+        let app_state = test_app_state(mapped_cache.clone());
+
+        for action in [Action::Upsert, Action::Snapshot] {
+            app_state
+                .assigned_cache
+                .insert("user-1", "kept-id", "env-1", cached_assignment());
+            app_state
+                .pending_assignments
+                .push(pending_assignment("kept-id"));
+
+            let feature = team_feature_full("kept-id", "kept-key", "team-1");
+            handle_feature_update(&app_state, feature_update(action, feature)).await;
+
+            assert!(
+                app_state
+                    .assigned_cache
+                    .get("user-1", "kept-id", "env-1")
+                    .is_none(),
+                "{action:?} must clear cached results"
+            );
+            let pending = app_state
+                .pending_assignments
+                .pop()
+                .unwrap_or_else(|| panic!("{action:?} dropped the pending assignment"));
+            assert_eq!(pending.feature_id, "kept-id");
+            assert!(app_state.pending_assignments.pop().is_none());
+        }
+    }
+
+    /// A kill-switched feature still drops both cached and pending assignments.
+    #[tokio::test]
+    async fn test_upsert_of_disabled_feature_drops_pending_assignments() {
+        use crate::pb::feature_update::Action;
+        let mapped_cache = Arc::new(crate::MappedFeatureCache::new(100));
+        let app_state = test_app_state(mapped_cache.clone());
+
+        app_state
+            .assigned_cache
+            .insert("user-1", "killed-id", "env-1", cached_assignment());
+        app_state
+            .pending_assignments
+            .push(pending_assignment("killed-id"));
+
+        let mut feature = team_feature_full("killed-id", "killed-key", "team-1");
+        feature.kill_switch_enabled = false;
+        handle_feature_update(&app_state, feature_update(Action::Upsert, feature)).await;
+
+        assert!(
+            app_state
+                .assigned_cache
+                .get("user-1", "killed-id", "env-1")
+                .is_none()
+        );
+        assert!(app_state.pending_assignments.pop().is_none());
+    }
+
     fn team_feature_full(id: &str, key: &str, team_id: &str) -> crate::pb::FeatureFull {
         crate::pb::FeatureFull {
             id: id.to_string(),
