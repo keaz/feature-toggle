@@ -39,3 +39,4 @@ protoc-bin-vendored = "3"
 
 [dev-dependencies]
 feature-toggle-backend = { path = "../feature-toggle-backend" }
+tokio = { version = "1.45", features = ["full", "test-util"] }

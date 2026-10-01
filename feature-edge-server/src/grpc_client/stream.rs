@@ -34,8 +34,11 @@ pub(crate) async fn prepare_for_full_resync(app: &AppState) {
     app.purge_all_assignments();
 }
 
-/// Spawn a background task to send periodic heartbeats.
-fn spawn_heartbeat(tx: tokio::sync::mpsc::Sender<pb::StreamRequest>) {
+/// Spawn a background task to send periodic heartbeats. The task exits once
+/// the stream's receiver is dropped.
+fn spawn_heartbeat(
+    tx: tokio::sync::mpsc::Sender<pb::StreamRequest>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(30)).await;
@@ -43,15 +46,20 @@ fn spawn_heartbeat(tx: tokio::sync::mpsc::Sender<pb::StreamRequest>) {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)
                 .unwrap_or(0);
-            let _ = tx
+            let sent = tx
                 .send(pb::StreamRequest {
                     payload: Some(pb::stream_request::Payload::Heartbeat(pb::Heartbeat {
                         ts_unix_ms: ts,
                     })),
                 })
                 .await;
+            // The streaming call owns the receiver; once it is dropped the
+            // connection is gone and this task must end with it.
+            if sent.is_err() {
+                break;
+            }
         }
-    });
+    })
 }
 
 /// Open a streaming gRPC call for feature updates.
@@ -234,5 +242,44 @@ pub async fn run_stream_task(app: AppState, grpc_addr: String) {
 
         tokio::time::sleep(retry_delay).await;
         retry_delay = std::cmp::min(retry_delay * 2, max_retry_delay);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn heartbeat_task_exits_after_receiver_is_dropped() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<pb::StreamRequest>(16);
+        let handle = spawn_heartbeat(tx);
+        drop(rx);
+
+        // Paused clock: the runtime auto-advances through the heartbeat's
+        // 30 s timer before this 31 s sleep completes.
+        tokio::time::sleep(Duration::from_secs(31)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+
+        assert!(
+            handle.is_finished(),
+            "heartbeat task must stop once the stream receiver is gone"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn heartbeat_task_keeps_sending_while_receiver_is_alive() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<pb::StreamRequest>(16);
+        let handle = spawn_heartbeat(tx);
+
+        tokio::time::sleep(Duration::from_secs(31)).await;
+        let msg = rx.recv().await.expect("heartbeat expected");
+        assert!(matches!(
+            msg.payload,
+            Some(pb::stream_request::Payload::Heartbeat(_))
+        ));
+        assert!(!handle.is_finished());
+        handle.abort();
     }
 }
