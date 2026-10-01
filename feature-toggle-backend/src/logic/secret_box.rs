@@ -6,9 +6,14 @@
 //! where the ciphertext carries the GCM authentication tag. Decryption verifies the
 //! tag, so a tampered value or a wrong key is an error, never garbage plaintext.
 //!
+//! The `*_with_aad` functions additionally bind the value to associated data (for
+//! example the owning row id): a ciphertext only decrypts under the same associated
+//! data, so sealed values cannot be swapped between rows. The associated data is not
+//! stored and is not secret.
+//!
 //! Neither plaintext nor key material appears in error values or logs.
 
-use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng};
+use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng, Payload};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -70,10 +75,21 @@ impl SecretBox {
 
     /// Encrypts `plaintext` with a fresh random nonce; returns `base64(nonce || ciphertext)`.
     pub fn encrypt(&self, plaintext: &str) -> Result<String, SecretBoxError> {
+        self.encrypt_with_aad(plaintext, &[])
+    }
+
+    /// Like [`SecretBox::encrypt`], binding the value to `aad` as associated data.
+    pub fn encrypt_with_aad(&self, plaintext: &str, aad: &[u8]) -> Result<String, SecretBoxError> {
         let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
         let ciphertext = self
             .cipher
-            .encrypt(&nonce, plaintext.as_bytes())
+            .encrypt(
+                &nonce,
+                Payload {
+                    msg: plaintext.as_bytes(),
+                    aad,
+                },
+            )
             .map_err(|_| SecretBoxError::EncryptionFailed)?;
         let mut sealed = Vec::with_capacity(NONCE_LEN + ciphertext.len());
         sealed.extend_from_slice(&nonce);
@@ -83,6 +99,11 @@ impl SecretBox {
 
     /// Decrypts a value produced by [`SecretBox::encrypt`], verifying its authentication tag.
     pub fn decrypt(&self, sealed: &str) -> Result<String, SecretBoxError> {
+        self.decrypt_with_aad(sealed, &[])
+    }
+
+    /// Like [`SecretBox::decrypt`]; fails unless the value was sealed with the same `aad`.
+    pub fn decrypt_with_aad(&self, sealed: &str, aad: &[u8]) -> Result<String, SecretBoxError> {
         let bytes = STANDARD
             .decode(sealed.trim())
             .map_err(|_| SecretBoxError::InvalidCiphertext)?;
@@ -92,7 +113,13 @@ impl SecretBox {
         let (nonce, ciphertext) = bytes.split_at(NONCE_LEN);
         let plaintext = self
             .cipher
-            .decrypt(Nonce::from_slice(nonce), ciphertext)
+            .decrypt(
+                Nonce::from_slice(nonce),
+                Payload {
+                    msg: ciphertext,
+                    aad,
+                },
+            )
             .map_err(|_| SecretBoxError::DecryptionFailed)?;
         String::from_utf8(plaintext).map_err(|_| SecretBoxError::DecryptionFailed)
     }
@@ -118,6 +145,16 @@ pub fn encrypt(plaintext: &str) -> Result<String, SecretBoxError> {
 /// Decrypts with the key from `FLUXGATE_ENCRYPTION_KEY` (loaded once).
 pub fn decrypt(sealed: &str) -> Result<String, SecretBoxError> {
     global()?.decrypt(sealed)
+}
+
+/// Encrypts with the environment key, binding the value to `aad` (loaded once).
+pub fn encrypt_with_aad(plaintext: &str, aad: &[u8]) -> Result<String, SecretBoxError> {
+    global()?.encrypt_with_aad(plaintext, aad)
+}
+
+/// Decrypts with the environment key; fails unless sealed with the same `aad`.
+pub fn decrypt_with_aad(sealed: &str, aad: &[u8]) -> Result<String, SecretBoxError> {
+    global()?.decrypt_with_aad(sealed, aad)
 }
 
 #[cfg(test)]
@@ -251,5 +288,52 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(!message.contains(&key(9)[..10]));
+    }
+
+    #[test]
+    fn aad_round_trip() {
+        let sb = secret_box(1);
+        let aad = b"7b1c1d9e-0000-4000-8000-000000000001";
+        let sealed = sb.encrypt_with_aad("client-secret", aad).unwrap();
+        assert_eq!(sb.decrypt_with_aad(&sealed, aad).unwrap(), "client-secret");
+    }
+
+    #[test]
+    fn aad_mismatch_fails() {
+        let sb = secret_box(1);
+        let sealed = sb.encrypt_with_aad("client-secret", b"provider-a").unwrap();
+        assert_eq!(
+            sb.decrypt_with_aad(&sealed, b"provider-b"),
+            Err(SecretBoxError::DecryptionFailed),
+            "a ciphertext must not decrypt under another provider id"
+        );
+        assert_eq!(
+            sb.decrypt_with_aad(&sealed, b""),
+            Err(SecretBoxError::DecryptionFailed)
+        );
+        assert_eq!(sb.decrypt(&sealed), Err(SecretBoxError::DecryptionFailed));
+    }
+
+    #[test]
+    fn value_sealed_without_aad_does_not_decrypt_with_aad() {
+        let sb = secret_box(1);
+        let sealed = sb.encrypt("plain").unwrap();
+        assert_eq!(
+            sb.decrypt_with_aad(&sealed, b"provider-a"),
+            Err(SecretBoxError::DecryptionFailed)
+        );
+    }
+
+    #[test]
+    fn tampered_value_fails_with_aad() {
+        let sb = secret_box(1);
+        let sealed = sb.encrypt_with_aad("secret", b"id").unwrap();
+        let mut bytes = STANDARD.decode(&sealed).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0x01;
+        assert_eq!(
+            sb.decrypt_with_aad(&STANDARD.encode(bytes), b"id"),
+            Err(SecretBoxError::DecryptionFailed)
+        );
     }
 }

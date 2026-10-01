@@ -55,6 +55,12 @@ pub enum RestError {
     SelfApprovalNotAllowed { message: String },
     #[error("Last admin required")]
     LastAdminRequired { message: String },
+    #[error("SSO managed")]
+    SsoManaged { message: String },
+    #[error("SSO user has no local password")]
+    SsoUserNoLocalPassword { message: String },
+    #[error("Encryption key missing")]
+    EncryptionKeyMissing { message: String },
     #[error("Invalid refresh token")]
     InvalidRefreshToken { message: String },
     #[error("Refresh token reused")]
@@ -127,6 +133,30 @@ impl RestError {
         }
     }
 
+    /// 409 `sso_managed`: the role or team assignment comes from SSO group sync and
+    /// cannot be removed by hand.
+    pub fn sso_managed() -> Self {
+        Self::SsoManaged {
+            message: "This assignment is managed by SSO group sync".to_string(),
+        }
+    }
+
+    /// 400 `sso_user_no_local_password`: SSO users have no local password to reset.
+    pub fn sso_user_no_local_password() -> Self {
+        Self::SsoUserNoLocalPassword {
+            message: "SSO users sign in through their identity provider and have no local password"
+                .to_string(),
+        }
+    }
+
+    /// 400 `encryption_key_missing`: a client secret was supplied but
+    /// `FLUXGATE_ENCRYPTION_KEY` is not configured.
+    pub fn encryption_key_missing() -> Self {
+        Self::EncryptionKeyMissing {
+            message: "FLUXGATE_ENCRYPTION_KEY must be set to store a client secret".to_string(),
+        }
+    }
+
     /// 401 `invalid_refresh_token`: unknown or expired refresh token, or its user
     /// is missing or disabled.
     pub fn invalid_refresh_token() -> Self {
@@ -177,6 +207,9 @@ impl RestError {
             Self::AccountDisabled { .. } => "account_disabled",
             Self::SelfApprovalNotAllowed { .. } => "self_approval_not_allowed",
             Self::LastAdminRequired { .. } => "last_admin_required",
+            Self::EncryptionKeyMissing { .. } => "encryption_key_missing",
+            Self::SsoManaged { .. } => "sso_managed",
+            Self::SsoUserNoLocalPassword { .. } => "sso_user_no_local_password",
             Self::InvalidRefreshToken { .. } => "invalid_refresh_token",
             Self::RefreshTokenReused { .. } => "refresh_token_reused",
             Self::Forbidden { .. } => "forbidden",
@@ -195,6 +228,9 @@ impl RestError {
             | Self::AccountDisabled { message }
             | Self::SelfApprovalNotAllowed { message }
             | Self::LastAdminRequired { message }
+            | Self::SsoManaged { message }
+            | Self::EncryptionKeyMissing { message }
+            | Self::SsoUserNoLocalPassword { message }
             | Self::InvalidRefreshToken { message }
             | Self::RefreshTokenReused { message } => message,
         }
@@ -211,6 +247,9 @@ impl RestError {
             Self::AccountDisabled { .. }
             | Self::SelfApprovalNotAllowed { .. }
             | Self::LastAdminRequired { .. }
+            | Self::SsoManaged { .. }
+            | Self::SsoUserNoLocalPassword { .. }
+            | Self::EncryptionKeyMissing { .. }
             | Self::InvalidRefreshToken { .. }
             | Self::RefreshTokenReused { .. } => None,
         }
@@ -227,6 +266,9 @@ impl RestError {
             Self::AccountDisabled { .. }
             | Self::SelfApprovalNotAllowed { .. }
             | Self::LastAdminRequired { .. }
+            | Self::SsoManaged { .. }
+            | Self::SsoUserNoLocalPassword { .. }
+            | Self::EncryptionKeyMissing { .. }
             | Self::InvalidRefreshToken { .. }
             | Self::RefreshTokenReused { .. } => None,
         }
@@ -246,8 +288,12 @@ impl ResponseError for RestError {
     fn status_code(&self) -> StatusCode {
         match self {
             Self::NotFound { .. } => StatusCode::NOT_FOUND,
-            Self::InvalidInput { .. } => StatusCode::BAD_REQUEST,
-            Self::Conflict { .. } | Self::LastAdminRequired { .. } => StatusCode::CONFLICT,
+            Self::Conflict { .. } | Self::LastAdminRequired { .. } | Self::SsoManaged { .. } => {
+                StatusCode::CONFLICT
+            }
+            Self::InvalidInput { .. }
+            | Self::SsoUserNoLocalPassword { .. }
+            | Self::EncryptionKeyMissing { .. } => StatusCode::BAD_REQUEST,
             Self::Unauthorized { .. }
             | Self::AccountDisabled { .. }
             | Self::InvalidRefreshToken { .. }
@@ -275,6 +321,19 @@ impl From<crate::Error> for RestError {
             crate::Error::AccountDisabled => RestError::account_disabled("Account is disabled"),
             crate::Error::SelfApprovalNotAllowed => RestError::self_approval_not_allowed(),
             crate::Error::LastAdminRequired => RestError::last_admin_required(),
+            crate::Error::SsoManaged => RestError::sso_managed(),
+            crate::Error::SsoUserNoLocalPassword => RestError::sso_user_no_local_password(),
+        }
+    }
+}
+
+impl From<crate::logic::sso_provider::SsoAdminError> for RestError {
+    fn from(err: crate::logic::sso_provider::SsoAdminError) -> Self {
+        use crate::logic::sso_provider::SsoAdminError;
+        match err {
+            SsoAdminError::Invalid(message) => RestError::invalid_input(message),
+            SsoAdminError::EncryptionKeyMissing => RestError::encryption_key_missing(),
+            SsoAdminError::Other(inner) => RestError::from(inner),
         }
     }
 }
@@ -380,6 +439,40 @@ mod tests {
         ] {
             let resp = err.error_response();
             assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+            let body = to_bytes(resp.into_body()).await.expect("body");
+            let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+            assert_eq!(json["error"], code);
+        }
+    }
+
+    #[actix_web::test]
+    async fn sso_errors_map_to_their_status_and_error_codes() {
+        use crate::logic::sso_provider::SsoAdminError;
+        let cases = [
+            (
+                RestError::from(crate::Error::SsoManaged),
+                StatusCode::CONFLICT,
+                "sso_managed",
+            ),
+            (
+                RestError::from(crate::Error::SsoUserNoLocalPassword),
+                StatusCode::BAD_REQUEST,
+                "sso_user_no_local_password",
+            ),
+            (
+                RestError::from(SsoAdminError::EncryptionKeyMissing),
+                StatusCode::BAD_REQUEST,
+                "encryption_key_missing",
+            ),
+            (
+                RestError::from(SsoAdminError::invalid("bad")),
+                StatusCode::BAD_REQUEST,
+                "invalid_input",
+            ),
+        ];
+        for (err, status, code) in cases {
+            let resp = err.error_response();
+            assert_eq!(resp.status(), status);
             let body = to_bytes(resp.into_body()).await.expect("body");
             let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
             assert_eq!(json["error"], code);

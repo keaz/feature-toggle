@@ -39,6 +39,11 @@ pub trait RoleRepository: Send + Sync {
     async fn user_has_role(&self, user_id: Uuid, role_name: &str) -> Result<bool, Error>;
     /// Ids of the roles the user holds through SSO group sync (`source = 'sso'`).
     async fn list_sso_role_ids(&self, user_id: Uuid) -> Result<Vec<Uuid>, Error>;
+    /// Batch variant of `list_sso_role_ids`: `(user_id, role_id)` pairs for list endpoints.
+    async fn list_sso_role_ids_for_users(
+        &self,
+        user_ids: Vec<Uuid>,
+    ) -> Result<Vec<(Uuid, Uuid)>, Error>;
     fn clone_box(&self) -> Box<dyn RoleRepository>;
 }
 
@@ -245,7 +250,8 @@ impl RoleRepository for RoleRepositoryImpl {
                 sqlx::query(
                     r#"INSERT INTO user_roles (user_id, role_id, assigned_by, source)
                        VALUES ($1, $2, $3, 'manual')
-                       ON CONFLICT (user_id, role_id) DO NOTHING"#,
+                       ON CONFLICT (user_id, role_id)
+                       DO UPDATE SET source = 'manual', assigned_by = EXCLUDED.assigned_by"#,
                 )
                 .bind(user_id)
                 .bind(role_id)
@@ -260,18 +266,8 @@ impl RoleRepository for RoleRepositoryImpl {
     }
 
     async fn remove_user_role(&self, user_id: Uuid, role_id: Uuid) -> Result<(), Error> {
-        handle_error(
-            Some(user_id),
-            sqlx::query(
-                "DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2 AND source = 'manual'",
-            )
-            .bind(user_id)
-            .bind(role_id)
-            .execute(&self.pool)
-            .await,
-        )?;
-
-        Ok(())
+        let mut conn = self.pool.acquire().await.map_err(Error::DatabaseError)?;
+        Self::remove_user_role_internal(&mut conn, user_id, role_id).await
     }
 
     async fn user_has_role(&self, user_id: Uuid, role_name: &str) -> Result<bool, Error> {
@@ -295,6 +291,21 @@ impl RoleRepository for RoleRepositoryImpl {
     async fn list_sso_role_ids(&self, user_id: Uuid) -> Result<Vec<Uuid>, Error> {
         let mut conn = self.pool.acquire().await.map_err(Error::DatabaseError)?;
         Self::list_sso_role_ids_internal(&mut conn, user_id).await
+    }
+
+    async fn list_sso_role_ids_for_users(
+        &self,
+        user_ids: Vec<Uuid>,
+    ) -> Result<Vec<(Uuid, Uuid)>, Error> {
+        let rows = sqlx::query!(
+            "SELECT user_id, role_id FROM user_roles \
+             WHERE source = 'sso' AND user_id = ANY($1) ORDER BY user_id, role_id",
+            &user_ids
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Error::DatabaseError)?;
+        Ok(rows.into_iter().map(|r| (r.user_id, r.role_id)).collect())
     }
 
     fn clone_box(&self) -> Box<dyn RoleRepository> {
@@ -416,7 +427,8 @@ impl RoleRepositoryImpl {
                 sqlx::query(
                     r#"INSERT INTO user_roles (user_id, role_id, assigned_by, source)
                        VALUES ($1, $2, $3, 'manual')
-                       ON CONFLICT (user_id, role_id) DO NOTHING"#,
+                       ON CONFLICT (user_id, role_id)
+                       DO UPDATE SET source = 'manual', assigned_by = EXCLUDED.assigned_by"#,
                 )
                 .bind(user_id)
                 .bind(role_id)
@@ -453,7 +465,7 @@ impl RoleRepositoryImpl {
         user_id: Uuid,
         role_id: Uuid,
     ) -> Result<(), Error> {
-        handle_error(
+        let result = handle_error(
             Some(user_id),
             sqlx::query(
                 "DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2 AND source = 'manual'",
@@ -463,6 +475,25 @@ impl RoleRepositoryImpl {
             .execute(&mut *conn)
             .await,
         )?;
+
+        if result.rows_affected() == 0 {
+            // An SSO-sourced assignment is owned by group sync; refuse instead of
+            // reporting a silent no-op.
+            let sso_held = handle_error(
+                Some(user_id),
+                sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS(SELECT 1 FROM user_roles \
+                     WHERE user_id = $1 AND role_id = $2 AND source = 'sso')",
+                )
+                .bind(user_id)
+                .bind(role_id)
+                .fetch_one(&mut *conn)
+                .await,
+            )?;
+            if sso_held {
+                return Err(Error::SsoManaged);
+            }
+        }
 
         Ok(())
     }

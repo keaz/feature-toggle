@@ -50,6 +50,8 @@ pub mod policy;
 pub mod role;
 pub mod role_tx;
 pub mod secret_box;
+pub mod sso_provider;
+pub mod sso_provider_tx;
 pub mod stage_builder;
 pub mod system_client;
 pub mod team;

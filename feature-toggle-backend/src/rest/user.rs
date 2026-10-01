@@ -43,6 +43,23 @@ pub struct UserResponse {
     pub is_temporary_password: bool,
     pub team_ids: Option<Vec<String>>,
     pub teams: Option<Vec<TeamResponse>>,
+    /// How the account is managed: `local`, `sso` or `system`.
+    pub auth_source: String,
+    /// Roles the user holds through SSO group sync (not removable by hand).
+    pub sso_managed_role_ids: Vec<String>,
+    /// Teams the user belongs to through SSO group sync.
+    pub sso_managed_team_ids: Vec<String>,
+    /// Linked SSO identities.
+    pub identities: Vec<UserIdentityResponse>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UserIdentityResponse {
+    pub provider_slug: String,
+    pub subject: String,
+    pub email: Option<String>,
+    pub last_login: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -103,8 +120,64 @@ impl UserResponse {
             is_temporary_password: user.is_temporary_password,
             team_ids: None,
             teams: None,
+            auth_source: user.auth_source,
+            sso_managed_role_ids: Vec::new(),
+            sso_managed_team_ids: Vec::new(),
+            identities: Vec::new(),
         }
     }
+}
+
+/// Fills `ssoManagedRoleIds`, `ssoManagedTeamIds` and `identities` for `users` with
+/// three batched queries.
+pub(crate) async fn attach_sso_details(
+    pool: &sqlx::PgPool,
+    users: &mut [UserResponse],
+) -> Result<(), RestError> {
+    if users.is_empty() {
+        return Ok(());
+    }
+    let ids = users
+        .iter()
+        .filter_map(|u| Uuid::parse_str(&u.id).ok())
+        .collect::<Vec<_>>();
+
+    let role_pairs = crate::database::role::role_repository(pool.clone())
+        .list_sso_role_ids_for_users(ids.clone())
+        .await?;
+    let team_pairs = crate::database::user::user_repository(pool.clone())
+        .list_sso_team_ids_for_users(ids.clone())
+        .await?;
+    let identities = crate::database::user_identity::user_identity_repository(pool.clone())
+        .list_identities_for_users(ids)
+        .await?;
+
+    for user in users.iter_mut() {
+        let Ok(user_id) = Uuid::parse_str(&user.id) else {
+            continue;
+        };
+        user.sso_managed_role_ids = role_pairs
+            .iter()
+            .filter(|(u, _)| *u == user_id)
+            .map(|(_, r)| r.to_string())
+            .collect();
+        user.sso_managed_team_ids = team_pairs
+            .iter()
+            .filter(|(u, _)| *u == user_id)
+            .map(|(_, t)| t.to_string())
+            .collect();
+        user.identities = identities
+            .iter()
+            .filter(|i| i.user_id == user_id)
+            .map(|i| UserIdentityResponse {
+                provider_slug: i.provider_slug.clone(),
+                subject: i.subject.clone(),
+                email: i.email.clone(),
+                last_login: i.last_login.map(|v| v.to_rfc3339()),
+            })
+            .collect();
+    }
+    Ok(())
 }
 
 impl From<crate::logic::user::ApiUser> for UserResponse {
@@ -217,6 +290,7 @@ fn validate_mobile_number(value: &str) -> Result<(), RestError> {
 )]
 #[get("/users")]
 pub(crate) async fn list_users(
+    db_pool: web::Data<sqlx::PgPool>,
     logic: web::Data<Box<dyn UserLogic>>,
     query: web::Query<UserListQuery>,
 ) -> Result<impl Responder, RestError> {
@@ -244,10 +318,11 @@ pub(crate) async fn list_users(
         .await
         .map_err(RestError::from)?;
 
-    let items = users
+    let mut items = users
         .into_iter()
         .map(UserResponse::from)
         .collect::<Vec<_>>();
+    attach_sso_details(db_pool.get_ref(), &mut items).await?;
 
     Ok(HttpResponse::Ok().json(UsersResponse {
         items,
@@ -275,6 +350,7 @@ pub(crate) async fn list_users(
 )]
 #[get("/users/{id}")]
 pub(crate) async fn get_user(
+    db_pool: web::Data<sqlx::PgPool>,
     logic: web::Data<Box<dyn UserLogic>>,
     user_id: web::Path<String>,
 ) -> Result<impl Responder, RestError> {
@@ -295,6 +371,7 @@ pub(crate) async fn get_user(
     let mut response = UserResponse::from(api_user);
     response.team_ids = Some(team_ids);
     response.teams = Some(team_responses);
+    attach_sso_details(db_pool.get_ref(), std::slice::from_mut(&mut response)).await?;
 
     Ok(HttpResponse::Ok().json(response))
 }
@@ -516,7 +593,9 @@ pub(crate) async fn update_user(
             tx.commit()
                 .await
                 .map_err(|e| RestError::internal(format!("Failed to commit transaction: {e}")))?;
-            Ok(HttpResponse::Ok().json(UserResponse::from(updated)))
+            let mut response = UserResponse::from(updated);
+            attach_sso_details(db_pool.get_ref(), std::slice::from_mut(&mut response)).await?;
+            Ok(HttpResponse::Ok().json(response))
         }
         Err(err) => {
             let _ = tx.rollback().await;
@@ -796,6 +875,7 @@ mod tests {
             updated_at: chrono::Utc::now(),
             last_login: None,
             is_temporary_password: false,
+            auth_source: "local".to_string(),
         }
     }
 
@@ -811,8 +891,16 @@ mod tests {
             .times(1)
             .returning(move |_, _, _, _| Ok((vec![user_clone.clone()], 1)));
 
+        let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL not set");
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&db_url)
+            .await
+            .expect("Failed to connect to database");
+
         let app = test::init_service(
             App::new()
+                .app_data(web::Data::new(pool))
                 .app_data(web::Data::new(
                     Box::new(mock_user_logic) as Box<dyn UserLogic>
                 ))
@@ -830,6 +918,10 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["items"][0]["id"], user_id.to_string());
         assert_eq!(json["meta"]["total"], 1);
+        assert_eq!(json["items"][0]["authSource"], "local");
+        assert_eq!(json["items"][0]["ssoManagedRoleIds"], serde_json::json!([]));
+        assert_eq!(json["items"][0]["ssoManagedTeamIds"], serde_json::json!([]));
+        assert_eq!(json["items"][0]["identities"], serde_json::json!([]));
     }
 
     #[actix_web::test]

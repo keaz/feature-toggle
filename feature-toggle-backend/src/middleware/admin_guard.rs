@@ -136,7 +136,8 @@ where
 
             let is_allowed_rest = is_public_path
                 || (path == "/api/v1/admins" && method == actix_web::http::Method::POST)
-                || (path == "/api/v1/auth/status" && method == actix_web::http::Method::GET);
+                || (path == "/api/v1/auth/status" && method == actix_web::http::Method::GET)
+                || (path == "/api/v1/auth/sso/providers" && method == actix_web::http::Method::GET);
 
             if is_allowed_rest {
                 let res = service.call(req).await?;

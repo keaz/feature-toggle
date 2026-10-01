@@ -325,7 +325,8 @@ where
                 || (path == "/api/v1/metrics/track" && method == actix_web::http::Method::POST)
                 || (path == "/api/v1/auth/login" && method == actix_web::http::Method::POST)
                 || (path == "/api/v1/auth/refresh" && method == actix_web::http::Method::POST)
-                || (path == "/api/v1/auth/status" && method == actix_web::http::Method::GET);
+                || (path == "/api/v1/auth/status" && method == actix_web::http::Method::GET)
+                || (path == "/api/v1/auth/sso/providers" && method == actix_web::http::Method::GET);
 
             if is_public_path {
                 let res = service.call(req).await?;

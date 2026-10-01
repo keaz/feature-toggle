@@ -101,6 +101,11 @@ pub trait UserRepository: Send + Sync {
     async fn get_user_teams(&self, id: Uuid) -> Result<Vec<Team>, Error>;
     /// Ids of the teams the user belongs to through SSO group sync (`source = 'sso'`).
     async fn list_sso_team_ids(&self, id: Uuid) -> Result<Vec<Uuid>, Error>;
+    /// Batch variant of `list_sso_team_ids`: `(user_id, team_id)` pairs for list endpoints.
+    async fn list_sso_team_ids_for_users(
+        &self,
+        user_ids: Vec<Uuid>,
+    ) -> Result<Vec<(Uuid, Uuid)>, Error>;
     async fn admin_exists(&self) -> Result<bool, Error>;
     fn clone_box(&self) -> Box<dyn UserRepository>;
 }
@@ -434,8 +439,8 @@ impl UserRepository for UserRepositoryImpl {
                 Some(id),
                 sqlx::query(
                     r#"INSERT INTO user_teams (user_id, team_id, source)
-                       SELECT u, t, 'manual' FROM UNNEST($1::uuid[], $2::uuid[]) AS x(u, t)
-                       ON CONFLICT (user_id, team_id) DO NOTHING"#,
+                       SELECT DISTINCT u, t, 'manual' FROM UNNEST($1::uuid[], $2::uuid[]) AS x(u, t)
+                       ON CONFLICT (user_id, team_id) DO UPDATE SET source = 'manual'"#,
                 )
                 .bind(&user_ids)
                 .bind(&team_ids)
@@ -548,6 +553,21 @@ impl UserRepository for UserRepositoryImpl {
     async fn list_sso_team_ids(&self, id: Uuid) -> Result<Vec<Uuid>, Error> {
         let mut conn = self.pool.acquire().await.map_err(Error::DatabaseError)?;
         Self::list_sso_team_ids_internal(&mut conn, id).await
+    }
+
+    async fn list_sso_team_ids_for_users(
+        &self,
+        user_ids: Vec<Uuid>,
+    ) -> Result<Vec<(Uuid, Uuid)>, Error> {
+        let rows = sqlx::query!(
+            "SELECT user_id, team_id FROM user_teams \
+             WHERE source = 'sso' AND user_id = ANY($1) ORDER BY user_id, team_id",
+            &user_ids
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Error::DatabaseError)?;
+        Ok(rows.into_iter().map(|r| (r.user_id, r.team_id)).collect())
     }
 
     async fn admin_exists(&self) -> Result<bool, Error> {
@@ -750,8 +770,8 @@ impl UserRepositoryImpl {
                 Some(id),
                 sqlx::query(
                     r#"INSERT INTO user_teams (user_id, team_id, source)
-                       SELECT u, t, 'manual' FROM UNNEST($1::uuid[], $2::uuid[]) AS x(u, t)
-                       ON CONFLICT (user_id, team_id) DO NOTHING"#,
+                       SELECT DISTINCT u, t, 'manual' FROM UNNEST($1::uuid[], $2::uuid[]) AS x(u, t)
+                       ON CONFLICT (user_id, team_id) DO UPDATE SET source = 'manual'"#,
                 )
                 .bind(&user_ids)
                 .bind(&team_ids)

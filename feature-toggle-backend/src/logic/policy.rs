@@ -72,6 +72,7 @@ pub enum PolicyAction {
     ManageRoles,
     UpdateTeamResource,
     ManageSystemClients,
+    ManageSso,
 }
 
 impl PolicyAction {
@@ -83,6 +84,7 @@ impl PolicyAction {
             PolicyAction::ManageRoles => "manage_roles",
             PolicyAction::UpdateTeamResource => "update_team_resource",
             PolicyAction::ManageSystemClients => "manage_system_clients",
+            PolicyAction::ManageSso => "manage_sso",
         }
     }
 }
@@ -99,6 +101,7 @@ pub enum PolicyResource {
     Feature,
     SystemClient,
     SystemClientToken,
+    Sso,
 }
 
 impl PolicyResource {
@@ -114,6 +117,7 @@ impl PolicyResource {
             PolicyResource::Feature => "feature",
             PolicyResource::SystemClient => "system_client",
             PolicyResource::SystemClientToken => "system_client_token",
+            PolicyResource::Sso => "sso",
         }
     }
 }
@@ -281,6 +285,14 @@ fn route_policy_for_request(method: &Method, path: &str) -> Option<RoutePolicy> 
                 resource_id: parse_uuid_at(3),
             });
         }
+        // SSO administration: every method and sub-route, system admin only.
+        "sso" => {
+            return Some(RoutePolicy {
+                action: PolicyAction::ManageSso,
+                resource: PolicyResource::Sso,
+                resource_id: parse_uuid_at(4),
+            });
+        }
         "teams" if parts.get(4) == Some(&"system-clients") => {
             return Some(RoutePolicy {
                 action: PolicyAction::ManageSystemClients,
@@ -381,9 +393,10 @@ async fn evaluate(
 ) -> Result<PolicyDecision, PolicyError> {
     match policy_request.action {
         PolicyAction::CreateAdmin => evaluate_create_admin(pool, policy_request).await,
-        PolicyAction::ManageUsers | PolicyAction::AssignRoles | PolicyAction::ManageRoles => {
-            Ok(require_user_admin(policy_request.actor.as_ref()))
-        }
+        PolicyAction::ManageUsers
+        | PolicyAction::AssignRoles
+        | PolicyAction::ManageRoles
+        | PolicyAction::ManageSso => Ok(require_user_admin(policy_request.actor.as_ref())),
         PolicyAction::UpdateTeamResource => {
             evaluate_team_admin_or_admin(
                 pool,
@@ -1178,5 +1191,72 @@ mod tests {
         assert!(!admin_exists(&mut *tx).await.expect("query admins"));
 
         tx.rollback().await.expect("rollback");
+    }
+
+    fn sso_admin_routes() -> Vec<(Method, String)> {
+        let id = Uuid::new_v4();
+        vec![
+            (Method::GET, "/api/v1/sso/providers".to_string()),
+            (Method::POST, "/api/v1/sso/providers".to_string()),
+            (Method::GET, format!("/api/v1/sso/providers/{id}")),
+            (Method::PATCH, format!("/api/v1/sso/providers/{id}")),
+            (Method::DELETE, format!("/api/v1/sso/providers/{id}")),
+            (Method::POST, format!("/api/v1/sso/providers/{id}/test")),
+            (Method::GET, format!("/api/v1/sso/providers/{id}/mappings")),
+            (Method::PUT, format!("/api/v1/sso/providers/{id}/mappings")),
+            (Method::GET, "/api/v1/sso/settings".to_string()),
+            (Method::PUT, "/api/v1/sso/settings".to_string()),
+            // A route added later under the prefix is guarded by default.
+            (Method::POST, "/api/v1/sso/future-route".to_string()),
+        ]
+    }
+
+    #[test]
+    fn every_sso_admin_route_has_a_manage_sso_policy() {
+        for (method, path) in sso_admin_routes() {
+            let policy = route_policy_for_request(&method, &path)
+                .unwrap_or_else(|| panic!("{method} {path} has no policy"));
+            assert_eq!(policy.action, PolicyAction::ManageSso, "{method} {path}");
+        }
+        // The public provider list is not an admin route.
+        assert!(route_policy_for_request(&Method::GET, "/api/v1/auth/sso/providers").is_none());
+    }
+
+    #[tokio::test]
+    async fn sso_admin_routes_allow_only_system_admin_users() {
+        let pool = test_pool().await;
+        let actor_id = Uuid::new_v4();
+        for (method, path) in sso_admin_routes() {
+            let admin = PolicyActor::user(actor_id, "admin".to_string(), true, Vec::new());
+            assert!(
+                enforce_for_route(&pool, &method, &path, Some(admin))
+                    .await
+                    .is_ok(),
+                "admin {method} {path}"
+            );
+
+            let plain = PolicyActor::user(actor_id, "plain".to_string(), false, Vec::new());
+            let team_admin = PolicyActor::user(
+                actor_id,
+                "team-admin".to_string(),
+                false,
+                vec![TEAM_ADMIN_ROLE.to_string()],
+            );
+            let system_client =
+                PolicyActor::system_client(actor_id, "client".to_string(), Vec::new());
+            for actor in [plain, team_admin, system_client] {
+                let result = enforce_for_route(&pool, &method, &path, Some(actor)).await;
+                assert!(
+                    matches!(result, Err(PolicyError::Forbidden(_))),
+                    "{method} {path}: {result:?}"
+                );
+            }
+
+            let anonymous = enforce_for_route(&pool, &method, &path, None).await;
+            assert!(
+                matches!(anonymous, Err(PolicyError::Unauthorized)),
+                "{method} {path}: {anonymous:?}"
+            );
+        }
     }
 }

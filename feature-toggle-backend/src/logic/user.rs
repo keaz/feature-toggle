@@ -47,6 +47,8 @@ pub struct ApiUser {
     pub updated_at: DateTime<Utc>,
     pub last_login: Option<DateTime<Utc>>,
     pub is_temporary_password: bool,
+    /// How the account is managed: `local`, `sso` or `system`.
+    pub auth_source: String,
 }
 
 impl From<crate::database::user::User> for ApiUser {
@@ -63,6 +65,7 @@ impl From<crate::database::user::User> for ApiUser {
             updated_at: u.updated_at,
             last_login: u.last_login,
             is_temporary_password: u.is_temporary_password,
+            auth_source: u.auth_source,
         }
     }
 }
@@ -227,6 +230,7 @@ impl UserLogic for UserLogicImpl {
             updated_at: u.updated_at,
             last_login: u.last_login,
             is_temporary_password: u.is_temporary_password,
+            auth_source: u.auth_source,
         })
     }
 
@@ -244,6 +248,7 @@ impl UserLogic for UserLogicImpl {
             updated_at: u.updated_at,
             last_login: u.last_login,
             is_temporary_password: u.is_temporary_password,
+            auth_source: u.auth_source,
         })
     }
 
@@ -329,6 +334,7 @@ impl UserLogic for UserLogicImpl {
             updated_at: created.updated_at,
             last_login: created.last_login,
             is_temporary_password: created.is_temporary_password,
+            auth_source: created.auth_source,
         })
     }
 
@@ -379,6 +385,7 @@ impl UserLogic for UserLogicImpl {
             updated_at: u.updated_at,
             last_login: u.last_login,
             is_temporary_password: u.is_temporary_password,
+            auth_source: u.auth_source,
         })
     }
 
@@ -452,6 +459,7 @@ impl UserLogic for UserLogicImpl {
             updated_at: updated.updated_at,
             last_login: updated.last_login,
             is_temporary_password: updated.is_temporary_password,
+            auth_source: updated.auth_source,
         })
     }
 
@@ -532,6 +540,9 @@ impl UserLogic for UserLogicImpl {
 
         // Verify user exists
         let _user = self.repository.get_user_by_id(user_uuid).await?;
+        if _user.auth_source == "sso" {
+            return Err(Error::SsoUserNoLocalPassword);
+        }
 
         // Hash the new temporary password
         let salt = SaltString::generate(&mut OsRng);
@@ -713,6 +724,7 @@ impl UserLogic for UserLogicImpl {
                 updated_at: u.updated_at,
                 last_login: u.last_login,
                 is_temporary_password: u.is_temporary_password,
+                auth_source: u.auth_source,
             })
             .collect();
         Ok((mapped, total))

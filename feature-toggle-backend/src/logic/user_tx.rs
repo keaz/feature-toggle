@@ -113,6 +113,7 @@ where
         updated_at: created.updated_at,
         last_login: created.last_login,
         is_temporary_password: created.is_temporary_password,
+        auth_source: created.auth_source,
     })
 }
 
@@ -246,6 +247,7 @@ where
         updated_at: updated.updated_at,
         last_login: updated.last_login,
         is_temporary_password: updated.is_temporary_password,
+        auth_source: updated.auth_source,
     })
 }
 
@@ -400,6 +402,9 @@ where
 {
     let user_uuid = Uuid::try_from(user_id).map_err(|e| Error::InvalidInput(e.to_string()))?;
     let user = repo.get_user_by_id_tx(conn, user_uuid).await?;
+    if user.auth_source == "sso" {
+        return Err(Error::SsoUserNoLocalPassword);
+    }
 
     let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::default();

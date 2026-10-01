@@ -42,6 +42,10 @@ pub enum Error {
     SelfApprovalNotAllowed,
     #[error("At least one enabled administrator must remain")]
     LastAdminRequired,
+    #[error("Assignment is managed by SSO group sync")]
+    SsoManaged,
+    #[error("SSO user has no local password")]
+    SsoUserNoLocalPassword,
 }
 
 pub async fn run() -> std::io::Result<()> {
@@ -261,6 +265,8 @@ pub async fn run() -> std::io::Result<()> {
     // Clone values for use in the HttpServer closure
     let jwt_secret_logic_for_server = jwt_secret_logic.clone();
     let jwt_token_logic_for_server = jwt_token_logic.clone();
+    // Seals SSO client secrets; disabled (saving a secret fails) without FLUXGATE_ENCRYPTION_KEY.
+    let sso_secrets = logic::sso_provider::SsoSecrets::from_env();
 
     HttpServer::new(move || {
         let admin_state = AdminState::new();
@@ -287,6 +293,7 @@ pub async fn run() -> std::io::Result<()> {
             .wrap(AccessLogger)
             .wrap(cors)
             .app_data(web::Data::new(db_pool.clone()))
+            .app_data(web::Data::new(sso_secrets.clone()))
             .app_data(web::Data::new(metric_logic.clone()))
             .app_data(web::Data::new(feature_evaluation_logic.clone()))
             .app_data(web::Data::new(environment_logic.clone()))

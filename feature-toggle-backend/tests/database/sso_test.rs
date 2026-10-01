@@ -994,7 +994,7 @@ async fn test_settings_enforce_sso_round_trip() {
 // -------------------------------------------- manual versus SSO sources
 
 #[tokio::test]
-async fn test_manual_role_replace_leaves_sso_roles_untouched() {
+async fn test_manual_role_replace_keeps_other_sso_roles_and_converts_selected() {
     let pool = init_pg_pool().await;
     let user_id = create_user(&pool, Some("x"), "local").await;
     let roles_tx = role_repository_tx(pool.clone());
@@ -1035,22 +1035,78 @@ async fn test_manual_role_replace_leaves_sso_roles_untouched() {
         ]
     );
 
-    // Selecting the role already held through SSO leaves the SSO row as is.
+    // Selecting the role already held through SSO converts that row to manual.
     roles
         .assign_user_roles(user_id, vec![role(TEAM_ADMIN_ROLE_ID)], None)
         .await
         .unwrap();
     assert_eq!(
         role_sources(&pool, user_id).await,
-        vec![(role(TEAM_ADMIN_ROLE_ID), "sso".to_string())]
+        vec![(role(TEAM_ADMIN_ROLE_ID), "manual".to_string())]
+    );
+    assert!(roles.list_sso_role_ids(user_id).await.unwrap().is_empty());
+
+    // Group sync grants it again, but the manual row wins and stays manual.
+    let mut tx = pool.begin().await.unwrap();
+    roles_tx
+        .add_sso_user_roles_tx(&mut tx, user_id, vec![role(TEAM_ADMIN_ROLE_ID)])
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        role_sources(&pool, user_id).await,
+        vec![(role(TEAM_ADMIN_ROLE_ID), "manual".to_string())]
     );
 
-    // Removing a single role by hand does not remove the SSO row either.
+    // Tx path converts too: re-grant via SSO after clearing, then select by hand.
     roles
         .remove_user_role(user_id, role(TEAM_ADMIN_ROLE_ID))
         .await
         .unwrap();
-    assert_eq!(role_sources(&pool, user_id).await.len(), 1);
+    let mut tx = pool.begin().await.unwrap();
+    roles_tx
+        .add_sso_user_roles_tx(&mut tx, user_id, vec![role(TEAM_ADMIN_ROLE_ID)])
+        .await
+        .unwrap();
+    roles_tx
+        .assign_user_roles_tx(&mut tx, user_id, vec![role(TEAM_ADMIN_ROLE_ID)], None)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        role_sources(&pool, user_id).await,
+        vec![(role(TEAM_ADMIN_ROLE_ID), "manual".to_string())]
+    );
+
+    // Back to an SSO-sourced row for the removal and effective-role checks.
+    roles
+        .remove_user_role(user_id, role(TEAM_ADMIN_ROLE_ID))
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    roles_tx
+        .add_sso_user_roles_tx(&mut tx, user_id, vec![role(TEAM_ADMIN_ROLE_ID)])
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    // Removing an SSO-sourced role by hand is refused and leaves the row alone.
+    let err = roles
+        .remove_user_role(user_id, role(TEAM_ADMIN_ROLE_ID))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::SsoManaged));
+    let mut tx = pool.begin().await.unwrap();
+    let err = roles_tx
+        .remove_user_role_tx(&mut tx, user_id, role(TEAM_ADMIN_ROLE_ID))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::SsoManaged));
+    tx.rollback().await.unwrap();
+    assert_eq!(
+        role_sources(&pool, user_id).await,
+        vec![(role(TEAM_ADMIN_ROLE_ID), "sso".to_string())]
+    );
 
     // The user's effective roles include SSO-sourced ones.
     let effective = roles.get_user_roles(user_id).await.unwrap();
@@ -1116,7 +1172,7 @@ async fn test_sso_role_add_remove_list_respects_source() {
 }
 
 #[tokio::test]
-async fn test_manual_team_replace_leaves_sso_teams_untouched() {
+async fn test_manual_team_replace_keeps_other_sso_teams_and_converts_selected() {
     let pool = init_pg_pool().await;
     let user_id = create_user(&pool, Some("x"), "local").await;
     let (t1, t2, t3) = (
@@ -1150,12 +1206,40 @@ async fn test_manual_team_replace_leaves_sso_teams_untouched() {
     expected.sort();
     assert_eq!(team_sources(&pool, user_id).await, expected);
 
-    // Selecting the team already held through SSO keeps the SSO row and drops the manual one.
-    users.set_user_teams(user_id, vec![t1]).await.unwrap();
+    // Selecting the team already held through SSO converts that row to manual
+    // (duplicates in the request are tolerated).
+    users.set_user_teams(user_id, vec![t1, t1]).await.unwrap();
     assert_eq!(
         team_sources(&pool, user_id).await,
-        vec![(t1, "sso".to_string())]
+        vec![(t1, "manual".to_string())]
     );
+    assert!(users.list_sso_team_ids(user_id).await.unwrap().is_empty());
+
+    // Re-grant through SSO after a clear, then a tx-path manual select converts again.
+    users.set_user_teams(user_id, vec![t2]).await.unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    users_tx
+        .add_sso_user_teams_tx(&mut tx, user_id, vec![t1])
+        .await
+        .unwrap();
+    users_tx
+        .set_user_teams_tx(&mut tx, user_id, vec![t1])
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        team_sources(&pool, user_id).await,
+        vec![(t1, "manual".to_string())]
+    );
+
+    // Restore an SSO-sourced membership for the clear check below.
+    users.set_user_teams(user_id, vec![]).await.unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    users_tx
+        .add_sso_user_teams_tx(&mut tx, user_id, vec![t1])
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
 
     // Empty manual set clears manual rows only.
     users.set_user_teams(user_id, vec![]).await.unwrap();

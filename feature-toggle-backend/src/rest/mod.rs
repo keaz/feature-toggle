@@ -17,6 +17,7 @@ pub mod pipeline;
 pub mod role;
 pub mod rollout_template;
 pub mod serde;
+pub mod sso;
 pub mod stream;
 pub mod system_client;
 pub mod team;
@@ -116,6 +117,10 @@ use crate::rest::rollout_template::{
     RolloutTemplatePreviewResponse, RolloutTemplateResponse, RolloutTemplateVariables,
     RolloutTemplatesResponse,
 };
+use crate::rest::sso::{
+    PublicSsoProviderResponse, SsoGroupMappingInput, SsoGroupMappingResponse, SsoProviderInput,
+    SsoProviderResponse, SsoProviderTestResponse, SsoSettingsBody,
+};
 use crate::rest::system_client::{
     CreateSystemClientRequest, CreateSystemClientTokenRequest, SystemClientListQuery,
     SystemClientResponse, SystemClientTokenResponse, SystemClientTokensResponse,
@@ -125,7 +130,7 @@ use crate::rest::team::{CreateTeamRequest, TeamResponse, UpdateTeamRequest};
 use crate::rest::types::HealthResponse;
 use crate::rest::user::{
     AssignUserRolesRequest, AssignUserTeamsRequest, CreateUserRequest, UpdateUserRequest,
-    UserListQuery, UserResponse, UsersResponse,
+    UserIdentityResponse, UserListQuery, UserResponse, UsersResponse,
 };
 
 #[utoipa::path(
@@ -221,6 +226,17 @@ async fn health() -> impl Responder {
         auth::reset_password,
         auth::set_temporary_password,
         auth::auth_status,
+        sso::list_public_sso_providers,
+        sso::list_sso_providers,
+        sso::create_sso_provider,
+        sso::get_sso_provider,
+        sso::update_sso_provider,
+        sso::delete_sso_provider,
+        sso::test_sso_provider,
+        sso::list_sso_mappings,
+        sso::replace_sso_mappings,
+        sso::get_sso_settings,
+        sso::update_sso_settings,
         jwt_secret::list_jwt_secrets,
         jwt_secret::generate_jwt_secret,
         jwt_secret::deactivate_all_jwt_secrets,
@@ -369,6 +385,7 @@ async fn health() -> impl Responder {
         UpdateTeamRequest,
         UserListQuery,
         UserResponse,
+        UserIdentityResponse,
         UsersResponse,
         CreateUserRequest,
         UpdateUserRequest,
@@ -382,6 +399,13 @@ async fn health() -> impl Responder {
         ResetPasswordRequest,
         SetTemporaryPasswordRequest,
         AuthStatusResponse,
+        SsoProviderResponse,
+        SsoProviderInput,
+        SsoProviderTestResponse,
+        SsoGroupMappingResponse,
+        SsoGroupMappingInput,
+        SsoSettingsBody,
+        PublicSsoProviderResponse,
         JwtSecretResponse,
         StageCriterionResponse,
         VariantAllocationResponse,
@@ -475,6 +499,7 @@ async fn health() -> impl Responder {
         (name = "Teams", description = "Team management"),
         (name = "Users", description = "User management"),
         (name = "Auth", description = "Authentication"),
+        (name = "SSO", description = "Single sign-on provider, group mapping and enforcement administration"),
         (name = "Metrics", description = "Metrics and analytics"),
         (name = "Activity", description = "Activity logs"),
         (name = "Notifications", description = "Notification settings and delivery preferences"),
@@ -493,6 +518,7 @@ fn is_public_operation(path: &str, method: &str) -> bool {
             | ("/api/v1/auth/login", "POST")
             | ("/api/v1/auth/refresh", "POST")
             | ("/api/v1/auth/status", "GET")
+            | ("/api/v1/auth/sso/providers", "GET")
             | ("/api/v1/admins", "POST")
     )
 }
@@ -606,6 +632,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .configure(team::configure)
             .configure(user::configure)
             .configure(auth::configure)
+            .configure(sso::configure)
             .configure(jwt_secret::configure)
             .configure(notification::configure)
             .configure(operational_safety::configure)

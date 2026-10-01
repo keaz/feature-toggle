@@ -61,6 +61,13 @@ pub mod activity_types {
     pub const ROLE_ASSIGNED: &str = "role_assigned";
     pub const ROLE_REVOKED: &str = "role_revoked";
 
+    // SSO activities
+    pub const SSO_PROVIDER_CREATED: &str = "sso_provider_created";
+    pub const SSO_PROVIDER_UPDATED: &str = "sso_provider_updated";
+    pub const SSO_PROVIDER_DELETED: &str = "sso_provider_deleted";
+    pub const SSO_MAPPINGS_UPDATED: &str = "sso_mappings_updated";
+    pub const SSO_SETTINGS_UPDATED: &str = "sso_settings_updated";
+
     // Approval policy activities
     pub const APPROVAL_POLICY_CREATED: &str = "approval_policy_created";
     pub const APPROVAL_POLICY_UPDATED: &str = "approval_policy_updated";
@@ -77,6 +84,8 @@ pub mod entity_types {
     pub const PIPELINE: &str = "pipeline";
     pub const STAGE: &str = "stage";
     pub const ROLE: &str = "role";
+    pub const SSO_PROVIDER: &str = "sso_provider";
+    pub const SSO_SETTINGS: &str = "sso_settings";
 }
 
 /// Log a feature activity

@@ -459,6 +459,7 @@ mod tests {
             updated_at: chrono::Utc::now(),
             last_login: None,
             is_temporary_password: false,
+            auth_source: "local".to_string(),
         }
     }
 
