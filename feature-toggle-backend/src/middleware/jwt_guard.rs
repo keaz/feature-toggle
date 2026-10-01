@@ -655,7 +655,11 @@ where
                                             stored_token.scopes.clone()
                                         };
 
-                                        if !system_client_scope_allowed(
+                                        // System client management routes skip the scope check so
+                                        // the policy below denies them (403 policy_denied, audited).
+                                        if !crate::logic::policy::is_system_client_management_route(
+                                            &path,
+                                        ) && !system_client_scope_allowed(
                                             &effective_scopes,
                                             &method,
                                             &path,
@@ -753,7 +757,9 @@ where
                                         req.extensions_mut().insert(crate::JwtUser {
                                             id: system_client_id,
                                             username: claims.username.clone(),
-                                            is_admin: claims.is_admin,
+                                            // Never trust the claim: tokens issued before system
+                                            // clients lost admin rights still carry `true`.
+                                            is_admin: false,
                                             roles: claims.roles.clone(),
                                             team_id: Some(claim_team_id),
                                             token_hash: token_hash.clone(),
@@ -857,7 +863,8 @@ pub fn create_system_client_jwt_token(
     let claims = Claims {
         sub: system_client_id.to_string(),
         username: username.to_string(),
-        is_admin: true,
+        // System clients are never admins; their access comes from roles and scopes.
+        is_admin: false,
         roles: vec!["Requester".to_string(), "Approver".to_string()],
         exp: timestamp_as_usize(expires_at.timestamp()),
         iat: timestamp_as_usize(now.timestamp()),
@@ -1192,6 +1199,7 @@ mod tests {
         assert_eq!(claims.scopes, vec!["evaluate".to_string()]);
         assert!(claims.roles.contains(&"Requester".to_string()));
         assert!(claims.roles.contains(&"Approver".to_string()));
+        assert!(!claims.is_admin, "system client tokens never carry admin");
     }
 
     #[actix_web::test]
@@ -1848,7 +1856,8 @@ mod tests {
                     web::post().to(|req: actix_web::HttpRequest| async move {
                         let user = req.extensions().get::<crate::JwtUser>().cloned();
                         HttpResponse::Ok().json(serde_json::json!({
-                            "id": user.map(|user| user.id.to_string()),
+                            "id": user.as_ref().map(|user| user.id.to_string()),
+                            "is_admin": user.map(|user| user.is_admin),
                         }))
                     }),
                 ),
@@ -1862,5 +1871,129 @@ mod tests {
         assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
         let body: serde_json::Value = test::read_body_json(resp).await;
         assert_eq!(body["id"], client.id.to_string());
+        // The legacy claim says `is_admin: true`; the guard must not honour it.
+        assert_eq!(body["is_admin"], false);
+    }
+
+    /// Creates a team and a system client, stores a token with `scopes`, and returns
+    /// (team id, system client id, bearer token).
+    async fn system_client_with_token(
+        pool: &sqlx::PgPool,
+        scopes: Vec<String>,
+    ) -> (Uuid, Uuid, String) {
+        use crate::database::system_client::{CreateSystemClient, system_client_repository};
+
+        let team_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO teams (id, name, description) VALUES ($1, $2, 'guard test')")
+            .bind(team_id)
+            .bind(format!("guard-sc-{team_id}"))
+            .execute(pool)
+            .await
+            .expect("insert team");
+        let client = system_client_repository(pool.clone())
+            .create_system_client(
+                team_id,
+                CreateSystemClient {
+                    name: format!("guard-bot-{}", Uuid::new_v4().simple()),
+                    description: None,
+                    enabled: true,
+                    expires_at: Utc::now() + chrono::Duration::days(1),
+                },
+            )
+            .await
+            .expect("create system client");
+        let token = create_system_client_jwt_token(
+            client.id,
+            team_id,
+            "guard-bot",
+            Utc::now() + chrono::Duration::hours(1),
+            scopes.clone(),
+            &test_key(),
+        )
+        .expect("sign token");
+        crate::database::system_client_token::system_client_token_repository(pool.clone())
+            .store_token(
+                client.id,
+                hash_token(&token),
+                "guard".to_string(),
+                scopes,
+                Utc::now() + chrono::Duration::hours(1),
+            )
+            .await
+            .expect("store system client token");
+        (team_id, client.id, token)
+    }
+
+    #[actix_web::test]
+    async fn system_client_token_is_never_admin_and_cannot_manage_system_clients() {
+        let pool = db_pool().await;
+        let scopes = vec![
+            "admin:read".to_string(),
+            "flag:write".to_string(),
+            "evaluate".to_string(),
+        ];
+        let (team_id, client_id, token) = system_client_with_token(&pool, scopes).await;
+
+        let app = test::init_service(
+            App::new()
+                .wrap(JwtGuard::new(
+                    "http://ui".to_string(),
+                    db_secret_logic(),
+                    pool.clone(),
+                ))
+                .route(
+                    "/api/v1/teams/{team_id}/clients",
+                    web::get().to(|req: actix_web::HttpRequest| async move {
+                        let user = req.extensions().get::<crate::JwtUser>().cloned();
+                        HttpResponse::Ok()
+                            .json(serde_json::json!({"is_admin": user.map(|u| u.is_admin)}))
+                    }),
+                )
+                .default_service(web::to(|| async { HttpResponse::Ok().finish() })),
+        )
+        .await;
+
+        // Ordinary team route: allowed, and the request context says "not admin".
+        let req = test::TestRequest::get()
+            .uri(&format!("/api/v1/teams/{team_id}/clients"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["is_admin"], false);
+
+        // Every management route (reads and writes) answers 403 policy_denied.
+        let routes = [
+            ("GET", format!("/api/v1/teams/{team_id}/system-clients")),
+            ("POST", format!("/api/v1/teams/{team_id}/system-clients")),
+            ("GET", format!("/api/v1/system-clients/{client_id}")),
+            ("PATCH", format!("/api/v1/system-clients/{client_id}")),
+            (
+                "POST",
+                format!("/api/v1/system-clients/{client_id}/regenerate-token"),
+            ),
+            ("GET", format!("/api/v1/system-clients/{client_id}/tokens")),
+            ("POST", format!("/api/v1/system-clients/{client_id}/tokens")),
+        ];
+        for (method, uri) in routes {
+            let builder = match method {
+                "GET" => test::TestRequest::get(),
+                "POST" => test::TestRequest::post(),
+                _ => test::TestRequest::patch(),
+            };
+            let req = builder
+                .uri(&uri)
+                .insert_header(("Authorization", format!("Bearer {token}")))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(
+                resp.status(),
+                actix_web::http::StatusCode::FORBIDDEN,
+                "{method} {uri}"
+            );
+            let body: serde_json::Value = test::read_body_json(resp).await;
+            assert_eq!(body["code"], "policy_denied", "{method} {uri}");
+        }
     }
 }

@@ -493,7 +493,7 @@ impl UserRepository for UserRepositoryImpl {
     async fn admin_exists(&self) -> Result<bool, Error> {
         let row = handle_error(
             None,
-            sqlx::query("SELECT EXISTS(SELECT 1 FROM users WHERE is_admin = true AND enabled = true) AS exists")
+            sqlx::query("SELECT EXISTS(SELECT 1 FROM users WHERE is_admin = true AND enabled = true AND id NOT IN (SELECT id FROM system_clients)) AS exists")
                 .fetch_one(&self.pool)
                 .await,
         )?;

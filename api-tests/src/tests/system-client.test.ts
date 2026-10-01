@@ -126,6 +126,20 @@ describe('System Client API', () => {
     expectStatus(response, 403);
   });
 
+  it('denies system client management routes to a system client token', async () => {
+    const list = await tokenClient.get(`/teams/${teamId}/system-clients`);
+    expectStatus(list, 403);
+    expect(list.data.code).toBe('policy_denied');
+
+    const detail = await tokenClient.get(`/system-clients/${systemClientId}`);
+    expectStatus(detail, 403);
+    expect(detail.data.code).toBe('policy_denied');
+
+    const issue = await tokenClient.post(`/system-clients/${systemClientId}/tokens`, {});
+    expectStatus(issue, 403);
+    expect(issue.data.code).toBe('policy_denied');
+  });
+
   it('can request and approve a stage change using system client token', async () => {
     const requestResponse = await tokenClient.post(`/stages/${stageId}/request-change`, {
       request: 'DEPLOYMENT_REQUESTED',
