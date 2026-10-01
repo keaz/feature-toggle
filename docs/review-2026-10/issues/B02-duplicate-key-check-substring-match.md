@@ -62,3 +62,12 @@ The same happens when renaming a flag to `pay` while `payment` exists.
 
 - Neither conflict check calls `get_features` with a key filter.
 - `cargo test -p feature-toggle-backend` and `pnpm --dir api-tests run test:docker` pass.
+
+## Follow-up
+
+Branch `fix/feature-key-uniqueness-rules`.
+
+- Feature key uniqueness is now case-insensitive on every path that sets a key, within a team. The REST create path (`create_feature_tx`) used an exact, case-sensitive check, so `Checkout` could be created next to `checkout`. It now rejects that with `RecordAlreadyExists` (409), like the other duplicate checks.
+- The rule lives in one predicate in `database/feature.rs` (`push_key_conflict_filter`, `lower(f.key) = lower($key)`). `get_features_by_key_ignore_case` uses it, and so does a connection-based check (`ensure_feature_key_available_conn`) used by `create_feature_tx`, the shared `update_feature` (pool and transactional rename), and `restore_feature_snapshot_tx` (version rollback can restore an old key). The connection-based check runs inside the caller's transaction, so it also sees uncommitted rows.
+- Lookups are unchanged: `get_feature_by_key` stays exact and case-sensitive. No migration or DB constraint was added.
+- Not changed: the REST create handler also checks the new key against **pipeline names** (`ensure_feature_key_unique_for_create`, `get_pipelines` with `ILIKE '%key%'`), so creating feature `check` still fails while a pipeline named like `checkout-...` exists. History shows this was copied from the pipeline create validator in commit `8b8f16f` (GraphQL) and ported as-is to REST in `523de85`. It looks unintended and is left for a maintainer decision.

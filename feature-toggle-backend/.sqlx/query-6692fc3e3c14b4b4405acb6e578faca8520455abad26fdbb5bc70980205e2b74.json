@@ -1,0 +1,46 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT control, value, value_type as \"value_type: VariantValueType\"\n           FROM feature_variants\n           WHERE feature_id = $1\n           ORDER BY control",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "control",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "value",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 2,
+        "name": "value_type: VariantValueType",
+        "type_info": {
+          "Custom": {
+            "name": "variant_value_type",
+            "kind": {
+              "Enum": [
+                "string",
+                "number",
+                "boolean",
+                "json"
+              ]
+            }
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "6692fc3e3c14b4b4405acb6e578faca8520455abad26fdbb5bc70980205e2b74"
+}

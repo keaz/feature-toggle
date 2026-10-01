@@ -2427,6 +2427,97 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn create_feature_case_variant_duplicate_returns_conflict() {
+        let pool = test_pool().await;
+        let team_id = insert_team(&pool).await;
+        let env_id = insert_environment(&pool, team_id).await;
+
+        let mut mock_pipeline_logic = MockPipelineLogic::new();
+        mock_pipeline_logic
+            .expect_get_pipelines()
+            .returning(|_, _, _, _| Ok(vec![]));
+
+        let new_env_logic = || {
+            environment_logic(
+                environment_repository(pool.clone()),
+                Box::new(PgActivityLogRepository::new(pool.clone())),
+            )
+        };
+        let feature_logic = feature_logic(
+            feature_repository(pool.clone()),
+            new_env_logic(),
+            Box::new(PgActivityLogRepository::new(pool.clone())),
+            user_repository(pool.clone()),
+        );
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(pool.clone()))
+                .app_data(web::Data::new(
+                    Box::new(PgActivityLogRepository::new(pool.clone()))
+                        as Box<dyn ActivityLogRepository>,
+                ))
+                .app_data(web::Data::new(feature_logic))
+                .app_data(web::Data::new(
+                    Box::new(mock_pipeline_logic) as Box<dyn PipelineLogic>
+                ))
+                .app_data(web::Data::new(feature_repository(pool.clone())))
+                .app_data(web::Data::new(new_env_logic()))
+                .service(web::scope("/api/v1").configure(super::configure)),
+        )
+        .await;
+
+        let create = |key: &str| {
+            test::TestRequest::post()
+                .uri(&format!("/api/v1/teams/{team_id}/features"))
+                .set_json(CreateFeatureRequest {
+                    key: key.to_string(),
+                    description: None,
+                    feature_type: FeatureType::Simple,
+                    enabled: Some(true),
+                    lifecycle_stage: None,
+                    owner: None,
+                    purpose: None,
+                    reference_url: None,
+                    expires_at: None,
+                    cleanup_reason: None,
+                    tags: None,
+                    dependencies: vec![],
+                    relationships: vec![],
+                    stages: vec![CreateFeatureStageRequest {
+                        id: None,
+                        environment_id: env_id.to_string(),
+                        order_index: 0,
+                        position: "{\"x\":0,\"y\":0}".to_string(),
+                        bucketing_key: None,
+                    }],
+                    variants: None,
+                })
+                .to_request()
+        };
+
+        let first = test::call_service(&app, create("checkout")).await.status();
+        let exact = test::call_service(&app, create("checkout")).await.status();
+        let case_variant = test::call_service(&app, create("Checkout")).await.status();
+        let substring = test::call_service(&app, create("check")).await.status();
+
+        sqlx::query("DELETE FROM teams WHERE id = $1")
+            .bind(team_id)
+            .execute(&pool)
+            .await
+            .expect("delete test team");
+
+        assert_eq!(first, StatusCode::CREATED);
+        assert_eq!(exact, StatusCode::CONFLICT);
+        assert_eq!(
+            case_variant,
+            StatusCode::CONFLICT,
+            "a case variant of an existing key must be rejected like an exact duplicate"
+        );
+        assert_eq!(substring, StatusCode::CREATED);
+    }
+
+    #[actix_web::test]
     async fn update_feature_duplicate_name_returns_conflict() {
         let pool = test_pool().await;
         let activity_repo = PgActivityLogRepository::new(pool.clone());

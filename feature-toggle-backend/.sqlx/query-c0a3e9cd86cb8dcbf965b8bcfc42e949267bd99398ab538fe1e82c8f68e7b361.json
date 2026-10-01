@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE features_pipeline_stages SET status = 'NOT_DEPLOYED' WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c0a3e9cd86cb8dcbf965b8bcfc42e949267bd99398ab538fe1e82c8f68e7b361"
+}

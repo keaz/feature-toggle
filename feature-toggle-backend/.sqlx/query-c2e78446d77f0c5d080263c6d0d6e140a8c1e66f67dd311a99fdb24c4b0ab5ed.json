@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO features (id, key, description, feature_type, team_id, created_at, kill_switch_enabled, kill_switch_activated_at, rollback_scheduled_at)\n               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Varchar",
+        "Text",
+        "Text",
+        "Uuid",
+        "Timestamptz",
+        "Bool",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c2e78446d77f0c5d080263c6d0d6e140a8c1e66f67dd311a99fdb24c4b0ab5ed"
+}

@@ -367,6 +367,52 @@ fn parse_snapshot(snapshot: &JsonValue) -> Result<FeatureConfigSnapshot, Error> 
         .map_err(|e| Error::InvalidInput(format!("Invalid feature snapshot: {e}")))
 }
 
+/// Appends the feature-key uniqueness predicate for one team: the key equals
+/// `key` ignoring case, with no substring or LIKE wildcard matching. Every
+/// uniqueness check (create, rename, version restore) uses this predicate so
+/// the rule is the same on all paths. Lookups by key stay exact and
+/// case-sensitive (`get_feature_by_key`).
+fn push_key_conflict_filter(
+    query_builder: &mut sqlx::QueryBuilder<'_, Postgres>,
+    team_id: Uuid,
+    key: String,
+) {
+    query_builder
+        .push(" WHERE f.team_id = ")
+        .push_bind(team_id)
+        .push(" AND lower(f.key) = lower(")
+        .push_bind(key)
+        .push(")");
+}
+
+/// Fails with `RecordAlreadyExists` when another feature in the team already
+/// uses `key`, ignoring case. Runs on the given connection, so inside a
+/// transaction it also sees features written earlier in that transaction.
+async fn ensure_feature_key_available_conn(
+    conn: &mut PgConnection,
+    team_id: Uuid,
+    key: &str,
+    exclude_feature_id: Option<Uuid>,
+) -> Result<(), Error> {
+    let mut query_builder = sqlx::QueryBuilder::new("SELECT EXISTS(SELECT 1 FROM features f");
+    push_key_conflict_filter(&mut query_builder, team_id, key.to_string());
+    if let Some(id) = exclude_feature_id {
+        query_builder.push(" AND f.id <> ").push_bind(id);
+    }
+    query_builder.push(")");
+
+    let result = query_builder
+        .build_query_scalar::<bool>()
+        .fetch_one(&mut *conn)
+        .await;
+    if handle_error(None, result)? {
+        return Err(Error::RecordAlreadyExists(format!(
+            "Feature with key '{key}' already exists"
+        )));
+    }
+    Ok(())
+}
+
 fn diff_json_value(
     path: &str,
     before: &JsonValue,
@@ -1909,6 +1955,18 @@ impl FeatureRepositoryImpl {
     ) -> Result<PgQueryResult, Error> {
         let existing_feature = self.get_feature_by_id_conn(tx, input.id).await?;
 
+        if let Some(new_key) = input.key.as_deref()
+            && new_key != existing_feature.key
+        {
+            ensure_feature_key_available_conn(
+                tx,
+                existing_feature.team_id,
+                new_key,
+                Some(input.id),
+            )
+            .await?;
+        }
+
         let feature_type_str = match input
             .feature_type
             .clone()
@@ -2231,11 +2289,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
         key: String,
     ) -> Result<Vec<Feature>, Error> {
         let mut query_builder = sqlx::QueryBuilder::new(FEATURE_SELECT);
-        query_builder.push(" WHERE f.team_id = ").push_bind(team_id);
-        query_builder
-            .push(" AND lower(f.key) = lower(")
-            .push_bind(key)
-            .push(")");
+        push_key_conflict_filter(&mut query_builder, team_id, key);
         query_builder.push(" ORDER BY f.key");
 
         let result = query_builder
@@ -3511,20 +3565,8 @@ impl FeatureRepositoryTx for FeatureRepositoryImpl {
         conn: &mut PgConnection,
         input: CreateFeature,
     ) -> Result<Uuid, Error> {
-        // Check if feature with same key exists in team
-        let existing = sqlx::query_scalar!(
-            r#"SELECT EXISTS(SELECT 1 FROM features WHERE key = $1 AND team_id = $2) AS exists"#,
-            input.key,
-            input.team_id
-        )
-        .fetch_one(&mut *conn)
-        .await;
-        let exists: Option<bool> = handle_error(None, existing)?;
-        if exists.unwrap_or_default() {
-            return Err(Error::RecordAlreadyExists(
-                "Feature with same key in team".into(),
-            ));
-        }
+        // Reject keys already used in the team, ignoring case.
+        ensure_feature_key_available_conn(conn, input.team_id, &input.key, None).await?;
 
         let id = Uuid::new_v4();
         let feature_type_str = match input.feature_type {
@@ -3874,6 +3916,19 @@ impl FeatureRepositoryTx for FeatureRepositoryImpl {
             return Err(Error::InvalidInput(
                 "Snapshot does not belong to this feature".to_string(),
             ));
+        }
+
+        // Restoring a version can change the key back to an old value, so it
+        // follows the same uniqueness rule as a rename.
+        let current = self.get_feature_by_id_conn(conn, feature_id).await?;
+        if parsed.feature.key != current.key {
+            ensure_feature_key_available_conn(
+                conn,
+                current.team_id,
+                &parsed.feature.key,
+                Some(feature_id),
+            )
+            .await?;
         }
 
         if parsed.feature.lifecycle_stage == "archived" && !archive_confirmation {
