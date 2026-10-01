@@ -2476,6 +2476,114 @@ mod tests {
         assert_eq!(status, StatusCode::CREATED);
     }
 
+    /// B19: a dependency on a non-boolean flag always blocks the dependent, so
+    /// creating one is rejected with 400.
+    #[actix_web::test]
+    async fn create_feature_with_non_boolean_dependency_returns_bad_request() {
+        let pool = test_pool().await;
+        let team_id = insert_team(&pool).await;
+        let env_id = insert_environment(&pool, team_id).await;
+
+        let dependency_id = feature_repository(pool.clone())
+            .create_feature(crate::database::feature::CreateFeature {
+                team_id,
+                key: "theme".to_string(),
+                description: None,
+                feature_type: crate::database::entity::FeatureType::Contextual,
+                lifecycle_stage: "active".to_string(),
+                owner: None,
+                purpose: None,
+                reference_url: None,
+                expires_at: None,
+                cleanup_reason: None,
+                tags: vec![],
+                stages: vec![],
+                dependencies: vec![],
+                variants: Some(vec![(
+                    "dark".to_string(),
+                    serde_json::json!("dark"),
+                    crate::database::entity::VariantValueType::String,
+                    None,
+                )]),
+            })
+            .await
+            .expect("Failed to create dependency");
+
+        let new_env_logic = || {
+            environment_logic(
+                environment_repository(pool.clone()),
+                Box::new(PgActivityLogRepository::new(pool.clone())),
+            )
+        };
+        let feature_logic = feature_logic(
+            feature_repository(pool.clone()),
+            new_env_logic(),
+            Box::new(PgActivityLogRepository::new(pool.clone())),
+            user_repository(pool.clone()),
+        );
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(pool.clone()))
+                .app_data(web::Data::new(
+                    Box::new(PgActivityLogRepository::new(pool.clone()))
+                        as Box<dyn ActivityLogRepository>,
+                ))
+                .app_data(web::Data::new(feature_logic))
+                .app_data(web::Data::new(
+                    Box::new(MockPipelineLogic::new()) as Box<dyn PipelineLogic>
+                ))
+                .app_data(web::Data::new(feature_repository(pool.clone())))
+                .app_data(web::Data::new(new_env_logic()))
+                .service(web::scope("/api/v1").configure(super::configure)),
+        )
+        .await;
+
+        let req = test::TestRequest::post()
+            .uri(&format!("/api/v1/teams/{team_id}/features"))
+            .set_json(CreateFeatureRequest {
+                key: "checkout".to_string(),
+                description: None,
+                feature_type: FeatureType::Simple,
+                enabled: Some(true),
+                lifecycle_stage: None,
+                owner: None,
+                purpose: None,
+                reference_url: None,
+                expires_at: None,
+                cleanup_reason: None,
+                tags: None,
+                dependencies: vec![dependency_id.to_string()],
+                relationships: vec![],
+                stages: vec![CreateFeatureStageRequest {
+                    id: None,
+                    environment_id: env_id.to_string(),
+                    order_index: 0,
+                    position: "{\"x\":0,\"y\":0}".to_string(),
+                    bucketing_key: None,
+                }],
+                variants: None,
+            })
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        let status = resp.status();
+        let body = test::read_body(resp).await;
+
+        sqlx::query("DELETE FROM teams WHERE id = $1")
+            .bind(team_id)
+            .execute(&pool)
+            .await
+            .expect("Failed to delete test team");
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let message = json.to_string();
+        assert!(
+            message.contains("non-boolean") && message.contains("theme"),
+            "unexpected body: {message}"
+        );
+    }
+
     #[actix_web::test]
     async fn create_feature_case_variant_duplicate_returns_conflict() {
         let pool = test_pool().await;

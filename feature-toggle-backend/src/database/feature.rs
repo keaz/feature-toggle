@@ -362,6 +362,29 @@ pub fn snapshot_dependencies(snapshot: &JsonValue) -> Result<Vec<Uuid>, Error> {
     Ok(parsed.dependencies)
 }
 
+/// The feature type and variant values a snapshot would restore. Used to check
+/// that restoring a version does not make a depended-on flag non-boolean.
+pub fn snapshot_type_and_variant_values(
+    snapshot: &JsonValue,
+) -> Result<(FeatureType, Vec<JsonValue>), Error> {
+    let parsed = parse_snapshot(snapshot)?;
+    let feature_type = match parsed.feature.feature_type.as_str() {
+        "Simple" => FeatureType::Simple,
+        "Contextual" => FeatureType::Contextual,
+        other => {
+            return Err(Error::InvalidInput(format!(
+                "Invalid feature snapshot: unknown feature type '{other}'"
+            )));
+        }
+    };
+    let values = parsed
+        .variants
+        .into_iter()
+        .map(|variant| variant.value)
+        .collect();
+    Ok((feature_type, values))
+}
+
 fn parse_snapshot(snapshot: &JsonValue) -> Result<FeatureConfigSnapshot, Error> {
     serde_json::from_value(snapshot.clone())
         .map_err(|e| Error::InvalidInput(format!("Invalid feature snapshot: {e}")))

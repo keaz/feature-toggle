@@ -803,3 +803,57 @@ const GOLDEN_ROOT_VARIANTS: &[(&str, &str)] = &[
     ("3f2c9a10-7b1e-4c55-9d2e-0a8b1c2d3e4f", "v2"),
     ("org-42:user-7", "v1"),
 ];
+
+// ============================================
+// Non-boolean dependencies (B19)
+// ============================================
+
+/// A dependency passes only when it evaluates to the JSON boolean `true`.
+/// A dependency that serves a string (or any other non-boolean) value blocks
+/// its dependents with `DEPENDENCY_EVALUATION_FAILED`. The backend rejects such
+/// configurations on save; this pins the engine side of that contract.
+#[test]
+fn non_boolean_dependency_blocks_dependent() {
+    let string_dependency = mk_feature(
+        "dep-theme",
+        "theme",
+        "Contextual",
+        true,
+        true,
+        vec![stage(
+            "env-a",
+            true,
+            None,
+            vec![criterion(vec![], Some("dark"), 0)],
+        )],
+        vec![
+            variant("dark", json!("dark")),
+            variant("light", json!("light")),
+        ],
+    );
+    let mut dependent = mk_feature(
+        "dep-f",
+        "flag-f",
+        "Simple",
+        true,
+        true,
+        vec![stage("env-a", true, None, vec![])],
+        vec![],
+    );
+    dependent.dependencies = vec![string_dependency.clone()];
+
+    let direct = evaluation_engine::evaluate(
+        &mk_ctx("theme", "env-a", "user123", &[]),
+        &string_dependency,
+    );
+    assert_eq!(direct.value, json!("dark"));
+    assert_eq!(direct.reason, EvaluationReason::TargetingMatch);
+
+    let result =
+        evaluation_engine::evaluate(&mk_ctx("flag-f", "env-a", "user123", &[]), &dependent);
+    assert_eq!(result.value, json!(false));
+    assert_eq!(result.reason, EvaluationReason::Disabled);
+    let block = &result.metadata.expect("dependency block metadata")["dependencyBlock"];
+    assert_eq!(block["dependencyKey"], json!("theme"));
+    assert_eq!(block["code"], json!("DEPENDENCY_EVALUATION_FAILED"));
+}

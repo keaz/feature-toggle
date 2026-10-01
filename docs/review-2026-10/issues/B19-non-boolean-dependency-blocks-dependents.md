@@ -4,7 +4,7 @@
 |---|---|
 | Type | Bug or design gap (**needs maintainer decision**) |
 | Severity | Medium |
-| Status | Reported by a verification agent with a code reference. Confirm intended semantics before changing anything. |
+| Status | Fixed on branch review-followups (option 3: boolean-only dependencies, non-boolean dependencies rejected on save) |
 | Crate | `evaluation-engine` |
 | Behavior change | Yes, if changed |
 | Related | [B13](B13-dependency-bucketing-uses-root-key.md) (same code, do together) |

@@ -117,6 +117,20 @@ A feature can depend on other features. When feature `F` depends on `D`, `F` is 
 
 Dependencies are resolved recursively (a dependency can have its own dependencies), each one bucketed with its own key. Cycles are detected and reported with the `DEPENDENCY_CYCLE_DETECTED` block code.
 
+#### Dependencies must be boolean flags
+
+A dependency passes only when it evaluates to the JSON boolean `true`. Any other value blocks the dependent flag, including the strings, numbers and objects that multivariate flags serve (block code `DEPENDENCY_EVALUATION_FAILED`). Such a dependency would block its dependents for every user who receives a non-boolean value, so the backend rejects it when it is saved.
+
+A flag counts as **non-boolean** when it is a `CONTEXTUAL` feature and at least one of its variants has a stored value that is not `true` or `false`. The stored value decides, not the declared value type, so a variant of type boolean holding the string `"true"` is non-boolean. Every variant counts, not only the ones a criterion currently serves. `SIMPLE` features always serve `true`/`false` and are always boolean, as are contextual features without variants.
+
+The backend returns `400 invalid_input` when:
+
+- a feature is created with, or updated to add, a dependency on a non-boolean flag;
+- a flag that other features depend on is changed to become non-boolean, either by new variant values or by switching it from `SIMPLE` to `CONTEXTUAL` when it has stored non-boolean variants;
+- a version rollback (`POST /api/v1/features/{id}/versions/{version_id}/rollback`) would do either of the above.
+
+Configurations saved before this rule existed keep working: editing a feature without adding a new non-boolean dependency, or editing a flag that was already non-boolean, is not rejected. Those dependencies still block their dependents at evaluation time until they are removed.
+
 ### Rollout safety
 
 Recent backend changes added stronger rollout controls:

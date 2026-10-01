@@ -6,6 +6,7 @@ use crate::database::compound_rules::{
 use crate::database::feature::{
     CreateFeature, CreateFeatureStage, CreateStageCriterion, FeatureRepositoryTx, UpdateFeature,
     diff_entries_to_json, diff_feature_snapshots, snapshot_dependencies, snapshot_feature_key,
+    snapshot_type_and_variant_values,
 };
 use crate::database::variant_allocations::{
     CreateVariantAllocationInput, VariantAllocationsRepositoryTx,
@@ -459,6 +460,13 @@ where
         &dependencies,
     )
     .await?;
+    crate::logic::dependency_graph::ensure_added_dependencies_are_boolean(
+        feature_repo,
+        input.key.as_str(),
+        &[],
+        &dependencies,
+    )
+    .await?;
 
     let db_input = CreateFeature {
         team_id: team_uuid,
@@ -567,6 +575,40 @@ where
         &dependencies,
     )
     .await?;
+    let previous_dependencies = existing_feature
+        .dependencies
+        .iter()
+        .map(|dependency| dependency.depends_on_id)
+        .collect::<Vec<_>>();
+    crate::logic::dependency_graph::ensure_added_dependencies_are_boolean(
+        feature_repo,
+        input.key.as_str(),
+        &previous_dependencies,
+        &dependencies,
+    )
+    .await?;
+    {
+        let new_feature_type = map_api_to_entity_feature_type(input.feature_type);
+        let previous_variants = feature_repo.get_feature_variants(feature_uuid).await?;
+        let was_non_boolean = crate::logic::dependency_graph::is_non_boolean_flag(
+            &existing_feature.feature_type,
+            previous_variants.iter().map(|variant| &variant.value),
+        );
+        let new_variant_values = match &input.variants {
+            Some(variants) => variants.iter().map(|v| &v.value).collect::<Vec<_>>(),
+            None => previous_variants.iter().map(|v| &v.value).collect(),
+        };
+        crate::logic::dependency_graph::ensure_depended_on_flag_stays_boolean(
+            feature_repo,
+            existing_feature.team_id,
+            feature_uuid,
+            input.key.as_str(),
+            was_non_boolean,
+            &new_feature_type,
+            new_variant_values,
+        )
+        .await?;
+    }
 
     let variants = input.variants.map(|v| {
         v.into_iter()
@@ -706,6 +748,37 @@ where
         &dependencies,
     )
     .await?;
+    let previous_dependencies = existing_feature
+        .dependencies
+        .iter()
+        .map(|dependency| dependency.depends_on_id)
+        .collect::<Vec<_>>();
+    crate::logic::dependency_graph::ensure_added_dependencies_are_boolean(
+        feature_repo,
+        target_key.as_str(),
+        &previous_dependencies,
+        &dependencies,
+    )
+    .await?;
+    {
+        let (target_feature_type, target_variant_values) =
+            snapshot_type_and_variant_values(&target_version.snapshot)?;
+        let previous_variants = feature_repo.get_feature_variants(feature_uuid).await?;
+        let was_non_boolean = crate::logic::dependency_graph::is_non_boolean_flag(
+            &existing_feature.feature_type,
+            previous_variants.iter().map(|variant| &variant.value),
+        );
+        crate::logic::dependency_graph::ensure_depended_on_flag_stays_boolean(
+            feature_repo,
+            existing_feature.team_id,
+            feature_uuid,
+            target_key.as_str(),
+            was_non_boolean,
+            &target_feature_type,
+            &target_variant_values,
+        )
+        .await?;
+    }
 
     let restored_feature = feature_repo
         .restore_feature_snapshot_tx(

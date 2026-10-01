@@ -6,6 +6,8 @@ All notable user-visible changes to FluxGate are recorded here.
 
 ### Changed
 
+- **Dependencies on non-boolean flags are rejected (backend).** A dependency passes only when it evaluates to `true`, so a dependency on a contextual flag with string, number or object variant values always blocked its dependents. Creating or updating a feature to add such a dependency, changing a depended-on flag to non-boolean values (or from `SIMPLE` to `CONTEXTUAL` with non-boolean stored variants), and version rollbacks that would do either now return `400 invalid_input`. Evaluation results do not change. Existing configurations are not migrated and stay editable; their non-boolean dependencies keep blocking until removed.
+
 - **Dependencies are now bucketed with their own key (evaluation engine).** When flag `F` depends on flag `D`, the engine used to evaluate `D` inside `F` with `F`'s key in the bucketing hash (`SHA256("F:" + targetingKey)`). It now uses `D`'s own key (`SHA256("D:" + targetingKey)`), so the `D` check inside `F` gives the same result as evaluating `D` directly for the same user. `F`'s own weighted split is no longer correlated with `D`'s split, so all of `F`'s variants are served again.
 
   **Who is affected:** only flags that depend on a flag whose matching criterion is a weighted split with variants of different truthiness (for example a percentage rollout `{off: false, on: true}`). Flags evaluated directly, flags without dependencies, and dependencies without weighted splits keep exactly the same results.

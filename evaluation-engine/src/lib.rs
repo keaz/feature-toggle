@@ -760,6 +760,14 @@ fn evaluate_with_memo(
                 visiting,
                 visiting_set,
             );
+            // Dependency semantics are boolean-only: a dependency passes only
+            // when its value is the JSON boolean `true`. Any other value,
+            // including strings, numbers and objects served by multivariate
+            // flags, blocks the dependent (DEPENDENCY_EVALUATION_FAILED when the
+            // dependency itself matched). The backend therefore rejects, at
+            // create/update/rollback time, dependencies on Contextual flags
+            // whose variants hold non-boolean values (B19); configurations
+            // saved before that rule may still reach this branch.
             if !dep_result.value.as_bool().unwrap_or(false) {
                 let code = dependency_block_code_from_result(&dep_result);
                 let message = match dep_result.error_code {
@@ -871,8 +879,10 @@ fn evaluate_with_memo(
 /// passes the `D` check inside any flag that depends on `D`, and the dependent
 /// flag's own weighted split is independent of `D`'s split.
 ///
-/// A dependency passes only when its value is the JSON boolean `true`; see the
-/// dependency check in `evaluate_with_memo` for how other values are treated.
+/// A dependency passes only when its value is the JSON boolean `true`. A
+/// dependency that serves any other value (a string, number or object from a
+/// multivariate flag, or `false`) blocks the dependent, which then evaluates to
+/// `false` with reason `DISABLED` and a `dependencyBlock` metadata entry.
 pub fn evaluate(
     evaluation_context: &FeatureEvaluationContext,
     feature: &Feature,
