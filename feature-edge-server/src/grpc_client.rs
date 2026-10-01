@@ -22,6 +22,20 @@ pub struct UserAssignment {
     pub variant: Option<String>,
 }
 
+/// Retry delays for direct gRPC calls: `base`, `2*base`, `4*base`, ...
+///
+/// Yields exactly `max_attempts` delays (one per retry after the first call),
+/// each capped at 16x `base_delay_ms`. Replaces tokio-retry's
+/// `ExponentialBackoff::from_millis(base)`, which grows as `base^n`.
+pub(crate) fn backoff(cfg: &crate::config::RetryConfig) -> impl Iterator<Item = Duration> + use<> {
+    let base = cfg.base_delay_ms.max(1);
+    let cap = Duration::from_millis(base.saturating_mul(16));
+    (0..cfg.max_attempts).map(move |i| {
+        let shift = i.min(16) as u32;
+        Duration::from_millis(base.saturating_mul(1u64 << shift)).min(cap)
+    })
+}
+
 fn should_retry_feature_fetch(status: &tonic::Status) -> bool {
     status.code() != tonic::Code::NotFound
 }
@@ -33,11 +47,8 @@ pub async fn fetch_feature_via_grpc(
     client_id: &str,
     client_secret: &str,
 ) -> Result<Option<pb::FeatureFull>, tonic::Status> {
-    use tokio_retry::strategy::ExponentialBackoff;
-
-    // Retry with exponential backoff using config values
-    let retry_strategy = ExponentialBackoff::from_millis(app.retry_config.base_delay_ms)
-        .take(app.retry_config.max_attempts);
+    // Retry with doubling, capped backoff using config values
+    let retry_strategy = backoff(&app.retry_config);
     let action = || async {
         // Clone the client to allow gRPC channel reconnection on retry
         let mut client = {
@@ -85,11 +96,8 @@ async fn fetch_client_info_via_grpc_uncached(
     client_id: &str,
     client_secret: &str,
 ) -> Option<pb::GetClientInfoResponse> {
-    use tokio_retry::strategy::ExponentialBackoff;
-
-    // Retry with exponential backoff using config values
-    let retry_strategy = ExponentialBackoff::from_millis(app.retry_config.base_delay_ms)
-        .take(app.retry_config.max_attempts);
+    // Retry with doubling, capped backoff using config values
+    let retry_strategy = backoff(&app.retry_config);
     let action = || async {
         // Clone the client to allow gRPC channel reconnection on retry
         let mut client = {
@@ -374,6 +382,41 @@ mod tests {
         });
 
         (format!("http://{}", addr), state, handle)
+    }
+
+    fn retry_config(base_delay_ms: u64, max_attempts: usize) -> crate::config::RetryConfig {
+        crate::config::RetryConfig {
+            base_delay_ms,
+            max_attempts,
+            ..crate::config::RetryConfig::default()
+        }
+    }
+
+    #[test]
+    fn backoff_doubles_from_base() {
+        let delays: Vec<Duration> = backoff(&retry_config(500, 3)).collect();
+        assert_eq!(
+            delays,
+            vec![
+                Duration::from_millis(500),
+                Duration::from_millis(1000),
+                Duration::from_millis(2000),
+            ]
+        );
+    }
+
+    #[test]
+    fn backoff_with_zero_attempts_yields_nothing() {
+        assert_eq!(backoff(&retry_config(500, 0)).count(), 0);
+    }
+
+    #[test]
+    fn backoff_stays_at_or_below_cap_for_many_attempts() {
+        let cap = Duration::from_millis(500 * 16);
+        let delays: Vec<Duration> = backoff(&retry_config(500, 100)).collect();
+        assert_eq!(delays.len(), 100, "retry count must equal max_attempts");
+        assert!(delays.iter().all(|d| *d <= cap));
+        assert_eq!(delays.last(), Some(&cap));
     }
 
     #[tokio::test]

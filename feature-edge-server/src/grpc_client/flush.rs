@@ -1,4 +1,4 @@
-use super::{AppState, UserAssignment, assignment_key, pb};
+use super::{AppState, UserAssignment, assignment_key, backoff, pb};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use tokio_retry::Retry;
@@ -216,9 +216,7 @@ pub async fn run_evaluation_flush_task(
                 });
             }
 
-            use tokio_retry::strategy::ExponentialBackoff;
-            let retry_strategy = ExponentialBackoff::from_millis(app.retry_config.base_delay_ms)
-                .take(app.retry_config.max_attempts);
+            let retry_strategy = backoff(&app.retry_config);
             let action = || async {
                 let mut client = {
                     let guard = app.grpc.lock().await;

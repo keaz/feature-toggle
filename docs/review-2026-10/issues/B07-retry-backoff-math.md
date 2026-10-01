@@ -4,7 +4,7 @@
 |---|---|
 | Type | Bug (availability) |
 | Severity | High |
-| Status | Confirmed (code traced, checked against tokio-retry 0.3.0 source) |
+| Status | Fixed on branch fix/b07-retry-backoff |
 | Crate | `feature-edge-server` |
 | Behavior change | Retry waits become short and bounded. Retry count is unchanged. |
 | Related | [B08](B08-retry-permanent-grpc-errors.md) (do together or right after) |

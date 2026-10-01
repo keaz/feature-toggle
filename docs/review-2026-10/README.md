@@ -44,7 +44,7 @@ Review of `feature-toggle-backend/`, `feature-edge-server/` and `evaluation-engi
 | [ ] | [B04](issues/B04-stream-snapshot-deadlock-and-lost-updates.md) | Stream snapshot hangs above 64 features and loses updates | Critical | backend | Minor | — |
 | [ ] | [B05](issues/B05-ofrep-empty-client-secret.md) | OFREP sends an empty client secret, so OFREP never works | Critical | edge | Yes (intended) | — |
 | [ ] | [B06](issues/B06-ofrep-auth-error-status.md) | OFREP returns 502 for bad credentials instead of 401/403 | Low | edge | Yes (OFREP only) | B05 |
-| [ ] | [B07](issues/B07-retry-backoff-math.md) | Retry backoff is base^n (500 ms, 250 s, 34.7 h) | High | edge | Waits only | — |
+| [x] | [B07](issues/B07-retry-backoff-math.md) | Retry backoff is base^n (500 ms, 250 s, 34.7 h) | High | edge | Waits only | — |
 | [ ] | [B08](issues/B08-retry-permanent-grpc-errors.md) | Edge retries permanent gRPC errors | Medium | edge | Fail fast | — |
 | [ ] | [B09](issues/B09-heartbeat-task-leak.md) | Heartbeat task leaks on every reconnect | Medium | edge | No | — |
 | [ ] | [B10](issues/B10-edge-env-overrides-ignored.md) | `EDGE_*` env overrides are silently ignored | High | edge | Yes (env starts applying) | — |
