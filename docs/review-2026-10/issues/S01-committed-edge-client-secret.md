@@ -4,7 +4,7 @@
 |---|---|
 | Type | Security |
 | Severity | High, if the credential is used in any shared or production environment |
-| Status | Confirmed (`git ls-files feature-edge-server/config.toml` lists the file) |
+| Status | Won't fix: maintainer confirmed these are old local test secrets, not live credentials |
 | Crate | `feature-edge-server` (config) |
 | Behavior change | No code change. Needs credential rotation by a human. |
 

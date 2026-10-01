@@ -71,7 +71,7 @@ Review of `feature-toggle-backend/`, `feature-edge-server/` and `evaluation-engi
 
 | Done | ID | Title | Severity | Crate | Behavior change | Depends on |
 |---|---|---|---|---|---|---|
-| [ ] | [S01](issues/S01-committed-edge-client-secret.md) | Live-looking client secret committed in `feature-edge-server/config.toml` | High | edge config | Needs human rotation | B10 (for env-based replacement) |
+| [x] | [S01](issues/S01-committed-edge-client-secret.md) | Live-looking client secret committed in `feature-edge-server/config.toml` | High | edge config | Won't fix (old local test secrets) | B10 (for env-based replacement) |
 
 ## Suggested order
 
