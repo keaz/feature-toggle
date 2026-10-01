@@ -77,10 +77,14 @@ max_capacity = 10000
 
 ## Environment Variable Overrides
 
-All configuration values can be overridden using environment variables with the `EDGE_` prefix. The variable names follow the pattern:
+All configuration values can be overridden using environment variables with the `EDGE_` prefix. A single underscore follows the prefix, and a **double underscore (`__`)** separates a section from its key. Single underscores inside a name are kept as part of the key name.
 
-- Top-level: `EDGE_<KEY>` (e.g., `EDGE_BACKEND_GRPC`, `EDGE_HTTP_ADDR`)
-- Nested sections: `EDGE_<SECTION>_<KEY>` (e.g., `EDGE_GRPC_TIMEOUT_SECS`, `EDGE_FLUSH_ASSIGNMENT_FLUSH_SECS`)
+- Top-level: `EDGE_<KEY>` (e.g., `EDGE_BACKEND_GRPC` sets `backend_grpc`, `EDGE_HTTP_ADDR` sets `http_addr`)
+- Nested sections: `EDGE_<SECTION>__<KEY>` (e.g., `EDGE_GRPC__TIMEOUT_SECS` sets `grpc.timeout_secs`, `EDGE_FLUSH__ASSIGNMENT_FLUSH_SECS` sets `flush.assignment_flush_secs`)
+
+A nested variable written with a single underscore (e.g. `EDGE_GRPC_TIMEOUT_SECS`) does not match any setting and is ignored.
+
+**Deprecated:** `EDGE_GRPC_COMPRESSION` (single underscore) is still accepted for `grpc.compression` and logs a deprecation warning. Use `EDGE_GRPC__COMPRESSION` instead. If both are set, `EDGE_GRPC__COMPRESSION` wins.
 
 ### Examples
 
@@ -95,20 +99,21 @@ export EDGE_HTTP_ADDR="0.0.0.0:9000"
 export EDGE_CLIENT_ID="production-client-id"
 export EDGE_CLIENT_SECRET="production-secret-key"
 
-# Override gRPC settings
-export EDGE_GRPC_TIMEOUT_SECS=15
-export EDGE_GRPC_CONCURRENCY_LIMIT=512
+# Override gRPC settings (note the double underscore after the section)
+export EDGE_GRPC__TIMEOUT_SECS=15
+export EDGE_GRPC__CONCURRENCY_LIMIT=512
+export EDGE_GRPC__COMPRESSION=gzip
 
 # Override flush intervals
-export EDGE_FLUSH_ASSIGNMENT_FLUSH_SECS=5
-export EDGE_FLUSH_EVALUATION_FLUSH_SECS=60
+export EDGE_FLUSH__ASSIGNMENT_FLUSH_SECS=5
+export EDGE_FLUSH__EVALUATION_FLUSH_SECS=60
 
 # Override retry settings
-export EDGE_RETRY_MAX_ATTEMPTS=5
-export EDGE_RETRY_BASE_DELAY_MS=1000
+export EDGE_RETRY__MAX_ATTEMPTS=5
+export EDGE_RETRY__BASE_DELAY_MS=1000
 
 # Override cache settings
-export EDGE_CACHE_MAX_CAPACITY=50000
+export EDGE_CACHE__MAX_CAPACITY=50000
 ```
 
 ## Configuration Precedence
@@ -146,9 +151,9 @@ services:
       EDGE_HTTP_ADDR: "0.0.0.0:8081"
       EDGE_CLIENT_ID: "${CLIENT_ID}"
       EDGE_CLIENT_SECRET: "${CLIENT_SECRET}"
-      EDGE_GRPC_TIMEOUT_SECS: "15"
-      EDGE_FLUSH_ASSIGNMENT_FLUSH_SECS: "5"
-      EDGE_CACHE_MAX_CAPACITY: "20000"
+      EDGE_GRPC__TIMEOUT_SECS: "15"
+      EDGE_FLUSH__ASSIGNMENT_FLUSH_SECS: "5"
+      EDGE_CACHE__MAX_CAPACITY: "20000"
     ports:
       - "8081:8081"
 ```
@@ -336,7 +341,7 @@ Memory usage estimate: Each feature uses approximately 1-5 KB depending on confi
 
 1. **Check variable names**: Ensure they follow the `EDGE_` prefix convention.
 
-2. **Check nesting**: For nested values, use underscores: `EDGE_GRPC_TIMEOUT_SECS`
+2. **Check nesting**: For nested values, separate the section and the key with a double underscore: `EDGE_GRPC__TIMEOUT_SECS`. With a single underscore (`EDGE_GRPC_TIMEOUT_SECS`) the variable matches no setting and is silently ignored.
 
 3. **Check types**: Numeric values should be valid numbers, booleans should be `true` or `false`.
 
