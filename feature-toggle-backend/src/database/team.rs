@@ -127,6 +127,15 @@ impl TeamRepositoryImpl {
     }
 
     async fn delete_team_internal(conn: &mut PgConnection, id: Uuid) -> Result<(), Error> {
+        // sso_group_mappings.target_id is polymorphic (no FK): remove the team's
+        // mappings explicitly so none is left pointing at a deleted team.
+        sqlx::query!(
+            "DELETE FROM sso_group_mappings WHERE target_type = 'team' AND target_id = $1",
+            id
+        )
+        .execute(&mut *conn)
+        .await
+        .map_err(Error::DatabaseError)?;
         let result = sqlx::query!("DELETE FROM teams WHERE id = $1", id)
             .execute(&mut *conn)
             .await;
@@ -171,9 +180,12 @@ impl TeamRepository for TeamRepositoryImpl {
     }
 
     async fn delete_team(&self, id: Uuid) -> Result<(), Error> {
-        let mut conn = self.pool.acquire().await.map_err(Error::DatabaseError)?;
-        Self::get_team_by_id_internal(&mut conn, id).await?;
-        Self::delete_team_internal(&mut conn, id).await
+        // One transaction, so the team and its SSO group mappings go together.
+        let mut tx = self.pool.begin().await.map_err(Error::DatabaseError)?;
+        Self::get_team_by_id_internal(&mut tx, id).await?;
+        Self::delete_team_internal(&mut tx, id).await?;
+        tx.commit().await.map_err(Error::DatabaseError)?;
+        Ok(())
     }
 
     fn clone_box(&self) -> Box<dyn TeamRepository> {

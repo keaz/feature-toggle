@@ -198,9 +198,9 @@ impl SystemClientRepository for SystemClientRepositoryImpl {
         sqlx::query(
             r#"
             INSERT INTO users (
-                id, username, password_hash, first_name, last_name, email, is_admin, enabled, is_temporary_password
+                id, username, password_hash, first_name, last_name, email, is_admin, enabled, is_temporary_password, auth_source
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'system')
             "#,
         )
         .bind(created.id)

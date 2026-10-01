@@ -42,6 +42,12 @@ pub enum Error {
     SelfApprovalNotAllowed,
     #[error("At least one enabled administrator must remain")]
     LastAdminRequired,
+    #[error("Assignment is managed by SSO group sync")]
+    SsoManaged,
+    #[error("SSO user has no local password")]
+    SsoUserNoLocalPassword,
+    #[error("Enforcing SSO requires an enabled local administrator with a password")]
+    EnforceSsoRequiresLocalAdmin,
 }
 
 pub async fn run() -> std::io::Result<()> {
@@ -252,6 +258,8 @@ pub async fn run() -> std::io::Result<()> {
     let token_cleanup_scheduler = scheduler::TokenCleanupScheduler::new(
         database::jwt_token::jwt_token_repository(db_pool.clone()),
         database::refresh_token::refresh_token_repository(db_pool.clone()),
+        database::sso_login_state::sso_login_state_repository(db_pool.clone()),
+        database::sso_login_code::sso_login_code_repository(db_pool.clone()),
         Duration::from_secs(3600),
     );
     tokio::spawn(async move {
@@ -261,6 +269,22 @@ pub async fn run() -> std::io::Result<()> {
     // Clone values for use in the HttpServer closure
     let jwt_secret_logic_for_server = jwt_secret_logic.clone();
     let jwt_token_logic_for_server = jwt_token_logic.clone();
+    // Seals SSO client secrets; disabled (saving a secret fails) without FLUXGATE_ENCRYPTION_KEY.
+    let sso_secrets = logic::sso_provider::SsoSecrets::from_env();
+    // OIDC client shared by all workers so the discovery + JWKS cache is shared too.
+    let oidc_client = logic::oidc_client::OidcClient::new()
+        .map_err(|e| io::Error::other(format!("Failed to create OIDC client: {e}")))?;
+    if cfg.public_base_url.is_none() {
+        log::warn!(
+            "public_base_url is not set: SSO callback URLs are derived from each request's \
+             scheme and host (including Forwarded / X-Forwarded-* headers). Set \
+             public_base_url in production."
+        );
+    }
+    let sso_login_config = rest::sso_auth::SsoLoginConfig {
+        ui_origin: cfg.allowed_origin.clone(),
+        public_base_url: cfg.public_base_url.clone(),
+    };
 
     HttpServer::new(move || {
         let admin_state = AdminState::new();
@@ -287,6 +311,9 @@ pub async fn run() -> std::io::Result<()> {
             .wrap(AccessLogger)
             .wrap(cors)
             .app_data(web::Data::new(db_pool.clone()))
+            .app_data(web::Data::new(sso_secrets.clone()))
+            .app_data(web::Data::new(oidc_client.clone()))
+            .app_data(web::Data::new(sso_login_config.clone()))
             .app_data(web::Data::new(metric_logic.clone()))
             .app_data(web::Data::new(feature_evaluation_logic.clone()))
             .app_data(web::Data::new(environment_logic.clone()))

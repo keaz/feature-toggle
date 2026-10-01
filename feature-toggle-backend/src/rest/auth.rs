@@ -8,14 +8,15 @@ use crate::JwtUser;
 use crate::config::AuthConfig;
 use crate::database::activity_log::ActivityLogRepository;
 use crate::database::role::role_repository_tx;
-use crate::database::user::user_repository_tx;
+use crate::database::sso_settings::sso_settings_repository;
+use crate::database::user::{UserRepositoryTx, user_repository_tx};
 use crate::logic::ActorContext;
 use crate::logic::jwt_token::JwtTokenLogic;
 use crate::logic::jwt_token_tx::{RefreshOutcome, RefreshRejection, refresh_session_in_tx};
-use crate::logic::user::UserLogic;
+use crate::logic::user::{ApiUser, UserLogic};
 use crate::logic::user_tx;
 use crate::rest::error::RestError;
-use crate::rest::user::UserResponse;
+use crate::rest::user::{UserResponse, attach_sso_details};
 
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -104,28 +105,73 @@ fn jwt_user(req: &HttpRequest) -> Result<JwtUser, RestError> {
     responses(
         (status = 200, description = "Login successful", body = LoginResponse),
         (status = 400, description = "Invalid input", body = crate::rest::error::ErrorResponse),
-        (status = 401, description = "Unauthorized", body = crate::rest::error::ErrorResponse)
+        (status = 401, description = "Unauthorized (also for SSO-only users, who have no password)", body = crate::rest::error::ErrorResponse),
+        (status = 403, description = "sso_required: SSO is enforced and the user is not a break-glass admin (system admin not granted by SSO)", body = crate::rest::error::ErrorResponse)
     ),
     security(()),
     tag = "Auth"
 )]
 #[post("/auth/login")]
 pub(crate) async fn login(
+    db_pool: web::Data<sqlx::PgPool>,
     logic: web::Data<Box<dyn JwtTokenLogic>>,
     payload: web::Json<LoginRequest>,
 ) -> Result<impl Responder, RestError> {
-    let result = logic
-        .login_user(payload.username.clone(), payload.password.clone())
+    let user = logic
+        .authenticate(payload.username.clone(), payload.password.clone())
         .await
         .map_err(RestError::from)?;
 
-    Ok(HttpResponse::Ok().json(LoginResponse {
-        user: UserResponse::from(result.user),
+    // Checked only after the password matched: a wrong password still gets the
+    // normal 401, so the 403 never reveals that an account exists.
+    if sso_settings_repository(db_pool.get_ref().clone())
+        .get_enforce_sso()
+        .await?
+        && !password_login_exempt(db_pool.get_ref(), &user).await?
+    {
+        return Err(RestError::sso_required());
+    }
+
+    let result = logic.issue_session(user).await.map_err(RestError::from)?;
+    Ok(HttpResponse::Ok().json(login_response(db_pool.get_ref(), result).await?))
+}
+
+/// Whether a user may still log in with a password while SSO is enforced.
+///
+/// Only break-glass admins are exempt: system admins whose admin flag was not
+/// granted by SSO group sync (`admin_source` is `'manual'` or NULL). An admin
+/// granted by an SSO mapping must log in through SSO like everyone else, or a
+/// local password would let them skip the IdP and its revocation.
+async fn password_login_exempt(pool: &sqlx::PgPool, user: &ApiUser) -> Result<bool, RestError> {
+    if !user.is_admin {
+        return Ok(false);
+    }
+    let user_id = Uuid::try_from(user.id.clone())
+        .map_err(|e| RestError::internal(format!("Invalid user ID: {e}")))?;
+    let mut conn = pool
+        .acquire()
+        .await
+        .map_err(|e| RestError::internal(format!("Failed to acquire connection: {e}")))?;
+    let (is_admin, admin_source) = user_repository_tx(pool.clone())
+        .get_admin_state_tx(&mut conn, user_id)
+        .await?;
+    Ok(is_admin && admin_source.as_deref() != Some("sso"))
+}
+
+/// The login response body, shared by password login and the SSO exchange.
+pub(crate) async fn login_response(
+    pool: &sqlx::PgPool,
+    result: crate::logic::jwt_token::LoginResult,
+) -> Result<LoginResponse, RestError> {
+    let mut user = UserResponse::from(result.user);
+    attach_sso_details(pool, std::slice::from_mut(&mut user)).await?;
+    Ok(LoginResponse {
+        user,
         token: result.token,
         is_temporary: result.is_temporary,
         refresh_token: result.refresh_token,
         expires_in: result.expires_in,
-    }))
+    })
 }
 
 #[utoipa::path(
@@ -393,6 +439,21 @@ mod tests {
             Ok(self.login_result.clone())
         }
 
+        async fn authenticate(
+            &self,
+            _username: String,
+            _password: String,
+        ) -> Result<crate::logic::user::ApiUser, crate::Error> {
+            Ok(self.login_result.user.clone())
+        }
+
+        async fn issue_session(
+            &self,
+            _user: crate::logic::user::ApiUser,
+        ) -> Result<crate::logic::jwt_token::LoginResult, crate::Error> {
+            Ok(self.login_result.clone())
+        }
+
         async fn logout_user(&self, _user_id: Uuid) -> Result<u64, crate::Error> {
             Ok(1)
         }
@@ -459,6 +520,7 @@ mod tests {
             updated_at: chrono::Utc::now(),
             last_login: None,
             is_temporary_password: false,
+            auth_source: "local".to_string(),
         }
     }
 
@@ -478,9 +540,16 @@ mod tests {
     #[actix_web::test]
     async fn login_returns_token_and_user() {
         let stub_logic = stub_logic();
+        // The admin user skips the enforce-SSO lookup; the SSO details query runs
+        // against the test database.
+        let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL not set");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy(&db_url)
+            .unwrap();
 
         let app = test::init_service(
             App::new()
+                .app_data(web::Data::new(pool))
                 .app_data(web::Data::new(
                     Box::new(stub_logic) as Box<dyn JwtTokenLogic>
                 ))

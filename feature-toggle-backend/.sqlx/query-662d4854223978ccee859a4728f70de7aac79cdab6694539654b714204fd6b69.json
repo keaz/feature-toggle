@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM user_teams WHERE user_id = $1 AND source = 'sso' AND team_id = ANY($2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "662d4854223978ccee859a4728f70de7aac79cdab6694539654b714204fd6b69"
+}

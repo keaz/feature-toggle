@@ -101,7 +101,8 @@ pub async fn revoke_all_tokens_tx(conn: &mut PgConnection) -> Result<u64, Error>
     Ok(result.rows_affected())
 }
 
-/// Stores a session's access and refresh tokens on the given connection after
+/// Stores a session's access and refresh tokens (and sets the user's
+/// `last_login`) on the given connection after
 /// locking its signing secret `FOR SHARE`, so an emergency deactivation either
 /// runs first (the secret is revoked: returns false, nothing stored) or waits
 /// and then revokes these rows too.
@@ -127,6 +128,14 @@ pub async fn store_session_tx(
         session.refresh_expires_at,
     )
     .await?;
+    // A login is recorded only when a session is actually issued.
+    sqlx::query!(
+        "UPDATE users SET last_login = now(), updated_at = now() WHERE id = $1",
+        session.user_id
+    )
+    .execute(&mut *conn)
+    .await
+    .map_err(Error::DatabaseError)?;
     Ok(true)
 }
 

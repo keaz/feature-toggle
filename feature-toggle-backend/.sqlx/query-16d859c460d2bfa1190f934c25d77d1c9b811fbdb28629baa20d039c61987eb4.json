@@ -1,0 +1,104 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT id, slug, display_name, issuer_url, client_id, client_secret_enc, scopes,\n                   groups_claim, allowed_email_domains, jit_provisioning, allow_email_linking,\n                   role_sync_mode, enabled, created_at, updated_at\n            FROM sso_providers ORDER BY slug\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "slug",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "display_name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "issuer_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "client_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "client_secret_enc",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "scopes",
+        "type_info": "TextArray"
+      },
+      {
+        "ordinal": 7,
+        "name": "groups_claim",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "allowed_email_domains",
+        "type_info": "TextArray"
+      },
+      {
+        "ordinal": 9,
+        "name": "jit_provisioning",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 10,
+        "name": "allow_email_linking",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 11,
+        "name": "role_sync_mode",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 12,
+        "name": "enabled",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 13,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 14,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "16d859c460d2bfa1190f934c25d77d1c9b811fbdb28629baa20d039c61987eb4"
+}

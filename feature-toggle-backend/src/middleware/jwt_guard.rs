@@ -325,7 +325,8 @@ where
                 || (path == "/api/v1/metrics/track" && method == actix_web::http::Method::POST)
                 || (path == "/api/v1/auth/login" && method == actix_web::http::Method::POST)
                 || (path == "/api/v1/auth/refresh" && method == actix_web::http::Method::POST)
-                || (path == "/api/v1/auth/status" && method == actix_web::http::Method::GET);
+                || (path == "/api/v1/auth/status" && method == actix_web::http::Method::GET)
+                || super::is_public_sso_path(&path, &method);
 
             if is_public_path {
                 let res = service.call(req).await?;
@@ -2024,7 +2025,11 @@ mod tests {
                     .route("/api/v1/roles", web::post().to(ok))
                     .route("/api/v1/health", web::get().to(ok))
                     .route("/api/v1/auth/login", web::post().to(ok))
-                    .route("/api/v1/auth/refresh", web::post().to(ok)),
+                    .route("/api/v1/auth/refresh", web::post().to(ok))
+                    .route("/api/v1/auth/sso/{slug}/authorize", web::get().to(ok))
+                    .route("/api/v1/auth/sso/{slug}/callback", web::get().to(ok))
+                    .route("/api/v1/auth/sso/{slug}/other", web::get().to(ok))
+                    .route("/api/v1/auth/sso/exchange", web::post().to(ok)),
             )
             .await
         }};
@@ -2095,6 +2100,9 @@ mod tests {
             ("GET", "/api/v1/health"),
             ("POST", "/api/v1/auth/login"),
             ("POST", "/api/v1/auth/refresh"),
+            ("GET", "/api/v1/auth/sso/okta/authorize"),
+            ("GET", "/api/v1/auth/sso/okta/callback?code=c&state=s"),
+            ("POST", "/api/v1/auth/sso/exchange"),
         ] {
             let builder = if method == "GET" {
                 test::TestRequest::get()
@@ -2113,6 +2121,8 @@ mod tests {
             ("POST", "/api/v1/auth%2Flogin"),
             ("POST", "/api/v1/auth/refresh%2F"),
             ("POST", "/api/v1/roles"),
+            ("GET", "/api/v1/auth/sso/okta/other"),
+            ("GET", "/api/v1/auth/sso/okta%2Fx/authorize"),
         ] {
             let builder = if method == "GET" {
                 test::TestRequest::get()

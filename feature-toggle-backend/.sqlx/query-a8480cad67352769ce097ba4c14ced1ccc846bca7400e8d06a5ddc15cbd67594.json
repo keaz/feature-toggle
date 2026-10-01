@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO user_roles (user_id, role_id, assigned_by, source)\n                       VALUES ($1, $2, NULL, 'sso')\n                       ON CONFLICT (user_id, role_id) DO NOTHING\n                       RETURNING role_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "role_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a8480cad67352769ce097ba4c14ced1ccc846bca7400e8d06a5ddc15cbd67594"
+}

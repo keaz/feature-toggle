@@ -113,6 +113,7 @@ where
         updated_at: created.updated_at,
         last_login: created.last_login,
         is_temporary_password: created.is_temporary_password,
+        auth_source: created.auth_source,
     })
 }
 
@@ -122,7 +123,10 @@ where
 /// Locks every enabled admin row until the transaction ends, so two concurrent
 /// updates that would each remove the last two admins are serialized: the second
 /// one re-reads the admin set after the first commits and is rejected.
-async fn ensure_another_admin_remains(conn: &mut PgConnection, user_id: Uuid) -> Result<(), Error> {
+pub(crate) async fn ensure_another_admin_remains(
+    conn: &mut PgConnection,
+    user_id: Uuid,
+) -> Result<(), Error> {
     // Cheap pre-check without locks: only an enabled, non-shadow admin can be "the last admin".
     let is_enabled_admin: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM users \
@@ -246,6 +250,7 @@ where
         updated_at: updated.updated_at,
         last_login: updated.last_login,
         is_temporary_password: updated.is_temporary_password,
+        auth_source: updated.auth_source,
     })
 }
 
@@ -323,7 +328,11 @@ where
     let user_id = Uuid::try_from(id).map_err(|e| Error::InvalidInput(e.to_string()))?;
     let user = repo.get_user_by_id_tx(conn, user_id).await?;
 
-    let parsed_hash = PasswordHash::new(&user.password_hash)
+    let stored_hash = user
+        .password_hash
+        .as_deref()
+        .ok_or_else(|| Error::InvalidInput("Current password is incorrect".to_string()))?;
+    let parsed_hash = PasswordHash::new(stored_hash)
         .map_err(|_| Error::InvalidInput("Stored password hash is invalid".to_string()))?;
     Argon2::default()
         .verify_password(current_password.as_bytes(), &parsed_hash)
@@ -396,6 +405,9 @@ where
 {
     let user_uuid = Uuid::try_from(user_id).map_err(|e| Error::InvalidInput(e.to_string()))?;
     let user = repo.get_user_by_id_tx(conn, user_uuid).await?;
+    if user.auth_source == "sso" {
+        return Err(Error::SsoUserNoLocalPassword);
+    }
 
     let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::default();

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, enabled,\n                       created_at, updated_at, last_login, is_temporary_password\n                FROM users WHERE id = $1",
+  "query": "UPDATE users\n               SET first_name = $1, last_name = $2, email = $3, mobile_number = $4, is_admin = $5, enabled = $6, updated_at = now(),\n                   admin_source = CASE WHEN NOT $5 THEN NULL WHEN is_admin THEN admin_source ELSE 'manual' END\n               WHERE id = $7\n               RETURNING id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, enabled, created_at, updated_at, last_login, is_temporary_password, auth_source",
   "describe": {
     "columns": [
       {
@@ -67,17 +67,28 @@
         "ordinal": 12,
         "name": "is_temporary_password",
         "type_info": "Bool"
+      },
+      {
+        "ordinal": 13,
+        "name": "auth_source",
+        "type_info": "Varchar"
       }
     ],
     "parameters": {
       "Left": [
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Bool",
+        "Bool",
         "Uuid"
       ]
     },
     "nullable": [
       false,
       false,
-      false,
+      true,
       false,
       false,
       false,
@@ -87,8 +98,9 @@
       false,
       false,
       true,
+      false,
       false
     ]
   },
-  "hash": "dbeaf1b1704e820454b0e3a0da7067d70763a76c487757792018595122cb79fd"
+  "hash": "f6509161667b23eed2caf6cce489761d776709365ee0449b41e49c9f680d4842"
 }

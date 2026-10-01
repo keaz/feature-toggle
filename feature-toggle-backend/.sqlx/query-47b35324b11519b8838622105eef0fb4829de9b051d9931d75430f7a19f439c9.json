@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, enabled,\n                       created_at, updated_at, last_login, is_temporary_password\n                FROM users WHERE username = $1",
+  "query": "SELECT id, username, password_hash, first_name, last_name, email, mobile_number, is_admin, enabled,\n                       created_at, updated_at, last_login, is_temporary_password, auth_source\n                FROM users WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -67,17 +67,22 @@
         "ordinal": 12,
         "name": "is_temporary_password",
         "type_info": "Bool"
+      },
+      {
+        "ordinal": 13,
+        "name": "auth_source",
+        "type_info": "Varchar"
       }
     ],
     "parameters": {
       "Left": [
-        "Text"
+        "Uuid"
       ]
     },
     "nullable": [
       false,
       false,
-      false,
+      true,
       false,
       false,
       false,
@@ -87,8 +92,9 @@
       false,
       false,
       true,
+      false,
       false
     ]
   },
-  "hash": "8cb30b7cb83146d43b6695929f4f207e465b08b2a3861a64dd71a70cc91c224b"
+  "hash": "47b35324b11519b8838622105eef0fb4829de9b051d9931d75430f7a19f439c9"
 }

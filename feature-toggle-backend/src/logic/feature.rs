@@ -2237,7 +2237,7 @@ mod test {
             Ok(crate::database::user::User {
                 id: uuid::Uuid::new_v4(),
                 username: "test_user".to_string(),
-                password_hash: "hash".to_string(),
+                password_hash: Some("hash".to_string()),
                 first_name: "Test".to_string(),
                 last_name: "User".to_string(),
                 email: "test@example.com".to_string(),
@@ -2248,6 +2248,7 @@ mod test {
                 updated_at: chrono::Utc::now(),
                 last_login: None,
                 is_temporary_password: false,
+                auth_source: "local".to_string(),
             })
         });
         mock.expect_clone_box()

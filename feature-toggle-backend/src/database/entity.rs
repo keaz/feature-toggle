@@ -492,3 +492,123 @@ pub struct JwtSecret {
     /// Set by emergency deactivation: the secret verifies no token at all.
     pub revoked_at: Option<DateTime<Utc>>,
 }
+
+/// OIDC identity provider configuration. `client_secret_enc` holds the
+/// AES-256-GCM encrypted secret (`base64(nonce || ciphertext)`), never plaintext.
+/// `Debug` shows only whether a secret is stored.
+#[derive(Clone, sqlx::FromRow)]
+pub struct SsoProvider {
+    pub id: Uuid,
+    pub slug: String,
+    pub display_name: String,
+    pub issuer_url: String,
+    pub client_id: String,
+    pub client_secret_enc: Option<String>,
+    pub scopes: Vec<String>,
+    pub groups_claim: String,
+    pub allowed_email_domains: Vec<String>,
+    pub jit_provisioning: bool,
+    pub allow_email_linking: bool,
+    pub role_sync_mode: String,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for SsoProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SsoProvider")
+            .field("id", &self.id)
+            .field("slug", &self.slug)
+            .field("display_name", &self.display_name)
+            .field("issuer_url", &self.issuer_url)
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret_enc",
+                &self.client_secret_enc.as_ref().map(|_| "<redacted>"),
+            )
+            .field("scopes", &self.scopes)
+            .field("groups_claim", &self.groups_claim)
+            .field("allowed_email_domains", &self.allowed_email_domains)
+            .field("jit_provisioning", &self.jit_provisioning)
+            .field("allow_email_linking", &self.allow_email_linking)
+            .field("role_sync_mode", &self.role_sync_mode)
+            .field("enabled", &self.enabled)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
+}
+
+/// A user's account at an identity provider, matched by `(provider_id, subject)`.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct UserIdentity {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub provider_id: Uuid,
+    pub subject: String,
+    pub email: Option<String>,
+    pub last_login: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// A user identity together with the slug of its provider, as shown in the users API.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct UserIdentityWithProvider {
+    pub user_id: Uuid,
+    pub provider_slug: String,
+    pub subject: String,
+    pub email: Option<String>,
+    pub last_login: Option<DateTime<Utc>>,
+}
+
+/// Maps an IdP group value to a FluxGate role, team or the admin flag.
+/// `target_id` is `None` exactly when `target_type` is `admin`.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct SsoGroupMapping {
+    pub id: Uuid,
+    pub provider_id: Uuid,
+    pub group_value: String,
+    pub target_type: String,
+    pub target_id: Option<Uuid>,
+}
+
+/// An authorization request in flight. Single use and short lived. `Debug`
+/// redacts the nonce and PKCE verifier.
+#[derive(Clone, sqlx::FromRow)]
+pub struct SsoLoginState {
+    pub id: Uuid,
+    pub state_hash: String,
+    pub provider_id: Uuid,
+    pub nonce: String,
+    pub pkce_verifier: String,
+    pub redirect_path: Option<String>,
+    pub expires_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for SsoLoginState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SsoLoginState")
+            .field("id", &self.id)
+            .field("provider_id", &self.provider_id)
+            .field("nonce", &"<redacted>")
+            .field("pkce_verifier", &"<redacted>")
+            .field("redirect_path", &self.redirect_path)
+            .field("expires_at", &self.expires_at)
+            .field("created_at", &self.created_at)
+            .finish()
+    }
+}
+
+/// One-time code exchanged by the UI for a FluxGate session. Only its hash is stored.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct SsoLoginCode {
+    pub id: Uuid,
+    pub code_hash: String,
+    pub user_id: Uuid,
+    pub provider_id: Uuid,
+    pub expires_at: DateTime<Utc>,
+    pub used_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}

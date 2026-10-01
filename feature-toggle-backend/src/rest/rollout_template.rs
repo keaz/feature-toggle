@@ -324,8 +324,14 @@ fn rest_error_message(err: &RestError) -> String {
         | RestError::AccountDisabled { message }
         | RestError::SelfApprovalNotAllowed { message }
         | RestError::LastAdminRequired { message }
+        | RestError::SsoManaged { message }
+        | RestError::EnforceSsoRequiresLocalAdmin { message }
+        | RestError::EncryptionKeyMissing { message }
+        | RestError::SsoUserNoLocalPassword { message }
         | RestError::InvalidRefreshToken { message }
         | RestError::RefreshTokenReused { message }
+        | RestError::SsoRequired { message }
+        | RestError::InvalidSsoCode { message }
         | RestError::Forbidden { message, .. }
         | RestError::Internal { message, .. } => message.clone(),
     }

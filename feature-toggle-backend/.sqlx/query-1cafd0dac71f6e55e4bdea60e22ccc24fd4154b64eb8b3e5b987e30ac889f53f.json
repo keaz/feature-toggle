@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO sso_settings (id, enforce_sso) VALUES (TRUE, $1)\n            ON CONFLICT (id) DO UPDATE SET enforce_sso = EXCLUDED.enforce_sso\n            RETURNING enforce_sso\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "enforce_sso",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bool"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "1cafd0dac71f6e55e4bdea60e22ccc24fd4154b64eb8b3e5b987e30ac889f53f"
+}
