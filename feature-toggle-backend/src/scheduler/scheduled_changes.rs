@@ -1,15 +1,20 @@
 use crate::database::activity_log::{ActivityLogRepository, CreateActivityLog};
 use crate::logic::ActorContext;
 use crate::logic::feature::FeatureLogic;
+use crate::logic::policy::PolicyError;
 use crate::model::ID;
 use crate::rest::operational_safety::{
-    ScheduledChangeRow, ScheduledChangeStatus, claim_due_scheduled_changes,
-    mark_scheduled_change_status, scheduled_change_hits_freeze, stage_request_from_status,
+    ScheduledChangeRow, ScheduledChangeStatus, authorize_scheduled_action,
+    claim_due_scheduled_changes, load_scheduled_change_creator, mark_scheduled_change_status,
+    scheduled_change_hits_freeze, stage_request_from_status,
 };
 use log::{info, warn};
 use sqlx::PgPool;
 use std::time::Duration;
 use tokio::time;
+
+/// Failure message stored on a scheduled change whose creator is no longer authorized.
+pub(crate) const CREATOR_NOT_AUTHORIZED: &str = "creator_not_authorized";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ScheduledChangeSchedulerError {
@@ -89,6 +94,27 @@ impl ScheduledChangeScheduler {
         &self,
         change: ScheduledChangeRow,
     ) -> Result<(), ScheduledChangeSchedulerError> {
+        // The creator may have been disabled, deleted, or demoted since scheduling.
+        // Authorization is decided now, from current state, not at creation time.
+        if let Some(reason) = self.creator_authorization_failure(&change).await? {
+            let message = CREATOR_NOT_AUTHORIZED;
+            mark_scheduled_change_status(
+                &self.pool,
+                change.id,
+                ScheduledChangeStatus::Blocked,
+                None,
+                Some(message),
+            )
+            .await?;
+            self.log_execution(
+                &change,
+                "scheduled_change_blocked",
+                &format!("{message}: {reason}"),
+            )
+            .await?;
+            return Ok(());
+        }
+
         if let Some(window) = scheduled_change_hits_freeze(&self.pool, &change).await? {
             let message = format!("Blocked by active freeze window '{}'", window.name);
             mark_scheduled_change_status(
@@ -177,6 +203,31 @@ impl ScheduledChangeScheduler {
         )
         .await?;
         Ok(())
+    }
+
+    /// `Some(reason)` when the creator may no longer run this change.
+    async fn creator_authorization_failure(
+        &self,
+        change: &ScheduledChangeRow,
+    ) -> Result<Option<String>, ScheduledChangeSchedulerError> {
+        let Some(actor) = load_scheduled_change_creator(&self.pool, change).await? else {
+            return Ok(Some("creator_missing_or_disabled".to_string()));
+        };
+        match authorize_scheduled_action(
+            &self.pool,
+            actor,
+            change.team_id,
+            change.feature_id,
+            &change.action,
+            change.requested_status.as_deref(),
+        )
+        .await
+        {
+            Ok(()) => Ok(None),
+            Err(PolicyError::Forbidden(reason)) => Ok(Some(reason)),
+            Err(PolicyError::Unauthorized) => Ok(Some("authentication_required".to_string())),
+            Err(PolicyError::Internal(err)) => Err(ScheduledChangeSchedulerError::Feature(err)),
+        }
     }
 
     fn actor_context(&self, change: &ScheduledChangeRow) -> Option<ActorContext> {

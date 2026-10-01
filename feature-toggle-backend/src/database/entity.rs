@@ -486,4 +486,9 @@ pub struct JwtSecret {
     pub created_at: DateTime<Utc>,
     pub created_by: Option<Uuid>,
     pub expires_at: Option<DateTime<Utc>>,
+    /// When rotation deactivated this secret; tokens it signed stay valid for
+    /// one access-token lifetime after this instant.
+    pub deactivated_at: Option<DateTime<Utc>>,
+    /// Set by emergency deactivation: the secret verifies no token at all.
+    pub revoked_at: Option<DateTime<Utc>>,
 }

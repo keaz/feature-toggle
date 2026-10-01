@@ -209,7 +209,8 @@ impl SystemClientRepository for SystemClientRepositoryImpl {
         .bind(created.name.clone())
         .bind("Automation")
         .bind(shadow_email)
-        .bind(true)
+        // Shadow users are never admins; they keep the Requester/Approver roles only.
+        .bind(false)
         .bind(true)
         .bind(false)
         .execute(&mut *tx)

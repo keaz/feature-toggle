@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE jwt_tokens\n        SET is_revoked = TRUE, revoked_at = CURRENT_TIMESTAMP\n        WHERE is_revoked = FALSE\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "07ceed458294d9419df902c3b06af1241d151a879753ffc903d52d74c2376610"
+}

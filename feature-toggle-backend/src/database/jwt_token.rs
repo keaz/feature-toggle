@@ -1,8 +1,10 @@
 use crate::Error;
+use crate::database::jwt_secret::lock_signing_secret_tx;
+use crate::database::refresh_token::{create_token_tx, revoke_all_user_refresh_tokens_tx};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use mockall::automock;
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -16,9 +18,26 @@ pub struct JwtToken {
     pub is_revoked: bool,
 }
 
+/// The access and refresh token rows of a new session (login).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewSession {
+    pub user_id: Uuid,
+    /// Id of the secret that signed the access token.
+    pub kid: Uuid,
+    pub access_token_hash: String,
+    pub access_expires_at: DateTime<Utc>,
+    pub refresh_family_id: Uuid,
+    pub refresh_token_hash: String,
+    pub refresh_expires_at: DateTime<Utc>,
+}
+
 #[automock]
 #[async_trait]
 pub trait JwtTokenRepository: Send + Sync {
+    /// Stores a new session's access and refresh tokens in one transaction,
+    /// only while the signing secret `session.kid` is active and unrevoked
+    /// (see [`store_session_tx`]). Returns false, storing nothing, otherwise.
+    async fn store_session(&self, session: NewSession) -> Result<bool, Error>;
     async fn store_token(
         &self,
         user_id: Uuid,
@@ -39,6 +58,101 @@ impl Clone for Box<dyn JwtTokenRepository> {
     }
 }
 
+/// Revokes every active session of a user on the given connection, so it can
+/// join a caller's transaction (e.g. when disabling a user or resetting a
+/// password): all access tokens and all refresh tokens.
+///
+/// This is the single place that defines "kill all sessions of a user".
+/// Returns the number of access and refresh tokens revoked.
+pub async fn revoke_all_user_tokens_tx(
+    conn: &mut PgConnection,
+    user_id: Uuid,
+) -> Result<u64, Error> {
+    let result = sqlx::query!(
+        r#"
+        UPDATE jwt_tokens 
+        SET is_revoked = TRUE, revoked_at = CURRENT_TIMESTAMP
+        WHERE user_id = $1 AND is_revoked = FALSE
+        "#,
+        user_id
+    )
+    .execute(&mut *conn)
+    .await
+    .map_err(Error::DatabaseError)?;
+    let refresh_revoked = revoke_all_user_refresh_tokens_tx(conn, user_id).await?;
+
+    Ok(result.rows_affected() + refresh_revoked)
+}
+
+/// Revokes every active access token of every user on the given connection
+/// (emergency JWT secret deactivation). Returns the number revoked.
+pub async fn revoke_all_tokens_tx(conn: &mut PgConnection) -> Result<u64, Error> {
+    let result = sqlx::query!(
+        r#"
+        UPDATE jwt_tokens
+        SET is_revoked = TRUE, revoked_at = CURRENT_TIMESTAMP
+        WHERE is_revoked = FALSE
+        "#
+    )
+    .execute(&mut *conn)
+    .await
+    .map_err(Error::DatabaseError)?;
+
+    Ok(result.rows_affected())
+}
+
+/// Stores a session's access and refresh tokens on the given connection after
+/// locking its signing secret `FOR SHARE`, so an emergency deactivation either
+/// runs first (the secret is revoked: returns false, nothing stored) or waits
+/// and then revokes these rows too.
+pub async fn store_session_tx(
+    conn: &mut PgConnection,
+    session: &NewSession,
+) -> Result<bool, Error> {
+    if !lock_signing_secret_tx(conn, session.kid).await? {
+        return Ok(false);
+    }
+    store_token_tx(
+        conn,
+        session.user_id,
+        session.access_token_hash.clone(),
+        session.access_expires_at,
+    )
+    .await?;
+    create_token_tx(
+        conn,
+        session.user_id,
+        session.refresh_family_id,
+        session.refresh_token_hash.clone(),
+        session.refresh_expires_at,
+    )
+    .await?;
+    Ok(true)
+}
+
+/// Stores an access token hash on the given connection.
+pub async fn store_token_tx(
+    conn: &mut PgConnection,
+    user_id: Uuid,
+    token_hash: String,
+    expires_at: DateTime<Utc>,
+) -> Result<JwtToken, Error> {
+    sqlx::query_as!(
+        JwtToken,
+        r#"
+        INSERT INTO jwt_tokens (user_id, token_hash, expires_at)
+        VALUES ($1, $2, $3)
+        RETURNING id, user_id, token_hash, expires_at, created_at, revoked_at, is_revoked
+        "#,
+        user_id,
+        token_hash,
+        expires_at
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(Error::DatabaseError)
+}
+
 pub fn jwt_token_repository(pool: PgPool) -> Box<dyn JwtTokenRepository> {
     Box::new(JwtTokenRepositoryImpl { pool })
 }
@@ -50,28 +164,24 @@ struct JwtTokenRepositoryImpl {
 
 #[async_trait]
 impl JwtTokenRepository for JwtTokenRepositoryImpl {
+    async fn store_session(&self, session: NewSession) -> Result<bool, Error> {
+        let mut tx = self.pool.begin().await.map_err(Error::DatabaseError)?;
+        if !store_session_tx(&mut tx, &session).await? {
+            tx.rollback().await.map_err(Error::DatabaseError)?;
+            return Ok(false);
+        }
+        tx.commit().await.map_err(Error::DatabaseError)?;
+        Ok(true)
+    }
+
     async fn store_token(
         &self,
         user_id: Uuid,
         token_hash: String,
         expires_at: DateTime<Utc>,
     ) -> Result<JwtToken, Error> {
-        let token = sqlx::query_as!(
-            JwtToken,
-            r#"
-            INSERT INTO jwt_tokens (user_id, token_hash, expires_at)
-            VALUES ($1, $2, $3)
-            RETURNING id, user_id, token_hash, expires_at, created_at, revoked_at, is_revoked
-            "#,
-            user_id,
-            token_hash,
-            expires_at
-        )
-        .fetch_one(&self.pool)
-        .await
-        .map_err(Error::DatabaseError)?;
-
-        Ok(token)
+        let mut conn = self.pool.acquire().await.map_err(Error::DatabaseError)?;
+        store_token_tx(&mut conn, user_id, token_hash, expires_at).await
     }
 
     async fn is_token_valid(&self, token_hash: &str) -> Result<bool, Error> {
@@ -109,19 +219,8 @@ impl JwtTokenRepository for JwtTokenRepositoryImpl {
     }
 
     async fn revoke_all_user_tokens(&self, user_id: Uuid) -> Result<u64, Error> {
-        let result = sqlx::query!(
-            r#"
-            UPDATE jwt_tokens 
-            SET is_revoked = TRUE, revoked_at = CURRENT_TIMESTAMP
-            WHERE user_id = $1 AND is_revoked = FALSE
-            "#,
-            user_id
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(Error::DatabaseError)?;
-
-        Ok(result.rows_affected())
+        let mut conn = self.pool.acquire().await.map_err(Error::DatabaseError)?;
+        revoke_all_user_tokens_tx(&mut conn, user_id).await
     }
 
     async fn cleanup_expired_tokens(&self) -> Result<u64, Error> {
@@ -175,6 +274,7 @@ mod tests {
 
         #[async_trait]
         impl JwtTokenRepository for JwtTokenRepository {
+            async fn store_session(&self, session: NewSession) -> Result<bool, Error>;
             async fn store_token(&self, user_id: Uuid, token_hash: String, expires_at: DateTime<Utc>) -> Result<JwtToken, Error>;
             async fn is_token_valid(&self, token_hash: &str) -> Result<bool, Error>;
             async fn revoke_token(&self, token_hash: &str) -> Result<bool, Error>;

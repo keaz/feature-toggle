@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, secret, is_active, created_at, created_by, expires_at\n               FROM jwt_secrets \n               ORDER BY created_at DESC",
+  "query": "SELECT id, secret, is_active, created_at, created_by, expires_at,\n                      deactivated_at, revoked_at\n               FROM jwt_secrets \n               ORDER BY created_at DESC",
   "describe": {
     "columns": [
       {
@@ -32,6 +32,16 @@
         "ordinal": 5,
         "name": "expires_at",
         "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 6,
+        "name": "deactivated_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "revoked_at",
+        "type_info": "Timestamptz"
       }
     ],
     "parameters": {
@@ -43,8 +53,10 @@
       false,
       false,
       true,
+      true,
+      true,
       true
     ]
   },
-  "hash": "2382a42e824bbeccbad09b33e688bcd107e247f06f51d69bcc1a81829e3e2361"
+  "hash": "b7f27080b06b9e52ef621307e5c1a6b00393ac2151c081ac31da0da490895343"
 }

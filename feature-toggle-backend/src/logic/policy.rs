@@ -71,6 +71,7 @@ pub enum PolicyAction {
     AssignRoles,
     ManageRoles,
     UpdateTeamResource,
+    ManageSystemClients,
 }
 
 impl PolicyAction {
@@ -81,6 +82,7 @@ impl PolicyAction {
             PolicyAction::AssignRoles => "assign_roles",
             PolicyAction::ManageRoles => "manage_roles",
             PolicyAction::UpdateTeamResource => "update_team_resource",
+            PolicyAction::ManageSystemClients => "manage_system_clients",
         }
     }
 }
@@ -95,6 +97,8 @@ pub enum PolicyResource {
     Environment,
     Pipeline,
     Feature,
+    SystemClient,
+    SystemClientToken,
 }
 
 impl PolicyResource {
@@ -108,6 +112,8 @@ impl PolicyResource {
             PolicyResource::Environment => "environment",
             PolicyResource::Pipeline => "pipeline",
             PolicyResource::Feature => "feature",
+            PolicyResource::SystemClient => "system_client",
+            PolicyResource::SystemClientToken => "system_client_token",
         }
     }
 }
@@ -181,15 +187,15 @@ pub async fn enforce_for_route(
         return Ok(());
     };
 
-    let team_id = if route_policy.action == PolicyAction::UpdateTeamResource {
-        match route_policy.resource_id {
+    let team_id = match route_policy.action {
+        PolicyAction::UpdateTeamResource => match route_policy.resource_id {
             Some(resource_id) => {
                 resolve_team_id_for_resource(pool, route_policy.resource, resource_id).await?
             }
             None => None,
-        }
-    } else {
-        None
+        },
+        PolicyAction::ManageSystemClients => resolve_team_id_for_path(pool, path).await?,
+        _ => None,
     };
 
     let policy_request = PolicyRequest {
@@ -202,7 +208,10 @@ pub async fn enforce_for_route(
 
     let decision = evaluate(pool, &policy_request).await?;
     record_policy_decision(pool, &policy_request, decision).await;
+    decision_to_result(decision)
+}
 
+fn decision_to_result(decision: PolicyDecision) -> Result<(), PolicyError> {
     if decision.allowed {
         Ok(())
     } else if decision.unauthorized {
@@ -210,6 +219,39 @@ pub async fn enforce_for_route(
     } else {
         Err(PolicyError::Forbidden(decision.reason.to_string()))
     }
+}
+
+/// The decision `PATCH /features/{id}` and `POST /features/{id}/emergency-*` get from
+/// `enforce_for_route`, for callers that act on a feature outside that route (the
+/// scheduled-change create handler and executor): a user actor that is a system admin,
+/// or a `Team Admin` who belongs to `team_id`. System clients are always denied.
+pub(crate) async fn authorize_feature_update(
+    pool: &sqlx::PgPool,
+    feature_id: Uuid,
+    team_id: Uuid,
+    actor: PolicyActor,
+) -> Result<(), PolicyError> {
+    let policy_request = PolicyRequest {
+        action: PolicyAction::UpdateTeamResource,
+        resource: PolicyResource::Feature,
+        resource_id: Some(feature_id),
+        team_id: Some(team_id),
+        actor: Some(actor),
+    };
+    let decision = evaluate(pool, &policy_request).await?;
+    record_policy_decision(pool, &policy_request, decision).await;
+    decision_to_result(decision)
+}
+
+/// Whether `path` is a system-client management route (any method).
+pub(crate) fn is_system_client_management_route(path: &str) -> bool {
+    matches!(
+        route_policy_for_request(&Method::GET, path),
+        Some(RoutePolicy {
+            action: PolicyAction::ManageSystemClients,
+            ..
+        })
+    )
 }
 
 fn route_policy_for_request(method: &Method, path: &str) -> Option<RoutePolicy> {
@@ -221,6 +263,33 @@ fn route_policy_for_request(method: &Method, path: &str) -> Option<RoutePolicy> 
     let parse_uuid_at = |index: usize| -> Option<Uuid> {
         parts.get(index).and_then(|raw| Uuid::parse_str(raw).ok())
     };
+
+    // System client management: every method and every sub-route, so a route added
+    // later under these prefixes is guarded by default.
+    match parts[2] {
+        "system-clients" => {
+            return Some(RoutePolicy {
+                action: PolicyAction::ManageSystemClients,
+                resource: PolicyResource::SystemClient,
+                resource_id: parse_uuid_at(3),
+            });
+        }
+        "system-client-tokens" => {
+            return Some(RoutePolicy {
+                action: PolicyAction::ManageSystemClients,
+                resource: PolicyResource::SystemClientToken,
+                resource_id: parse_uuid_at(3),
+            });
+        }
+        "teams" if parts.get(4) == Some(&"system-clients") => {
+            return Some(RoutePolicy {
+                action: PolicyAction::ManageSystemClients,
+                resource: PolicyResource::SystemClient,
+                resource_id: None,
+            });
+        }
+        _ => {}
+    }
 
     match (method, parts[2]) {
         (&Method::POST, "admins") if parts.len() == 3 => Some(RoutePolicy {
@@ -316,7 +385,20 @@ async fn evaluate(
             Ok(require_user_admin(policy_request.actor.as_ref()))
         }
         PolicyAction::UpdateTeamResource => {
-            evaluate_team_resource_update(pool, policy_request).await
+            evaluate_team_admin_or_admin(
+                pool,
+                policy_request,
+                "system_client_updates_not_permitted",
+            )
+            .await
+        }
+        PolicyAction::ManageSystemClients => {
+            evaluate_team_admin_or_admin(
+                pool,
+                policy_request,
+                "system_client_management_not_permitted",
+            )
+            .await
         }
     }
 }
@@ -348,18 +430,19 @@ fn require_user_admin(actor: Option<&PolicyActor>) -> PolicyDecision {
     }
 }
 
-async fn evaluate_team_resource_update(
+/// Allows a user actor who is a system admin, or who holds the `Team Admin` role and
+/// is a member of the owning team. System clients are denied with `system_client_reason`.
+async fn evaluate_team_admin_or_admin(
     pool: &sqlx::PgPool,
     policy_request: &PolicyRequest,
+    system_client_reason: &'static str,
 ) -> Result<PolicyDecision, PolicyError> {
     let Some(actor) = policy_request.actor.as_ref() else {
         return Ok(PolicyDecision::unauthorized("authentication_required"));
     };
 
     if actor.kind != ActorKind::User {
-        return Ok(PolicyDecision::forbidden(
-            "system_client_updates_not_permitted",
-        ));
+        return Ok(PolicyDecision::forbidden(system_client_reason));
     }
 
     if actor.is_admin {
@@ -384,11 +467,21 @@ async fn evaluate_team_resource_update(
     }
 }
 
-async fn admin_exists(pool: &sqlx::PgPool) -> Result<bool, PolicyError> {
-    sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM users WHERE is_admin = TRUE)")
-        .fetch_one(pool)
-        .await
-        .map_err(|e| PolicyError::Internal(crate::Error::DatabaseError(e)))
+/// Whether at least one enabled admin account exists. Disabled admins cannot log
+/// in, so they must not count towards the "admin already configured" decision.
+/// System-client shadow users are never human admins and are ignored.
+pub(crate) async fn admin_exists<'e, E>(executor: E) -> Result<bool, PolicyError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM users \
+         WHERE is_admin = TRUE AND enabled = TRUE \
+           AND id NOT IN (SELECT id FROM system_clients))",
+    )
+    .fetch_one(executor)
+    .await
+    .map_err(|e| PolicyError::Internal(crate::Error::DatabaseError(e)))
 }
 
 async fn user_in_team(
@@ -404,6 +497,23 @@ async fn user_in_team(
     .fetch_one(pool)
     .await
     .map_err(|e| PolicyError::Internal(crate::Error::DatabaseError(e)))
+}
+
+/// Owning team of a system-client management route, via the same resolver the JWT
+/// guard uses for system-client token scoping. A malformed id in the path resolves
+/// to no team (non-admins are then denied; admins reach the handler, which 400s/404s).
+async fn resolve_team_id_for_path(
+    pool: &sqlx::PgPool,
+    path: &str,
+) -> Result<Option<Uuid>, PolicyError> {
+    match super::authorization::request_scope_resolver(pool.clone())
+        .resolve_team_id_for_request(path)
+        .await
+    {
+        Ok(team_id) => Ok(team_id),
+        Err(crate::Error::InvalidInput(_)) => Ok(None),
+        Err(err) => Err(PolicyError::Internal(err)),
+    }
 }
 
 async fn resolve_team_id_for_resource(
@@ -708,5 +818,365 @@ mod tests {
         let admin_result =
             enforce_for_route(&pool, &Method::POST, "/api/v1/admins", Some(actor_admin)).await;
         assert!(admin_result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn admin_exists_ignores_disabled_admins() {
+        let pool = test_pool().await;
+        let mut tx = pool.begin().await.expect("begin tx");
+
+        // Disable every admin inside a transaction that is rolled back afterwards.
+        sqlx::query("UPDATE users SET enabled = FALSE WHERE is_admin = TRUE")
+            .execute(&mut *tx)
+            .await
+            .expect("disable admins");
+        assert!(!admin_exists(&mut *tx).await.expect("query admins"));
+
+        // A single enabled admin flips the answer back.
+        let enabled_admin = Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO users (id, username, password_hash, first_name, last_name, email, is_admin, enabled)
+               VALUES ($1, $2, 'x', 'A', 'B', $3, TRUE, TRUE)"#,
+        )
+        .bind(enabled_admin)
+        .bind(format!("policy_admin_exists_{enabled_admin}"))
+        .bind(format!("policy_admin_exists_{enabled_admin}@example.com"))
+        .execute(&mut *tx)
+        .await
+        .expect("insert admin");
+        assert!(admin_exists(&mut *tx).await.expect("query admins"));
+
+        tx.rollback().await.expect("rollback");
+    }
+
+    // ---- system client management routes ----
+
+    async fn insert_system_client(pool: &sqlx::PgPool, team_id: Uuid) -> (Uuid, Uuid) {
+        let system_client_id = Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO system_clients (id, team_id, name, enabled, expires_at)
+               VALUES ($1, $2, $3, TRUE, NOW() + INTERVAL '1 day')"#,
+        )
+        .bind(system_client_id)
+        .bind(team_id)
+        .bind(format!("policy-sc-{system_client_id}"))
+        .execute(pool)
+        .await
+        .expect("Failed to insert system client");
+        let token_id = Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO system_client_tokens (id, system_client_id, token_hash, expires_at)
+               VALUES ($1, $2, $3, NOW() + INTERVAL '1 day')"#,
+        )
+        .bind(token_id)
+        .bind(system_client_id)
+        .bind(format!("policy-token-{token_id}"))
+        .execute(pool)
+        .await
+        .expect("Failed to insert system client token");
+        (system_client_id, token_id)
+    }
+
+    /// Every system client management route (method, path).
+    fn management_routes(
+        team_id: Uuid,
+        system_client_id: Uuid,
+        token_id: Uuid,
+    ) -> Vec<(Method, String)> {
+        vec![
+            (
+                Method::GET,
+                format!("/api/v1/teams/{team_id}/system-clients"),
+            ),
+            (
+                Method::POST,
+                format!("/api/v1/teams/{team_id}/system-clients"),
+            ),
+            (
+                Method::GET,
+                format!("/api/v1/system-clients/{system_client_id}"),
+            ),
+            (
+                Method::PATCH,
+                format!("/api/v1/system-clients/{system_client_id}"),
+            ),
+            (
+                Method::POST,
+                format!("/api/v1/system-clients/{system_client_id}/regenerate-token"),
+            ),
+            (
+                Method::GET,
+                format!("/api/v1/system-clients/{system_client_id}/tokens"),
+            ),
+            (
+                Method::POST,
+                format!("/api/v1/system-clients/{system_client_id}/tokens"),
+            ),
+            (
+                Method::POST,
+                format!("/api/v1/system-client-tokens/{token_id}/revoke"),
+            ),
+        ]
+    }
+
+    fn team_admin_actor(user_id: Uuid) -> PolicyActor {
+        PolicyActor::user(
+            user_id,
+            "team-admin".to_string(),
+            false,
+            vec![TEAM_ADMIN_ROLE.to_string()],
+        )
+    }
+
+    #[test]
+    fn every_system_client_route_and_method_has_a_management_policy() {
+        let id = Uuid::new_v4();
+        for method in [
+            Method::GET,
+            Method::POST,
+            Method::PATCH,
+            Method::PUT,
+            Method::DELETE,
+        ] {
+            for path in [
+                format!("/api/v1/teams/{id}/system-clients"),
+                format!("/api/v1/teams/{id}/system-clients/"),
+                "/api/v1/system-clients".to_string(),
+                format!("/api/v1/system-clients/{id}"),
+                format!("/api/v1/system-clients/{id}/tokens"),
+                format!("/api/v1/system-clients/{id}/regenerate-token"),
+                format!("/api/v1/system-client-tokens/{id}/revoke"),
+            ] {
+                let policy = route_policy_for_request(&method, &path)
+                    .unwrap_or_else(|| panic!("{method} {path} has no policy"));
+                assert_eq!(policy.action, PolicyAction::ManageSystemClients);
+                assert!(is_system_client_management_route(&path));
+            }
+        }
+        // Neighbouring team routes stay out of scope.
+        assert!(!is_system_client_management_route(&format!(
+            "/api/v1/teams/{id}/clients"
+        )));
+    }
+
+    #[tokio::test]
+    async fn denies_non_admin_without_team_admin_role_on_all_system_client_routes() {
+        let pool = test_pool().await;
+        let team_id = insert_team(&pool).await;
+        let (system_client_id, token_id) = insert_system_client(&pool, team_id).await;
+        let user_id = insert_user(&pool, false, "sc_plain").await;
+        assign_user_to_team(&pool, user_id, team_id).await;
+
+        for (method, path) in management_routes(team_id, system_client_id, token_id) {
+            let actor = PolicyActor::user(user_id, "plain".to_string(), false, Vec::new());
+            let result = enforce_for_route(&pool, &method, &path, Some(actor)).await;
+            assert!(
+                matches!(result, Err(PolicyError::Forbidden(_))),
+                "{method} {path}: {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn denies_team_admin_of_another_team_on_all_system_client_routes() {
+        let pool = test_pool().await;
+        let owning_team = insert_team(&pool).await;
+        let other_team = insert_team(&pool).await;
+        let (system_client_id, token_id) = insert_system_client(&pool, owning_team).await;
+        let user_id = insert_user(&pool, false, "sc_other_team").await;
+        let role_id = team_admin_role_id(&pool).await;
+        assign_role(&pool, user_id, role_id).await;
+        assign_user_to_team(&pool, user_id, other_team).await;
+
+        for (method, path) in management_routes(owning_team, system_client_id, token_id) {
+            let result =
+                enforce_for_route(&pool, &method, &path, Some(team_admin_actor(user_id))).await;
+            assert!(
+                matches!(result, Err(PolicyError::Forbidden(_))),
+                "{method} {path}: {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn denies_team_admin_role_without_membership_in_owning_team() {
+        let pool = test_pool().await;
+        let team_id = insert_team(&pool).await;
+        let user_id = insert_user(&pool, false, "sc_no_member").await;
+        let role_id = team_admin_role_id(&pool).await;
+        assign_role(&pool, user_id, role_id).await;
+
+        let result = enforce_for_route(
+            &pool,
+            &Method::GET,
+            &format!("/api/v1/teams/{team_id}/system-clients"),
+            Some(team_admin_actor(user_id)),
+        )
+        .await;
+        assert!(matches!(result, Err(PolicyError::Forbidden(_))));
+    }
+
+    #[tokio::test]
+    async fn allows_team_admin_of_owning_team_on_all_system_client_routes() {
+        let pool = test_pool().await;
+        let team_id = insert_team(&pool).await;
+        let (system_client_id, token_id) = insert_system_client(&pool, team_id).await;
+        let user_id = insert_user(&pool, false, "sc_team_admin").await;
+        let role_id = team_admin_role_id(&pool).await;
+        assign_role(&pool, user_id, role_id).await;
+        assign_user_to_team(&pool, user_id, team_id).await;
+
+        for (method, path) in management_routes(team_id, system_client_id, token_id) {
+            let result =
+                enforce_for_route(&pool, &method, &path, Some(team_admin_actor(user_id))).await;
+            assert!(result.is_ok(), "{method} {path}: {result:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn allows_system_admin_on_system_client_routes_even_for_unknown_resources() {
+        let pool = test_pool().await;
+        let team_id = insert_team(&pool).await;
+        let (system_client_id, token_id) = insert_system_client(&pool, team_id).await;
+        let admin_id = insert_user(&pool, true, "sc_admin").await;
+
+        for (method, path) in management_routes(team_id, system_client_id, token_id)
+            .into_iter()
+            .chain([
+                (
+                    Method::GET,
+                    format!("/api/v1/system-clients/{}", Uuid::new_v4()),
+                ),
+                (Method::GET, "/api/v1/system-clients/not-a-uuid".to_string()),
+            ])
+        {
+            let actor = PolicyActor::user(admin_id, "admin".to_string(), true, Vec::new());
+            let result = enforce_for_route(&pool, &method, &path, Some(actor)).await;
+            assert!(result.is_ok(), "{method} {path}: {result:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn denies_unknown_system_client_resource_for_team_admin() {
+        let pool = test_pool().await;
+        let team_id = insert_team(&pool).await;
+        let user_id = insert_user(&pool, false, "sc_unknown").await;
+        let role_id = team_admin_role_id(&pool).await;
+        assign_role(&pool, user_id, role_id).await;
+        assign_user_to_team(&pool, user_id, team_id).await;
+
+        for path in [
+            format!("/api/v1/system-clients/{}", Uuid::new_v4()),
+            "/api/v1/system-clients/not-a-uuid".to_string(),
+            "/api/v1/system-clients".to_string(),
+        ] {
+            let result =
+                enforce_for_route(&pool, &Method::GET, &path, Some(team_admin_actor(user_id)))
+                    .await;
+            assert!(
+                matches!(result, Err(PolicyError::Forbidden(_))),
+                "{path}: {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn denies_system_client_actor_and_anonymous_on_system_client_routes() {
+        let pool = test_pool().await;
+        let team_id = insert_team(&pool).await;
+        let (system_client_id, token_id) = insert_system_client(&pool, team_id).await;
+        // Even a token whose roles claim Team Admin must be denied.
+        let roles = vec![TEAM_ADMIN_ROLE.to_string()];
+
+        for (method, path) in management_routes(team_id, system_client_id, token_id) {
+            let actor =
+                PolicyActor::system_client(system_client_id, "bot".to_string(), roles.clone());
+            let result = enforce_for_route(&pool, &method, &path, Some(actor)).await;
+            assert!(
+                matches!(result, Err(PolicyError::Forbidden(_))),
+                "{method} {path}: {result:?}"
+            );
+
+            let result = enforce_for_route(&pool, &method, &path, None).await;
+            assert!(
+                matches!(result, Err(PolicyError::Unauthorized)),
+                "{method} {path}: {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn system_client_management_decisions_are_audited() {
+        let pool = test_pool().await;
+        let team_id = insert_team(&pool).await;
+        let user_id = insert_user(&pool, false, "sc_audit").await;
+
+        let result = enforce_for_route(
+            &pool,
+            &Method::POST,
+            &format!("/api/v1/teams/{team_id}/system-clients"),
+            Some(PolicyActor::user(
+                user_id,
+                "audited".to_string(),
+                false,
+                Vec::new(),
+            )),
+        )
+        .await;
+        assert!(matches!(result, Err(PolicyError::Forbidden(_))));
+
+        let (count, reason): (i64, Option<String>) = sqlx::query_as(
+            r#"SELECT COUNT(*), MAX(metadata->>'reason') FROM activity_log
+               WHERE activity_type = 'policy_deny'
+                 AND actor_id = $1
+                 AND metadata->>'action' = 'manage_system_clients'
+                 AND metadata->>'team_id' = $2"#,
+        )
+        .bind(user_id)
+        .bind(team_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("query activity log");
+        assert_eq!(count, 1);
+        assert_eq!(reason.as_deref(), Some("team_admin_role_required"));
+    }
+
+    #[tokio::test]
+    async fn admin_exists_ignores_system_client_shadow_users() {
+        let pool = test_pool().await;
+        let team_id = insert_team(&pool).await;
+        let mut tx = pool.begin().await.expect("begin tx");
+
+        sqlx::query("UPDATE users SET enabled = FALSE WHERE is_admin = TRUE")
+            .execute(&mut *tx)
+            .await
+            .expect("disable admins");
+
+        // A legacy shadow user: enabled, flagged admin, but backed by a system client.
+        let shadow_id = Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO system_clients (id, team_id, name, enabled, expires_at)
+               VALUES ($1, $2, $3, TRUE, NOW() + INTERVAL '1 day')"#,
+        )
+        .bind(shadow_id)
+        .bind(team_id)
+        .bind(format!("policy-shadow-{shadow_id}"))
+        .execute(&mut *tx)
+        .await
+        .expect("insert system client");
+        sqlx::query(
+            r#"INSERT INTO users (id, username, password_hash, first_name, last_name, email, is_admin, enabled)
+               VALUES ($1, $2, 'x', 'A', 'B', $3, TRUE, TRUE)"#,
+        )
+        .bind(shadow_id)
+        .bind(format!("policy_shadow_{shadow_id}"))
+        .bind(format!("policy_shadow_{shadow_id}@example.com"))
+        .execute(&mut *tx)
+        .await
+        .expect("insert shadow user");
+
+        assert!(!admin_exists(&mut *tx).await.expect("query admins"));
+
+        tx.rollback().await.expect("rollback");
     }
 }

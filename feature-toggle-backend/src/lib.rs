@@ -1,6 +1,6 @@
 pub mod broadcast;
 pub mod cluster;
-mod config;
+pub mod config;
 pub mod database;
 pub mod grpc;
 pub mod logic;
@@ -36,6 +36,12 @@ pub enum Error {
     InvalidInput(String),
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
+    #[error("Account is disabled")]
+    AccountDisabled,
+    #[error("Requesters cannot approve their own request")]
+    SelfApprovalNotAllowed,
+    #[error("At least one enabled administrator must remain")]
+    LastAdminRequired,
 }
 
 pub async fn run() -> std::io::Result<()> {
@@ -137,12 +143,14 @@ pub async fn run() -> std::io::Result<()> {
         database::role::role_repository(db_pool.clone()),
         activity_log_repository.clone_box(),
     );
-    let jwt_secret_logic = logic::jwt_secret::jwt_secret_logic(db_pool.clone());
+    let jwt_secret_logic = logic::jwt_secret::jwt_secret_logic(db_pool.clone(), cfg.auth);
     let jwt_token_logic = logic::jwt_token::jwt_token_logic(
         database::jwt_token::jwt_token_repository(db_pool.clone()),
+        database::refresh_token::refresh_token_repository(db_pool.clone()),
         user_logic.clone(),
         role_logic.clone(),
         jwt_secret_logic.clone(),
+        cfg.auth,
     );
     let system_client_logic = logic::system_client::system_client_logic(
         database::system_client::system_client_repository(db_pool.clone()),
@@ -240,6 +248,16 @@ pub async fn run() -> std::io::Result<()> {
         scheduled_change_scheduler.start().await;
     });
 
+    // Expired session token cleanup (hourly)
+    let token_cleanup_scheduler = scheduler::TokenCleanupScheduler::new(
+        database::jwt_token::jwt_token_repository(db_pool.clone()),
+        database::refresh_token::refresh_token_repository(db_pool.clone()),
+        Duration::from_secs(3600),
+    );
+    tokio::spawn(async move {
+        token_cleanup_scheduler.start().await;
+    });
+
     // Clone values for use in the HttpServer closure
     let jwt_secret_logic_for_server = jwt_secret_logic.clone();
     let jwt_token_logic_for_server = jwt_token_logic.clone();
@@ -287,6 +305,7 @@ pub async fn run() -> std::io::Result<()> {
             .app_data(web::Data::new(notification_logic.clone_box()))
             .app_data(web::Data::new(jwt_token_logic_for_server.clone()))
             .app_data(web::Data::new(jwt_secret_logic_for_server.clone()))
+            .app_data(web::Data::new(cfg.auth))
             .app_data(web::Data::new(evaluation_events_tx.clone()))
             .app_data(web::Data::new(approval_events_tx.clone()))
             .app_data(web::Data::new(admin_state.clone()))

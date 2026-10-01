@@ -103,12 +103,7 @@ where
         Box::pin(async move {
             // Initialize cache once lazily
             if !state.is_initialized() {
-                if let Ok(exists) = sqlx::query_scalar::<_, bool>(
-                    "SELECT EXISTS(SELECT 1 FROM users WHERE is_admin = TRUE)",
-                )
-                .fetch_one(&pool)
-                .await
-                {
+                if let Ok(exists) = crate::logic::policy::admin_exists(&pool).await {
                     state.set_exists(exists);
                 } else {
                     // On DB error, be conservative: allow the request to proceed
@@ -123,7 +118,7 @@ where
             }
 
             // No admin exists -> allow only admin creation/status checks and preflight OPTIONS
-            let path = req.path().to_string();
+            let path = super::routed_path(&req);
             let method = req.method().clone();
 
             let is_preflight = method == actix_web::http::Method::OPTIONS;
@@ -312,6 +307,35 @@ mod tests {
             resp_post.status(),
             actix_web::http::StatusCode::UNAUTHORIZED
         );
+    }
+
+    #[actix_web::test]
+    async fn blocks_login_and_refresh_when_no_admin() {
+        let pool = test_pool();
+        let state = AdminState::new();
+        state.set_exists(false);
+
+        let app = test::init_service(
+            App::new()
+                .wrap(AdminGuard::new(pool, "http://ui".to_string(), state))
+                .route(
+                    "/api/v1/auth/login",
+                    web::post().to(|| async { HttpResponse::Ok().finish() }),
+                )
+                .route(
+                    "/api/v1/auth/refresh",
+                    web::post().to(|| async { HttpResponse::Ok().finish() }),
+                ),
+        )
+        .await;
+
+        for uri in ["/api/v1/auth/login", "/api/v1/auth/refresh"] {
+            let req = test::TestRequest::post().uri(uri).to_request();
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(resp.status(), actix_web::http::StatusCode::UNAUTHORIZED);
+            let body: serde_json::Value = test::read_body_json(resp).await;
+            assert_eq!(body["error"], "admin_account_missing", "{uri}");
+        }
     }
 
     #[actix_web::test]

@@ -116,16 +116,17 @@ impl UserFlagLogic for UserFlagLogicImpl {
                 Error::NotFound(id) => UserFlagLogicError::NotFound(id),
                 other => UserFlagLogicError::DatabaseError(other),
             })?;
-        if !client.enabled {
-            return Err(UserFlagLogicError::PermissionDenied(
-                "client is disabled".to_string(),
-            ));
-        }
-        if client.api_key != client_secret {
-            return Err(UserFlagLogicError::Unauthenticated(
-                "invalid client_secret".to_string(),
-            ));
-        }
+        // Secret first, then status (see `verify_client_credentials`).
+        crate::logic::client::verify_client_credentials(&client, client_secret).map_err(
+            |rejection| match rejection {
+                crate::logic::client::ClientCredentialRejection::InvalidSecret => {
+                    UserFlagLogicError::Unauthenticated("invalid client_secret".to_string())
+                }
+                crate::logic::client::ClientCredentialRejection::Disabled => {
+                    UserFlagLogicError::PermissionDenied("client is disabled".to_string())
+                }
+            },
+        )?;
         Ok(client.team_id)
     }
 

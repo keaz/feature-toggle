@@ -160,8 +160,11 @@ impl PendingAssignments {
 const CLIENT_INFO_FAILURE_TTL: Duration = Duration::from_secs(30);
 const CLIENT_INFO_FAILURE_CAPACITY: u64 = 10_000;
 
+/// Client authentication results, keyed by client ID and a hash of the
+/// secret (`grpc_client::client_info_cache_key`), so a cached result never
+/// answers for a different secret.
 pub struct ClientInfoCache {
-    // Cache with TTL for client info
+    // Successful authentications, for the configured client TTL.
     cache: moka::future::Cache<String, pb::GetClientInfoResponse>,
     // Permanent auth failures (bad credentials, unknown or disabled client),
     // so repeated bad requests do not reach the backend.
@@ -201,16 +204,18 @@ impl ClientInfoCache {
         self.failures.insert(key, code).await;
     }
 
-    pub async fn get(&self, client_id: &str) -> Option<pb::GetClientInfoResponse> {
-        self.cache.get(client_id).await
+    /// Look up a cached client by its cache key
+    /// (see `grpc_client::client_info_cache_key`).
+    pub async fn get(&self, key: &str) -> Option<pb::GetClientInfoResponse> {
+        self.cache.get(key).await
     }
 
-    pub async fn insert(&self, client_id: String, client_info: pb::GetClientInfoResponse) {
-        self.cache.insert(client_id, client_info).await;
+    pub async fn insert(&self, key: String, client_info: pb::GetClientInfoResponse) {
+        self.cache.insert(key, client_info).await;
     }
 
-    pub async fn invalidate(&self, client_id: &str) {
-        self.cache.invalidate(client_id).await;
+    pub async fn invalidate(&self, key: &str) {
+        self.cache.invalidate(key).await;
     }
 
     /// Get current cache size (number of entries)
@@ -564,6 +569,8 @@ fn setup_logger() -> actix_web::Result<(), Box<dyn std::error::Error>> {
         handlers::OFREPFlagEvaluation,
         handlers::OFREPBulkEvaluationSuccess,
         handlers::OFREPBulkEvaluationFailure,
+        handlers::OFREPAuthErrorResponse,
+        handlers::EdgeErrorResponse,
         handlers::OFREPEventStream,
         handlers::OFREPEventStreamEndpoint
     )),
@@ -655,17 +662,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         App::new()
             .app_data(web::Data::new(state.clone()))
             .service(SwaggerUi::new("/docs/{_:.*}").url("/api-doc/openapi.json", openapi.clone()))
-            .route("/health", web::get().to(handlers::health_handler))
-            .route("/evaluate", web::post().to(handlers::evaluate_handler))
-            // OFREP (OpenFeature Remote Evaluation Protocol) endpoints
-            .route(
-                "/ofrep/v1/evaluate/flags",
-                web::post().to(handlers::ofrep_evaluate_flags_bulk),
-            )
-            .route(
-                "/ofrep/v1/evaluate/flags/{key}",
-                web::post().to(handlers::ofrep_evaluate_flag),
-            )
+            .configure(handlers::configure_routes)
     })
     .bind(http_addr)?
     .run()

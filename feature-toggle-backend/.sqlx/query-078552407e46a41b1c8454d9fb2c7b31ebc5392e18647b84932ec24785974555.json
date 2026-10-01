@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE jwt_secrets SET is_active = false, deactivated_at = now() WHERE is_active = true",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "078552407e46a41b1c8454d9fb2c7b31ebc5392e18647b84932ec24785974555"
+}

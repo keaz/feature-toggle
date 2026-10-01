@@ -10,6 +10,39 @@ use uuid::Uuid;
 #[cfg(test)]
 use mockall::automock;
 
+/// Why a client credential was rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientCredentialRejection {
+    /// The secret does not match the client's API key.
+    InvalidSecret,
+    /// The secret matches, but the client is disabled.
+    Disabled,
+}
+
+/// Verify a client credential: the secret first, then the client status.
+///
+/// Checking the secret first means a caller without the right secret learns
+/// nothing about whether the client is disabled. The comparison runs in
+/// constant time over SHA-256 digests, so neither the content nor the length
+/// of the API key leaks through timing.
+pub fn verify_client_credentials(
+    client: &crate::database::entity::Client,
+    provided_secret: &str,
+) -> Result<(), ClientCredentialRejection> {
+    use sha2::{Digest, Sha256};
+    use subtle::ConstantTimeEq;
+
+    let stored = Sha256::digest(client.api_key.as_bytes());
+    let provided = Sha256::digest(provided_secret.as_bytes());
+    if !bool::from(stored.as_slice().ct_eq(provided.as_slice())) {
+        return Err(ClientCredentialRejection::InvalidSecret);
+    }
+    if !client.enabled {
+        return Err(ClientCredentialRejection::Disabled);
+    }
+    Ok(())
+}
+
 #[cfg_attr(test, automock)]
 #[async_trait::async_trait]
 pub trait ClientLogic: Send + Sync {
@@ -448,6 +481,46 @@ impl ClientLogic for ClientLogicImpl {
 
 #[cfg(test)]
 mod tests {
+    fn credential_client(api_key: &str, enabled: bool) -> crate::database::entity::Client {
+        crate::database::entity::Client {
+            id: Uuid::new_v4(),
+            team_id: Uuid::new_v4(),
+            environment_id: Uuid::new_v4(),
+            name: "client".into(),
+            description: None,
+            enabled,
+            client_type: EntityClientType::Backend,
+            api_key: api_key.into(),
+            web_origins: None,
+        }
+    }
+
+    #[test]
+    fn verify_client_credentials_checks_secret_before_status() {
+        use super::{ClientCredentialRejection, verify_client_credentials};
+
+        let enabled = credential_client("api-key", true);
+        assert_eq!(verify_client_credentials(&enabled, "api-key"), Ok(()));
+        for wrong in ["", "api-ke", "api-key ", "API-KEY", "other"] {
+            assert_eq!(
+                verify_client_credentials(&enabled, wrong),
+                Err(ClientCredentialRejection::InvalidSecret),
+                "{wrong:?}"
+            );
+        }
+
+        // A disabled client is only reported to callers with the right secret.
+        let disabled = credential_client("api-key", false);
+        assert_eq!(
+            verify_client_credentials(&disabled, "wrong"),
+            Err(ClientCredentialRejection::InvalidSecret)
+        );
+        assert_eq!(
+            verify_client_credentials(&disabled, "api-key"),
+            Err(ClientCredentialRejection::Disabled)
+        );
+    }
+
     use super::*;
     use crate::database::activity_log::{ActivityLogRepository, MockActivityLogRepository};
     use crate::database::client::MockClientRepository;

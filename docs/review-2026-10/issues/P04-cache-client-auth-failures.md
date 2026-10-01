@@ -43,3 +43,7 @@ With the mock backend:
 
 - Repeated bad-credential requests within the TTL make no backend call.
 - `cargo test -p feature-edge-server` passes.
+
+## Update (2026-10-01): keyed by secret hash
+
+The failure cache stays (30 s TTL, 10,000 entries, auth codes only, never transient codes). Both the success and the failure cache are now keyed by client ID plus a SHA-256 hash of the secret, so a cached success never answers for a different secret and a rejected secret does not block the correct one. Auth failures are logged at `warn`. See `docs/edge-server-api.md`.

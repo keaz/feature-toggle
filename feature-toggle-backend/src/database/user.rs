@@ -23,6 +23,28 @@ pub struct User {
     pub is_temporary_password: bool,
 }
 
+/// System-client shadow users are machine identities managed through the system
+/// client API. Updating them through the users API (notably `is_admin = true`)
+/// would hand a machine token human privileges, so it is rejected.
+async fn ensure_not_system_client<'e, E>(executor: E, user_id: Uuid) -> Result<(), Error>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    let is_system_client =
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM system_clients WHERE id = $1)")
+            .bind(user_id)
+            .fetch_one(executor)
+            .await
+            .map_err(Error::DatabaseError)?;
+    if is_system_client {
+        return Err(Error::InvalidInput(
+            "system_client_user_immutable: system client identities cannot be updated through the users API; use the system client API"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 pub struct CreateUser {
     pub username: String,
     pub password_hash: String,
@@ -259,6 +281,7 @@ impl UserRepository for UserRepositoryImpl {
 
     async fn update_user(&self, input: UpdateUser) -> Result<User, Error> {
         let existing = self.get_user_by_id(input.id).await?;
+        ensure_not_system_client(&self.pool, input.id).await?;
         let result = sqlx::query!(
             r#"UPDATE users
                SET first_name = $1, last_name = $2, email = $3, mobile_number = $4, is_admin = $5, enabled = $6, updated_at = now()
@@ -493,7 +516,7 @@ impl UserRepository for UserRepositoryImpl {
     async fn admin_exists(&self) -> Result<bool, Error> {
         let row = handle_error(
             None,
-            sqlx::query("SELECT EXISTS(SELECT 1 FROM users WHERE is_admin = true AND enabled = true) AS exists")
+            sqlx::query("SELECT EXISTS(SELECT 1 FROM users WHERE is_admin = true AND enabled = true AND id NOT IN (SELECT id FROM system_clients)) AS exists")
                 .fetch_one(&self.pool)
                 .await,
         )?;
@@ -666,6 +689,7 @@ impl UserRepositoryTx for UserRepositoryImpl {
         input: UpdateUser,
     ) -> Result<User, Error> {
         let existing = Self::get_user_by_id_internal(conn, input.id).await?;
+        ensure_not_system_client(&mut *conn, input.id).await?;
         Self::update_user_internal(conn, input, existing).await
     }
 

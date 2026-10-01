@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT EXISTS (\n            SELECT 1 FROM refresh_tokens\n            WHERE family_id = $1 AND revoked_at IS NULL AND expires_at > now()\n        ) AS \"active!\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "active!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "90b8165115238f3d1f3d112e717cc58e3fe9522bf64cb54efb215613185a7309"
+}

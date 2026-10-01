@@ -347,7 +347,7 @@ impl ApprovalLogicImpl {
             return Ok(None);
         };
 
-        let routing = self.resolve_approval_routing(policy).await?;
+        let routing = self.resolve_approval_routing(policy, None).await?;
         Ok(Some(routing.eligible_approver_ids.len() as i64))
     }
 
@@ -364,9 +364,13 @@ impl ApprovalLogicImpl {
         }
     }
 
+    /// Resolves who may vote on requests under `policy`. `requester_id` is excluded
+    /// from the result: nobody approves their own request, so counting them would let
+    /// a request be created that can never reach its required approvals.
     async fn resolve_approval_routing(
         &self,
         policy: &ApprovalPolicy,
+        requester_id: Option<Uuid>,
     ) -> Result<ApprovalRoutingDecision, Error> {
         let Some(pool) = &self.db_pool else {
             return Ok(ApprovalRoutingDecision {
@@ -396,6 +400,7 @@ impl ApprovalLogicImpl {
                   )
               )
               AND u.enabled = TRUE
+              AND ($5::uuid IS NULL OR u.id <> $5)
               AND EXISTS (
                   SELECT 1
                   FROM user_roles approver_ur
@@ -422,6 +427,7 @@ impl ApprovalLogicImpl {
         .bind(&policy.approver_role_ids)
         .bind(&policy.approver_user_ids)
         .bind(policy.fallback_to_roles)
+        .bind(requester_id)
         .fetch_one(pool)
         .await
         .map_err(Error::DatabaseError)?;
@@ -483,7 +489,14 @@ impl ApprovalLogicImpl {
         request: &ApprovalRequest,
         policy: &ApprovalPolicy,
         approver_id: Uuid,
+        vote: &ApprovalVoteValue,
     ) -> Result<(), Error> {
+        // The requester can reject their own request, but never approve it, and an
+        // admin override does not lift that restriction.
+        if *vote == ApprovalVoteValue::Approve && request.requested_by == approver_id {
+            return Err(Error::SelfApprovalNotAllowed);
+        }
+
         if request.admin_override_enabled
             && policy.allow_admin_override
             && self.user_can_admin_override(approver_id).await?
@@ -503,7 +516,11 @@ impl ApprovalLogicImpl {
         }
 
         if !request.eligible_approver_ids.is_empty() {
-            if request.eligible_approver_ids.contains(&approver_id) {
+            // Routing excludes the requester from the eligible set, but they keep the
+            // right to reject their own request.
+            let rejecting_own_request =
+                *vote == ApprovalVoteValue::Reject && request.requested_by == approver_id;
+            if rejecting_own_request || request.eligible_approver_ids.contains(&approver_id) {
                 return Ok(());
             }
 
@@ -1026,7 +1043,7 @@ impl ApprovalLogicImpl {
             .ok_or(Error::NotFound(request.policy_id))?;
         let team_id = policy.team_id;
 
-        self.ensure_user_can_vote(&request, &policy, approver_id)
+        self.ensure_user_can_vote(&request, &policy, approver_id, &vote)
             .await?;
 
         let updated = self
@@ -1120,7 +1137,7 @@ impl ApprovalLogicImpl {
             .ok_or(Error::NotFound(request.policy_id))?;
         let team_id = policy.team_id;
 
-        self.ensure_user_can_vote(&request, &policy, approver_id)
+        self.ensure_user_can_vote(&request, &policy, approver_id, &vote)
             .await?;
 
         let pool = self
@@ -1348,7 +1365,9 @@ impl ApprovalLogic for ApprovalLogicImpl {
                 Self::add_marker(&mut risk_markers, marker);
             }
         }
-        let routing = self.resolve_approval_routing(&policy).await?;
+        let routing = self
+            .resolve_approval_routing(&policy, Some(requested_by))
+            .await?;
         self.ensure_request_has_eligible_approvers(&policy, &routing)
             .await?;
         let eligible_approver_id_strings = routing

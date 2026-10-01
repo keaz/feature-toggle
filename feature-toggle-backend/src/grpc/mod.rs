@@ -1104,6 +1104,22 @@ impl FeatureEvaluationSvc {
     }
 }
 
+/// Authenticate a fetched client: wrong secret `Unauthenticated`, disabled
+/// client (right secret) `PermissionDenied`.
+#[allow(clippy::result_large_err)]
+fn verify_client_status(
+    client: &crate::database::entity::Client,
+    secret: &str,
+) -> Result<(), Status> {
+    use crate::logic::client::{ClientCredentialRejection, verify_client_credentials};
+    verify_client_credentials(client, secret).map_err(|rejection| match rejection {
+        ClientCredentialRejection::InvalidSecret => {
+            Status::unauthenticated("invalid client_secret")
+        }
+        ClientCredentialRejection::Disabled => Status::permission_denied("client is disabled"),
+    })
+}
+
 #[tonic::async_trait]
 impl FeatureEvaluation for FeatureEvaluationSvc {
     async fn evaluate(
@@ -1133,13 +1149,8 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
             .await
             .map_err(|e| Status::not_found(format!("client not found: {}", e)))?;
 
-        // Validate client secret and status
-        if !client.enabled {
-            return Err(Status::permission_denied("client is disabled"));
-        }
-        if client.api_key != req.client_secret {
-            return Err(Status::unauthenticated("invalid client_secret"));
-        }
+        // Secret first, then status (see `verify_client_credentials`).
+        verify_client_status(&client, &req.client_secret)?;
 
         let team_id = client.team_id;
 
@@ -1216,13 +1227,8 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
             .await
             .map_err(|e| Status::not_found(format!("client not found: {}", e)))?;
 
-        // Validate client secret and status
-        if !client.enabled {
-            return Err(Status::permission_denied("client is disabled"));
-        }
-        if client.api_key != req.client_secret {
-            return Err(Status::unauthenticated("invalid client_secret"));
-        }
+        // Secret first, then status (see `verify_client_credentials`).
+        verify_client_status(&client, &req.client_secret)?;
 
         let team_id = client.team_id;
 
@@ -1277,13 +1283,8 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
             .await
             .map_err(|e| Status::not_found(format!("client not found: {}", e)))?;
 
-        // Validate client secret and status
-        if !client.enabled {
-            return Err(Status::permission_denied("client is disabled"));
-        }
-        if client.api_key != req.client_secret {
-            return Err(Status::unauthenticated("invalid client_secret"));
-        }
+        // Secret first, then status (see `verify_client_credentials`).
+        verify_client_status(&client, &req.client_secret)?;
 
         // Map client type to string
         let client_type_str = match client.client_type {
@@ -1479,12 +1480,8 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
             .get_client_by_id(client_id)
             .await
             .map_err(|e| Status::not_found(format!("client not found: {}", e)))?;
-        if !client.enabled {
-            return Err(Status::permission_denied("client is disabled"));
-        }
-        if client.api_key != subscribe.client_secret {
-            return Err(Status::unauthenticated("invalid client_secret"));
-        }
+        // Secret first, then status (see `verify_client_credentials`).
+        verify_client_status(&client, &subscribe.client_secret)?;
         let team_id = client.team_id;
 
         // Prepare outgoing channel
@@ -1702,12 +1699,8 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
             .await
             .map_err(|e| Status::not_found(format!("client not found: {}", e)))?;
 
-        if !client.enabled {
-            return Err(Status::permission_denied("client is disabled"));
-        }
-        if client.api_key != first_event.client_secret {
-            return Err(Status::unauthenticated("invalid client_secret"));
-        }
+        // Secret first, then status (see `verify_client_credentials`).
+        verify_client_status(&client, &first_event.client_secret)?;
 
         let request_fingerprint = push_evaluation_request_fingerprint(&req).map_err(|e| {
             Status::internal(format!("failed to fingerprint evaluation payload: {e}"))

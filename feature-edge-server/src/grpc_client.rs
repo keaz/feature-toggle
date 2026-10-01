@@ -3,11 +3,12 @@ mod stream;
 
 use crate::AppState;
 use crate::pb;
+use sha2::{Digest, Sha256};
 use std::time::Duration;
 use tokio_retry::RetryIf;
 use tonic::codec::CompressionEncoding;
 use tonic::transport::{Channel, Endpoint};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 pub use flush::{run_evaluation_flush_task, run_flush_task};
 pub use stream::run_stream_task;
@@ -92,6 +93,15 @@ pub async fn fetch_feature_via_grpc(
             info!("Feature '{}' not found in backend", feature_key);
             Ok(None)
         }
+        Err(status) if is_auth_failure(status.code()) => {
+            warn!(
+                "Backend rejected credentials for feature '{}': code={:?} msg={}",
+                feature_key,
+                status.code(),
+                status.message()
+            );
+            Err(status)
+        }
         Err(status) => {
             error!(
                 "gRPC GetFeatureByKey error after retries for feature '{}': code={:?} msg={}",
@@ -133,6 +143,15 @@ async fn fetch_client_info_via_grpc_uncached(
             info!("Successfully fetched client info for: {}", client_id);
             Ok(client_info)
         }
+        Err(e) if is_auth_failure(e.code()) => {
+            warn!(
+                "Backend rejected credentials of client '{}': code={:?} msg={}",
+                client_id,
+                e.code(),
+                e.message()
+            );
+            Err(e)
+        }
         Err(e) => {
             error!(
                 "gRPC GetClientInfo error after retries for client '{}': {}",
@@ -141,17 +160,6 @@ async fn fetch_client_info_via_grpc_uncached(
             Err(e)
         }
     }
-}
-
-/// Client-info failures that cannot change on retry: bad credentials, an
-/// unknown client or a disabled client. Only these are cached; transient
-/// failures always go back to the backend.
-fn is_cacheable_auth_failure(code: tonic::Code) -> bool {
-    use tonic::Code::*;
-    matches!(
-        code,
-        Unauthenticated | InvalidArgument | NotFound | PermissionDenied
-    )
 }
 
 /// Get client info from cache or fetch from backend
@@ -166,19 +174,48 @@ pub async fn get_or_fetch_client_info(
         .ok()
 }
 
+/// Cache key for a client credential: the client ID plus a SHA-256 hash of
+/// the secret. The raw secret is never kept as a key, and a rotated or wrong
+/// secret maps to a different entry.
+pub(crate) fn client_info_cache_key(client_id: &str, client_secret: &str) -> String {
+    let digest = Sha256::digest(client_secret.as_bytes());
+    let mut key = String::with_capacity(client_id.len() + 1 + digest.len() * 2);
+    key.push_str(client_id);
+    key.push(':');
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(&mut key, "{byte:02x}");
+    }
+    key
+}
+
+/// Client-info failures that cannot change on retry: bad credentials, an
+/// unknown client or a disabled client. Only these are cached; transient
+/// failures always go back to the backend. None of them is retried either
+/// (see [`is_transient`]).
+fn is_auth_failure(code: tonic::Code) -> bool {
+    use tonic::Code::*;
+    matches!(
+        code,
+        Unauthenticated | InvalidArgument | NotFound | PermissionDenied
+    )
+}
+
 /// Like [`get_or_fetch_client_info`], but returns the backend status on
 /// failure so callers can tell bad credentials from an unavailable backend.
+///
+/// Successes are cached for the configured client TTL, auth failures for a
+/// short fixed TTL. Both caches are keyed by client ID plus secret hash, so a
+/// wrong secret is never served from a cached success, and a rejected secret
+/// does not block the correct one.
 #[allow(clippy::result_large_err)]
 pub async fn try_get_or_fetch_client_info(
     app: &AppState,
     client_id: &str,
     client_secret: &str,
 ) -> Result<pb::GetClientInfoResponse, tonic::Status> {
-    // Cache entries are scoped by both ID and secret so rotated credentials
-    // cannot reuse stale authorization results.
-    let cache_key = format!("{client_id}:{client_secret}");
+    let cache_key = client_info_cache_key(client_id, client_secret);
 
-    // Check cache first
     if let Some(cached) = app.client_info_cache.get(&cache_key).await {
         return Ok(cached);
     }
@@ -189,12 +226,11 @@ pub async fn try_get_or_fetch_client_info(
         ));
     }
 
-    // Cache miss - fetch from backend
     let client_info = match fetch_client_info_via_grpc_uncached(app, client_id, client_secret).await
     {
         Ok(info) => info,
         Err(status) => {
-            if is_cacheable_auth_failure(status.code()) {
+            if is_auth_failure(status.code()) {
                 app.client_info_cache
                     .insert_failure(cache_key, status.code())
                     .await;
@@ -203,7 +239,6 @@ pub async fn try_get_or_fetch_client_info(
         }
     };
 
-    // Store in cache for future requests
     app.client_info_cache
         .insert(cache_key, client_info.clone())
         .await;
@@ -1685,7 +1720,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn client_info_permanent_auth_failures_are_cached() {
+    async fn client_info_auth_failures_are_cached() {
         for code in [
             tonic::Code::Unauthenticated,
             tonic::Code::InvalidArgument,
@@ -1700,6 +1735,7 @@ mod tests {
                 assert_eq!(result.map_err(|s| s.code()).err(), Some(code));
             }
 
+            // Not retried, and the second request is served from the cache.
             assert_eq!(
                 state.client_info_attempts.load(Ordering::SeqCst),
                 1,
@@ -1707,6 +1743,39 @@ mod tests {
             );
             server.abort();
         }
+    }
+
+    #[tokio::test]
+    async fn client_info_successes_are_cached_per_secret() {
+        let (app, state, server) = app_with_mock_backend().await;
+
+        for _ in 0..2 {
+            try_get_or_fetch_client_info(&app, "client", "secret")
+                .await
+                .expect("mock accepts any secret");
+        }
+        assert_eq!(state.client_info_attempts.load(Ordering::SeqCst), 1);
+
+        // Same client ID, other secret: not served from the cache.
+        script_errors(&state, &[tonic::Code::Unauthenticated]);
+        let result = try_get_or_fetch_client_info(&app, "client", "other-secret").await;
+        assert_eq!(
+            result.map_err(|s| s.code()).err(),
+            Some(tonic::Code::Unauthenticated)
+        );
+        assert_eq!(state.client_info_attempts.load(Ordering::SeqCst), 2);
+        server.abort();
+    }
+
+    #[test]
+    fn client_info_cache_key_hashes_the_secret() {
+        let key = client_info_cache_key("client-1", "s3cret-value");
+        assert!(key.starts_with("client-1:"), "{key}");
+        assert!(!key.contains("s3cret-value"), "{key}");
+        assert_eq!(key.len(), "client-1:".len() + 64);
+        assert_eq!(key, client_info_cache_key("client-1", "s3cret-value"));
+        assert_ne!(key, client_info_cache_key("client-1", "s3cret-valuf"));
+        assert_ne!(key, client_info_cache_key("client-2", "s3cret-value"));
     }
 
     #[tokio::test]
@@ -1728,7 +1797,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn client_info_failure_cache_does_not_block_corrected_secret() {
+    async fn client_info_rejected_secret_does_not_block_corrected_secret() {
         let (app, state, server) = app_with_mock_backend().await;
         script_errors(&state, &[tonic::Code::Unauthenticated]);
 

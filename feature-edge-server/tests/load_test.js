@@ -16,7 +16,7 @@ import {Counter, Rate, Trend} from 'k6/metrics';
 //
 // Usage:
 //   k6 run --env LOAD_TIER=1x tests/load_test.js
-//   k6 run --env LOAD_TIER=1x --env CLIENT_ID=your-client-id tests/load_test.js
+//   k6 run --env LOAD_TIER=1x --env SDK_KEY=<clientId>.<apiKey> tests/load_test.js
 // ============================================================================
 
 // Custom metrics
@@ -39,8 +39,7 @@ const baseUrl = __ENV.BASE_URL || 'http://localhost:8081';
 
 // Client authentication (from environment or defaults)
 // Get these from: node populate_test_data.js output or database
-const clientId = __ENV.CLIENT_ID || '';
-const clientSecret = __ENV.CLIENT_SECRET || '';
+const sdkKey = __ENV.SDK_KEY || ''; // <clientId>.<apiKey>
 
 // Test options
 export const options = {
@@ -93,14 +92,6 @@ const USER_IDS = [
     'user-100', 'user-200', 'user-300', 'user-400', 'user-500',
 ];
 
-// Environment IDs (from populate_test_data.js)
-// Use actual UUID after running populate script
-const ENVIRONMENT_IDS = [
-    'bf06820b-3ff6-4235-b7c6-91b27f5ef9a6',
-    '9646bb30-6bbe-48d8-89eb-a0200d4c95ce',
-    '7c7efb52-018f-4140-87ae-e42322ffa94d',
-];
-
 function randomElement(arr) {
     return arr[Math.floor(Math.random() * arr.length)];
 }
@@ -111,7 +102,7 @@ const formatLatencyUs = (ms) => `${toMicroseconds(ms).toFixed(0)}us`;
 const formatLatencyUsWithMs = (ms) => `${formatLatencyUs(ms)} (${ms.toFixed(2)}ms)`;
 
 export function setup() {
-    const authMethod = clientId ? `Bearer token (${clientId.substring(0, 8)}...)` : 'Default (edge server credentials)';
+    const authMethod = sdkKey ? `SDK key (client ${sdkKey.substring(0, 8)}...)` : 'MISSING (set SDK_KEY, requests get 401)';
 
     console.log(`
 ╔══════════════════════════════════════════════════════════════╗
@@ -136,33 +127,30 @@ SETUP:
 
     // Warm-up request
     const headers = { 'Content-Type': 'application/json' };
-    if (clientId) {
-        headers['Authorization'] = `Bearer ${clientId}`;
+    if (sdkKey) {
+        headers['Authorization'] = `Bearer ${sdkKey}`;
     }
 
     const warmupRes = http.post(`${baseUrl}/ofrep/v1/evaluate/flags/NewCheckoutFlow`, JSON.stringify({
         context: {
             targetingKey: 'warmup-user',
-            environment_id: 'E-Commerce-Dev',
         }
     }), { headers });
 
     console.log(`Warm-up response: ${warmupRes.status}`);
 
-    return { baseUrl, clientId };
+    return { baseUrl, sdkKey };
 }
 
 export default function (data) {
     const featureKey = randomElement(FEATURE_KEYS);
     const userId = randomElement(USER_IDS);
-    const envId = randomElement(ENVIRONMENT_IDS);
 
     // OFREP request body format
     const payload = JSON.stringify({
         context: {
             targetingKey: userId,
             // Additional attributes are passed as custom properties
-            environment_id: envId,
             platform: 'web',
             version: '2.1.0',
             userTier: 'premium',  // For contextual features
@@ -174,8 +162,8 @@ export default function (data) {
     };
 
     // Add authentication if client ID is provided
-    if (data.clientId) {
-        headers['Authorization'] = `Bearer ${data.clientId}`;
+    if (data.sdkKey) {
+        headers['Authorization'] = `Bearer ${data.sdkKey}`;
     }
 
     const params = {

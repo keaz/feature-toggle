@@ -5,6 +5,7 @@ use utoipa::ToSchema;
 
 use crate::JwtUser;
 use crate::logic::jwt_secret::JwtSecretLogic;
+use crate::logic::jwt_secret_tx::deactivate_all_secrets_in_tx;
 use crate::rest::error::RestError;
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -116,14 +117,21 @@ pub(crate) async fn generate_jwt_secret(
 )]
 #[post("/auth/jwt-secrets/deactivate-all")]
 pub(crate) async fn deactivate_all_jwt_secrets(
-    logic: web::Data<Box<dyn JwtSecretLogic>>,
+    db_pool: web::Data<sqlx::PgPool>,
     req: HttpRequest,
 ) -> Result<impl Responder, RestError> {
     require_admin(&req)?;
-    logic
-        .deactivate_all_secrets()
+    let mut tx = db_pool
+        .begin()
         .await
-        .map_err(RestError::from)?;
+        .map_err(|e| RestError::internal(format!("Failed to begin transaction: {e}")))?;
+    if let Err(e) = deactivate_all_secrets_in_tx(&mut tx).await {
+        let _ = tx.rollback().await;
+        return Err(RestError::from(e));
+    }
+    tx.commit()
+        .await
+        .map_err(|e| RestError::internal(format!("Failed to commit transaction: {e}")))?;
     Ok(HttpResponse::NoContent().finish())
 }
 

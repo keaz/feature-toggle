@@ -26,6 +26,24 @@ pub struct ApiUser {
     pub is_temporary_password: bool,
 }
 
+impl From<crate::database::user::User> for ApiUser {
+    fn from(u: crate::database::user::User) -> Self {
+        ApiUser {
+            id: ID::from(u.id),
+            username: u.username,
+            first_name: u.first_name,
+            last_name: u.last_name,
+            email: u.email,
+            mobile_number: u.mobile_number,
+            is_admin: u.is_admin,
+            created_at: u.created_at,
+            updated_at: u.updated_at,
+            last_login: u.last_login,
+            is_temporary_password: u.is_temporary_password,
+        }
+    }
+}
+
 #[automock]
 #[async_trait::async_trait]
 pub trait UserLogic: Send + Sync {
@@ -38,6 +56,9 @@ pub trait UserLogic: Send + Sync {
     ) -> Result<ApiUser, Error>;
     async fn authenticate_user(&self, username: String, password: String)
     -> Result<ApiUser, Error>;
+    /// Non-transactional user update. It does not revoke tokens when a user is
+    /// disabled and does not enforce the last-admin guard, so it must not be wired
+    /// to REST. Use `user_tx::update_user_in_tx` instead.
     async fn update_user(
         &self,
         id: ID,
@@ -312,6 +333,11 @@ impl UserLogic for UserLogicImpl {
         Argon2::default()
             .verify_password(password.as_bytes(), &parsed_hash)
             .map_err(|_| Error::Unauthorized("Invalid username or password".to_string()))?;
+        // Only reveal the disabled state after the password matched, so the
+        // response cannot be used to enumerate accounts.
+        if !u.enabled {
+            return Err(Error::AccountDisabled);
+        }
         let now = Utc::now();
         let _ = self.repository.update_last_login(u.id, now).await?;
         let u = self.repository.get_user_by_id(u.id).await?; // reload to get updated last_login
@@ -330,6 +356,11 @@ impl UserLogic for UserLogicImpl {
         })
     }
 
+    /// Non-transactional user update.
+    ///
+    /// This does not revoke tokens when a user is disabled and does not enforce the
+    /// last-admin guard. It must not be wired to REST; use
+    /// `user_tx::update_user_in_tx`, which does both.
     async fn update_user(
         &self,
         id: ID,
@@ -951,6 +982,54 @@ mod tests {
         match err {
             Error::Unauthorized(msg) => assert!(msg.contains("Invalid username or password")),
             _ => panic!("wrong error"),
+        }
+    }
+
+    fn user_with_password(password: &str, enabled: bool) -> User {
+        let salt = SaltString::generate(&mut OsRng);
+        let mut u = sample_user();
+        u.password_hash = Argon2::default()
+            .hash_password(password.as_bytes(), &salt)
+            .unwrap()
+            .to_string();
+        u.enabled = enabled;
+        u
+    }
+
+    #[tokio::test]
+    async fn test_authenticate_user_rejects_disabled_user_with_correct_password() {
+        let u = user_with_password("topsecret", false);
+        let mut mock = MockUserRepository::new();
+        mock.expect_get_user_by_username()
+            .returning(move |_| Ok(u.clone()));
+        // A disabled account must not get as far as recording a login.
+        mock.expect_update_last_login().never();
+
+        let logic = user_logic(Box::new(mock), create_mock_activity_log());
+        let err = logic
+            .authenticate_user("jdoe".to_string(), "topsecret".to_string())
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(err, Error::AccountDisabled), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn test_authenticate_user_disabled_user_wrong_password_does_not_leak_state() {
+        let u = user_with_password("topsecret", false);
+        let mut mock = MockUserRepository::new();
+        mock.expect_get_user_by_username()
+            .returning(move |_| Ok(u.clone()));
+
+        let logic = user_logic(Box::new(mock), create_mock_activity_log());
+        let err = logic
+            .authenticate_user("jdoe".to_string(), "wrong".to_string())
+            .await
+            .err()
+            .unwrap();
+        match err {
+            Error::Unauthorized(msg) => assert!(msg.contains("Invalid username or password")),
+            other => panic!("wrong error: {other:?}"),
         }
     }
 

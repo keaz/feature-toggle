@@ -7,6 +7,8 @@ use uuid::Uuid;
 
 use crate::JwtUser;
 use crate::database::activity_log::{ActivityLogRepository, CreateActivityLog};
+use crate::logic::authorization::RoleAuthorizer;
+use crate::logic::policy::{PolicyActor, PolicyError};
 use crate::rest::error::RestError;
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -272,6 +274,111 @@ fn jwt_user(req: &HttpRequest) -> Result<JwtUser, RestError> {
 
 fn can_operate_safety(jwt: &JwtUser) -> bool {
     jwt.is_admin || jwt.roles.iter().any(|role| role == "Team Admin")
+}
+
+/// Authorization for a scheduled change, checked when it is created and again when it
+/// is about to run. `ENABLE_FEATURE`, `DISABLE_FEATURE` and `ARCHIVE_FEATURE` need what
+/// `POST /features/{id}/emergency-*` and `PATCH /features/{id}` need (system admin, or
+/// `Team Admin` of the feature's team; system clients never). `STAGE_CHANGE` needs the
+/// role rule `POST /stages/{id}/request-change` applies to the requested status.
+pub(crate) async fn authorize_scheduled_action(
+    pool: &PgPool,
+    actor: PolicyActor,
+    team_id: Uuid,
+    feature_id: Uuid,
+    action: &str,
+    requested_status: Option<&str>,
+) -> Result<(), PolicyError> {
+    match action {
+        "STAGE_CHANGE" => {
+            let status = requested_status
+                .ok_or_else(|| PolicyError::Forbidden("requested_status_missing".to_string()))?;
+            RoleAuthorizer::authorize_stage_change_request(&actor.roles, status)
+                .map_err(|err| PolicyError::Forbidden(err.to_string()))
+        }
+        "ENABLE_FEATURE" | "DISABLE_FEATURE" | "ARCHIVE_FEATURE" => {
+            crate::logic::policy::authorize_feature_update(pool, feature_id, team_id, actor).await
+        }
+        other => Err(PolicyError::Forbidden(format!(
+            "unsupported_scheduled_action_{other}"
+        ))),
+    }
+}
+
+/// Rebuilds the policy actor for the creator of a scheduled change from current
+/// database state, so execution never trusts what was true at creation time. `None`
+/// when the creator no longer exists, is disabled, or (system client) is disabled,
+/// expired, or belongs to another team.
+pub(crate) async fn load_scheduled_change_creator(
+    pool: &PgPool,
+    change: &ScheduledChangeRow,
+) -> Result<Option<PolicyActor>, sqlx::Error> {
+    let Some(creator_id) = change.requested_by else {
+        return Ok(None);
+    };
+    let Some(user) =
+        sqlx::query("SELECT username, is_admin FROM users WHERE id = $1 AND enabled = TRUE")
+            .bind(creator_id)
+            .fetch_optional(pool)
+            .await?
+    else {
+        return Ok(None);
+    };
+    let username: String = user.get("username");
+    let is_admin: bool = user.get("is_admin");
+    let roles: Vec<String> = sqlx::query_scalar(
+        "SELECT r.name FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = $1",
+    )
+    .bind(creator_id)
+    .fetch_all(pool)
+    .await?;
+
+    let system_client =
+        sqlx::query("SELECT team_id, enabled, expires_at FROM system_clients WHERE id = $1")
+            .bind(creator_id)
+            .fetch_optional(pool)
+            .await?;
+    match system_client {
+        Some(client) => {
+            let active = client.get::<bool, _>("enabled")
+                && client.get::<DateTime<Utc>, _>("expires_at") > Utc::now()
+                && client.get::<Uuid, _>("team_id") == change.team_id;
+            Ok(active.then(|| PolicyActor::system_client(creator_id, username, roles)))
+        }
+        None => Ok(Some(PolicyActor::user(
+            creator_id, username, is_admin, roles,
+        ))),
+    }
+}
+
+async fn policy_actor_for_request(pool: &PgPool, jwt: &JwtUser) -> Result<PolicyActor, RestError> {
+    let is_system_client: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM system_clients WHERE id = $1)")
+            .bind(jwt.id)
+            .fetch_one(pool)
+            .await
+            .map_err(RestError::from)?;
+    Ok(if is_system_client {
+        PolicyActor::system_client(jwt.id, jwt.username.clone(), jwt.roles.clone())
+    } else {
+        PolicyActor::user(
+            jwt.id,
+            jwt.username.clone(),
+            jwt.is_admin,
+            jwt.roles.clone(),
+        )
+    })
+}
+
+fn rest_error_from_policy(err: PolicyError) -> RestError {
+    match err {
+        PolicyError::Unauthorized => RestError::unauthorized("User authentication not found"),
+        PolicyError::Forbidden(reason) => RestError::policy_denied(reason),
+        PolicyError::Internal(err) => {
+            log::error!("Scheduled change authorization failed: {err:?}");
+            RestError::internal("Authorization service is temporarily unavailable")
+        }
+    }
 }
 
 fn validate_reason(reason: &str, field: &str) -> Result<String, RestError> {
@@ -1167,7 +1274,7 @@ pub(crate) async fn create_scheduled_change(
         .map(|value| parse_uuid(value, "stage_id"))
         .transpose()?;
     let mut environment_id = None;
-    if payload.action == ScheduledChangeAction::StageChange {
+    let stage_change_target = if payload.action == ScheduledChangeAction::StageChange {
         let stage_id = stage_id.ok_or_else(|| {
             RestError::invalid_input("stageId is required for STAGE_CHANGE schedules")
         })?;
@@ -1177,6 +1284,26 @@ pub(crate) async fn create_scheduled_change(
         if stage_request_from_status(requested_status).is_none() {
             return Err(RestError::invalid_input("requestedStatus is not supported"));
         }
+        Some(stage_id)
+    } else {
+        None
+    };
+
+    // Same authorization the direct endpoints apply, before anything else about the
+    // feature (such as its stages) is revealed.
+    let actor = policy_actor_for_request(pool.get_ref(), &jwt).await?;
+    authorize_scheduled_action(
+        pool.get_ref(),
+        actor,
+        team_id,
+        feature_id,
+        payload.action.as_str(),
+        payload.requested_status.as_deref(),
+    )
+    .await
+    .map_err(rest_error_from_policy)?;
+
+    if let Some(stage_id) = stage_change_target {
         let stage_row = sqlx::query(
             "SELECT environment_id FROM features_pipeline_stages WHERE id = $1 AND feature_id = $2",
         )
@@ -1418,5 +1545,608 @@ mod tests {
             .with_timezone(&Utc);
         assert!(freeze_window_active(&row, next_day));
         assert!(!freeze_window_active(&row, outside));
+    }
+}
+
+/// Authorization of scheduled changes, at creation (REST) and at execution (scheduler).
+/// These need the seeded and migrated database.
+#[cfg(test)]
+mod authorization_tests {
+    use super::*;
+    use crate::database::activity_log::activity_log_repository;
+    use crate::database::entity::FeatureType;
+    use crate::database::feature::{CreateFeature, CreateFeatureStage, feature_repository};
+    use crate::database::system_client::{CreateSystemClient, system_client_repository};
+    use crate::scheduler::scheduled_changes::{CREATOR_NOT_AUTHORIZED, ScheduledChangeScheduler};
+    use actix_web::{App, http::StatusCode, test};
+    use sqlx::postgres::PgPoolOptions;
+
+    const APPROVER_ROLE: &str = "00000000-0000-0000-0000-000000000001";
+    const REQUESTER_ROLE: &str = "00000000-0000-0000-0000-000000000002";
+    const TEAM_ADMIN_ROLE: &str = "00000000-0000-0000-0000-000000000003";
+
+    /// Scheduler runs claim every due change in the database, so tests that run it
+    /// must not overlap.
+    static SCHEDULER_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    async fn test_pool() -> PgPool {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL not set");
+        PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&url)
+            .await
+            .expect("connect")
+    }
+
+    struct World {
+        pool: PgPool,
+        team_id: Uuid,
+        other_team_id: Uuid,
+        feature_id: Uuid,
+        stage_id: Uuid,
+        users: Vec<Uuid>,
+    }
+
+    impl World {
+        async fn new() -> Self {
+            let pool = test_pool().await;
+            let team_id = insert_team(&pool).await;
+            let other_team_id = insert_team(&pool).await;
+            let env_id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO environments (id, name, active, team_id, environment_type) VALUES ($1, $2, true, $3, 'Production')",
+            )
+            .bind(env_id)
+            .bind(format!("sched-auth-env-{env_id}"))
+            .bind(team_id)
+            .execute(&pool)
+            .await
+            .expect("insert environment");
+            let stage_id = Uuid::new_v4();
+            let feature_id = feature_repository(pool.clone())
+                .create_feature(CreateFeature {
+                    team_id,
+                    key: format!("sched-auth-{}", Uuid::new_v4()),
+                    description: None,
+                    feature_type: FeatureType::Simple,
+                    lifecycle_stage: "active".to_string(),
+                    owner: None,
+                    purpose: None,
+                    reference_url: None,
+                    expires_at: None,
+                    cleanup_reason: None,
+                    tags: vec![],
+                    stages: vec![CreateFeatureStage {
+                        id: stage_id,
+                        environment_id: env_id,
+                        order_index: 0,
+                        parent_stage: None,
+                        position: "{ \"x\": 0, \"y\": 0 }".to_string(),
+                        enabled: true,
+                    }],
+                    dependencies: vec![],
+                    variants: None,
+                })
+                .await
+                .expect("create feature");
+            Self {
+                pool,
+                team_id,
+                other_team_id,
+                feature_id,
+                stage_id,
+                users: Vec::new(),
+            }
+        }
+
+        async fn user(&mut self, team: Option<Uuid>, is_admin: bool, roles: &[&str]) -> JwtUser {
+            let id = Uuid::new_v4();
+            let username = format!("sched_auth_{id}");
+            sqlx::query(
+                "INSERT INTO users (id, username, password_hash, first_name, last_name, email, is_admin)
+                 VALUES ($1, $2, 'x', 'S', 'A', $3, $4)",
+            )
+            .bind(id)
+            .bind(&username)
+            .bind(format!("{username}@example.com"))
+            .bind(is_admin)
+            .execute(&self.pool)
+            .await
+            .expect("insert user");
+            if let Some(team) = team {
+                sqlx::query("INSERT INTO user_teams (user_id, team_id) VALUES ($1, $2)")
+                    .bind(id)
+                    .bind(team)
+                    .execute(&self.pool)
+                    .await
+                    .expect("membership");
+            }
+            let mut role_names = Vec::new();
+            for role in roles {
+                let role_id = Uuid::parse_str(role).unwrap();
+                sqlx::query("INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)")
+                    .bind(id)
+                    .bind(role_id)
+                    .execute(&self.pool)
+                    .await
+                    .expect("assign role");
+                role_names.push(
+                    sqlx::query_scalar::<_, String>("SELECT name FROM roles WHERE id = $1")
+                        .bind(role_id)
+                        .fetch_one(&self.pool)
+                        .await
+                        .expect("role name"),
+                );
+            }
+            self.users.push(id);
+            JwtUser {
+                id,
+                username,
+                is_admin,
+                roles: role_names,
+                team_id: team,
+                token_hash: "hash".to_string(),
+            }
+        }
+
+        async fn system_client(&mut self) -> JwtUser {
+            let client = system_client_repository(self.pool.clone())
+                .create_system_client(
+                    self.team_id,
+                    CreateSystemClient {
+                        name: format!("sched-auth-{}", Uuid::new_v4().simple()),
+                        description: None,
+                        enabled: true,
+                        expires_at: Utc::now() + ChronoDuration::days(1),
+                    },
+                )
+                .await
+                .expect("create system client");
+            self.users.push(client.id);
+            JwtUser {
+                id: client.id,
+                username: client.name,
+                is_admin: false,
+                roles: vec!["Requester".to_string(), "Approver".to_string()],
+                team_id: Some(self.team_id),
+                token_hash: "hash".to_string(),
+            }
+        }
+
+        async fn insert_due_change(&self, creator: Option<Uuid>, action: &str) -> Uuid {
+            sqlx::query_scalar(
+                r#"INSERT INTO scheduled_feature_changes
+                       (team_id, feature_id, action, reason, scheduled_at, requested_by)
+                   VALUES ($1, $2, $3, 'scheduled for test', NOW() - INTERVAL '1 minute', $4)
+                   RETURNING id"#,
+            )
+            .bind(self.team_id)
+            .bind(self.feature_id)
+            .bind(action)
+            .bind(creator)
+            .fetch_one(&self.pool)
+            .await
+            .expect("insert scheduled change")
+        }
+
+        async fn change_state(&self, id: Uuid) -> (String, Option<String>) {
+            sqlx::query_as::<_, (String, Option<String>)>(
+                "SELECT status, failure_message FROM scheduled_feature_changes WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await
+            .expect("load change")
+        }
+
+        async fn lifecycle_stage(&self) -> String {
+            sqlx::query_scalar("SELECT lifecycle_stage FROM features WHERE id = $1")
+                .bind(self.feature_id)
+                .fetch_one(&self.pool)
+                .await
+                .expect("lifecycle")
+        }
+
+        async fn run_scheduler(&self) {
+            let activity = activity_log_repository(self.pool.clone());
+            let environment_logic = crate::logic::environment::environment_logic(
+                crate::database::environment::environment_repository(self.pool.clone()),
+                activity.clone_box(),
+            );
+            let feature_logic = crate::logic::feature::feature_logic(
+                feature_repository(self.pool.clone()),
+                environment_logic,
+                activity.clone_box(),
+                crate::database::user::user_repository(self.pool.clone()),
+            );
+            ScheduledChangeScheduler::new(
+                self.pool.clone(),
+                feature_logic,
+                activity,
+                std::time::Duration::from_secs(60),
+            )
+            .run_once(25)
+            .await
+            .expect("scheduler run");
+        }
+
+        async fn cleanup(self) {
+            let _ = sqlx::query("DELETE FROM scheduled_feature_changes WHERE feature_id = $1")
+                .bind(self.feature_id)
+                .execute(&self.pool)
+                .await;
+            let _ = feature_repository(self.pool.clone())
+                .delete_feature(self.feature_id)
+                .await;
+            let _ = sqlx::query("DELETE FROM teams WHERE id = ANY($1)")
+                .bind(vec![self.team_id, self.other_team_id])
+                .execute(&self.pool)
+                .await;
+            let _ = sqlx::query("DELETE FROM users WHERE id = ANY($1)")
+                .bind(&self.users)
+                .execute(&self.pool)
+                .await;
+        }
+    }
+
+    async fn insert_team(pool: &PgPool) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query("INSERT INTO teams (id, name, description) VALUES ($1, $2, 'sched auth test')")
+            .bind(id)
+            .bind(format!("sched-auth-{id}"))
+            .execute(pool)
+            .await
+            .expect("insert team");
+        id
+    }
+
+    async fn create_status(
+        world: &World,
+        jwt: JwtUser,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(world.pool.clone()))
+                .app_data(web::Data::new(activity_log_repository(world.pool.clone())))
+                .service(web::scope("/api/v1").configure(super::configure)),
+        )
+        .await;
+        let req = test::TestRequest::post()
+            .uri(&format!(
+                "/api/v1/features/{}/scheduled-changes",
+                world.feature_id
+            ))
+            .set_json(body)
+            .to_request();
+        req.extensions_mut().insert(jwt);
+        let resp = test::call_service(&app, req).await;
+        let status = resp.status();
+        let body = test::read_body(resp).await;
+        (
+            status,
+            serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    fn schedule_body(action: &str) -> serde_json::Value {
+        serde_json::json!({
+            "action": action,
+            "reason": "scheduled for test",
+            "scheduledAt": (Utc::now() + ChronoDuration::hours(1)).to_rfc3339(),
+        })
+    }
+
+    fn stage_body(stage_id: Uuid, status: &str) -> serde_json::Value {
+        let mut body = schedule_body("STAGE_CHANGE");
+        body["stageId"] = serde_json::json!(stage_id.to_string());
+        body["requestedStatus"] = serde_json::json!(status);
+        body
+    }
+
+    #[actix_web::test]
+    async fn system_client_cannot_schedule_non_stage_change_actions() {
+        let mut world = World::new().await;
+        let client = world.system_client().await;
+
+        let mut results = Vec::new();
+        for action in ["DISABLE_FEATURE", "ENABLE_FEATURE", "ARCHIVE_FEATURE"] {
+            results.push(create_status(&world, client.clone(), schedule_body(action)).await);
+        }
+        let stage_change = create_status(
+            &world,
+            client,
+            stage_body(world.stage_id, "DEPLOYMENT_REQUESTED"),
+        )
+        .await;
+        let created: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM scheduled_feature_changes WHERE feature_id = $1",
+        )
+        .bind(world.feature_id)
+        .fetch_one(&world.pool)
+        .await
+        .unwrap();
+        world.cleanup().await;
+
+        for (status, body) in results {
+            assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+            assert_eq!(body["code"], "policy_denied");
+        }
+        assert_eq!(stage_change.0, StatusCode::CREATED, "{}", stage_change.1);
+        assert_eq!(created, 1, "only the STAGE_CHANGE was stored");
+    }
+
+    #[actix_web::test]
+    async fn team_admin_of_another_team_cannot_schedule_feature_actions() {
+        let mut world = World::new().await;
+        let outsider = world
+            .user(Some(world.other_team_id), false, &[TEAM_ADMIN_ROLE])
+            .await;
+        let plain_member = world
+            .user(Some(world.team_id), false, &[REQUESTER_ROLE])
+            .await;
+
+        let mut denied = Vec::new();
+        for action in ["DISABLE_FEATURE", "ENABLE_FEATURE", "ARCHIVE_FEATURE"] {
+            denied.push(create_status(&world, outsider.clone(), schedule_body(action)).await);
+        }
+        denied.push(create_status(&world, plain_member, schedule_body("DISABLE_FEATURE")).await);
+        world.cleanup().await;
+
+        for (status, body) in denied {
+            assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+            assert_eq!(body["code"], "policy_denied");
+        }
+    }
+
+    #[actix_web::test]
+    async fn admin_and_own_team_admin_can_schedule_feature_actions() {
+        let mut world = World::new().await;
+        let admin = world.user(None, true, &[]).await;
+        let team_admin = world
+            .user(Some(world.team_id), false, &[TEAM_ADMIN_ROLE])
+            .await;
+
+        let mut results = Vec::new();
+        for action in ["DISABLE_FEATURE", "ENABLE_FEATURE", "ARCHIVE_FEATURE"] {
+            results.push(create_status(&world, admin.clone(), schedule_body(action)).await);
+            results.push(create_status(&world, team_admin.clone(), schedule_body(action)).await);
+        }
+        world.cleanup().await;
+
+        for (status, body) in results {
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+        }
+    }
+
+    #[actix_web::test]
+    async fn stage_change_schedule_requires_the_role_for_the_requested_status() {
+        let mut world = World::new().await;
+        let requester = world
+            .user(Some(world.team_id), false, &[REQUESTER_ROLE])
+            .await;
+        let approver = world
+            .user(Some(world.team_id), false, &[APPROVER_ROLE])
+            .await;
+
+        let requester_deploy = create_status(
+            &world,
+            requester.clone(),
+            stage_body(world.stage_id, "DEPLOYMENT_REQUESTED"),
+        )
+        .await;
+        let requester_reject = create_status(
+            &world,
+            requester,
+            stage_body(world.stage_id, "DEPLOYMENT_REJECTED"),
+        )
+        .await;
+        let approver_request = create_status(
+            &world,
+            approver.clone(),
+            stage_body(world.stage_id, "DEPLOYMENT_REQUESTED"),
+        )
+        .await;
+        let approver_reject = create_status(
+            &world,
+            approver,
+            stage_body(world.stage_id, "DEPLOYMENT_REJECTED"),
+        )
+        .await;
+        world.cleanup().await;
+
+        assert_eq!(
+            requester_deploy.0,
+            StatusCode::CREATED,
+            "{}",
+            requester_deploy.1
+        );
+        assert_eq!(requester_reject.0, StatusCode::FORBIDDEN);
+        assert_eq!(requester_reject.1["code"], "policy_denied");
+        assert_eq!(approver_request.0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            approver_reject.0,
+            StatusCode::CREATED,
+            "{}",
+            approver_reject.1
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduled_change_from_disabled_creator_is_not_executed() {
+        let _guard = SCHEDULER_LOCK.lock().await;
+        let mut world = World::new().await;
+        let creator = world
+            .user(Some(world.team_id), false, &[TEAM_ADMIN_ROLE])
+            .await;
+        let change = world
+            .insert_due_change(Some(creator.id), "ARCHIVE_FEATURE")
+            .await;
+        sqlx::query("UPDATE users SET enabled = FALSE WHERE id = $1")
+            .bind(creator.id)
+            .execute(&world.pool)
+            .await
+            .unwrap();
+
+        world.run_scheduler().await;
+
+        let state = world.change_state(change).await;
+        let lifecycle = world.lifecycle_stage().await;
+        world.cleanup().await;
+        assert_eq!(
+            state,
+            (
+                "BLOCKED".to_string(),
+                Some(CREATOR_NOT_AUTHORIZED.to_string())
+            )
+        );
+        assert_eq!(lifecycle, "active", "feature must not be archived");
+    }
+
+    #[tokio::test]
+    async fn scheduled_change_from_deleted_or_demoted_creator_is_not_executed() {
+        let _guard = SCHEDULER_LOCK.lock().await;
+        let mut world = World::new().await;
+        let deleted = world
+            .user(Some(world.team_id), false, &[TEAM_ADMIN_ROLE])
+            .await;
+        let demoted = world
+            .user(Some(world.team_id), false, &[TEAM_ADMIN_ROLE])
+            .await;
+        let moved = world
+            .user(Some(world.team_id), false, &[TEAM_ADMIN_ROLE])
+            .await;
+        let deleted_change = world
+            .insert_due_change(Some(deleted.id), "ARCHIVE_FEATURE")
+            .await;
+        let demoted_change = world
+            .insert_due_change(Some(demoted.id), "ARCHIVE_FEATURE")
+            .await;
+        let moved_change = world
+            .insert_due_change(Some(moved.id), "ARCHIVE_FEATURE")
+            .await;
+        // Deleting the user nulls requested_by (ON DELETE SET NULL).
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(deleted.id)
+            .execute(&world.pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM user_roles WHERE user_id = $1")
+            .bind(demoted.id)
+            .execute(&world.pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM user_teams WHERE user_id = $1")
+            .bind(moved.id)
+            .execute(&world.pool)
+            .await
+            .unwrap();
+
+        world.run_scheduler().await;
+
+        let states = [
+            world.change_state(deleted_change).await,
+            world.change_state(demoted_change).await,
+            world.change_state(moved_change).await,
+        ];
+        let lifecycle = world.lifecycle_stage().await;
+        world.cleanup().await;
+        for state in states {
+            assert_eq!(
+                state,
+                (
+                    "BLOCKED".to_string(),
+                    Some(CREATOR_NOT_AUTHORIZED.to_string())
+                )
+            );
+        }
+        assert_eq!(lifecycle, "active");
+    }
+
+    #[tokio::test]
+    async fn scheduled_change_from_authorized_creator_still_executes() {
+        let _guard = SCHEDULER_LOCK.lock().await;
+        let mut world = World::new().await;
+        let creator = world
+            .user(Some(world.team_id), false, &[TEAM_ADMIN_ROLE])
+            .await;
+        let change = world
+            .insert_due_change(Some(creator.id), "ARCHIVE_FEATURE")
+            .await;
+
+        world.run_scheduler().await;
+
+        let state = world.change_state(change).await;
+        let lifecycle = world.lifecycle_stage().await;
+        world.cleanup().await;
+        assert_eq!(state.0, "EXECUTED", "{state:?}");
+        assert_eq!(lifecycle, "archived");
+    }
+
+    #[tokio::test]
+    async fn scheduled_non_stage_change_from_system_client_is_not_executed() {
+        let _guard = SCHEDULER_LOCK.lock().await;
+        let mut world = World::new().await;
+        let client = world.system_client().await;
+        let change = world
+            .insert_due_change(Some(client.id), "ARCHIVE_FEATURE")
+            .await;
+
+        world.run_scheduler().await;
+
+        let state = world.change_state(change).await;
+        let lifecycle = world.lifecycle_stage().await;
+        world.cleanup().await;
+        // System clients may only schedule STAGE_CHANGE, so even a stored ARCHIVE
+        // from one (for example created before this rule) must not run.
+        assert_eq!(
+            state,
+            (
+                "BLOCKED".to_string(),
+                Some(CREATOR_NOT_AUTHORIZED.to_string())
+            )
+        );
+        assert_eq!(lifecycle, "active");
+    }
+
+    #[tokio::test]
+    async fn scheduled_stage_change_needs_creator_to_keep_the_role() {
+        let _guard = SCHEDULER_LOCK.lock().await;
+        let mut world = World::new().await;
+        let creator = world.user(Some(world.team_id), false, &[]).await;
+        let change: Uuid = sqlx::query_scalar(
+            r#"INSERT INTO scheduled_feature_changes
+                   (team_id, feature_id, stage_id, action, requested_status, reason,
+                    scheduled_at, requested_by)
+               VALUES ($1, $2, $3, 'STAGE_CHANGE', 'DEPLOYMENT_REQUESTED', 'scheduled for test',
+                       NOW() - INTERVAL '1 minute', $4)
+               RETURNING id"#,
+        )
+        .bind(world.team_id)
+        .bind(world.feature_id)
+        .bind(world.stage_id)
+        .bind(creator.id)
+        .fetch_one(&world.pool)
+        .await
+        .unwrap();
+
+        world.run_scheduler().await;
+
+        let state = world.change_state(change).await;
+        let stage_status: String =
+            sqlx::query_scalar("SELECT status FROM features_pipeline_stages WHERE id = $1")
+                .bind(world.stage_id)
+                .fetch_one(&world.pool)
+                .await
+                .unwrap();
+        world.cleanup().await;
+        assert_eq!(
+            state,
+            (
+                "BLOCKED".to_string(),
+                Some(CREATOR_NOT_AUTHORIZED.to_string())
+            )
+        );
+        assert_ne!(stage_status, "DEPLOYMENT_REQUESTED");
     }
 }

@@ -190,9 +190,9 @@ impl SystemClientLogicImpl {
         scopes: Vec<String>,
         expires_at: chrono::DateTime<Utc>,
     ) -> Result<String, Error> {
-        let secret = self
+        let signing_key = self
             .jwt_secret_logic
-            .get_current_secret()
+            .get_signing_key()
             .await
             .map_err(|e| Error::InvalidInput(format!("Failed to get JWT secret: {e}")))?;
 
@@ -202,7 +202,7 @@ impl SystemClientLogicImpl {
             &client.name,
             expires_at,
             scopes.clone(),
-            &secret,
+            &signing_key,
         )
         .map_err(|e| Error::InvalidInput(format!("Failed to create token: {e}")))?;
 

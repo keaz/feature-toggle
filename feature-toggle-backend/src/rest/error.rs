@@ -49,6 +49,16 @@ pub enum RestError {
         code: Option<String>,
         details: Option<Value>,
     },
+    #[error("Account disabled")]
+    AccountDisabled { message: String },
+    #[error("Self approval not allowed")]
+    SelfApprovalNotAllowed { message: String },
+    #[error("Last admin required")]
+    LastAdminRequired { message: String },
+    #[error("Invalid refresh token")]
+    InvalidRefreshToken { message: String },
+    #[error("Refresh token reused")]
+    RefreshTokenReused { message: String },
     #[error("Forbidden")]
     Forbidden {
         message: String,
@@ -96,10 +106,56 @@ impl RestError {
         }
     }
 
+    pub fn account_disabled(message: impl Into<String>) -> Self {
+        Self::AccountDisabled {
+            message: message.into(),
+        }
+    }
+
+    /// 403 `self_approval_not_allowed`: a requester tried to approve their own request.
+    pub fn self_approval_not_allowed() -> Self {
+        Self::SelfApprovalNotAllowed {
+            message: "Requesters cannot approve their own request".to_string(),
+        }
+    }
+
+    /// 409 `last_admin_required`: the update would disable or demote the last
+    /// enabled administrator.
+    pub fn last_admin_required() -> Self {
+        Self::LastAdminRequired {
+            message: "At least one enabled administrator must remain".to_string(),
+        }
+    }
+
+    /// 401 `invalid_refresh_token`: unknown or expired refresh token, or its user
+    /// is missing or disabled.
+    pub fn invalid_refresh_token() -> Self {
+        Self::InvalidRefreshToken {
+            message: "Refresh token is invalid or expired".to_string(),
+        }
+    }
+
+    /// 401 `refresh_token_reused`: an already revoked refresh token was presented
+    /// and its token family has been revoked.
+    pub fn refresh_token_reused() -> Self {
+        Self::RefreshTokenReused {
+            message: "Refresh token was already used; the session has been revoked".to_string(),
+        }
+    }
+
     pub fn forbidden(message: impl Into<String>) -> Self {
         Self::Forbidden {
             message: message.into(),
             code: None,
+            details: None,
+        }
+    }
+
+    /// 403 with `code: "policy_denied"`, the shape `JwtGuard` uses for policy denials.
+    pub fn policy_denied(message: impl Into<String>) -> Self {
+        Self::Forbidden {
+            message: message.into(),
+            code: Some("policy_denied".to_string()),
             details: None,
         }
     }
@@ -118,6 +174,11 @@ impl RestError {
             Self::InvalidInput { .. } => "invalid_input",
             Self::Conflict { .. } => "conflict",
             Self::Unauthorized { .. } => "unauthorized",
+            Self::AccountDisabled { .. } => "account_disabled",
+            Self::SelfApprovalNotAllowed { .. } => "self_approval_not_allowed",
+            Self::LastAdminRequired { .. } => "last_admin_required",
+            Self::InvalidRefreshToken { .. } => "invalid_refresh_token",
+            Self::RefreshTokenReused { .. } => "refresh_token_reused",
             Self::Forbidden { .. } => "forbidden",
             Self::Internal { .. } => "internal",
         }
@@ -130,7 +191,12 @@ impl RestError {
             | Self::Conflict { message, .. }
             | Self::Unauthorized { message, .. }
             | Self::Forbidden { message, .. }
-            | Self::Internal { message, .. } => message,
+            | Self::Internal { message, .. }
+            | Self::AccountDisabled { message }
+            | Self::SelfApprovalNotAllowed { message }
+            | Self::LastAdminRequired { message }
+            | Self::InvalidRefreshToken { message }
+            | Self::RefreshTokenReused { message } => message,
         }
     }
 
@@ -142,6 +208,11 @@ impl RestError {
             | Self::Unauthorized { code, .. }
             | Self::Forbidden { code, .. }
             | Self::Internal { code, .. } => code.as_deref(),
+            Self::AccountDisabled { .. }
+            | Self::SelfApprovalNotAllowed { .. }
+            | Self::LastAdminRequired { .. }
+            | Self::InvalidRefreshToken { .. }
+            | Self::RefreshTokenReused { .. } => None,
         }
     }
 
@@ -153,6 +224,11 @@ impl RestError {
             | Self::Unauthorized { details, .. }
             | Self::Forbidden { details, .. }
             | Self::Internal { details, .. } => details.as_ref(),
+            Self::AccountDisabled { .. }
+            | Self::SelfApprovalNotAllowed { .. }
+            | Self::LastAdminRequired { .. }
+            | Self::InvalidRefreshToken { .. }
+            | Self::RefreshTokenReused { .. } => None,
         }
     }
 
@@ -171,9 +247,12 @@ impl ResponseError for RestError {
         match self {
             Self::NotFound { .. } => StatusCode::NOT_FOUND,
             Self::InvalidInput { .. } => StatusCode::BAD_REQUEST,
-            Self::Conflict { .. } => StatusCode::CONFLICT,
-            Self::Unauthorized { .. } => StatusCode::UNAUTHORIZED,
-            Self::Forbidden { .. } => StatusCode::FORBIDDEN,
+            Self::Conflict { .. } | Self::LastAdminRequired { .. } => StatusCode::CONFLICT,
+            Self::Unauthorized { .. }
+            | Self::AccountDisabled { .. }
+            | Self::InvalidRefreshToken { .. }
+            | Self::RefreshTokenReused { .. } => StatusCode::UNAUTHORIZED,
+            Self::Forbidden { .. } | Self::SelfApprovalNotAllowed { .. } => StatusCode::FORBIDDEN,
             Self::Internal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -193,6 +272,9 @@ impl From<crate::Error> for RestError {
             crate::Error::RecordAlreadyExists(msg) => RestError::conflict(msg),
             crate::Error::InvalidInput(msg) => RestError::invalid_input(msg),
             crate::Error::Unauthorized(msg) => RestError::unauthorized(msg),
+            crate::Error::AccountDisabled => RestError::account_disabled("Account is disabled"),
+            crate::Error::SelfApprovalNotAllowed => RestError::self_approval_not_allowed(),
+            crate::Error::LastAdminRequired => RestError::last_admin_required(),
         }
     }
 }
@@ -257,6 +339,50 @@ impl From<crate::logic::canary::CanaryLogicError> for RestError {
             crate::logic::canary::CanaryLogicError::Database(_) => {
                 RestError::internal("Internal server error")
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use actix_web::body::to_bytes;
+
+    #[actix_web::test]
+    async fn last_admin_required_maps_to_409_with_last_admin_required_error() {
+        let err = RestError::from(crate::Error::LastAdminRequired);
+        assert_eq!(err.status_code(), StatusCode::CONFLICT);
+
+        let resp = err.error_response();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body = to_bytes(resp.into_body()).await.expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(json["error"], "last_admin_required");
+    }
+
+    #[actix_web::test]
+    async fn account_disabled_maps_to_401_with_account_disabled_error() {
+        let err = RestError::from(crate::Error::AccountDisabled);
+        assert_eq!(err.status_code(), StatusCode::UNAUTHORIZED);
+
+        let resp = err.error_response();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let body = to_bytes(resp.into_body()).await.expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(json["error"], "account_disabled");
+    }
+
+    #[actix_web::test]
+    async fn refresh_token_errors_map_to_401_with_their_error_codes() {
+        for (err, code) in [
+            (RestError::invalid_refresh_token(), "invalid_refresh_token"),
+            (RestError::refresh_token_reused(), "refresh_token_reused"),
+        ] {
+            let resp = err.error_response();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+            let body = to_bytes(resp.into_body()).await.expect("body");
+            let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+            assert_eq!(json["error"], code);
         }
     }
 }

@@ -41,8 +41,8 @@ use crate::rest::approval::{
     UpdateApprovalPolicyRequest,
 };
 use crate::rest::auth::{
-    AuthStatusResponse, LoginRequest, LoginResponse, ResetPasswordRequest,
-    SetTemporaryPasswordRequest,
+    AuthStatusResponse, LoginRequest, LoginResponse, LogoutRequest, RefreshRequest,
+    RefreshResponse, ResetPasswordRequest, SetTemporaryPasswordRequest,
 };
 use crate::rest::client::{
     ClientListQuery, ClientResponse, ClientType, ClientsResponse, CreateClientRequest,
@@ -216,6 +216,7 @@ async fn health() -> impl Responder {
         user::get_user_roles,
         user::assign_user_roles,
         auth::login,
+        auth::refresh,
         auth::logout,
         auth::reset_password,
         auth::set_temporary_password,
@@ -375,6 +376,9 @@ async fn health() -> impl Responder {
         AssignUserRolesRequest,
         LoginRequest,
         LoginResponse,
+        RefreshRequest,
+        RefreshResponse,
+        LogoutRequest,
         ResetPasswordRequest,
         SetTemporaryPasswordRequest,
         AuthStatusResponse,
@@ -487,6 +491,7 @@ fn is_public_operation(path: &str, method: &str) -> bool {
         ("/api/v1/health", "GET")
             | ("/api/v1/metrics/track", "POST")
             | ("/api/v1/auth/login", "POST")
+            | ("/api/v1/auth/refresh", "POST")
             | ("/api/v1/auth/status", "GET")
             | ("/api/v1/admins", "POST")
     )

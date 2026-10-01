@@ -34,7 +34,7 @@ const LOAD_TIERS = {
 const loadTier = __ENV.LOAD_TIER || '1x';
 const config = LOAD_TIERS[loadTier] || LOAD_TIERS['1x'];
 const baseUrl = __ENV.BASE_URL || 'http://localhost:8081';
-const clientId = __ENV.CLIENT_ID || '';
+const sdkKey = __ENV.SDK_KEY || ''; // <clientId>.<apiKey>
 
 // Test options
 export const options = {
@@ -80,13 +80,6 @@ const FEATURE_KEYS = [
     // 'AdvancedFilters',
 ];
 
-// Environment IDs
-const ENVIRONMENT_IDS = [
-    'bf06820b-3ff6-4235-b7c6-91b27f5ef9a6',
-    '9646bb30-6bbe-48d8-89eb-a0200d4c95ce',
-    '7c7efb52-018f-4140-87ae-e42322ffa94d',
-];
-
 // User tier options for contextual features
 const USER_TIERS = ['free', 'basic', 'premium', 'enterprise'];
 
@@ -108,7 +101,7 @@ function generateUniqueUserId() {
 }
 
 export function setup() {
-    const authMethod = clientId ? `Bearer token (${clientId.substring(0, 8)}...)` : 'Default (edge server credentials)';
+    const authMethod = sdkKey ? `SDK key (client ${sdkKey.substring(0, 8)}...)` : 'MISSING (set SDK_KEY, requests get 401)';
 
     console.log(`
 ╔══════════════════════════════════════════════════════════════╗
@@ -131,33 +124,30 @@ This measures WORST-CASE performance with no assignment caching.
 
     // Warm-up request
     const headers = { 'Content-Type': 'application/json' };
-    if (clientId) {
-        headers['Authorization'] = `Bearer ${clientId}`;
+    if (sdkKey) {
+        headers['Authorization'] = `Bearer ${sdkKey}`;
     }
 
     const warmupRes = http.post(`${baseUrl}/ofrep/v1/evaluate/flags/NewCheckoutFlow`, JSON.stringify({
         context: {
             targetingKey: 'warmup-unique-user',
-            environment_id: ENVIRONMENT_IDS[0],
         }
     }), { headers });
 
     console.log(`Warm-up response: ${warmupRes.status}`);
 
-    return { baseUrl, clientId };
+    return { baseUrl, sdkKey };
 }
 
 export default function (data) {
     const featureKey = randomElement(FEATURE_KEYS);
     const uniqueUserId = generateUniqueUserId();
-    const envId = randomElement(ENVIRONMENT_IDS);
     const userTier = randomElement(USER_TIERS);
 
     // OFREP request body with unique user
     const payload = JSON.stringify({
         context: {
             targetingKey: uniqueUserId, // UNIQUE on every request
-            environment_id: envId,
             platform: 'web',
             version: '2.1.0',
             userTier: userTier,
@@ -168,8 +158,8 @@ export default function (data) {
         'Content-Type': 'application/json',
     };
 
-    if (data.clientId) {
-        headers['Authorization'] = `Bearer ${data.clientId}`;
+    if (data.sdkKey) {
+        headers['Authorization'] = `Bearer ${data.sdkKey}`;
     }
 
     const params = {

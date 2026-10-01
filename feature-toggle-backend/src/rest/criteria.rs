@@ -7,6 +7,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::JwtUser;
+use crate::database::activity_log::{ActivityLogRepository, CreateActivityLog};
 use crate::database::compound_rules::{
     CompoundRulesRepository, CompoundRulesRepositoryTx,
     CreateRuleConditionInput as DbCreateRuleConditionInput,
@@ -667,6 +668,10 @@ pub(crate) async fn set_stage_criteria(
 #[put("/criteria/{criteria_id}/variant-allocations")]
 pub(crate) async fn set_variant_allocations(
     db_pool: web::Data<sqlx::PgPool>,
+    req: HttpRequest,
+    feature_repo: web::Data<Box<dyn FeatureRepository>>,
+    activity_repo: web::Data<Box<dyn ActivityLogRepository>>,
+    updates_tx: web::Data<tokio::sync::broadcast::Sender<crate::grpc::pb::FeatureUpdate>>,
     criteria_id: web::Path<String>,
     body: web::Json<SetVariantAllocationsRequest>,
 ) -> Result<impl Responder, RestError> {
@@ -692,11 +697,32 @@ pub(crate) async fn set_variant_allocations(
         })
         .collect();
 
+    let feature_id: Uuid = sqlx::query_scalar(
+        r#"
+        SELECT s.feature_id
+        FROM feature_stage_criteria c
+        JOIN features_pipeline_stages s ON s.id = c.stage_id
+        WHERE c.id = $1
+        "#,
+    )
+    .bind(criteria_uuid)
+    .fetch_optional(db_pool.get_ref())
+    .await
+    .map_err(RestError::from)?
+    .ok_or_else(|| RestError::not_found("Stage criterion not found"))?;
+
     let repo_tx = variant_allocations_repository_tx(db_pool.get_ref().clone());
+    let feature_repo_tx =
+        crate::database::feature::feature_repository_tx(db_pool.get_ref().clone());
     let mut tx = db_pool
         .begin()
         .await
         .map_err(|_| RestError::internal("Failed to start transaction"))?;
+
+    let before_snapshot = feature_repo_tx
+        .build_feature_snapshot_tx(&mut tx, feature_id)
+        .await
+        .map_err(RestError::from)?;
 
     let result = repo_tx
         .set_allocations_tx(&mut tx, criteria_uuid, db_allocations)
@@ -704,9 +730,65 @@ pub(crate) async fn set_variant_allocations(
 
     match result {
         Ok(saved) => {
+            let write = async {
+                let after_snapshot = feature_repo_tx
+                    .build_feature_snapshot_tx(&mut tx, feature_id)
+                    .await?;
+                let change_summary = diff_entries_to_json(&diff_feature_snapshots(
+                    &before_snapshot,
+                    &after_snapshot,
+                ));
+                let (actor_id, actor_name) = actor_from_request(&req)
+                    .as_ref()
+                    .map(|actor| actor.as_option())
+                    .unwrap_or((None, None));
+                feature_repo_tx
+                    .create_feature_version_tx(
+                        &mut tx,
+                        feature_id,
+                        after_snapshot,
+                        change_summary,
+                        actor_id,
+                        actor_name.clone(),
+                        "update",
+                    )
+                    .await?;
+                activity_repo
+                    .create_activity_tx(
+                        &mut tx,
+                        CreateActivityLog {
+                            activity_type:
+                                crate::utils::activity_logger::activity_types::FEATURE_UPDATED
+                                    .to_string(),
+                            entity_type: "feature".to_string(),
+                            entity_id: feature_id.to_string(),
+                            actor_id,
+                            actor_name,
+                            description: "Updated variant allocations for stage criterion"
+                                .to_string(),
+                            metadata: Some(serde_json::json!({
+                                "feature_id": feature_id.to_string(),
+                                "criteria_id": criteria_uuid.to_string(),
+                                "allocation_count": saved.len(),
+                            })),
+                        },
+                    )
+                    .await
+                    .map_err(crate::Error::DatabaseError)?;
+                Ok::<(), crate::Error>(())
+            }
+            .await;
+            if let Err(err) = write {
+                let _ = tx.rollback().await;
+                return Err(RestError::from(err));
+            }
+
             tx.commit()
                 .await
                 .map_err(|_| RestError::internal("Failed to commit transaction"))?;
+
+            broadcast_feature_update(feature_repo.as_ref().as_ref(), &updates_tx, feature_id).await;
+
             let response: Vec<VariantAllocationResponse> = saved
                 .into_iter()
                 .map(|alloc| VariantAllocationResponse {
@@ -956,6 +1038,25 @@ mod tests {
             .expect("Failed to connect to database")
     }
 
+    type UpdatesTx = tokio::sync::broadcast::Sender<crate::grpc::pb::FeatureUpdate>;
+
+    fn variant_allocation_data(
+        pool: &sqlx::PgPool,
+    ) -> (
+        web::Data<Box<dyn FeatureRepository>>,
+        web::Data<Box<dyn ActivityLogRepository>>,
+        web::Data<UpdatesTx>,
+    ) {
+        let (updates_tx, _) = tokio::sync::broadcast::channel(16);
+        (
+            web::Data::new(crate::database::feature::feature_repository(pool.clone())),
+            web::Data::new(crate::database::activity_log::activity_log_repository(
+                pool.clone(),
+            )),
+            web::Data::new(updates_tx),
+        )
+    }
+
     #[actix_web::test]
     async fn get_stage_criteria_returns_items() {
         let stage_id = Uuid::new_v4();
@@ -989,10 +1090,13 @@ mod tests {
     async fn set_variant_allocations_validates_total_weight() {
         let criteria_id = Uuid::new_v4();
         let pool = test_pool().await;
-
+        let (feature_repo, activity_repo, updates_tx) = variant_allocation_data(&pool);
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(pool))
+                .app_data(feature_repo)
+                .app_data(activity_repo)
+                .app_data(updates_tx)
                 .service(web::scope("/api/v1").configure(super::configure)),
         )
         .await;
@@ -1018,6 +1122,173 @@ mod tests {
         let resp = test::call_service(&app, req).await;
 
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[actix_web::test]
+    async fn set_variant_allocations_writes_version_activity_and_broadcast() {
+        use crate::database::entity::{FeatureType, VariantSelectionMode};
+        use crate::database::feature::{
+            CreateFeature, CreateFeatureStage, CreateStageCriterion, feature_repository,
+        };
+
+        let pool = test_pool().await;
+        let repo = feature_repository(pool.clone());
+        let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+        let env_id = team_id;
+        let stage_id = Uuid::new_v4();
+        let feature_id = repo
+            .create_feature(CreateFeature {
+                team_id,
+                key: format!("alloc-tx-{}", Uuid::new_v4()),
+                description: None,
+                feature_type: FeatureType::Simple,
+                lifecycle_stage: "active".to_string(),
+                owner: None,
+                purpose: None,
+                reference_url: None,
+                expires_at: None,
+                cleanup_reason: None,
+                tags: vec![],
+                stages: vec![CreateFeatureStage {
+                    id: stage_id,
+                    environment_id: env_id,
+                    order_index: 0,
+                    parent_stage: None,
+                    position: "{ x: 0, y: 0 }".to_string(),
+                    enabled: true,
+                }],
+                dependencies: vec![],
+                variants: Some(vec![
+                    (
+                        "control".to_string(),
+                        serde_json::json!("a"),
+                        crate::database::entity::VariantValueType::String,
+                        None,
+                    ),
+                    (
+                        "treatment".to_string(),
+                        serde_json::json!("b"),
+                        crate::database::entity::VariantValueType::String,
+                        None,
+                    ),
+                ]),
+            })
+            .await
+            .expect("create feature");
+        let criterion_id = repo
+            .set_stage_criteria(
+                stage_id,
+                vec![CreateStageCriterion {
+                    priority: 0,
+                    variant_selection_mode: VariantSelectionMode::WeightedSplit,
+                    selected_variant_control: None,
+                }],
+            )
+            .await
+            .expect("create criterion")[0]
+            .id;
+
+        let versions_before = repo
+            .list_feature_versions(feature_id, 0, 100)
+            .await
+            .expect("versions")
+            .1;
+        let activities_before: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM activity_log WHERE entity_id = $1 AND activity_type = 'feature_updated'",
+        )
+        .bind(feature_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("activity count");
+
+        let (feature_repo, activity_repo, updates_tx) = variant_allocation_data(&pool);
+        let mut updates_rx = updates_tx.subscribe();
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(pool.clone()))
+                .app_data(feature_repo)
+                .app_data(activity_repo)
+                .app_data(updates_tx)
+                .service(web::scope("/api/v1").configure(super::configure)),
+        )
+        .await;
+
+        let req = test::TestRequest::put()
+            .uri(&format!(
+                "/api/v1/criteria/{criterion_id}/variant-allocations"
+            ))
+            .set_json(SetVariantAllocationsRequest {
+                allocations: vec![
+                    CreateVariantAllocationRequest {
+                        variant_control: "control".to_string(),
+                        weight: 60,
+                    },
+                    CreateVariantAllocationRequest {
+                        variant_control: "treatment".to_string(),
+                        weight: 40,
+                    },
+                ],
+            })
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        let status = resp.status();
+
+        let versions_after = repo
+            .list_feature_versions(feature_id, 0, 100)
+            .await
+            .expect("versions")
+            .1;
+        let activities_after: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM activity_log WHERE entity_id = $1 AND activity_type = 'feature_updated'",
+        )
+        .bind(feature_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("activity count");
+        let update = updates_rx.try_recv();
+        let _ = repo.delete_feature(feature_id).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            versions_after,
+            versions_before + 1,
+            "feature version written"
+        );
+        assert_eq!(activities_after, activities_before + 1, "activity logged");
+        let update = update.expect("FeatureUpdate broadcast after commit");
+        assert_eq!(
+            update.feature.expect("feature payload").id,
+            feature_id.to_string()
+        );
+    }
+
+    #[actix_web::test]
+    async fn set_variant_allocations_unknown_criterion_is_not_found() {
+        let pool = test_pool().await;
+        let (feature_repo, activity_repo, updates_tx) = variant_allocation_data(&pool);
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(pool))
+                .app_data(feature_repo)
+                .app_data(activity_repo)
+                .app_data(updates_tx)
+                .service(web::scope("/api/v1").configure(super::configure)),
+        )
+        .await;
+        let req = test::TestRequest::put()
+            .uri(&format!(
+                "/api/v1/criteria/{}/variant-allocations",
+                Uuid::new_v4()
+            ))
+            .set_json(SetVariantAllocationsRequest {
+                allocations: vec![CreateVariantAllocationRequest {
+                    variant_control: "control".to_string(),
+                    weight: 100,
+                }],
+            })
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     #[actix_web::test]

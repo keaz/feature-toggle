@@ -25,22 +25,20 @@ mkdir -p feature-edge-server/tests/results
 
 # 5. Run load test
 cd feature-edge-server
-k6 run --env LOAD_TIER=1x tests/load_test.js
+k6 run --env LOAD_TIER=1x --env SDK_KEY=<clientId>.<apiKey> tests/load_test.js
 ```
 
 ## Client Authentication
 
-```bash
-# With client auth (recommended)
-k6 run --env LOAD_TIER=1x --env CLIENT_ID=<client-id> tests/load_test.js
+OFREP requires an SDK key `<clientId>.<apiKey>` (see `docs/edge-server-api.md`). Without one, every request gets 401.
 
-# Without (uses edge server defaults from config.toml)
-k6 run --env LOAD_TIER=1x tests/load_test.js
+```bash
+k6 run --env LOAD_TIER=1x --env SDK_KEY=<clientId>.<apiKey> tests/load_test.js
 ```
 
-Get client credentials:
+Get client credentials (the admin UI also shows the SDK key):
 ```sql
-SELECT name, client_id, client_secret FROM clients;
+SELECT name, id || '.' || api_key AS sdk_key FROM clients;
 ```
 
 ## Load Tiers
@@ -69,7 +67,7 @@ After each test run, the following files are generated in `tests/results/`:
 ```bash
 # Run all load tiers
 for tier in 1x 2x 5x 10x; do
-  k6 run --env LOAD_TIER=$tier tests/load_test.js
+  k6 run --env LOAD_TIER=$tier --env SDK_KEY=<clientId>.<apiKey> tests/load_test.js
 done
 
 # Combine CSVs for charting
@@ -88,7 +86,7 @@ docker run -d -p 8086:8086 influxdb:1.8
 
 # Run k6 with InfluxDB output
 k6 run --out influxdb=http://localhost:8086/k6 \
-       --env LOAD_TIER=1x tests/load_test.js
+       --env LOAD_TIER=1x --env SDK_KEY=<clientId>.<apiKey> tests/load_test.js
 ```
 
 ### Option 3: k6 Cloud (Built-in Charts)
@@ -163,13 +161,13 @@ load_tier,target_rps,actual_rps,total_requests,p50_ms,p95_ms,p99_ms,avg_ms,min_m
 ### Standard Test (Cached Users)
 Uses a fixed pool of user IDs, simulating realistic cache hit rates:
 ```bash
-k6 run --env LOAD_TIER=1x tests/load_test.js
+k6 run --env LOAD_TIER=1x --env SDK_KEY=<clientId>.<apiKey> tests/load_test.js
 ```
 
 ### Unique Users Test (No Cache)
 Generates unique user IDs for **every request**, measuring worst-case performance:
 ```bash
-k6 run --env LOAD_TIER=1x tests/load_test_unique_users.js
+k6 run --env LOAD_TIER=1x --env SDK_KEY=<clientId>.<apiKey> tests/load_test_unique_users.js
 ```
 
 **Use this to:**
@@ -207,7 +205,7 @@ This means tests failed. Common causes:
 |-------|----------|
 | Edge server not running | `make up` or `docker ps` |
 | Features not deployed | Run `node populate_test_data.js` |
-| Wrong environment IDs | Update `ENVIRONMENT_IDS` in test script |
+| 401 responses | Set `SDK_KEY` to `<clientId>.<apiKey>`; the environment comes from the client |
 | Wrong client credentials | Update `config.toml` with client from database |
 | Backend not accessible | Check `backend_grpc` in `config.toml` |
 
@@ -221,11 +219,11 @@ docker logs feature_toggle_edge_server
 **Verify feature exists:**
 ```bash
 curl -X POST http://localhost:8081/ofrep/v1/evaluate/flags/NewCheckoutFlow \
+  -H "Authorization: Bearer <clientId>.<apiKey>" \
   -H "Content-Type: application/json" \
   -d '{
     "context": {
-      "targetingKey": "test-user",
-      "environment_id": "bf06820b-3ff6-4235-b7c6-91b27f5ef9a6"
+      "targetingKey": "test-user"
     }
   }'
 ```
