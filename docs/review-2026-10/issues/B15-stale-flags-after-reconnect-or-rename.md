@@ -4,7 +4,7 @@
 |---|---|
 | Type | Bug (correctness, cache staleness) |
 | Severity | High |
-| Status | Fixed on branch fix/b15-stale-flags-deletes |
+| Status | Fixed on branch fix/b15-stale-flags-deletes (steps 1–3); optional mark-and-sweep done on branch review-followups (`feat: sweep stale edge cache entries after full snapshots (B15)`) |
 | Crates | `feature-toggle-backend`, `feature-edge-server` |
 | Behavior change | Yes, intended: edges receive Delete messages and drop stale keys |
 | Depends on | [B01](B01-feature-key-lookup-substring-match.md) (exact key match), [B03](B03-stream-updates-cross-team.md) (team scoping of Deletes) |
@@ -42,7 +42,7 @@ A second effect: after the first normal reconnect, the edge subscription shrinks
 1. **Backend keys snapshot:** filter results to the exact key (after B01, use `get_feature_by_key`). For each requested key with no exact match, send `FeatureUpdate { action: Delete, feature_key: key, .. }`. There is no proto change.
 2. **Rename:** when the REST update changes a feature's key, broadcast a Delete for the old key, in addition to the Upsert for the new key. Respect B03 team scoping.
 3. **New flags after reconnect:** have the edge resubscribe with empty keys (full snapshot) on every reconnect, not only after lag. Combined with the B04 fix (no hang on large snapshots), this costs one snapshot per reconnect.
-   - Optional: clear or mark-and-sweep the edge cache on full snapshot. A clean sweep needs a "snapshot complete" marker, which is a proto change and changes the contract hash. Agree with the maintainer first.
+   - Optional: clear or mark-and-sweep the edge cache on full snapshot. A clean sweep needs a "snapshot complete" marker, which is a proto change and changes the contract hash. Agree with the maintainer first. **Done (maintainer approved the proto change), see Status notes.**
 
 ## Behavior impact
 
@@ -60,3 +60,9 @@ A second effect: after the first normal reconnect, the edge subscription shrinks
 - After a rename, the old key stops evaluating on the edge within one update.
 - After a reconnect, flags created during the disconnect reach the edge.
 - `cargo test -p feature-toggle-backend` and `cargo test -p feature-edge-server` pass.
+
+## Status notes
+
+- Steps 1–3 shipped first: team-scoped Deletes for missing keys in keyed snapshots and for the old key on rename, and a full-snapshot resubscribe on every reconnect.
+- The optional sweep is done. `FeatureUpdate.Action` has a new value `SNAPSHOT_COMPLETE = 5` (additive; older edges ignore unknown actions). The backend sends it once after the last Snapshot (and the Deletes of a keyed snapshot), and not when the snapshot fails. The edge tracks the own-team keys of each connection's snapshot; on the marker it removes cached own-team keys that were not in it (only within the requested keys for a keyed snapshot) and purges their assignments. A stream that drops before the marker sweeps nothing, and an edge connected to an older backend behaves as before. The contract baseline hashes for the proto were updated on purpose.
+- Related hardening: a Delete for a renamed feature's old key no longer drops the id index of the new key when the new key's Upsert arrived first (`fix(edge): keep id index when deleting a renamed feature's old key`). The sweep relies on it, since the renamed feature's Snapshot always arrives before the sweep removes its old key.

@@ -960,7 +960,8 @@ impl FeatureEvaluationSvc {
         }
     }
 
-    /// Reads the initial stream snapshot and sends each feature as a Snapshot update.
+    /// Reads the initial stream snapshot and sends each feature as a Snapshot
+    /// update, then one SnapshotComplete marker once everything was sent.
     async fn send_stream_snapshot(
         feature_repo: &dyn crate::database::feature::FeatureRepository,
         team_id: Uuid,
@@ -1051,6 +1052,18 @@ impl FeatureEvaluationSvc {
                     .await;
             }
         }
+
+        // Tell the edge the snapshot is whole, so it can drop cached keys the
+        // snapshot did not contain. Never sent when the snapshot failed above.
+        let _ = out_tx
+            .send(Ok(pb::FeatureUpdate {
+                message_id: uuid::Uuid::new_v4().to_string(),
+                action: pb::feature_update::Action::SnapshotComplete as i32,
+                feature: None,
+                feature_key: String::new(),
+                error: String::new(),
+            }))
+            .await;
 
         log::info!("gRPC: Snapshot sent successfully");
         Ok(())

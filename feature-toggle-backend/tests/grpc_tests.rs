@@ -1885,6 +1885,17 @@ async fn open_update_stream(
     (stream, tx)
 }
 
+/// Reads the marker that ends the initial snapshot.
+async fn expect_snapshot_complete(stream: &mut tonic::Streaming<pb::FeatureUpdate>) {
+    let marker = recv_update_with_timeout(stream, Duration::from_secs(2))
+        .await
+        .expect("missing SnapshotComplete marker");
+    assert_eq!(
+        marker.action,
+        pb::feature_update::Action::SnapshotComplete as i32
+    );
+}
+
 fn upsert_for(key: &str, team_id: Uuid) -> pb::FeatureUpdate {
     pb::FeatureUpdate {
         message_id: Uuid::new_v4().to_string(),
@@ -2049,6 +2060,7 @@ async fn stream_drops_upserts_from_other_teams() {
         .expect("missing snapshot");
     assert_eq!(snapshot.action, pb::feature_update::Action::Snapshot as i32);
     assert_eq!(snapshot.feature.unwrap().team_id, team_a.to_string());
+    expect_snapshot_complete(&mut stream).await;
 
     // Team B changes its flag with the same key: Team A's stream must not see it.
     updates_tx.send(upsert_for("shared", team_b)).unwrap();
@@ -2192,6 +2204,152 @@ async fn stream_keys_snapshot_sends_delete_for_missing_key() {
         }),
         "existing key must not be deleted"
     );
+    // A keyed snapshot also ends with exactly one completion marker.
+    let markers = received
+        .iter()
+        .filter(|u| u.action == pb::feature_update::Action::SnapshotComplete as i32)
+        .count();
+    assert_eq!(markers, 1, "expected one SnapshotComplete in {received:?}");
+    assert_eq!(
+        received.last().map(|u| u.action),
+        Some(pb::feature_update::Action::SnapshotComplete as i32)
+    );
+}
+
+/// Reads updates until the stream ends, fails, or stays quiet for 500 ms.
+async fn drain_updates(stream: &mut tonic::Streaming<pb::FeatureUpdate>) -> Vec<pb::FeatureUpdate> {
+    let mut received = Vec::new();
+    while let Some(update) = recv_update_with_timeout(stream, Duration::from_millis(500)).await {
+        received.push(update);
+    }
+    received
+}
+
+#[tokio::test]
+async fn stream_full_snapshot_ends_with_one_snapshot_complete_marker() {
+    let (updates_tx, _updates_rx) = broadcast::channel::<pb::FeatureUpdate>(16);
+    let (cid, sec) = client_ids();
+    let client_id = Uuid::parse_str(&cid).unwrap();
+    let team_id = Uuid::new_v4();
+    let client_mock = stream_client_mock(client_id, team_id, sec.clone());
+
+    let mut feature_mock = MockFeatureRepository::new();
+    feature_mock
+        .expect_get_feature_stages_batch()
+        .returning(stages_batch(|_fid| Ok(Vec::new())));
+    feature_mock
+        .expect_get_features()
+        .returning(move |_team, _key, _ftype| {
+            Ok(["a", "b", "c"]
+                .iter()
+                .map(|key| test_feature(Uuid::new_v4(), key, team_id, true, false, vec![]))
+                .collect())
+        });
+
+    let (addr, _server) = start_server_with_repos(
+        Box::new(feature_mock),
+        Box::new(client_mock),
+        updates_tx.clone(),
+    )
+    .await;
+
+    let (mut stream, _tx) = open_update_stream(addr, cid, sec, vec![]).await;
+    let snapshot = drain_updates(&mut stream).await;
+
+    let actions: Vec<i32> = snapshot.iter().map(|u| u.action).collect();
+    let snapshot_action = pb::feature_update::Action::Snapshot as i32;
+    let complete_action = pb::feature_update::Action::SnapshotComplete as i32;
+    assert_eq!(
+        actions,
+        vec![
+            snapshot_action,
+            snapshot_action,
+            snapshot_action,
+            complete_action
+        ],
+        "full snapshot must be all Snapshot messages followed by one marker: {snapshot:?}"
+    );
+    let marker = snapshot.last().unwrap();
+    assert!(marker.feature.is_none());
+    assert!(marker.feature_key.is_empty());
+
+    // Live updates after the snapshot carry no further marker.
+    updates_tx.send(upsert_for("a", team_id)).unwrap();
+    let live = drain_updates(&mut stream).await;
+    assert_eq!(
+        live.iter().map(|u| u.action).collect::<Vec<_>>(),
+        vec![pb::feature_update::Action::Upsert as i32],
+        "unexpected live messages: {live:?}"
+    );
+}
+
+#[tokio::test]
+async fn stream_snapshot_db_error_sends_no_snapshot_complete_marker() {
+    // The feature list fails, or child rows fail after the list was read.
+    for fail_on_child_rows in [false, true] {
+        let (updates_tx, _updates_rx) = broadcast::channel::<pb::FeatureUpdate>(16);
+        let (cid, sec) = client_ids();
+        let client_id = Uuid::parse_str(&cid).unwrap();
+        let team_id = Uuid::new_v4();
+        let client_mock = stream_client_mock(client_id, team_id, sec.clone());
+
+        let mut feature_mock = MockFeatureRepository::new();
+        feature_mock
+            .expect_get_feature_stages_batch()
+            .returning(stages_batch(move |fid| {
+                if fail_on_child_rows {
+                    Err(Error::NotFound(fid))
+                } else {
+                    Ok(Vec::new())
+                }
+            }));
+        feature_mock
+            .expect_get_features()
+            .returning(move |_team, _key, _ftype| {
+                if fail_on_child_rows {
+                    Ok(vec![test_feature(
+                        Uuid::new_v4(),
+                        "a",
+                        team_id,
+                        true,
+                        false,
+                        vec![],
+                    )])
+                } else {
+                    Err(Error::NotFound(team_id))
+                }
+            });
+
+        let (addr, _server) =
+            start_server_with_repos(Box::new(feature_mock), Box::new(client_mock), updates_tx)
+                .await;
+
+        let (mut stream, _tx) = open_update_stream(addr, cid, sec, vec![]).await;
+        let mut received = Vec::new();
+        let mut status = None;
+        loop {
+            match tokio::time::timeout(Duration::from_millis(500), stream.message()).await {
+                Ok(Ok(Some(update))) => received.push(update),
+                Ok(Err(err)) => {
+                    status = Some(err);
+                    break;
+                }
+                Ok(Ok(None)) | Err(_) => break,
+            }
+        }
+
+        assert_eq!(
+            status.map(|s| s.code()),
+            Some(tonic::Code::Internal),
+            "snapshot failure must end the stream with an error (child rows: {fail_on_child_rows})"
+        );
+        assert!(
+            !received
+                .iter()
+                .any(|u| u.action == pb::feature_update::Action::SnapshotComplete as i32),
+            "failed snapshot must not be marked complete (child rows: {fail_on_child_rows}): {received:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -2233,6 +2391,7 @@ async fn stream_forwards_deletes_only_to_owning_team() {
         .await
         .expect("missing snapshot");
     assert_eq!(snapshot.action, pb::feature_update::Action::Snapshot as i32);
+    expect_snapshot_complete(&mut stream).await;
 
     // Team B renames its own "shared": Team A must keep its flag.
     updates_tx

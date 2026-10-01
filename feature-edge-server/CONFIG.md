@@ -82,9 +82,9 @@ stream_initial_delay_secs = 1
 # Maximum delay for stream reconnection in seconds
 stream_max_delay_secs = 30
 
-# When the backend emits a `lagged` stream marker, the edge drops its local
-# feature/assignment caches and reconnects with an empty subscription key set
-# so the next stream starts with a full snapshot resync.
+# Every (re)connect subscribes with an empty key set, so each stream starts
+# with a full snapshot. When the backend emits a `lagged` stream marker, the
+# edge also drops its local feature/assignment caches before reconnecting.
 
 [cache]
 # Maximum number of features to cache (LRU eviction when exceeded)
@@ -345,6 +345,8 @@ These settings have no default. Each one must be set in `config.toml` or through
 Memory usage estimate: Each feature uses approximately 1-5 KB depending on configuration complexity. A cache of 10,000 features typically uses 10-50 MB of memory.
 
 **LRU Eviction:** When the cache reaches `max_capacity`, the least recently used features are automatically evicted to make room for new ones. This prevents unbounded memory growth while maintaining performance for frequently accessed features.
+
+**Stream sync and stale entries:** The edge keeps its feature cache in sync over the backend's `StreamUpdates` stream. Every connection starts with a full snapshot of the team's features (`SNAPSHOT` messages), followed by live `UPSERT` and `DELETE` messages. A backend that supports it ends the snapshot with one `SNAPSHOT_COMPLETE` message. On that marker the edge removes cached features of its team that the snapshot did not contain (flags renamed or removed while the edge was disconnected) and drops their cached and pending assignments, as a `DELETE` does. If the stream drops before the marker, nothing is removed and the next connection starts over. With an older backend that never sends the marker, stale entries stay until LRU eviction.
 
 **Rejected client credentials:** When the backend rejects a client ID and secret (wrong secret, unknown client or disabled client), the edge remembers the rejection for 30 seconds and answers repeated requests with the same credentials without calling the backend. A client that is created or re-enabled right after a failed attempt can therefore be rejected for up to 30 seconds. Transient backend errors are not cached.
 

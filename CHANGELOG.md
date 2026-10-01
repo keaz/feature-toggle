@@ -4,6 +4,10 @@ All notable user-visible changes to FluxGate are recorded here.
 
 ## Unreleased
 
+### Added
+
+- **Edges drop flags renamed or removed while they were disconnected (backend + edge, B15).** The gRPC stream protocol has a new `FeatureUpdate.Action` value, `SNAPSHOT_COMPLETE = 5`. The backend sends it once after the initial snapshot of each `StreamUpdates` stream, and not when the snapshot fails. On that marker the edge removes cached features of its team that the snapshot did not contain and drops their cached and pending assignments, so evaluating such a key falls back to a backend fetch and then to not-found. Before, these entries kept evaluating until LRU eviction. The change is additive and backward compatible: older edges ignore the new action, and new edges connected to an older backend never sweep. The proto contract hashes changed, so the contract baseline was updated.
+
 ### Changed
 
 - **Dependencies on non-boolean flags are rejected (backend).** A dependency passes only when it evaluates to `true`, so a dependency on a contextual flag with string, number or object variant values always blocked its dependents. Creating or updating a feature to add such a dependency, changing a depended-on flag to non-boolean values (or from `SIMPLE` to `CONTEXTUAL` with non-boolean stored variants), and version rollbacks that would do either now return `400 invalid_input`. Evaluation results do not change. Existing configurations are not migrated and stay editable; their non-boolean dependencies keep blocking until removed.

@@ -456,6 +456,15 @@ impl MappedFeatureCache {
         Some(id)
     }
 
+    /// Keys of all cached features that belong to `team_id`.
+    pub fn keys_for_team(&self, team_id: &str) -> Vec<String> {
+        self.by_key
+            .iter()
+            .filter(|(_, entry)| &*entry.team_id == team_id)
+            .map(|(key, _)| key.to_string())
+            .collect()
+    }
+
     /// Get all feature keys
     pub async fn get_all_keys(&self) -> Vec<String> {
         self.by_key.iter().map(|(k, _)| k.to_string()).collect()

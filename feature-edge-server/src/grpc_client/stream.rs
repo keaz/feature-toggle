@@ -1,11 +1,13 @@
 use super::{AppState, backend_client, build_endpoint, pb};
 use crate::config::GrpcConfig;
+use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio_stream::StreamExt;
 use tracing::{debug, error, info, warn};
 
-/// Send the initial subscription payload for a stream connection.
+/// Send the initial subscription payload for a stream connection and return
+/// the subscribed feature keys.
 ///
 /// Every connection subscribes with empty keys, which means all of the team's
 /// features and a full snapshot. Subscribing with only the cached keys would
@@ -13,19 +15,21 @@ use tracing::{debug, error, info, warn};
 pub(crate) async fn send_initial_subscribe(
     tx: &tokio::sync::mpsc::Sender<pb::StreamRequest>,
     app: &AppState,
-) {
+) -> Vec<String> {
     tracing::info!("Subscribing to all team features (full snapshot)");
 
+    let feature_keys = Vec::new();
     let subscribe = pb::SubscribeRequest {
         client_id: app.client_id.clone(),
         client_secret: app.client_secret.clone(),
-        feature_keys: Vec::new(),
+        feature_keys: feature_keys.clone(),
         environment_id: "".into(),
     };
     let initial = pb::StreamRequest {
         payload: Some(pb::stream_request::Payload::Subscribe(subscribe)),
     };
     let _ = tx.send(initial).await;
+    feature_keys
 }
 
 pub(crate) async fn prepare_for_full_resync(app: &AppState) {
@@ -170,6 +174,98 @@ pub(crate) async fn handle_feature_update(app: &AppState, update: pb::FeatureUpd
     false
 }
 
+/// Tracks the initial snapshot of one stream connection, so that cached keys
+/// the snapshot did not contain can be swept once the backend marks it
+/// complete (`SNAPSHOT_COMPLETE`).
+///
+/// A tracker lives only as long as its connection: if the stream drops before
+/// the marker, the partial snapshot is discarded and nothing is swept. A
+/// backend that never sends the marker never triggers a sweep either.
+#[derive(Debug, Default)]
+pub(crate) struct SnapshotSweep {
+    /// Keys the subscription asked for. `None` means all team features, so
+    /// every cached key of the edge's team is in scope.
+    scope: Option<HashSet<String>>,
+    /// Own-team keys received in Snapshot messages. `None` once the snapshot
+    /// is complete.
+    seen: Option<HashSet<String>>,
+}
+
+impl SnapshotSweep {
+    /// Start tracking the snapshot of a subscription to `feature_keys`.
+    pub(crate) fn start(feature_keys: &[String]) -> Self {
+        Self {
+            scope: (!feature_keys.is_empty()).then(|| feature_keys.iter().cloned().collect()),
+            seen: Some(HashSet::new()),
+        }
+    }
+
+    fn record(&mut self, key: &str) {
+        if let Some(seen) = self.seen.as_mut() {
+            seen.insert(key.to_string());
+        }
+    }
+
+    /// Whether a cached key must go: in scope and not in the snapshot.
+    /// `None` when no snapshot is in progress.
+    fn take_stale_filter(&mut self) -> Option<impl Fn(&str) -> bool + use<>> {
+        let seen = self.seen.take()?;
+        let scope = self.scope.take();
+        Some(move |key: &str| {
+            !seen.contains(key) && scope.as_ref().is_none_or(|scope| scope.contains(key))
+        })
+    }
+}
+
+/// Apply one message of a stream connection, tracking its initial snapshot in
+/// `sweep`. Returning `true` asks for a reconnect with a full resync.
+pub(crate) async fn handle_stream_update(
+    app: &AppState,
+    sweep: &mut SnapshotSweep,
+    update: pb::FeatureUpdate,
+) -> bool {
+    use pb::feature_update::Action;
+    if update.action == Action::SnapshotComplete as i32 {
+        sweep_unseen_features(app, sweep).await;
+        return false;
+    }
+    if update.action == Action::Snapshot as i32
+        && let (Some(feature), Some(edge_team_id)) = (update.feature.as_ref(), app.edge_team_id())
+        && feature.team_id == edge_team_id
+    {
+        sweep.record(&feature.key);
+    }
+    handle_feature_update(app, update).await
+}
+
+/// Drop cached features of the edge's team that the completed snapshot did
+/// not contain (renamed or removed while the edge was disconnected), and
+/// purge their assignments like a Delete does.
+async fn sweep_unseen_features(app: &AppState, sweep: &mut SnapshotSweep) {
+    let Some(is_stale) = sweep.take_stale_filter() else {
+        debug!("Ignoring snapshot-complete marker: no snapshot in progress");
+        return;
+    };
+    let Some(edge_team_id) = app.edge_team_id() else {
+        return;
+    };
+    let stale_keys = app
+        .mapped_cache
+        .keys_for_team(edge_team_id)
+        .into_iter()
+        .filter(|key| is_stale(key))
+        .collect::<Vec<_>>();
+    for key in &stale_keys {
+        if let Some(feature_id) = app.mapped_cache.delete_by_key(key).await {
+            app.purge_assignments_for_feature(&feature_id).await;
+        }
+    }
+    info!(
+        "Snapshot complete: removed {} cached feature(s) missing from it",
+        stale_keys.len()
+    );
+}
+
 /// Maintain the long-lived backend update stream. Lag markers force a full
 /// snapshot resubscribe so deletes and missed updates converge deterministically.
 pub async fn run_stream_task(app: AppState, grpc_addr: String, grpc_config: GrpcConfig) {
@@ -199,7 +295,7 @@ pub async fn run_stream_task(app: AppState, grpc_addr: String, grpc_config: Grpc
                 }
 
                 let (tx, rx) = tokio::sync::mpsc::channel::<pb::StreamRequest>(16);
-                send_initial_subscribe(&tx, &app).await;
+                let subscribed_keys = send_initial_subscribe(&tx, &app).await;
                 spawn_heartbeat(tx.clone());
 
                 let response = match open_streaming_call(client, rx).await {
@@ -217,11 +313,14 @@ pub async fn run_stream_task(app: AppState, grpc_addr: String, grpc_config: Grpc
                 app.connected.store(true, Ordering::Relaxed);
                 info!("Stream connection established, receiving updates");
                 let mut inbound = response.into_inner();
+                // Per connection: a stream that drops before its snapshot
+                // completes discards the partial snapshot and sweeps nothing.
+                let mut sweep = SnapshotSweep::start(&subscribed_keys);
 
                 while let Some(msg) = inbound.next().await {
                     match msg {
                         Ok(update) => {
-                            if handle_feature_update(&app, update).await {
+                            if handle_stream_update(&app, &mut sweep, update).await {
                                 force_full_resync = true;
                                 break;
                             }
