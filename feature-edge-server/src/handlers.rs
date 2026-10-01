@@ -1145,7 +1145,37 @@ fn bytes_to_lower_hex(bytes: &[u8]) -> String {
     hex
 }
 
-fn ofrep_bulk_etag(features: &[std::sync::Arc<engine::Feature>]) -> String {
+/// ETag of a bulk OFREP response. The response depends on the flag configs,
+/// the caller's environment and the evaluation context, so all of them are
+/// hashed. Each part is length-prefixed so field boundaries cannot shift.
+fn ofrep_bulk_etag(
+    features: &[std::sync::Arc<engine::Feature>],
+    environment_id: &str,
+    context: &OFREPContext,
+) -> String {
+    // Top-level attributes come from a HashMap; sort them. Nested objects are
+    // `serde_json::Map`, which is already sorted (no `preserve_order`).
+    let attributes = context
+        .attributes
+        .iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let attributes = serde_json::to_string(&attributes).unwrap_or_default();
+    let config_hash = ofrep_flag_config_hash(features);
+
+    let mut hasher = Sha256::new();
+    for part in [
+        config_hash.as_bytes(),
+        environment_id.as_bytes(),
+        context.targeting_key.as_bytes(),
+        attributes.as_bytes(),
+    ] {
+        hasher.update((part.len() as u64).to_be_bytes());
+        hasher.update(part);
+    }
+    bytes_to_lower_hex(&hasher.finalize())
+}
+
+fn ofrep_flag_config_hash(features: &[std::sync::Arc<engine::Feature>]) -> String {
     let mut feature_payloads = features
         .iter()
         .map(|feature| {
@@ -1162,11 +1192,13 @@ fn ofrep_bulk_etag(features: &[std::sync::Arc<engine::Feature>]) -> String {
     bytes_to_lower_hex(&hasher.finalize())
 }
 
+/// Whether `If-None-Match` lists `etag`. The `*` wildcard is ignored: a bulk
+/// evaluation is a POST, so it must not short-circuit to 304.
 fn if_none_match_contains(if_none_match: &str, etag: &str) -> bool {
     if_none_match
         .split(',')
         .map(|part| part.trim().trim_matches('"'))
-        .any(|candidate| candidate == etag || candidate == "*")
+        .any(|candidate| candidate == etag)
 }
 
 /// OFREP handler for single flag evaluation
@@ -1372,14 +1404,16 @@ pub async fn ofrep_evaluate_flags_bulk(
     }
     features.sort_by(|left, right| left.key.cmp(&right.key));
 
-    let etag = ofrep_bulk_etag(&features);
+    let etag = ofrep_bulk_etag(&features, &environment_id, &context);
     if let Some(if_none_match) = http_req
         .headers()
         .get(header::IF_NONE_MATCH)
         .and_then(|value| value.to_str().ok())
         && if_none_match_contains(if_none_match, &etag)
     {
-        return Ok(HttpResponse::NotModified().finish());
+        return Ok(HttpResponse::NotModified()
+            .insert_header((header::ETAG, etag))
+            .finish());
     }
 
     let mut flags = Vec::with_capacity(features.len());
@@ -1414,10 +1448,10 @@ pub async fn ofrep_evaluate_flags_bulk(
 #[cfg(test)]
 mod tests {
     use super::{
-        EvaluateContext, cache_fetched_feature, evaluate_handler, evaluate_http_feature_locally,
-        extract_auth_from_headers, hydrate_feature_with_dependencies, if_none_match_contains,
-        map_proto_to_engine, ofrep_bulk_etag, ofrep_evaluate_flag, ofrep_evaluate_flags_bulk,
-        resolve_ofrep_credentials,
+        EvaluateContext, OFREPContext, cache_fetched_feature, evaluate_handler,
+        evaluate_http_feature_locally, extract_auth_from_headers,
+        hydrate_feature_with_dependencies, if_none_match_contains, map_proto_to_engine,
+        ofrep_bulk_etag, ofrep_evaluate_flag, ofrep_evaluate_flags_bulk, resolve_ofrep_credentials,
     };
     use crate::pb;
     use actix_web::test::TestRequest;
@@ -2141,6 +2175,89 @@ mod tests {
         assert_eq!(body["value"], serde_json::json!(true));
     }
 
+    /// A bulk OFREP request for `context`, optionally with `If-None-Match`.
+    fn bulk_request(
+        context: &serde_json::Value,
+        if_none_match: Option<&str>,
+    ) -> actix_test::TestRequest {
+        let req = actix_test::TestRequest::post()
+            .uri("/ofrep/v1/evaluate/flags")
+            .insert_header(("x-api-key", "client"))
+            .set_json(serde_json::json!({ "context": context }));
+        match if_none_match {
+            Some(value) => req.insert_header(("if-none-match", value)),
+            None => req,
+        }
+    }
+
+    fn status_and_etag(
+        resp: &actix_web::dev::ServiceResponse,
+    ) -> (actix_web::http::StatusCode, Option<String>) {
+        let etag = resp
+            .headers()
+            .get(actix_web::http::header::ETAG)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        (resp.status(), etag)
+    }
+
+    #[actix_web::test]
+    async fn ofrep_bulk_returns_304_only_for_the_same_context() {
+        use actix_web::http::StatusCode;
+
+        let (app_state, _backend) = ofrep_app_with_mock_backend().await;
+        cache_fetched_feature(&app_state, &team_feature("f-1", "alpha", "team-1", true)).await;
+        app_state.mapped_cache.run_pending_tasks().await;
+        let service =
+            actix_test::init_service(App::new().app_data(web::Data::new(app_state)).route(
+                "/ofrep/v1/evaluate/flags",
+                web::post().to(ofrep_evaluate_flags_bulk),
+            ))
+            .await;
+
+        let anon = serde_json::json!({ "targetingKey": "anon-1" });
+        let resp = actix_test::call_service(&service, bulk_request(&anon, None).to_request()).await;
+        let (status, etag) = status_and_etag(&resp);
+        assert_eq!(status, StatusCode::OK);
+        let etag = etag.expect("bulk response carries an ETag");
+
+        // Same config, other user: must re-evaluate.
+        let user = serde_json::json!({ "targetingKey": "u-42" });
+        let req = bulk_request(&user, Some(&etag)).to_request();
+        let resp = actix_test::call_service(&service, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "new targetingKey must not get 304"
+        );
+
+        // Same config and user, other attributes: must re-evaluate.
+        let with_plan = serde_json::json!({ "targetingKey": "anon-1", "plan": "premium" });
+        let req = bulk_request(&with_plan, Some(&etag)).to_request();
+        let resp = actix_test::call_service(&service, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "new attributes must not get 304"
+        );
+
+        // Identical repeat request: 304, with the ETag header.
+        let req = bulk_request(&anon, Some(&etag)).to_request();
+        let resp = actix_test::call_service(&service, req).await;
+        let (status, not_modified_etag) = status_and_etag(&resp);
+        assert_eq!(status, StatusCode::NOT_MODIFIED);
+        assert_eq!(not_modified_etag.as_deref(), Some(etag.as_str()));
+
+        // `*` must not short-circuit a POST evaluation.
+        let req = bulk_request(&anon, Some("*")).to_request();
+        let resp = actix_test::call_service(&service, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "If-None-Match: * must not get 304"
+        );
+    }
+
     #[test]
     fn ofrep_bulk_etag_is_stable_and_matchable() {
         let feature_a = Arc::new(map_proto_to_engine(&simple_feature(
@@ -2160,13 +2277,54 @@ mod tests {
             vec![],
         )));
 
-        let etag = ofrep_bulk_etag(&[feature_a.clone(), feature_b.clone()]);
-        let reversed_etag = ofrep_bulk_etag(&[feature_b, feature_a]);
+        let features = [feature_a.clone(), feature_b.clone()];
+        let context = ofrep_context("anon-1", &[("plan", "free"), ("country", "SE")]);
+
+        let etag = ofrep_bulk_etag(&features, "env-1", &context);
+        let reversed_etag = ofrep_bulk_etag(&[feature_b, feature_a], "env-1", &context);
 
         assert_eq!(etag, reversed_etag);
         assert!(if_none_match_contains(&etag, &etag));
         assert!(if_none_match_contains(&format!("\"{etag}\""), &etag));
         assert!(if_none_match_contains(&format!("stale, \"{etag}\""), &etag));
+
+        // Context and environment are part of the ETag.
+        let other_user = ofrep_context("u-42", &[("plan", "free"), ("country", "SE")]);
+        assert_ne!(etag, ofrep_bulk_etag(&features, "env-1", &other_user));
+        let other_attributes = ofrep_context("anon-1", &[("plan", "premium"), ("country", "SE")]);
+        assert_ne!(etag, ofrep_bulk_etag(&features, "env-1", &other_attributes));
+        let fewer_attributes = ofrep_context("anon-1", &[("plan", "free")]);
+        assert_ne!(etag, ofrep_bulk_etag(&features, "env-1", &fewer_attributes));
+        assert_ne!(etag, ofrep_bulk_etag(&features, "env-2", &context));
+
+        // Attribute insertion order does not matter.
+        for _ in 0..16 {
+            let reordered = ofrep_context("anon-1", &[("country", "SE"), ("plan", "free")]);
+            assert_eq!(etag, ofrep_bulk_etag(&features, "env-1", &reordered));
+        }
+
+        // Field boundaries are unambiguous.
+        assert_ne!(
+            ofrep_bulk_etag(&features, "env-", &ofrep_context("1", &[])),
+            ofrep_bulk_etag(&features, "env", &ofrep_context("-1", &[]))
+        );
+    }
+
+    fn ofrep_context(targeting_key: &str, attributes: &[(&str, &str)]) -> OFREPContext {
+        OFREPContext {
+            targeting_key: targeting_key.to_string(),
+            attributes: attributes
+                .iter()
+                .map(|(key, value)| (key.to_string(), serde_json::json!(value)))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn if_none_match_wildcard_does_not_match() {
+        assert!(!if_none_match_contains("*", "abc"));
+        assert!(!if_none_match_contains("\"*\"", "abc"));
+        assert!(if_none_match_contains("*, \"abc\"", "abc"));
     }
 
     #[test]
