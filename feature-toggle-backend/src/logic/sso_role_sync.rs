@@ -164,8 +164,8 @@ where
         .into_iter()
         .collect();
 
-    let add_roles: Vec<Uuid> = desired_roles.difference(&current_roles).copied().collect();
-    let add_teams: Vec<Uuid> = desired_teams.difference(&current_teams).copied().collect();
+    let want_roles: Vec<Uuid> = desired_roles.difference(&current_roles).copied().collect();
+    let want_teams: Vec<Uuid> = desired_teams.difference(&current_teams).copied().collect();
     let remove_roles: Vec<Uuid> = if authoritative {
         current_roles.difference(&desired_roles).copied().collect()
     } else {
@@ -177,20 +177,24 @@ where
         Vec::new()
     };
 
-    // The add call keeps an existing manual row manual, so "added" can include a
-    // role the user already holds manually; report only what is new to the user.
-    if !add_roles.is_empty() {
+    // The add calls keep an existing manual row manual and return only the rows they
+    // inserted, so a role or team held manually and mapped is never reported as added.
+    let add_roles = if want_roles.is_empty() {
+        Vec::new()
+    } else {
         repos
             .roles
-            .add_sso_user_roles_tx(conn, user_id, add_roles.clone())
-            .await?;
-    }
-    if !add_teams.is_empty() {
+            .add_sso_user_roles_tx(conn, user_id, want_roles)
+            .await?
+    };
+    let add_teams = if want_teams.is_empty() {
+        Vec::new()
+    } else {
         repos
             .users
-            .add_sso_user_teams_tx(conn, user_id, add_teams.clone())
-            .await?;
-    }
+            .add_sso_user_teams_tx(conn, user_id, want_teams)
+            .await?
+    };
     if !remove_roles.is_empty() {
         repos
             .roles
@@ -208,27 +212,23 @@ where
     let mut admin_change: Option<&str> = None;
     let mut admin_kept_warning = false;
     if desired.admin {
-        if !is_admin {
-            repos
-                .users
-                .set_admin_with_source_tx(conn, user_id, true, Some("sso"))
-                .await?;
+        if !is_admin && repos.users.grant_sso_admin_tx(conn, user_id).await? {
             admin_change = Some("granted");
         }
     } else if authoritative && is_admin && admin_source.as_deref() == Some("sso") {
         match ensure_another_admin_remains(conn, user_id).await {
             Ok(()) => {
-                repos
-                    .users
-                    .set_admin_with_source_tx(conn, user_id, false, None)
-                    .await?;
-                admin_change = Some("revoked");
+                // Conditional on the SSO source: a concurrent manual grant wins.
+                if repos.users.revoke_sso_admin_tx(conn, user_id).await? {
+                    admin_change = Some("revoked");
+                }
             }
             Err(Error::LastAdminRequired) => {
                 log::warn!(
                     "SSO sync kept admin for user {user_id}: no other enabled admin would remain"
                 );
-                admin_kept_warning = true;
+                // One warning per 24h per user: every login would repeat it otherwise.
+                admin_kept_warning = !recent_warning_exists(conn, user_id).await?;
             }
             Err(err) => return Err(err),
         }
@@ -305,6 +305,20 @@ async fn log_sync(
         .await
         .map_err(Error::DatabaseError)?;
     Ok(())
+}
+
+/// Whether a last-admin warning was already logged for the user in the last 24 hours.
+async fn recent_warning_exists(conn: &mut PgConnection, user_id: Uuid) -> Result<bool, Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM activity_log \
+         WHERE activity_type = $1 AND entity_id = $2 \
+           AND created_at > now() - interval '24 hours')",
+    )
+    .bind(activity_types::SSO_ROLE_SYNC_WARNING)
+    .bind(user_id.to_string())
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(Error::DatabaseError)
 }
 
 #[cfg(test)]

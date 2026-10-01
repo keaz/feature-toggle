@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE users SET is_admin = TRUE, admin_source = 'sso', updated_at = now() WHERE id = $1 AND is_admin = FALSE",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e22323dd2f4110f39811bb1e1417da4ec70b65d33d1fe29b93574928b203bf12"
+}

@@ -160,13 +160,14 @@ pub trait UserRepositoryTx: UserRepository {
         id: Uuid,
     ) -> Result<Vec<Uuid>, Error>;
     /// Adds team memberships with `source = 'sso'`. A team the user already belongs
-    /// to, manually or through SSO, is left as is (manual wins).
+    /// to, manually or through SSO, is left as is (manual wins). Returns the ids
+    /// actually inserted.
     async fn add_sso_user_teams_tx(
         &self,
         conn: &mut PgConnection,
         id: Uuid,
         team_ids: Vec<Uuid>,
-    ) -> Result<(), Error>;
+    ) -> Result<Vec<Uuid>, Error>;
     /// Removes only `source = 'sso'` memberships; manual ones are never touched.
     async fn remove_sso_user_teams_tx(
         &self,
@@ -189,6 +190,12 @@ pub trait UserRepositoryTx: UserRepository {
         is_admin: bool,
         source: Option<&str>,
     ) -> Result<(), Error>;
+    /// Grants admin with source `sso` only if the user is not an admin right now.
+    /// Returns whether a row changed.
+    async fn grant_sso_admin_tx(&self, conn: &mut PgConnection, id: Uuid) -> Result<bool, Error>;
+    /// Revokes admin only if it is still an SSO grant right now, so a concurrent
+    /// manual grant is never revoked. Returns whether a row changed.
+    async fn revoke_sso_admin_tx(&self, conn: &mut PgConnection, id: Uuid) -> Result<bool, Error>;
     /// The subset of `team_ids` that still exist.
     async fn existing_team_ids_tx(
         &self,
@@ -659,22 +666,25 @@ impl UserRepositoryImpl {
         conn: &mut PgConnection,
         id: Uuid,
         team_ids: Vec<Uuid>,
-    ) -> Result<(), Error> {
+    ) -> Result<Vec<Uuid>, Error> {
+        let mut inserted = Vec::new();
         for team_id in team_ids {
-            handle_error(
+            let row = handle_error(
                 Some(id),
-                sqlx::query!(
+                sqlx::query_scalar!(
                     r#"INSERT INTO user_teams (user_id, team_id, source)
                        VALUES ($1, $2, 'sso')
-                       ON CONFLICT (user_id, team_id) DO NOTHING"#,
+                       ON CONFLICT (user_id, team_id) DO NOTHING
+                       RETURNING team_id"#,
                     id,
                     team_id
                 )
-                .execute(&mut *conn)
+                .fetch_optional(&mut *conn)
                 .await,
             )?;
+            inserted.extend(row);
         }
-        Ok(())
+        Ok(inserted)
     }
 
     async fn remove_sso_user_teams_internal(
@@ -912,7 +922,7 @@ impl UserRepositoryTx for UserRepositoryImpl {
         conn: &mut PgConnection,
         id: Uuid,
         team_ids: Vec<Uuid>,
-    ) -> Result<(), Error> {
+    ) -> Result<Vec<Uuid>, Error> {
         Self::add_sso_user_teams_internal(conn, id, team_ids).await
     }
 
@@ -958,6 +968,34 @@ impl UserRepositoryTx for UserRepositoryImpl {
             .await,
         )?;
         Ok(())
+    }
+
+    async fn grant_sso_admin_tx(&self, conn: &mut PgConnection, id: Uuid) -> Result<bool, Error> {
+        let result = handle_error(
+            Some(id),
+            sqlx::query!(
+                "UPDATE users SET is_admin = TRUE, admin_source = 'sso', updated_at = now() \
+                 WHERE id = $1 AND is_admin = FALSE",
+                id
+            )
+            .execute(&mut *conn)
+            .await,
+        )?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn revoke_sso_admin_tx(&self, conn: &mut PgConnection, id: Uuid) -> Result<bool, Error> {
+        let result = handle_error(
+            Some(id),
+            sqlx::query!(
+                "UPDATE users SET is_admin = FALSE, admin_source = NULL, updated_at = now() \
+                 WHERE id = $1 AND is_admin = TRUE AND admin_source = 'sso'",
+                id
+            )
+            .execute(&mut *conn)
+            .await,
+        )?;
+        Ok(result.rows_affected() > 0)
     }
 
     async fn existing_team_ids_tx(

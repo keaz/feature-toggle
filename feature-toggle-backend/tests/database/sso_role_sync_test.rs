@@ -538,6 +538,13 @@ async fn last_enabled_admin_keeps_sso_admin_and_logs_a_warning() {
     assert_eq!(warnings[0]["reason"], json!("last_admin"));
     // A kept admin is not a change.
     assert_eq!(activities(&mut tx, u, "sso_role_sync").await.len(), 1);
+    // Later logins do not repeat the warning within 24 hours.
+    sync(&mut tx, &pool, &p, u, json!({"groups": []}), None).await;
+    sync(&mut tx, &pool, &p, u, json!({"groups": []}), None).await;
+    assert_eq!(
+        activities(&mut tx, u, "sso_role_sync_warning").await.len(),
+        1
+    );
     tx.rollback().await.unwrap();
 }
 
@@ -653,5 +660,71 @@ async fn migration_backfills_existing_admins_as_manual() {
         .execute(&mut *tx)
         .await;
     assert!(bad.is_err(), "admin_source is limited to manual and sso");
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn manual_and_mapped_assignments_log_nothing_on_repeated_syncs() {
+    let pool = init_pg_pool().await;
+    let mut tx = pool.begin().await.unwrap();
+    let p = provider(&mut tx, &pool, "authoritative").await;
+    let u = user(&mut tx, &pool, false).await;
+    let t = team(&mut tx).await;
+    sqlx::query("INSERT INTO user_roles (user_id, role_id, source) VALUES ($1, $2, 'manual')")
+        .bind(u)
+        .bind(id(ROLE_A))
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO user_teams (user_id, team_id, source) VALUES ($1, $2, 'manual')")
+        .bind(u)
+        .bind(t)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    set_mappings(
+        &mut tx,
+        &pool,
+        &p,
+        vec![
+            mapping("devs", "role", Some(id(ROLE_A))),
+            mapping("devs", "team", Some(t)),
+        ],
+    )
+    .await;
+    for _ in 0..2 {
+        sync(&mut tx, &pool, &p, u, json!({"groups": ["devs"]}), None).await;
+    }
+    assert!(activities(&mut tx, u, "sso_role_sync").await.is_empty());
+    assert_eq!(
+        role_rows(&mut tx, u).await,
+        vec![(id(ROLE_A), "manual".into())]
+    );
+    assert_eq!(team_rows(&mut tx, u).await, vec![(t, "manual".into())]);
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn sso_admin_grant_and_revoke_never_override_a_manual_admin() {
+    let _guard = ADMIN_STATE_LOCK.lock().await;
+    let pool = init_pg_pool().await;
+    let mut tx = pool.begin().await.unwrap();
+    let users = user_repository_tx(pool.clone());
+    let manual = user(&mut tx, &pool, true).await;
+    assert!(!users.revoke_sso_admin_tx(&mut tx, manual).await.unwrap());
+    assert!(!users.grant_sso_admin_tx(&mut tx, manual).await.unwrap());
+    assert_eq!(
+        admin_state(&mut tx, manual).await,
+        (true, Some("manual".into()))
+    );
+
+    let plain = user(&mut tx, &pool, false).await;
+    assert!(users.grant_sso_admin_tx(&mut tx, plain).await.unwrap());
+    assert_eq!(
+        admin_state(&mut tx, plain).await,
+        (true, Some("sso".into()))
+    );
+    assert!(users.revoke_sso_admin_tx(&mut tx, plain).await.unwrap());
+    assert_eq!(admin_state(&mut tx, plain).await, (false, None));
     tx.rollback().await.unwrap();
 }

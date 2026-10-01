@@ -387,6 +387,7 @@ async fn finish_login(
     // Userinfo is needed for a missing email, or for groups when the id_token has
     // none and role sync is on.
     let needs_groups = provider.role_sync_mode != "off"
+        && !crate::logic::sso_role_sync::has_group_overage(&claims.raw)
         && crate::logic::sso_role_sync::claim_at_path(&claims.raw, &provider.groups_claim)
             .is_none();
     if (claims.email.is_none() || needs_groups)

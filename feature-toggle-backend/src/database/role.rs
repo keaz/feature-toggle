@@ -88,13 +88,13 @@ pub trait RoleRepositoryTx: RoleRepository {
         user_id: Uuid,
     ) -> Result<Vec<Uuid>, Error>;
     /// Adds roles with `source = 'sso'`. A role the user already holds, manually or
-    /// through SSO, is left as is (manual wins).
+    /// through SSO, is left as is (manual wins). Returns the ids actually inserted.
     async fn add_sso_user_roles_tx(
         &self,
         conn: &mut PgConnection,
         user_id: Uuid,
         role_ids: Vec<Uuid>,
-    ) -> Result<(), Error>;
+    ) -> Result<Vec<Uuid>, Error>;
     /// Removes only `source = 'sso'` rows; manual assignments are never touched.
     async fn remove_sso_user_roles_tx(
         &self,
@@ -332,22 +332,25 @@ impl RoleRepositoryImpl {
         conn: &mut PgConnection,
         user_id: Uuid,
         role_ids: Vec<Uuid>,
-    ) -> Result<(), Error> {
+    ) -> Result<Vec<Uuid>, Error> {
+        let mut inserted = Vec::new();
         for role_id in role_ids {
-            handle_error(
+            let row = handle_error(
                 Some(user_id),
-                sqlx::query!(
+                sqlx::query_scalar!(
                     r#"INSERT INTO user_roles (user_id, role_id, assigned_by, source)
                        VALUES ($1, $2, NULL, 'sso')
-                       ON CONFLICT (user_id, role_id) DO NOTHING"#,
+                       ON CONFLICT (user_id, role_id) DO NOTHING
+                       RETURNING role_id"#,
                     user_id,
                     role_id
                 )
-                .execute(&mut *conn)
+                .fetch_optional(&mut *conn)
                 .await,
             )?;
+            inserted.extend(row);
         }
-        Ok(())
+        Ok(inserted)
     }
 
     async fn remove_sso_user_roles_internal(
@@ -576,7 +579,7 @@ impl RoleRepositoryTx for RoleRepositoryImpl {
         conn: &mut PgConnection,
         user_id: Uuid,
         role_ids: Vec<Uuid>,
-    ) -> Result<(), Error> {
+    ) -> Result<Vec<Uuid>, Error> {
         Self::add_sso_user_roles_internal(conn, user_id, role_ids).await
     }
 
