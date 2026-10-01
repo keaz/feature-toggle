@@ -631,9 +631,9 @@ impl FeatureLogicImpl {
             owner: input
                 .owner
                 .map(|owner| owner.and_then(|value| Self::normalize_optional_text(Some(value)))),
-            purpose: input
-                .purpose
-                .map(|purpose| purpose.and_then(|value| Self::normalize_optional_text(Some(value)))),
+            purpose: input.purpose.map(|purpose| {
+                purpose.and_then(|value| Self::normalize_optional_text(Some(value)))
+            }),
             reference_url: input.reference_url.map(|reference_url| {
                 reference_url.and_then(|value| Self::normalize_optional_text(Some(value)))
             }),
@@ -812,7 +812,7 @@ impl FeatureCrudLogic for FeatureLogicImpl {
             None,
             None,
         )
-            .await
+        .await
     }
 
     async fn get_features_filtered(

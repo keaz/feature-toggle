@@ -1002,6 +1002,133 @@ async fn test_emergency_disable_feature_integration() {
 }
 
 #[tokio::test]
+async fn test_active_kill_switch_listing_maps_feature_metadata() {
+    let pool = init_pg_pool().await;
+    let repository = feature::feature_repository(pool);
+    let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+    let feature_id = repository
+        .create_feature(CreateFeature {
+            team_id,
+            key: format!("kill-switch-listing-{}", Uuid::new_v4()),
+            description: Some("temp for active kill switch listing".into()),
+            feature_type: FeatureType::Simple,
+            lifecycle_stage: "active".to_string(),
+            owner: Some("Platform".to_string()),
+            purpose: Some("Verify kill switch list mapping".to_string()),
+            reference_url: Some("https://example.com/kill-switch".to_string()),
+            expires_at: None,
+            cleanup_reason: None,
+            tags: vec!["ops".to_string(), "emergency".to_string()],
+            stages: vec![],
+            dependencies: vec![],
+            variants: None,
+        })
+        .await
+        .expect("feature to create");
+
+    repository
+        .emergency_disable_feature(
+            feature_id,
+            None,
+            "test emergency reason".to_string(),
+            None,
+            None,
+        )
+        .await
+        .expect("feature to emergency disable");
+
+    let (features, total) = repository
+        .get_features_with_kill_switches_with_offset(Some(team_id), 0, 50)
+        .await
+        .expect("active kill switch listing should map feature rows");
+
+    let listed = features
+        .iter()
+        .find(|feature| feature.id == feature_id)
+        .expect("created kill-switched feature should be listed");
+    assert!(total >= 1);
+    assert_eq!(
+        listed.purpose.as_deref(),
+        Some("Verify kill switch list mapping")
+    );
+    assert_eq!(
+        listed.reference_url.as_deref(),
+        Some("https://example.com/kill-switch")
+    );
+    assert!(listed.tags.iter().any(|tag| tag == "ops"));
+
+    let _ = repository.emergency_enable_feature(feature_id).await;
+    let _ = repository.delete_feature(feature_id).await;
+}
+
+#[tokio::test]
+async fn test_pending_approval_listing_maps_feature_metadata() {
+    let pool = init_pg_pool().await;
+    let repository = feature::feature_repository(pool);
+    let team_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+    let environment_id = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+    let requester_id = Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").unwrap();
+    let stage_id = Uuid::new_v4();
+    let feature_id = repository
+        .create_feature(CreateFeature {
+            team_id,
+            key: format!("pending-approval-listing-{}", Uuid::new_v4()),
+            description: Some("temp for pending approval listing".into()),
+            feature_type: FeatureType::Simple,
+            lifecycle_stage: "active".to_string(),
+            owner: Some("Platform".to_string()),
+            purpose: Some("Verify pending approval list mapping".to_string()),
+            reference_url: Some("https://example.com/pending-approval".to_string()),
+            expires_at: None,
+            cleanup_reason: None,
+            tags: vec!["release".to_string()],
+            stages: vec![CreateFeatureStage::new(
+                stage_id,
+                environment_id,
+                0,
+                None,
+                "{ \"x\": 100, \"y\": 100 }".to_string(),
+            )],
+            dependencies: vec![],
+            variants: None,
+        })
+        .await
+        .expect("feature to create");
+
+    repository
+        .request_stage_change(
+            stage_id,
+            "DEPLOYMENT_REQUESTED",
+            requester_id,
+            chrono::Utc::now(),
+        )
+        .await
+        .expect("stage change to request");
+
+    let (features, total) = repository
+        .get_features_with_pending_approvals_with_offset(Some(team_id), 0, 50)
+        .await
+        .expect("pending approval listing should map feature rows");
+
+    let listed = features
+        .iter()
+        .find(|feature| feature.id == feature_id)
+        .expect("created pending-approval feature should be listed");
+    assert!(total >= 1);
+    assert_eq!(
+        listed.purpose.as_deref(),
+        Some("Verify pending approval list mapping")
+    );
+    assert_eq!(
+        listed.reference_url.as_deref(),
+        Some("https://example.com/pending-approval")
+    );
+    assert!(listed.tags.iter().any(|tag| tag == "release"));
+
+    let _ = repository.delete_feature(feature_id).await;
+}
+
+#[tokio::test]
 async fn test_emergency_disable_with_rollback_integration() {
     let pool = init_pg_pool().await;
     let repository = feature::feature_repository(pool);

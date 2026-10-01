@@ -67,17 +67,17 @@ use crate::rest::environment::{
 use crate::rest::error::ErrorResponse;
 use crate::rest::evaluation::{EvaluateRequest, EvaluateResponse};
 use crate::rest::feature::{
-    AuditAnalyticsBreakdownRow, AuditAnalyticsEvent, AuditAnalyticsQuery,
-    AuditAnalyticsResponse, AuditAnalyticsTopFeature, BulkFeatureAction,
-    BulkFeatureActionRequest, BulkFeatureActionResponse, BulkFeatureActionResult,
-    BulkFeatureExportRow, CreateFeatureRequest, CreateFeatureStageRequest,
-    CreateFeatureVariantRequest, DependencyImpactNode, DependencyImpactQuery,
-    DependencyImpactResponse, EmergencyDisableRequest, EmergencyEnableRequest, FeatureListQuery,
-    FeatureRelationshipResponse, FeatureResponse, FeatureRolloutQuery, FeatureStageResponse,
-    FeatureType, FeatureVariantResponse, FeatureVersionDiffEntryResponse,
-    FeatureVersionDiffResponse, FeatureVersionResponse, FeatureVersionsResponse, FeaturesResponse,
-    LifecycleStage, RollbackFeatureVersionRequest, RolloutMetricsQuery, RolloutMetricsResponse,
-    StageChangeRequest, StageChangeRequestBody, UpdateFeatureRequest, VariantValueType,
+    AuditAnalyticsBreakdownRow, AuditAnalyticsEvent, AuditAnalyticsQuery, AuditAnalyticsResponse,
+    AuditAnalyticsTopFeature, BulkFeatureAction, BulkFeatureActionRequest,
+    BulkFeatureActionResponse, BulkFeatureActionResult, BulkFeatureExportRow, CreateFeatureRequest,
+    CreateFeatureStageRequest, CreateFeatureVariantRequest, DependencyImpactNode,
+    DependencyImpactQuery, DependencyImpactResponse, EmergencyDisableRequest,
+    EmergencyEnableRequest, FeatureListQuery, FeatureRelationshipResponse, FeatureResponse,
+    FeatureRolloutQuery, FeatureStageResponse, FeatureType, FeatureVariantResponse,
+    FeatureVersionDiffEntryResponse, FeatureVersionDiffResponse, FeatureVersionResponse,
+    FeatureVersionsResponse, FeaturesResponse, LifecycleStage, RollbackFeatureVersionRequest,
+    RolloutMetricsQuery, RolloutMetricsResponse, StageChangeRequest, StageChangeRequestBody,
+    UpdateFeatureRequest, VariantValueType,
 };
 use crate::rest::jwt_secret::JwtSecretResponse;
 use crate::rest::metrics::{

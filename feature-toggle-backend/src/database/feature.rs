@@ -2294,7 +2294,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
             None,
             None,
         )
-            .await
+        .await
     }
 
     async fn get_features_filtered(
@@ -3297,7 +3297,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
                f.feature_type, f.team_id, f.created_at, f.kill_switch_enabled,
                f.kill_switch_activated_at, f.rollback_scheduled_at, f.active as feature_enabled,
                f.emergency_override_reason, f.emergency_override_expires_at, f.emergency_override_actor_id, f.emergency_override_applied_at,
-               f.lifecycle_stage, f.owner, f.expires_at, f.cleanup_reason, f.archived_at,
+               f.lifecycle_stage, f.owner, f.purpose, f.reference_url, f.expires_at, f.cleanup_reason, f.tags, f.archived_at,
                f.deprecated_at, f.deprecation_notice, f.last_evaluated_at,
                f.evaluation_count_7d, f.evaluation_count_30d, f.evaluation_count_90d,
                s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
@@ -3354,7 +3354,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
                f.feature_type, f.team_id, f.created_at, f.kill_switch_enabled,
                f.kill_switch_activated_at, f.rollback_scheduled_at, f.active as feature_enabled,
                f.emergency_override_reason, f.emergency_override_expires_at, f.emergency_override_actor_id, f.emergency_override_applied_at,
-               f.lifecycle_stage, f.owner, f.expires_at, f.cleanup_reason, f.archived_at,
+               f.lifecycle_stage, f.owner, f.purpose, f.reference_url, f.expires_at, f.cleanup_reason, f.tags, f.archived_at,
                f.deprecated_at, f.deprecation_notice, f.last_evaluated_at,
                f.evaluation_count_7d, f.evaluation_count_30d, f.evaluation_count_90d,
                s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
@@ -3420,7 +3420,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
                f.feature_type, f.team_id, f.created_at, f.kill_switch_enabled,
                f.kill_switch_activated_at, f.rollback_scheduled_at, f.active as feature_enabled,
                f.emergency_override_reason, f.emergency_override_expires_at, f.emergency_override_actor_id, f.emergency_override_applied_at,
-               f.lifecycle_stage, f.owner, f.expires_at, f.cleanup_reason, f.archived_at,
+               f.lifecycle_stage, f.owner, f.purpose, f.reference_url, f.expires_at, f.cleanup_reason, f.tags, f.archived_at,
                f.deprecated_at, f.deprecation_notice, f.last_evaluated_at,
                f.evaluation_count_7d, f.evaluation_count_30d, f.evaluation_count_90d,
                s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
@@ -3476,7 +3476,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
                f.feature_type, f.team_id, f.created_at, f.kill_switch_enabled,
                f.kill_switch_activated_at, f.rollback_scheduled_at, f.active as feature_enabled,
                f.emergency_override_reason, f.emergency_override_expires_at, f.emergency_override_actor_id, f.emergency_override_applied_at,
-               f.lifecycle_stage, f.owner, f.expires_at, f.cleanup_reason, f.archived_at,
+               f.lifecycle_stage, f.owner, f.purpose, f.reference_url, f.expires_at, f.cleanup_reason, f.tags, f.archived_at,
                f.deprecated_at, f.deprecation_notice, f.last_evaluated_at,
                f.evaluation_count_7d, f.evaluation_count_30d, f.evaluation_count_90d,
                s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,

@@ -742,8 +742,10 @@ pub(crate) async fn bulk_feature_action(
         };
 
         let feature_key: String = row.get("key");
-        let warnings = if matches!(payload.action, BulkFeatureAction::Archive | BulkFeatureAction::UpdateLifecycle)
-            && payload.lifecycle_stage == Some(LifecycleStage::Archived)
+        let warnings = if matches!(
+            payload.action,
+            BulkFeatureAction::Archive | BulkFeatureAction::UpdateLifecycle
+        ) && payload.lifecycle_stage == Some(LifecycleStage::Archived)
         {
             archive_warnings(db_pool.get_ref(), feature_id).await?
         } else if matches!(payload.action, BulkFeatureAction::Archive) {
@@ -754,7 +756,10 @@ pub(crate) async fn bulk_feature_action(
 
         if !warnings.is_empty()
             && !payload.archive_confirmation.unwrap_or(false)
-            && matches!(payload.action, BulkFeatureAction::Archive | BulkFeatureAction::UpdateLifecycle)
+            && matches!(
+                payload.action,
+                BulkFeatureAction::Archive | BulkFeatureAction::UpdateLifecycle
+            )
             && (matches!(payload.action, BulkFeatureAction::Archive)
                 || payload.lifecycle_stage == Some(LifecycleStage::Archived))
         {
@@ -978,7 +983,10 @@ pub(crate) async fn dependency_impact(
             lifecycle_stage: row.get("lifecycle_stage"),
             enabled: row.get("active"),
             reason: "This feature depends on target flag".to_string(),
-            severity: if matches!(action.as_str(), "archive" | "emergency-disable" | "rollback") {
+            severity: if matches!(
+                action.as_str(),
+                "archive" | "emergency-disable" | "rollback"
+            ) {
                 "high".to_string()
             } else {
                 "medium".to_string()
@@ -1086,7 +1094,10 @@ pub(crate) async fn audit_analytics(
         _ => None,
     };
     let action = query.action.as_deref().filter(|value| !value.is_empty());
-    let environment_id = query.environment_id.as_deref().filter(|value| !value.is_empty());
+    let environment_id = query
+        .environment_id
+        .as_deref()
+        .filter(|value| !value.is_empty());
 
     let base_sql = r#"FROM activity_log al
             LEFT JOIN features f ON al.entity_type = 'feature' AND al.entity_id = f.id::text

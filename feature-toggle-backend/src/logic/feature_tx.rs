@@ -608,9 +608,9 @@ where
         purpose: input
             .purpose
             .map(|purpose| purpose.and_then(|value| normalize_optional_text(Some(value)))),
-        reference_url: input
-            .reference_url
-            .map(|reference_url| reference_url.and_then(|value| normalize_optional_text(Some(value)))),
+        reference_url: input.reference_url.map(|reference_url| {
+            reference_url.and_then(|value| normalize_optional_text(Some(value)))
+        }),
         expires_at: input.expires_at,
         cleanup_reason: input
             .cleanup_reason
