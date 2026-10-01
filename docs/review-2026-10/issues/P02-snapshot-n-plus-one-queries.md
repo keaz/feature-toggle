@@ -4,7 +4,7 @@
 |---|---|
 | Type | Performance (DB round trips) |
 | Severity | High (snapshot time grows with feature × stage count) |
-| Status | Verified (code traced) |
+| Status | Fixed on branch `perf/p02-snapshot-batch-queries` |
 | Crate | `feature-toggle-backend` |
 | Behavior change | No. Output must be identical. |
 | Related | [B04](B04-stream-snapshot-deadlock-and-lost-updates.md) (slow snapshots widen its lost-update window) |
