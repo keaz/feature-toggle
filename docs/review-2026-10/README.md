@@ -42,7 +42,7 @@ Review of `feature-toggle-backend/`, `feature-edge-server/` and `evaluation-engi
 | [ ] | [B02](issues/B02-duplicate-key-check-substring-match.md) | Duplicate-key checks reject valid keys (`check` vs `checkout`) | Medium | backend | Yes (intended) | B01 |
 | [x] | [B03](issues/B03-stream-updates-cross-team.md) | Stream updates are not filtered by team | Critical | backend | Yes (intended) | — |
 | [x] | [B04](issues/B04-stream-snapshot-deadlock-and-lost-updates.md) | Stream snapshot hangs above 64 features and loses updates | Critical | backend | Minor | — |
-| [ ] | [B05](issues/B05-ofrep-empty-client-secret.md) | OFREP sends an empty client secret, so OFREP never works | Critical | edge | Yes (intended) | — |
+| [x] | [B05](issues/B05-ofrep-empty-client-secret.md) | OFREP sends an empty client secret, so OFREP never works | Critical | edge | Yes (intended) | — |
 | [ ] | [B06](issues/B06-ofrep-auth-error-status.md) | OFREP returns 502 for bad credentials instead of 401/403 | Low | edge | Yes (OFREP only) | B05 |
 | [ ] | [B07](issues/B07-retry-backoff-math.md) | Retry backoff is base^n (500 ms, 250 s, 34.7 h) | High | edge | Waits only | — |
 | [ ] | [B08](issues/B08-retry-permanent-grpc-errors.md) | Edge retries permanent gRPC errors | Medium | edge | Fail fast | — |
@@ -53,7 +53,7 @@ Review of `feature-toggle-backend/`, `feature-edge-server/` and `evaluation-engi
 | [ ] | [B13](issues/B13-dependency-bucketing-uses-root-key.md) | Dependencies bucketed with the root flag key | High | engine | **Yes, user-visible, needs sign-off** | — |
 | [ ] | [B14](issues/B14-ofrep-bulk-etag-ignores-context.md) | OFREP bulk ETag ignores context, so 304 returns stale results | Medium | edge | Yes (intended) | B05 |
 | [ ] | [B15](issues/B15-stale-flags-after-reconnect-or-rename.md) | Stale flags after reconnect or rename; new flags missed | High | backend + edge | Yes (intended) | B01, B03, B04 |
-| [ ] | [B16](issues/B16-edge-cache-not-team-scoped.md) | Edge cache not team-scoped; bulk lists other teams' flags | High | edge | Yes (intended) | B03 |
+| [x] | [B16](issues/B16-edge-cache-not-team-scoped.md) | Edge cache not team-scoped; bulk lists other teams' flags | High | edge | Yes (intended) | B03 |
 | [ ] | [B17](issues/B17-assignment-list-missing-environment-filter.md) | Assignment list by environment returns all environments | Medium | backend | Yes (intended) | — |
 | [ ] | [B18](issues/B18-assignment-warmup-caches-true-for-all-variants.md) | Assignment warm-up caches `true` for every variant (masked) | Medium | edge | No (latent) | — |
 | [ ] | [B19](issues/B19-non-boolean-dependency-blocks-dependents.md) | Non-boolean dependency blocks dependents | Medium | engine | **Needs decision** | — |

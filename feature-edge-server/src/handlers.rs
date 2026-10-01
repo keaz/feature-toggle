@@ -452,9 +452,20 @@ async fn cache_fetched_feature(
 
     let engine_feature = std::sync::Arc::new(map_proto_to_engine(pb_feature));
     app.mapped_cache
-        .insert_with_dependencies(engine_feature.clone(), dependency_ids)
+        .insert_with_dependencies(&pb_feature.team_id, engine_feature.clone(), dependency_ids)
         .await;
     engine_feature
+}
+
+/// Remember the edge's team when the caller is the configured client.
+fn note_configured_client_team(
+    app: &AppState,
+    client_id: &str,
+    client_info: &pb::GetClientInfoResponse,
+) {
+    if client_id == app.client_id {
+        app.record_edge_team_id(&client_info.team_id);
+    }
 }
 
 /// Map HTTP context to evaluation engine format
@@ -554,19 +565,24 @@ fn validate_web_origin(
     allowed
 }
 
-/// Get feature from cache or fetch from backend (returns mapped engine::Feature)
+/// Get feature from cache or fetch from backend (returns mapped engine::Feature).
+/// Only features owned by `team_id` (the caller's team) are returned. The
+/// cache, including the negative cache, is shared only by the edge's own team.
 async fn get_or_fetch_feature(
     app: &AppState,
     feature_key: &str,
     client_id: &str,
     client_secret: &str,
+    team_id: &str,
 ) -> Result<Option<std::sync::Arc<engine::Feature>>, tonic::Status> {
+    let shares_cache = app.edge_team_id() == Some(team_id);
+
     // Check negative cache first - avoid repeated gRPC calls for non-existent features
-    if app.mapped_cache.is_negative_cached(feature_key).await {
+    if shares_cache && app.mapped_cache.is_negative_cached(feature_key).await {
         return Ok(None);
     }
 
-    if let Some(cached) = app.mapped_cache.get(feature_key).await {
+    if let Some(cached) = app.mapped_cache.get_for_team(feature_key, team_id).await {
         return Ok(Some(cached));
     }
 
@@ -578,20 +594,31 @@ async fn get_or_fetch_feature(
     let pb_feature = fetch_feature_via_grpc(app, feature_key, client_id, client_secret).await?;
 
     match pb_feature {
-        Some(pf) => {
+        Some(pf) if pf.team_id != team_id => {
+            error!(
+                "Backend returned feature '{}' owned by another team; treating as not found",
+                feature_key
+            );
+            Ok(None)
+        }
+        Some(pf) if shares_cache => {
             let engine_feature = cache_fetched_feature(app, &pf).await;
 
             info_log!("Feature '{}' successfully fetched and cached", feature_key);
 
             Ok(Some(engine_feature))
         }
+        // Another team's caller: serve the result without caching it.
+        Some(pf) => Ok(Some(std::sync::Arc::new(map_proto_to_engine(&pf)))),
         None => {
             // Only negative-cache definitive misses. Transport/auth failures are returned as Err.
-            info_log!(
-                "Feature '{}' not found in backend, adding to negative cache",
-                feature_key
-            );
-            app.mapped_cache.add_negative(feature_key).await;
+            if shares_cache {
+                info_log!(
+                    "Feature '{}' not found in backend, adding to negative cache",
+                    feature_key
+                );
+                app.mapped_cache.add_negative(feature_key).await;
+            }
             Ok(None)
         }
     }
@@ -629,6 +656,7 @@ pub async fn evaluate_handler(
             ));
         }
     };
+    note_configured_client_team(&app, &client_id, &client_info);
 
     // Validate web origin for web clients
     if !validate_web_origin(&http_req, &client_info) {
@@ -639,7 +667,15 @@ pub async fn evaluate_handler(
     }
 
     // Get feature from cache or backend
-    let feature = match get_or_fetch_feature(&app, &feature_key, &client_id, &client_secret).await {
+    let feature = match get_or_fetch_feature(
+        &app,
+        &feature_key,
+        &client_id,
+        &client_secret,
+        &client_info.team_id,
+    )
+    .await
+    {
         Ok(Some(f)) => f,
         Ok(None) => {
             // Feature doesn't exist, return default
@@ -866,6 +902,19 @@ fn extract_auth_from_headers(http_req: &actix_web::HttpRequest) -> Option<(Strin
     }
 
     None
+}
+
+/// Resolve OFREP credentials. When the caller supplies only the configured
+/// client ID, use the configured secret.
+fn resolve_ofrep_credentials(
+    app: &AppState,
+    http_req: &actix_web::HttpRequest,
+) -> Option<(String, String)> {
+    let (client_id, client_secret) = extract_auth_from_headers(http_req)?;
+    if client_secret.is_empty() && client_id == app.client_id {
+        return Some((client_id, app.client_secret.clone()));
+    }
+    Some((client_id, client_secret))
 }
 
 /// Map OFREP context to engine context
@@ -1125,7 +1174,7 @@ pub async fn ofrep_evaluate_flag(
     let req = req.into_inner();
 
     // Extract credentials from headers (OFREP standard)
-    let Some((client_id, client_secret)) = extract_auth_from_headers(&http_req) else {
+    let Some((client_id, client_secret)) = resolve_ofrep_credentials(&app, &http_req) else {
         return Err(actix_web::error::ErrorUnauthorized(
             "Missing explicit client credentials",
         ));
@@ -1149,6 +1198,7 @@ pub async fn ofrep_evaluate_flag(
             ));
         }
     };
+    note_configured_client_team(&app, &client_id, &client_info);
 
     // Validate web origin for web clients
     if !validate_web_origin(&http_req, &client_info) {
@@ -1158,7 +1208,15 @@ pub async fn ofrep_evaluate_flag(
     }
 
     // Get feature from cache or backend
-    let feature = match get_or_fetch_feature(&app, &feature_key, &client_id, &client_secret).await {
+    let feature = match get_or_fetch_feature(
+        &app,
+        &feature_key,
+        &client_id,
+        &client_secret,
+        &client_info.team_id,
+    )
+    .await
+    {
         Ok(Some(f)) => f,
         Ok(None) => {
             // OFREP: Return 404 for missing flags
@@ -1228,7 +1286,7 @@ pub async fn ofrep_evaluate_flags_bulk(
     let _change_event_refetch =
         query.flag_config_etag.is_some() || query.flag_config_last_modified.is_some();
 
-    let Some((client_id, client_secret)) = extract_auth_from_headers(&http_req) else {
+    let Some((client_id, client_secret)) = resolve_ofrep_credentials(&app, &http_req) else {
         return Err(actix_web::error::ErrorUnauthorized(
             "Missing explicit client credentials",
         ));
@@ -1249,6 +1307,7 @@ pub async fn ofrep_evaluate_flags_bulk(
             ));
         }
     };
+    note_configured_client_team(&app, &client_id, &client_info);
 
     if !validate_web_origin(&http_req, &client_info) {
         return Err(actix_web::error::ErrorUnauthorized(
@@ -1267,12 +1326,10 @@ pub async fn ofrep_evaluate_flags_bulk(
     };
 
     let mut features = Vec::new();
-    for key in app.mapped_cache.get_all_keys().await {
-        if let Some(feature) = app.mapped_cache.get(&key).await {
-            features.push(std::sync::Arc::new(
-                hydrate_feature_with_dependencies(&app, &feature).await,
-            ));
-        }
+    for feature in app.mapped_cache.features_for_team(&client_info.team_id) {
+        features.push(std::sync::Arc::new(
+            hydrate_feature_with_dependencies(&app, &feature).await,
+        ));
     }
     features.sort_by(|left, right| left.key.cmp(&right.key));
 
@@ -1318,12 +1375,15 @@ pub async fn ofrep_evaluate_flags_bulk(
 #[cfg(test)]
 mod tests {
     use super::{
-        EvaluateContext, cache_fetched_feature, evaluate_http_feature_locally,
+        EvaluateContext, cache_fetched_feature, evaluate_handler, evaluate_http_feature_locally,
         extract_auth_from_headers, hydrate_feature_with_dependencies, if_none_match_contains,
-        map_proto_to_engine, ofrep_bulk_etag,
+        map_proto_to_engine, ofrep_bulk_etag, ofrep_evaluate_flag, ofrep_evaluate_flags_bulk,
+        resolve_ofrep_credentials,
     };
     use crate::pb;
     use actix_web::test::TestRequest;
+    use actix_web::{App, test as actix_test, web};
+    use feature_toggle_backend::grpc::pb as backend_pb;
     use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::mpsc;
@@ -1387,6 +1447,7 @@ mod tests {
             grpc: Arc::new(tokio::sync::Mutex::new(grpc_client)),
             client_id: "client".into(),
             client_secret: "secret".into(),
+            edge_team_id: Arc::new(std::sync::OnceLock::new()),
             connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             assigned_cache: Arc::new(dashmap::DashMap::new()),
             pending_assignments: Arc::new(crossbeam::queue::SegQueue::new()),
@@ -1423,6 +1484,504 @@ mod tests {
             .to_http_request();
         let auth = extract_auth_from_headers(&req);
         assert_eq!(auth, Some(("api-key-123".to_string(), String::new())));
+    }
+
+    #[tokio::test]
+    async fn resolve_ofrep_credentials_uses_configured_secret_for_bearer_client_id() {
+        let app = test_app_state(Arc::new(crate::MappedFeatureCache::new(10)));
+        let req = TestRequest::default()
+            .insert_header(("authorization", "Bearer client"))
+            .to_http_request();
+
+        let auth = resolve_ofrep_credentials(&app, &req);
+        assert_eq!(auth, Some(("client".to_string(), "secret".to_string())));
+    }
+
+    #[tokio::test]
+    async fn resolve_ofrep_credentials_uses_configured_secret_for_api_key_client_id() {
+        let app = test_app_state(Arc::new(crate::MappedFeatureCache::new(10)));
+        let req = TestRequest::default()
+            .insert_header(("x-api-key", "client"))
+            .to_http_request();
+
+        let auth = resolve_ofrep_credentials(&app, &req);
+        assert_eq!(auth, Some(("client".to_string(), "secret".to_string())));
+    }
+
+    #[tokio::test]
+    async fn resolve_ofrep_credentials_keeps_empty_secret_for_other_client_id() {
+        let app = test_app_state(Arc::new(crate::MappedFeatureCache::new(10)));
+        let bearer = TestRequest::default()
+            .insert_header(("authorization", "Bearer other-client"))
+            .to_http_request();
+        let api_key = TestRequest::default()
+            .insert_header(("x-api-key", "other-client"))
+            .to_http_request();
+
+        assert_eq!(
+            resolve_ofrep_credentials(&app, &bearer),
+            Some(("other-client".to_string(), String::new()))
+        );
+        assert_eq!(
+            resolve_ofrep_credentials(&app, &api_key),
+            Some(("other-client".to_string(), String::new()))
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_ofrep_credentials_requires_explicit_headers() {
+        let app = test_app_state(Arc::new(crate::MappedFeatureCache::new(10)));
+        let req = TestRequest::default().to_http_request();
+
+        assert!(resolve_ofrep_credentials(&app, &req).is_none());
+    }
+
+    /// Minimal backend that only accepts the configured test credentials
+    /// (`client` / `secret`) and records every secret it receives.
+    #[derive(Clone, Default)]
+    struct OfrepMockBackend {
+        seen_secrets: Arc<std::sync::Mutex<Vec<String>>>,
+        /// Keys for which `GetFeatureByKey` answers `NotFound`.
+        missing_keys: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl OfrepMockBackend {
+        /// Records the secret and returns the rejection status, if any.
+        fn reject_credentials(
+            &self,
+            client_id: &str,
+            client_secret: &str,
+        ) -> Option<tonic::Status> {
+            self.seen_secrets
+                .lock()
+                .unwrap()
+                .push(client_secret.to_string());
+            if client_secret.is_empty() {
+                return Some(tonic::Status::invalid_argument("client_secret is required"));
+            }
+            if client_id != "client" || client_secret != "secret" {
+                return Some(tonic::Status::unauthenticated("invalid client credentials"));
+            }
+            None
+        }
+    }
+
+    #[tonic::async_trait]
+    impl backend_pb::feature_evaluation_server::FeatureEvaluation for OfrepMockBackend {
+        type StreamUpdatesStream = tokio_stream::wrappers::ReceiverStream<
+            Result<backend_pb::FeatureUpdate, tonic::Status>,
+        >;
+
+        async fn evaluate(
+            &self,
+            _request: tonic::Request<backend_pb::EvaluateRequest>,
+        ) -> Result<tonic::Response<backend_pb::EvaluateResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not used in OFREP tests"))
+        }
+
+        async fn get_feature_by_key(
+            &self,
+            request: tonic::Request<backend_pb::GetFeatureByKeyRequest>,
+        ) -> Result<tonic::Response<backend_pb::GetFeatureByKeyResponse>, tonic::Status> {
+            let req = request.into_inner();
+            if let Some(status) = self.reject_credentials(&req.client_id, &req.client_secret) {
+                return Err(status);
+            }
+            if self.missing_keys.lock().unwrap().contains(&req.feature_key) {
+                return Err(tonic::Status::not_found("feature not found"));
+            }
+            Ok(tonic::Response::new(backend_pb::GetFeatureByKeyResponse {
+                feature: Some(backend_pb::FeatureFull {
+                    id: "feature-1".to_string(),
+                    key: req.feature_key,
+                    description: String::new(),
+                    feature_type: "Simple".to_string(),
+                    team_id: "team-1".to_string(),
+                    created_at: "2026-03-26T00:00:00Z".to_string(),
+                    kill_switch_enabled: true,
+                    kill_switch_activated_at: String::new(),
+                    rollback_scheduled_at: String::new(),
+                    stages: vec![backend_pb::FeatureStageFull {
+                        id: "stage-1".to_string(),
+                        environment_id: "env-1".to_string(),
+                        order_index: 0,
+                        position: "Start".to_string(),
+                        enabled: true,
+                        criterias: vec![],
+                    }],
+                    dependencies: vec![],
+                    active: true,
+                    variants: vec![],
+                }),
+            }))
+        }
+
+        async fn get_client_info(
+            &self,
+            request: tonic::Request<backend_pb::GetClientInfoRequest>,
+        ) -> Result<tonic::Response<backend_pb::GetClientInfoResponse>, tonic::Status> {
+            let req = request.into_inner();
+            if let Some(status) = self.reject_credentials(&req.client_id, &req.client_secret) {
+                return Err(status);
+            }
+            Ok(tonic::Response::new(backend_pb::GetClientInfoResponse {
+                id: req.client_id,
+                team_id: "team-1".to_string(),
+                name: "test client".to_string(),
+                description: String::new(),
+                enabled: true,
+                client_type: "Backend".to_string(),
+                web_origins: vec![],
+                environment_id: "env-1".to_string(),
+            }))
+        }
+
+        async fn push_user_assignments(
+            &self,
+            _request: tonic::Request<tonic::Streaming<backend_pb::UserFlagAssignment>>,
+        ) -> Result<tonic::Response<backend_pb::Ack>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not used in OFREP tests"))
+        }
+
+        async fn list_user_assignments(
+            &self,
+            _request: tonic::Request<backend_pb::ListUserFlagAssignmentsRequest>,
+        ) -> Result<tonic::Response<backend_pb::ListUserFlagAssignmentsResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used in OFREP tests"))
+        }
+
+        async fn stream_updates(
+            &self,
+            _request: tonic::Request<tonic::Streaming<backend_pb::StreamRequest>>,
+        ) -> Result<tonic::Response<Self::StreamUpdatesStream>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not used in OFREP tests"))
+        }
+
+        async fn push_evaluation_events(
+            &self,
+            _request: tonic::Request<backend_pb::PushEvaluationEventsRequest>,
+        ) -> Result<tonic::Response<backend_pb::PushEvaluationEventsResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used in OFREP tests"))
+        }
+
+        async fn track_metrics(
+            &self,
+            _request: tonic::Request<backend_pb::TrackMetricRequest>,
+        ) -> Result<tonic::Response<backend_pb::TrackMetricResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not used in OFREP tests"))
+        }
+    }
+
+    /// Start the OFREP mock backend and return an `AppState` (configured
+    /// credentials `client` / `secret`) wired to it, without retry delays.
+    async fn ofrep_app_with_mock_backend() -> (crate::AppState, OfrepMockBackend) {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind mock backend listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let backend = OfrepMockBackend::default();
+        let router = tonic::transport::Server::builder().add_service(
+            backend_pb::feature_evaluation_server::FeatureEvaluationServer::new(backend.clone()),
+        );
+        tokio::spawn(async move {
+            router
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .expect("mock backend should run");
+        });
+
+        let mut app = test_app_state(Arc::new(crate::MappedFeatureCache::new(10)));
+        let channel = Endpoint::from_shared(format!("http://{addr}"))
+            .expect("valid gRPC endpoint")
+            .connect_lazy();
+        app.grpc = Arc::new(tokio::sync::Mutex::new(
+            pb::feature_evaluation_client::FeatureEvaluationClient::new(channel),
+        ));
+        app.retry_config = crate::config::RetryConfig {
+            base_delay_ms: 1,
+            max_attempts: 0,
+            ..crate::config::RetryConfig::default()
+        };
+        (app, backend)
+    }
+
+    #[actix_web::test]
+    async fn ofrep_single_flag_with_configured_client_id_uses_configured_secret() {
+        let (app_state, backend) = ofrep_app_with_mock_backend().await;
+        let service =
+            actix_test::init_service(App::new().app_data(web::Data::new(app_state)).route(
+                "/ofrep/v1/evaluate/flags/{key}",
+                web::post().to(ofrep_evaluate_flag),
+            ))
+            .await;
+
+        let req = actix_test::TestRequest::post()
+            .uri("/ofrep/v1/evaluate/flags/my-flag")
+            .insert_header(("authorization", "Bearer client"))
+            .set_json(serde_json::json!({ "context": { "targetingKey": "u1" } }))
+            .to_request();
+        let resp = actix_test::call_service(&service, req).await;
+
+        assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+        let body: serde_json::Value = actix_test::read_body_json(resp).await;
+        assert_eq!(body["key"], serde_json::json!("my-flag"));
+        assert_eq!(body["value"], serde_json::json!(true));
+
+        let seen = backend.seen_secrets.lock().unwrap().clone();
+        assert!(!seen.is_empty(), "expected backend calls");
+        assert!(
+            seen.iter().all(|secret| secret == "secret"),
+            "backend saw secrets {seen:?}"
+        );
+    }
+
+    #[actix_web::test]
+    async fn ofrep_bulk_with_configured_client_id_uses_configured_secret() {
+        let (app_state, backend) = ofrep_app_with_mock_backend().await;
+        let service =
+            actix_test::init_service(App::new().app_data(web::Data::new(app_state)).route(
+                "/ofrep/v1/evaluate/flags",
+                web::post().to(ofrep_evaluate_flags_bulk),
+            ))
+            .await;
+
+        let req = actix_test::TestRequest::post()
+            .uri("/ofrep/v1/evaluate/flags")
+            .insert_header(("x-api-key", "client"))
+            .set_json(serde_json::json!({ "context": { "targetingKey": "u1" } }))
+            .to_request();
+        let resp = actix_test::call_service(&service, req).await;
+
+        assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+        let seen = backend.seen_secrets.lock().unwrap().clone();
+        assert_eq!(seen, vec!["secret".to_string()]);
+    }
+
+    /// A Simple feature owned by `team_id` with one stage in `env-1`.
+    fn team_feature(id: &str, key: &str, team_id: &str, stage_enabled: bool) -> pb::FeatureFull {
+        let mut feature = simple_feature(
+            id,
+            key,
+            true,
+            true,
+            vec![simple_stage("env-1", stage_enabled)],
+            vec![],
+        );
+        feature.team_id = team_id.to_string();
+        feature
+    }
+
+    #[actix_web::test]
+    async fn ofrep_bulk_returns_only_callers_team_flags() {
+        let (app_state, _backend) = ofrep_app_with_mock_backend().await;
+        cache_fetched_feature(
+            &app_state,
+            &team_feature("own-id", "own-flag", "team-1", true),
+        )
+        .await;
+        cache_fetched_feature(
+            &app_state,
+            &team_feature("foreign-id", "foreign-flag", "team-2", true),
+        )
+        .await;
+        app_state.mapped_cache.run_pending_tasks().await;
+
+        let service =
+            actix_test::init_service(App::new().app_data(web::Data::new(app_state)).route(
+                "/ofrep/v1/evaluate/flags",
+                web::post().to(ofrep_evaluate_flags_bulk),
+            ))
+            .await;
+        let req = actix_test::TestRequest::post()
+            .uri("/ofrep/v1/evaluate/flags")
+            .insert_header(("x-api-key", "client"))
+            .set_json(serde_json::json!({ "context": { "targetingKey": "u1" } }))
+            .to_request();
+        let resp = actix_test::call_service(&service, req).await;
+
+        assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+        let body: serde_json::Value = actix_test::read_body_json(resp).await;
+        let keys = body["flags"]
+            .as_array()
+            .expect("flags array")
+            .iter()
+            .map(|flag| flag["key"].as_str().unwrap_or_default().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(keys, vec!["own-flag".to_string()]);
+    }
+
+    #[actix_web::test]
+    async fn ofrep_single_flag_for_foreign_team_key_returns_not_found() {
+        let (app_state, backend) = ofrep_app_with_mock_backend().await;
+        backend
+            .missing_keys
+            .lock()
+            .unwrap()
+            .push("foreign-flag".to_string());
+        cache_fetched_feature(
+            &app_state,
+            &team_feature("foreign-id", "foreign-flag", "team-2", true),
+        )
+        .await;
+        app_state.mapped_cache.run_pending_tasks().await;
+
+        let service =
+            actix_test::init_service(App::new().app_data(web::Data::new(app_state)).route(
+                "/ofrep/v1/evaluate/flags/{key}",
+                web::post().to(ofrep_evaluate_flag),
+            ))
+            .await;
+        let req = actix_test::TestRequest::post()
+            .uri("/ofrep/v1/evaluate/flags/foreign-flag")
+            .insert_header(("authorization", "Bearer client"))
+            .set_json(serde_json::json!({ "context": { "targetingKey": "u1" } }))
+            .to_request();
+        let resp = actix_test::call_service(&service, req).await;
+
+        assert_eq!(resp.status(), actix_web::http::StatusCode::NOT_FOUND);
+        let body: serde_json::Value = actix_test::read_body_json(resp).await;
+        assert_eq!(body["errorCode"], serde_json::json!("FLAG_NOT_FOUND"));
+    }
+
+    #[actix_web::test]
+    async fn ofrep_single_flag_key_collision_serves_callers_team_flag() {
+        // Team 2's "checkout" (stage disabled) sits in the cache; the caller
+        // is in team 1, whose "checkout" (stage enabled) comes from the backend.
+        let (app_state, _backend) = ofrep_app_with_mock_backend().await;
+        cache_fetched_feature(
+            &app_state,
+            &team_feature("foreign-id", "checkout", "team-2", false),
+        )
+        .await;
+        app_state.mapped_cache.run_pending_tasks().await;
+
+        let service =
+            actix_test::init_service(App::new().app_data(web::Data::new(app_state)).route(
+                "/ofrep/v1/evaluate/flags/{key}",
+                web::post().to(ofrep_evaluate_flag),
+            ))
+            .await;
+        let req = actix_test::TestRequest::post()
+            .uri("/ofrep/v1/evaluate/flags/checkout")
+            .insert_header(("authorization", "Bearer client"))
+            .set_json(serde_json::json!({ "context": { "targetingKey": "u1" } }))
+            .to_request();
+        let resp = actix_test::call_service(&service, req).await;
+
+        assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+        let body: serde_json::Value = actix_test::read_body_json(resp).await;
+        assert_eq!(body["value"], serde_json::json!(true));
+    }
+
+    #[actix_web::test]
+    async fn ofrep_configured_client_records_edge_team_and_caches_fetch() {
+        let (app_state, _backend) = ofrep_app_with_mock_backend().await;
+        assert_eq!(app_state.edge_team_id(), None);
+        let service = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(app_state.clone()))
+                .route(
+                    "/ofrep/v1/evaluate/flags/{key}",
+                    web::post().to(ofrep_evaluate_flag),
+                ),
+        )
+        .await;
+        let req = actix_test::TestRequest::post()
+            .uri("/ofrep/v1/evaluate/flags/my-flag")
+            .insert_header(("authorization", "Bearer client"))
+            .set_json(serde_json::json!({ "context": { "targetingKey": "u1" } }))
+            .to_request();
+        let resp = actix_test::call_service(&service, req).await;
+
+        assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+        assert_eq!(app_state.edge_team_id(), Some("team-1"));
+        app_state.mapped_cache.run_pending_tasks().await;
+        assert!(
+            app_state
+                .mapped_cache
+                .get_for_team("my-flag", "team-1")
+                .await
+                .is_some()
+        );
+    }
+
+    #[actix_web::test]
+    async fn ofrep_fetch_for_another_teams_caller_is_not_cached() {
+        // The edge serves "team-edge"; the caller's client belongs to "team-1".
+        let (app_state, backend) = ofrep_app_with_mock_backend().await;
+        app_state.record_edge_team_id("team-edge");
+        backend
+            .missing_keys
+            .lock()
+            .unwrap()
+            .push("missing-flag".to_string());
+        let service = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(app_state.clone()))
+                .route(
+                    "/ofrep/v1/evaluate/flags/{key}",
+                    web::post().to(ofrep_evaluate_flag),
+                ),
+        )
+        .await;
+
+        let req = actix_test::TestRequest::post()
+            .uri("/ofrep/v1/evaluate/flags/my-flag")
+            .insert_header(("authorization", "Bearer client"))
+            .set_json(serde_json::json!({ "context": { "targetingKey": "u1" } }))
+            .to_request();
+        let resp = actix_test::call_service(&service, req).await;
+        assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+
+        let req = actix_test::TestRequest::post()
+            .uri("/ofrep/v1/evaluate/flags/missing-flag")
+            .insert_header(("authorization", "Bearer client"))
+            .set_json(serde_json::json!({ "context": { "targetingKey": "u1" } }))
+            .to_request();
+        let resp = actix_test::call_service(&service, req).await;
+        assert_eq!(resp.status(), actix_web::http::StatusCode::NOT_FOUND);
+
+        app_state.mapped_cache.run_pending_tasks().await;
+        assert_eq!(app_state.edge_team_id(), Some("team-edge"));
+        assert_eq!(app_state.mapped_cache.entry_count(), 0);
+        assert!(
+            !app_state
+                .mapped_cache
+                .is_negative_cached("missing-flag")
+                .await
+        );
+    }
+
+    #[actix_web::test]
+    async fn evaluate_does_not_serve_foreign_team_cached_feature() {
+        let (app_state, _backend) = ofrep_app_with_mock_backend().await;
+        cache_fetched_feature(
+            &app_state,
+            &team_feature("foreign-id", "checkout", "team-2", false),
+        )
+        .await;
+        app_state.mapped_cache.run_pending_tasks().await;
+
+        let service = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(app_state))
+                .route("/evaluate", web::post().to(evaluate_handler)),
+        )
+        .await;
+        let req = actix_test::TestRequest::post()
+            .uri("/evaluate")
+            .set_json(serde_json::json!({
+                "flagKey": "checkout",
+                "context": { "bucketingKey": "u1" }
+            }))
+            .to_request();
+        let resp = actix_test::call_service(&service, req).await;
+
+        assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+        let body: serde_json::Value = actix_test::read_body_json(resp).await;
+        assert_eq!(body["value"], serde_json::json!(true));
     }
 
     #[test]

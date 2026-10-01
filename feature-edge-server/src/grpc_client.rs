@@ -337,6 +337,7 @@ mod tests {
             grpc: Arc::new(tokio::sync::Mutex::new(grpc_client)),
             client_id: "test-client-id".to_string(),
             client_secret: "test-secret".to_string(),
+            edge_team_id: Arc::new(std::sync::OnceLock::from("team-1".to_string())),
             connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             assigned_cache: Arc::new(dashmap::DashMap::new()),
             pending_assignments: Arc::new(crossbeam::queue::SegQueue::new()),
@@ -393,7 +394,7 @@ mod tests {
                 stages: vec![],
                 variants: vec![],
             });
-            mapped_cache.insert(feature).await;
+            mapped_cache.insert("team-1", feature).await;
         }
 
         let app_state = test_app_state(mapped_cache);
@@ -462,16 +463,19 @@ mod tests {
     async fn test_send_initial_subscribe_forces_full_snapshot_after_lag() {
         let mapped_cache = Arc::new(crate::MappedFeatureCache::new(100));
         mapped_cache
-            .insert(Arc::new(evaluation_engine::Feature {
-                id: "id_1".to_string(),
-                key: "feature_key_1".to_string(),
-                feature_type: "Simple".to_string(),
-                active: true,
-                enabled: true,
-                dependencies: vec![],
-                stages: vec![],
-                variants: vec![],
-            }))
+            .insert(
+                "team-1",
+                Arc::new(evaluation_engine::Feature {
+                    id: "id_1".to_string(),
+                    key: "feature_key_1".to_string(),
+                    feature_type: "Simple".to_string(),
+                    active: true,
+                    enabled: true,
+                    dependencies: vec![],
+                    stages: vec![],
+                    variants: vec![],
+                }),
+            )
             .await;
         let app_state = test_app_state(mapped_cache);
         let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::pb::StreamRequest>(10);
@@ -610,6 +614,111 @@ mod tests {
         assert_eq!(cached_mapped.unwrap().id, "feature-id-123");
     }
 
+    fn team_feature_full(id: &str, key: &str, team_id: &str) -> crate::pb::FeatureFull {
+        crate::pb::FeatureFull {
+            id: id.to_string(),
+            key: key.to_string(),
+            description: String::new(),
+            feature_type: "Simple".to_string(),
+            team_id: team_id.to_string(),
+            created_at: "2024-01-01".to_string(),
+            active: true,
+            kill_switch_enabled: true,
+            kill_switch_activated_at: String::new(),
+            rollback_scheduled_at: String::new(),
+            stages: vec![],
+            dependencies: vec![],
+            variants: vec![],
+        }
+    }
+
+    fn feature_update(
+        action: crate::pb::feature_update::Action,
+        feature: crate::pb::FeatureFull,
+    ) -> crate::pb::FeatureUpdate {
+        crate::pb::FeatureUpdate {
+            action: action as i32,
+            feature_key: feature.key.clone(),
+            feature: Some(feature),
+            error: String::new(),
+            message_id: String::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_feature_update_ignores_foreign_team_upsert() {
+        use crate::pb::feature_update::Action;
+        let mapped_cache = Arc::new(crate::MappedFeatureCache::new(100));
+        let app_state = test_app_state(mapped_cache.clone());
+
+        // The edge's own team ("team-1") owns "shared".
+        handle_feature_update(
+            &app_state,
+            feature_update(
+                Action::Upsert,
+                team_feature_full("own-id", "shared", "team-1"),
+            ),
+        )
+        .await;
+        mapped_cache.run_pending_tasks().await;
+        assert_eq!(mapped_cache.entry_count(), 1);
+
+        // Another team's Upsert and Snapshot for the same key and for a new key.
+        for action in [Action::Upsert, Action::Snapshot] {
+            handle_feature_update(
+                &app_state,
+                feature_update(action, team_feature_full("foreign-id", "shared", "team-2")),
+            )
+            .await;
+            handle_feature_update(
+                &app_state,
+                feature_update(
+                    action,
+                    team_feature_full("foreign-only-id", "foreign-only", "team-2"),
+                ),
+            )
+            .await;
+        }
+        mapped_cache.run_pending_tasks().await;
+
+        assert_eq!(mapped_cache.entry_count(), 1);
+        assert_eq!(
+            mapped_cache.get("shared").await.expect("own feature").id,
+            "own-id"
+        );
+        assert!(mapped_cache.get("foreign-only").await.is_none());
+        assert!(mapped_cache.get_by_id("foreign-id").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_handle_feature_update_drops_features_while_edge_team_unknown() {
+        use crate::pb::feature_update::Action;
+        let mapped_cache = Arc::new(crate::MappedFeatureCache::new(100));
+        let mut app_state = test_app_state(mapped_cache.clone());
+        app_state.edge_team_id = Arc::new(std::sync::OnceLock::new());
+
+        for action in [Action::Upsert, Action::Snapshot] {
+            assert!(
+                !handle_feature_update(
+                    &app_state,
+                    feature_update(action, team_feature_full("id-1", "flag", "team-1")),
+                )
+                .await
+            );
+        }
+        mapped_cache.run_pending_tasks().await;
+        assert_eq!(mapped_cache.entry_count(), 0);
+
+        app_state.record_edge_team_id("team-1");
+        handle_feature_update(
+            &app_state,
+            feature_update(Action::Upsert, team_feature_full("id-1", "flag", "team-1")),
+        )
+        .await;
+        mapped_cache.run_pending_tasks().await;
+        assert_eq!(mapped_cache.entry_count(), 1);
+    }
+
     #[tokio::test]
     async fn test_lag_recovery_clears_stale_cache_and_requests_full_snapshot() {
         let mapped_cache = Arc::new(crate::MappedFeatureCache::new(100));
@@ -625,7 +734,7 @@ mod tests {
             stages: vec![],
             variants: vec![],
         });
-        mapped_cache.insert(stale_feature).await;
+        mapped_cache.insert("team-1", stale_feature).await;
         mapped_cache.add_negative("stale-miss").await;
         app_state.assigned_cache.insert(
             assignment_key("user-1", "stale-id", "env-1"),

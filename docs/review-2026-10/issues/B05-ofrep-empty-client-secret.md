@@ -4,7 +4,7 @@
 |---|---|
 | Type | Bug (correctness, regression) |
 | Severity | Critical |
-| Status | Confirmed (code traced) |
+| Status | Fixed on branch `fix/b05-ofrep-empty-secret` |
 | Crate | `feature-edge-server` |
 | Behavior change | Yes, intended: OFREP requests with the configured client ID start working |
 | Decision | Use the **fallback** option: fill the secret from edge config when the header client ID matches the configured client ID. The OFREP spec allows this (see below). |

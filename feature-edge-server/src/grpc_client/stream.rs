@@ -2,7 +2,7 @@ use super::{AppState, build_endpoint, pb};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio_stream::StreamExt;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Send the initial subscription payload for a stream connection.
 pub(crate) async fn send_initial_subscribe(
@@ -72,6 +72,40 @@ async fn open_streaming_call(
     client.stream_updates(req_stream).await
 }
 
+/// Learn the configured client's team before consuming the stream, so
+/// `handle_feature_update` can drop other teams' features. One attempt per
+/// connection; on failure the stream loop retries with its own backoff.
+async fn ensure_edge_team_id(
+    app: &AppState,
+    client: &mut pb::feature_evaluation_client::FeatureEvaluationClient<tonic::transport::Channel>,
+) -> bool {
+    if app.edge_team_id().is_some() {
+        return true;
+    }
+    let request = pb::GetClientInfoRequest {
+        client_id: app.client_id.clone(),
+        client_secret: app.client_secret.clone(),
+    };
+    match client.get_client_info(tonic::Request::new(request)).await {
+        Ok(response) => {
+            app.record_edge_team_id(&response.into_inner().team_id);
+            if app.edge_team_id().is_none() {
+                error!("GetClientInfo returned no team for the configured client");
+                return false;
+            }
+            true
+        }
+        Err(status) => {
+            error!(
+                "Failed to resolve the configured client's team: code={:?} msg={}",
+                status.code(),
+                status.message()
+            );
+            false
+        }
+    }
+}
+
 /// Apply a single backend stream update to local caches. Returning `true`
 /// tells the caller to tear down the stream and reconnect with a full resync.
 pub(crate) async fn handle_feature_update(app: &AppState, update: pb::FeatureUpdate) -> bool {
@@ -79,6 +113,23 @@ pub(crate) async fn handle_feature_update(app: &AppState, update: pb::FeatureUpd
     match update.action {
         x if x == Action::Upsert as i32 || x == Action::Snapshot as i32 => {
             if let Some(f) = update.feature {
+                // The edge serves one team. Drop other teams' features, and
+                // everything while the team is unknown (fail closed).
+                let Some(edge_team_id) = app.edge_team_id() else {
+                    warn!(
+                        "Ignoring update for feature '{}': edge team is not known yet",
+                        f.key
+                    );
+                    return false;
+                };
+                if f.team_id != edge_team_id {
+                    debug!(
+                        "Ignoring update for feature '{}' owned by another team",
+                        f.key
+                    );
+                    return false;
+                }
+
                 let feature_id = f.id.clone();
                 let dependency_ids = f
                     .dependencies
@@ -88,7 +139,7 @@ pub(crate) async fn handle_feature_update(app: &AppState, update: pb::FeatureUpd
 
                 let engine_feature = std::sync::Arc::new(crate::handlers::map_proto_to_engine(&f));
                 app.mapped_cache
-                    .insert_with_dependencies(engine_feature, dependency_ids)
+                    .insert_with_dependencies(&f.team_id, engine_feature, dependency_ids)
                     .await;
 
                 app.purge_assignments_for_feature(&feature_id).await;
@@ -132,10 +183,17 @@ pub async fn run_stream_task(app: AppState, grpc_addr: String) {
         let endpoint = build_endpoint(&grpc_addr);
         match endpoint.connect().await {
             Ok(channel) => {
-                let client = pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
+                let mut client =
+                    pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
                 info!("Connected to backend gRPC {}", &grpc_addr);
 
                 retry_delay = app.retry_config.stream_initial_delay();
+
+                if !ensure_edge_team_id(&app, &mut client).await {
+                    tokio::time::sleep(retry_delay).await;
+                    retry_delay = std::cmp::min(retry_delay * 2, max_retry_delay);
+                    continue;
+                }
 
                 let (tx, rx) = tokio::sync::mpsc::channel::<pb::StreamRequest>(16);
                 send_initial_subscribe(&tx, &app, force_full_resync).await;

@@ -73,6 +73,9 @@ pub struct AppState {
     >,
     client_id: String,
     client_secret: String,
+    // Team of the configured client, learned from `GetClientInfo`. The edge
+    // serves one team: the feature cache only holds this team's features.
+    edge_team_id: Arc<std::sync::OnceLock<String>>,
     connected: Arc<std::sync::atomic::AtomicBool>,
     // Sticky assignments cache with variant information and pending flush queue (lock-free!)
     assigned_cache: Arc<dashmap::DashMap<String, CachedAssignment>>,
@@ -102,10 +105,18 @@ pub struct EvaluationEvent {
     pub variant_value: Option<serde_json::Value>,
 }
 
+/// A cached feature together with the team that owns it. Feature keys are
+/// unique only per team, so readers must check `team_id` before serving it.
+#[derive(Clone)]
+pub struct CachedFeature {
+    pub team_id: Arc<str>,
+    pub feature: Arc<evaluation_engine::Feature>,
+}
+
 /// Cache for pre-mapped engine::Feature to avoid repeated allocations
 pub struct MappedFeatureCache {
-    // Primary cache: feature_key -> Arc<Feature>
-    by_key: moka::future::Cache<String, Arc<evaluation_engine::Feature>>,
+    // Primary cache: feature_key -> owning team + Arc<Feature>
+    by_key: moka::future::Cache<String, CachedFeature>,
     // Secondary index: feature_id -> feature_key
     by_id: moka::future::Cache<String, String>,
     // Dependency edges: feature_id -> depends_on_feature_ids
@@ -132,23 +143,43 @@ impl MappedFeatureCache {
         }
     }
 
-    /// Get feature by key
+    /// Get feature by key regardless of the owning team. Request handlers
+    /// must use [`Self::get_for_team`] instead.
+    #[cfg(test)]
     pub async fn get(&self, key: &str) -> Option<Arc<evaluation_engine::Feature>> {
-        self.by_key.get(key).await
+        self.by_key.get(key).await.map(|entry| entry.feature)
+    }
+
+    /// Get feature by key if it belongs to `team_id`.
+    pub async fn get_for_team(
+        &self,
+        key: &str,
+        team_id: &str,
+    ) -> Option<Arc<evaluation_engine::Feature>> {
+        self.by_key
+            .get(key)
+            .await
+            .filter(|entry| &*entry.team_id == team_id)
+            .map(|entry| entry.feature)
+    }
+
+    /// All cached features that belong to `team_id`.
+    pub fn features_for_team(&self, team_id: &str) -> Vec<Arc<evaluation_engine::Feature>> {
+        self.by_key
+            .iter()
+            .filter(|(_, entry)| &*entry.team_id == team_id)
+            .map(|(_, entry)| entry.feature)
+            .collect()
     }
 
     /// Get feature by key, or compute and insert it if not present.
     /// This uses moka's built-in request coalescing - if multiple concurrent
     /// requests ask for the same uncached key, only one will execute the
     /// init function while others wait for the result.
-    pub async fn optionally_get_with<F, Fut>(
-        &self,
-        key: String,
-        init: F,
-    ) -> Option<Arc<evaluation_engine::Feature>>
+    pub async fn optionally_get_with<F, Fut>(&self, key: String, init: F) -> Option<CachedFeature>
     where
         F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = Option<Arc<evaluation_engine::Feature>>>,
+        Fut: std::future::Future<Output = Option<CachedFeature>>,
     {
         self.by_key
             .optionally_get_with(key, async move {
@@ -182,24 +213,35 @@ impl MappedFeatureCache {
     /// Get feature by ID (using secondary index)
     pub async fn get_by_id(&self, id: &str) -> Option<Arc<evaluation_engine::Feature>> {
         let key = self.by_id.get(id).await?;
-        self.by_key.get(&key).await
+        self.by_key.get(&key).await.map(|entry| entry.feature)
     }
 
-    /// Insert feature into cache (updates both indices)
-    pub async fn insert(&self, feature: Arc<evaluation_engine::Feature>) {
-        self.insert_with_dependencies(feature, Vec::new()).await;
+    /// Insert a feature owned by `team_id` into cache (updates both indices)
+    pub async fn insert(&self, team_id: &str, feature: Arc<evaluation_engine::Feature>) {
+        self.insert_with_dependencies(team_id, feature, Vec::new())
+            .await;
     }
 
-    /// Insert feature into cache and store dependency edges (updates all indices)
+    /// Insert a feature owned by `team_id` into cache and store dependency
+    /// edges (updates all indices)
     pub async fn insert_with_dependencies(
         &self,
+        team_id: &str,
         feature: Arc<evaluation_engine::Feature>,
         dependency_ids: Vec<String>,
     ) {
         let key = feature.key.clone();
         let id = feature.id.clone();
 
-        self.by_key.insert(key.clone(), feature).await;
+        self.by_key
+            .insert(
+                key.clone(),
+                CachedFeature {
+                    team_id: Arc::from(team_id),
+                    feature,
+                },
+            )
+            .await;
         self.negative_cache.invalidate(&key).await;
         self.by_id.insert(id.clone(), key).await;
         self.dependency_ids.insert(id, dependency_ids).await;
@@ -223,17 +265,17 @@ impl MappedFeatureCache {
     /// Invalidate feature by key
     pub async fn invalidate(&self, key: &str) {
         // Get the feature to find its ID before invalidating
-        if let Some(feature) = self.by_key.get(key).await {
-            self.by_id.invalidate(&feature.id).await;
-            self.dependency_ids.invalidate(&feature.id).await;
+        if let Some(entry) = self.by_key.get(key).await {
+            self.by_id.invalidate(&entry.feature.id).await;
+            self.dependency_ids.invalidate(&entry.feature.id).await;
         }
         self.by_key.invalidate(key).await;
     }
 
     /// Delete feature by key and return its ID
     pub async fn delete_by_key(&self, key: &str) -> Option<String> {
-        let feature = self.by_key.get(key).await?;
-        let id = feature.id.clone();
+        let entry = self.by_key.get(key).await?;
+        let id = entry.feature.id.clone();
 
         self.by_key.invalidate(key).await;
         self.by_id.invalidate(&id).await;
@@ -275,6 +317,31 @@ impl MappedFeatureCache {
 }
 
 impl AppState {
+    /// Team of the configured client, once known.
+    pub fn edge_team_id(&self) -> Option<&str> {
+        self.edge_team_id.get().map(String::as_str)
+    }
+
+    /// Record the configured client's team. The first non-empty value wins.
+    pub fn record_edge_team_id(&self, team_id: &str) {
+        if team_id.is_empty() {
+            return;
+        }
+        match self.edge_team_id.get() {
+            Some(known) if known != team_id => tracing::warn!(
+                "Configured client reported team '{}', but the edge already serves team '{}'",
+                team_id,
+                known
+            ),
+            Some(_) => {}
+            None => {
+                if self.edge_team_id.set(team_id.to_string()).is_ok() {
+                    info!("Edge serves features of team '{}'", team_id);
+                }
+            }
+        }
+    }
+
     pub fn clear_assignment_caches(&self) {
         self.assigned_cache.clear();
         while self.pending_assignments.pop().is_some() {}
@@ -387,6 +454,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         grpc: Arc::new(tokio::sync::Mutex::new(grpc_client)),
         client_id: cfg.client_id.clone(),
         client_secret: cfg.client_secret.clone(),
+        edge_team_id: Arc::new(std::sync::OnceLock::new()),
         connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         assigned_cache: Arc::new(dashmap::DashMap::new()),
         pending_assignments: Arc::new(crossbeam::queue::SegQueue::new()),
@@ -469,6 +537,7 @@ mod tests {
             grpc: Arc::new(tokio::sync::Mutex::new(grpc_client)),
             client_id: "client".into(),
             client_secret: "secret".into(),
+            edge_team_id: Arc::new(std::sync::OnceLock::new()),
             connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             assigned_cache: Arc::new(dashmap::DashMap::new()),
             pending_assignments: Arc::new(crossbeam::queue::SegQueue::new()),
@@ -568,7 +637,7 @@ mod tests {
         });
 
         // Test insert and get
-        mapped_cache.insert(engine_feature.clone()).await;
+        mapped_cache.insert("team-1", engine_feature.clone()).await;
         mapped_cache.run_pending_tasks().await;
         assert_eq!(mapped_cache.entry_count(), 1);
 
@@ -601,7 +670,11 @@ mod tests {
             variants: vec![],
         });
         mapped_cache
-            .insert_with_dependencies(recovered_feature.clone(), vec!["dep-1".to_string()])
+            .insert_with_dependencies(
+                "team-1",
+                recovered_feature.clone(),
+                vec!["dep-1".to_string()],
+            )
             .await;
         mapped_cache.run_pending_tasks().await;
         assert!(mapped_cache.get("neg_key").await.is_some());
