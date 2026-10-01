@@ -762,21 +762,11 @@ pub async fn evaluate_handler(
         let cached = app
             .assigned_cache
             .get(&key)
-            .map(|entry| entry.value().clone());
+            .and_then(|entry| entry.value().clone().into_result(&feature_key, &feature));
 
-        if let Some(cached_assignment) = cached {
+        if let Some(cached_result) = cached {
             // Cached assignment - return cached result with original reason (not "CACHED")
-            (
-                engine::EvaluationResult {
-                    flag_key: feature_key.clone(),
-                    value: cached_assignment.value,
-                    variant: cached_assignment.variant,
-                    reason: cached_assignment.reason,
-                    error_code: None,
-                    metadata: None,
-                },
-                true,
-            )
+            (cached_result, true)
         } else {
             let result = evaluate_http_feature_locally(&feature_key, &feature, &eval_context);
             (result, false)
@@ -830,7 +820,7 @@ pub async fn evaluate_handler(
         app.assigned_cache.insert(
             key,
             crate::CachedAssignment {
-                value: result.value.clone(),
+                value: Some(result.value.clone()),
                 variant: result.variant.clone(),
                 reason: result.reason.clone(),
             },
@@ -1043,20 +1033,10 @@ async fn evaluate_ofrep_feature(
         let cached = app
             .assigned_cache
             .get(&cache_key)
-            .map(|entry| entry.value().clone());
+            .and_then(|entry| entry.value().clone().into_result(&feature_key, &feature));
 
-        if let Some(cached_assignment) = cached {
-            (
-                engine::EvaluationResult {
-                    flag_key: feature_key.clone(),
-                    value: cached_assignment.value,
-                    variant: cached_assignment.variant,
-                    reason: cached_assignment.reason,
-                    error_code: None,
-                    metadata: None,
-                },
-                true,
-            )
+        if let Some(cached_result) = cached {
+            (cached_result, true)
         } else {
             let ofrep_ctx = OFREPContext {
                 targeting_key: targeting_key.clone(),
@@ -1111,7 +1091,7 @@ async fn evaluate_ofrep_feature(
         app.assigned_cache.insert(
             cache_key,
             crate::CachedAssignment {
-                value: result.value.clone(),
+                value: Some(result.value.clone()),
                 variant: result.variant.clone(),
                 reason: result.reason.clone(),
             },
@@ -2418,6 +2398,127 @@ mod tests {
                 .is_some(),
             "expected dependency block metadata"
         );
+    }
+
+    /// A Contextual team-1 feature with variants `on` (true) and `off` (false)
+    /// and no stage criteria, so a fresh evaluation serves `true` without a variant.
+    fn contextual_feature_with_on_off(id: &str, key: &str) -> pb::FeatureFull {
+        let mut feature = team_feature(id, key, "team-1", true);
+        feature.feature_type = "Contextual".to_string();
+        feature.variants = vec![
+            pb::FeatureVariant {
+                control: "on".to_string(),
+                value: "true".to_string(),
+            },
+            pb::FeatureVariant {
+                control: "off".to_string(),
+                value: "false".to_string(),
+            },
+        ];
+        feature
+    }
+
+    fn persisted_assignment(feature_id: &str, variant: &str) -> pb::UserFlagAssignment {
+        pb::UserFlagAssignment {
+            user_id: "u1".to_string(),
+            feature_id: feature_id.to_string(),
+            environment_id: "env-1".to_string(),
+            assigned: true,
+            client_id: String::new(),
+            client_secret: String::new(),
+            variant: variant.to_string(),
+        }
+    }
+
+    /// Warm the assignment cache (without the snapshot purge that hides B18
+    /// at startup) and call `/evaluate` for user `u1`.
+    async fn evaluate_after_warmup(
+        feature: pb::FeatureFull,
+        variant: &str,
+    ) -> (crate::AppState, serde_json::Value) {
+        let (app_state, _backend) = ofrep_app_with_mock_backend().await;
+        cache_fetched_feature(&app_state, &feature).await;
+        app_state.mapped_cache.run_pending_tasks().await;
+        crate::grpc_client::warm_assignment_cache(
+            &app_state,
+            vec![persisted_assignment(&feature.id, variant)],
+        );
+
+        let service = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(app_state.clone()))
+                .route("/evaluate", web::post().to(evaluate_handler)),
+        )
+        .await;
+        let req = actix_test::TestRequest::post()
+            .uri("/evaluate")
+            .set_json(serde_json::json!({
+                "flagKey": feature.key,
+                "context": { "bucketingKey": "u1" }
+            }))
+            .to_request();
+        let resp = actix_test::call_service(&service, req).await;
+        assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+        (app_state, actix_test::read_body_json(resp).await)
+    }
+
+    #[actix_web::test]
+    async fn evaluate_serves_warmed_assignment_with_its_variant_value() {
+        let (_app, body) =
+            evaluate_after_warmup(contextual_feature_with_on_off("f-ctx", "ctx"), "off").await;
+
+        assert_eq!(body["value"], serde_json::json!(false));
+        assert_eq!(body["variant"], serde_json::json!("off"));
+    }
+
+    #[actix_web::test]
+    async fn evaluate_serves_warmed_assignment_without_variant_as_true() {
+        let (_app, body) =
+            evaluate_after_warmup(team_feature("f-simple", "simple", "team-1", true), "").await;
+
+        assert_eq!(body["value"], serde_json::json!(true));
+        assert_eq!(body["variant"], serde_json::Value::Null);
+    }
+
+    #[actix_web::test]
+    async fn evaluate_skips_warmed_assignment_for_removed_variant() {
+        let (_app, body) =
+            evaluate_after_warmup(contextual_feature_with_on_off("f-ctx", "ctx"), "gone").await;
+
+        // Fresh evaluation: no criteria, so `true` without a variant.
+        assert_eq!(body["value"], serde_json::json!(true));
+        assert_eq!(body["variant"], serde_json::Value::Null);
+        assert_eq!(body["reason"], serde_json::json!("STATIC"));
+    }
+
+    #[actix_web::test]
+    async fn ofrep_single_flag_serves_warmed_assignment_with_its_variant_value() {
+        let (app_state, _backend) = ofrep_app_with_mock_backend().await;
+        let feature = contextual_feature_with_on_off("f-ctx", "ctx");
+        cache_fetched_feature(&app_state, &feature).await;
+        app_state.mapped_cache.run_pending_tasks().await;
+        crate::grpc_client::warm_assignment_cache(
+            &app_state,
+            vec![persisted_assignment("f-ctx", "off")],
+        );
+
+        let service =
+            actix_test::init_service(App::new().app_data(web::Data::new(app_state)).route(
+                "/ofrep/v1/evaluate/flags/{key}",
+                web::post().to(ofrep_evaluate_flag),
+            ))
+            .await;
+        let req = actix_test::TestRequest::post()
+            .uri("/ofrep/v1/evaluate/flags/ctx")
+            .insert_header(("x-api-key", "client"))
+            .set_json(serde_json::json!({ "context": { "targetingKey": "u1" } }))
+            .to_request();
+        let resp = actix_test::call_service(&service, req).await;
+
+        assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+        let body: serde_json::Value = actix_test::read_body_json(resp).await;
+        assert_eq!(body["value"], serde_json::json!(false));
+        assert_eq!(body["variant"], serde_json::json!("off"));
     }
 
     #[tokio::test]

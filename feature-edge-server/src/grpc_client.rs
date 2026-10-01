@@ -217,14 +217,25 @@ pub async fn load_user_assignments(app: &AppState) -> Result<usize, tonic::Statu
     };
     let mut client = app.grpc.lock().await.clone();
     let resp = client.list_user_assignments(req).await?.into_inner();
+    Ok(warm_assignment_cache(app, resp.assignments))
+}
+
+/// Seed the sticky assignment cache with persisted assignments. Returns the
+/// number of cached entries.
+pub(crate) fn warm_assignment_cache(
+    app: &AppState,
+    assignments: Vec<pb::UserFlagAssignment>,
+) -> usize {
     let mut count = 0usize;
-    for a in resp.assignments.into_iter() {
+    for a in assignments.into_iter() {
         if a.assigned {
             let key = assignment_key(&a.user_id, &a.feature_id, &a.environment_id);
             app.assigned_cache.insert(
                 key,
                 crate::CachedAssignment {
-                    value: serde_json::json!(true),
+                    // Only the variant name is persisted; its value is
+                    // resolved from the feature when served.
+                    value: None,
                     variant: if a.variant.is_empty() {
                         None
                     } else {
@@ -238,7 +249,7 @@ pub async fn load_user_assignments(app: &AppState) -> Result<usize, tonic::Statu
             count += 1;
         }
     }
-    Ok(count)
+    count
 }
 
 /// Build a gRPC endpoint with standard configuration
@@ -879,7 +890,7 @@ mod tests {
         app_state.assigned_cache.insert(
             assignment_key("user-1", "stale-id", "env-1"),
             crate::CachedAssignment {
-                value: serde_json::json!(true),
+                value: Some(serde_json::json!(true)),
                 variant: None,
                 reason: evaluation_engine::EvaluationReason::Static,
             },

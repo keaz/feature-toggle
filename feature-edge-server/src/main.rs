@@ -22,9 +22,42 @@ mod pb {
 
 #[derive(Clone, Debug)]
 pub struct CachedAssignment {
-    pub value: serde_json::Value,
+    /// Served value. `None` for assignments warmed up from the backend, which
+    /// persists only the variant name: the value is then resolved from the
+    /// feature when served.
+    pub value: Option<serde_json::Value>,
     pub variant: Option<String>,
     pub reason: evaluation_engine::EvaluationReason,
+}
+
+impl CachedAssignment {
+    /// The result to serve for `feature`, or `None` when the assigned variant
+    /// no longer exists and the caller must evaluate afresh. Without a
+    /// variant the value is `true`, as in a fresh evaluation.
+    pub fn into_result(
+        self,
+        flag_key: &str,
+        feature: &evaluation_engine::Feature,
+    ) -> Option<evaluation_engine::EvaluationResult> {
+        let value = match (self.value, &self.variant) {
+            (Some(value), _) => value,
+            (None, None) => serde_json::Value::Bool(true),
+            (None, Some(control)) => feature
+                .variants
+                .iter()
+                .find(|variant| &variant.control == control)?
+                .value
+                .clone(),
+        };
+        Some(evaluation_engine::EvaluationResult {
+            flag_key: flag_key.to_string(),
+            value,
+            variant: self.variant,
+            reason: self.reason,
+            error_code: None,
+            metadata: None,
+        })
+    }
 }
 
 /// How long a rejected client credential is remembered. Kept short because a
@@ -576,7 +609,7 @@ mod tests {
         state.assigned_cache.insert(
             format!("user-1|{}|env-1", feature_id),
             CachedAssignment {
-                value: serde_json::json!(true),
+                value: Some(serde_json::json!(true)),
                 variant: None,
                 reason: evaluation_engine::EvaluationReason::TargetingMatch,
             },
@@ -584,7 +617,7 @@ mod tests {
         state.assigned_cache.insert(
             format!("user-2|{}|env-1", feature_id),
             CachedAssignment {
-                value: serde_json::json!(true),
+                value: Some(serde_json::json!(true)),
                 variant: None,
                 reason: evaluation_engine::EvaluationReason::TargetingMatch,
             },
@@ -592,7 +625,7 @@ mod tests {
         state.assigned_cache.insert(
             "user-3|other|env".to_string(),
             CachedAssignment {
-                value: serde_json::json!(true),
+                value: Some(serde_json::json!(true)),
                 variant: None,
                 reason: evaluation_engine::EvaluationReason::TargetingMatch,
             },
