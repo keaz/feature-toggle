@@ -19,9 +19,10 @@ docker-compose up --build
 ```
 
 This will start:
-- PostgreSQL database on port 5433
-- Feature toggle backend on port 8080
+- Feature toggle backend on port 8080 (REST) and 50051 (gRPC, inside the compose network)
 - Feature edge server on port 8081
+
+PostgreSQL is not part of the compose stack: the `postgres_server` service in `docker-compose.yml` is commented out. The backend connects to PostgreSQL on the host through `host.docker.internal:5432`, using the `DATABASE_URL` set in `docker-compose.yml`. Update that URL to match your local database, or uncomment `postgres_server` (it publishes port 5433) and point `DATABASE_URL` at it.
 
 ### Building Individual Images
 
@@ -135,11 +136,13 @@ docker-compose logs -f feature_edge_server
 To debug a specific service:
 ```bash
 # Get shell access to running container
-docker exec -it feature_toggle_backend bash
+docker-compose exec feature_toggle_backend bash
 
 # View container logs
-docker logs feature_toggle_backend
+docker-compose logs feature_toggle_backend
 
 # Check container resource usage
-docker stats feature_toggle_backend
+docker stats $(docker-compose ps -q feature_toggle_backend)
 ```
+
+Use the compose service names (`feature_toggle_backend`, `feature_edge_server`) with `docker-compose` commands. Plain `docker` commands need the container name, which Compose prefixes with the project name (for example `feature-toggle-feature_toggle_backend-1`); `docker-compose ps` lists them.
