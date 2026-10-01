@@ -4,7 +4,7 @@
 |---|---|
 | Type | Bug (correctness, tenant isolation, security) |
 | Severity | High |
-| Status | Verified (independent code trace) |
+| Status | Fixed on branch `fix/b16-edge-team-scope` (edge half; the backend half is [B03](B03-stream-updates-cross-team.md)) |
 | Crate | `feature-edge-server` |
 | Behavior change | Yes, intended: callers see only their own team's flags |
 | Depends on | [B03](B03-stream-updates-cross-team.md) (backend fix removes the main source). This issue is edge defense in depth plus OFREP bulk filtering. |
