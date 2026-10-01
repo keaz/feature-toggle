@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT ufa.user_id, ufa.feature_id, ufa.environment_id, ufa.assigned, ufa.variant\n                       FROM user_flag_assignments ufa\n                       JOIN features f ON f.id = ufa.feature_id\n                       WHERE f.team_id = $1 AND EXISTS (\n                           SELECT 1 FROM features_pipeline_stages s\n                           WHERE s.feature_id = f.id AND s.environment_id = $2\n                       )",
+  "query": "SELECT ufa.user_id, ufa.feature_id, ufa.environment_id, ufa.assigned, ufa.variant\n                       FROM user_flag_assignments ufa\n                       JOIN features f ON f.id = ufa.feature_id\n                       WHERE f.team_id = $1 AND ufa.environment_id = $2 AND EXISTS (\n                           SELECT 1 FROM features_pipeline_stages s\n                           WHERE s.feature_id = f.id AND s.environment_id = $2\n                       )",
   "describe": {
     "columns": [
       {
@@ -43,5 +43,5 @@
       true
     ]
   },
-  "hash": "44dd5b3ba1629aef9987ea4a836fb9ba405bc489fea31b49e8c9391f1fbfd958"
+  "hash": "4debd3c493981a4c7f2bf330aa67087a726abac283a91550549536598e9254a0"
 }

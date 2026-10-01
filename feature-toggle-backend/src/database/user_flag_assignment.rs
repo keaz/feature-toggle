@@ -124,7 +124,7 @@ impl UserFlagAssignmentRepository for UserFlagAssignmentRepositoryImpl {
                     r#"SELECT ufa.user_id, ufa.feature_id, ufa.environment_id, ufa.assigned, ufa.variant
                        FROM user_flag_assignments ufa
                        JOIN features f ON f.id = ufa.feature_id
-                       WHERE f.team_id = $1 AND EXISTS (
+                       WHERE f.team_id = $1 AND ufa.environment_id = $2 AND EXISTS (
                            SELECT 1 FROM features_pipeline_stages s
                            WHERE s.feature_id = f.id AND s.environment_id = $2
                        )"#,
