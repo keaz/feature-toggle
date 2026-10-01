@@ -18,7 +18,6 @@ use crate::logic::authorization::RoleAuthorizer;
 use crate::logic::environment::EnvironmentLogic;
 use crate::logic::feature::{FeatureLogic, StageChangeRequestType};
 use crate::logic::feature_tx;
-use crate::logic::pipeline::PipelineLogic;
 use crate::logic::{ActorContext, create_relationships, get_environment_map};
 use crate::model::{
     CreateFeatureInput, CreateFeatureStageInput, CreateFeatureVariantInput,
@@ -213,26 +212,6 @@ fn map_dependencies(ids: &[String]) -> Result<Vec<ID>, RestError> {
     ids.iter()
         .map(|id| Ok(ID::from(parse_uuid(id, "dependency id")?)))
         .collect()
-}
-
-async fn ensure_feature_key_unique_for_create(
-    logic: &dyn PipelineLogic,
-    team_id: ID,
-    key: &str,
-) -> Result<(), RestError> {
-    let pipelines = logic
-        .get_pipelines(team_id, Some(key.to_string()), Some(true), vec![])
-        .await
-        .map_err(RestError::from)?;
-
-    if !pipelines.is_empty() {
-        return Err(RestError::conflict(format!(
-            "Feature with name '{}' already exists",
-            key
-        )));
-    }
-
-    Ok(())
 }
 
 async fn ensure_feature_key_unique_for_update(
@@ -1458,7 +1437,6 @@ pub(crate) async fn create_feature(
     activity_repo: web::Data<Box<dyn ActivityLogRepository>>,
     req: HttpRequest,
     feature_logic: web::Data<Box<dyn FeatureLogic>>,
-    pipeline_logic: web::Data<Box<dyn PipelineLogic>>,
     feature_repo: web::Data<Box<dyn FeatureRepository>>,
     env_logic: web::Data<Box<dyn EnvironmentLogic>>,
     team_id: web::Path<String>,
@@ -1469,12 +1447,6 @@ pub(crate) async fn create_feature(
     validate_variant_requests(&payload.variants)?;
 
     let team_uuid = parse_uuid(&team_id, "team_id")?;
-    ensure_feature_key_unique_for_create(
-        pipeline_logic.as_ref().as_ref(),
-        ID::from(team_uuid),
-        payload.key.as_str(),
-    )
-    .await?;
 
     let stages = map_stage_requests(&payload.stages)?;
     let relationships = map_relationship_requests(&payload.relationships)?;
@@ -2163,7 +2135,7 @@ mod tests {
     use crate::database::user::user_repository;
     use crate::logic::environment::{MockEnvironmentLogic, environment_logic};
     use crate::logic::feature::{MockFeatureLogic, feature_logic};
-    use crate::logic::pipeline::MockPipelineLogic;
+    use crate::logic::pipeline::{MockPipelineLogic, PipelineLogic};
     use crate::model::{
         Feature as ModelFeature, FeatureType as ModelFeatureType,
         LifecycleStage as ModelLifecycleStage,
@@ -2424,6 +2396,84 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["key"], "checkout");
         assert_eq!(json["teamId"], team_id.to_string());
+    }
+
+    /// Feature keys and pipeline names are separate namespaces: creating a
+    /// feature must not consult pipelines at all.
+    #[actix_web::test]
+    async fn create_feature_does_not_check_pipeline_names() {
+        let pool = test_pool().await;
+        let team_id = insert_team(&pool).await;
+        let env_id = insert_environment(&pool, team_id).await;
+
+        // No expectations: any call to get_pipelines panics.
+        let mock_pipeline_logic = MockPipelineLogic::new();
+
+        let new_env_logic = || {
+            environment_logic(
+                environment_repository(pool.clone()),
+                Box::new(PgActivityLogRepository::new(pool.clone())),
+            )
+        };
+        let feature_logic = feature_logic(
+            feature_repository(pool.clone()),
+            new_env_logic(),
+            Box::new(PgActivityLogRepository::new(pool.clone())),
+            user_repository(pool.clone()),
+        );
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(pool.clone()))
+                .app_data(web::Data::new(
+                    Box::new(PgActivityLogRepository::new(pool.clone()))
+                        as Box<dyn ActivityLogRepository>,
+                ))
+                .app_data(web::Data::new(feature_logic))
+                .app_data(web::Data::new(
+                    Box::new(mock_pipeline_logic) as Box<dyn PipelineLogic>
+                ))
+                .app_data(web::Data::new(feature_repository(pool.clone())))
+                .app_data(web::Data::new(new_env_logic()))
+                .service(web::scope("/api/v1").configure(super::configure)),
+        )
+        .await;
+
+        let req = test::TestRequest::post()
+            .uri(&format!("/api/v1/teams/{team_id}/features"))
+            .set_json(CreateFeatureRequest {
+                key: "check".to_string(),
+                description: None,
+                feature_type: FeatureType::Simple,
+                enabled: Some(true),
+                lifecycle_stage: None,
+                owner: None,
+                purpose: None,
+                reference_url: None,
+                expires_at: None,
+                cleanup_reason: None,
+                tags: None,
+                dependencies: vec![],
+                relationships: vec![],
+                stages: vec![CreateFeatureStageRequest {
+                    id: None,
+                    environment_id: env_id.to_string(),
+                    order_index: 0,
+                    position: "{\"x\":0,\"y\":0}".to_string(),
+                    bucketing_key: None,
+                }],
+                variants: None,
+            })
+            .to_request();
+        let status = test::call_service(&app, req).await.status();
+
+        sqlx::query("DELETE FROM teams WHERE id = $1")
+            .bind(team_id)
+            .execute(&pool)
+            .await
+            .expect("Failed to delete test team");
+
+        assert_eq!(status, StatusCode::CREATED);
     }
 
     #[actix_web::test]
