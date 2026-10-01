@@ -4,7 +4,7 @@
 |---|---|
 | Type | Bug (correctness) |
 | Severity | Medium |
-| Status | Verified (code traced) |
+| Status | Fixed on branch `fix/b17-assignment-env-filter` |
 | Crate | `feature-toggle-backend` |
 | Behavior change | Yes, intended: only rows for the requested environment are returned |
 
