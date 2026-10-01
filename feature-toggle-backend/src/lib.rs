@@ -272,6 +272,13 @@ pub async fn run() -> std::io::Result<()> {
     // OIDC client shared by all workers so the discovery + JWKS cache is shared too.
     let oidc_client = logic::oidc_client::OidcClient::new()
         .map_err(|e| io::Error::other(format!("Failed to create OIDC client: {e}")))?;
+    if cfg.public_base_url.is_none() {
+        log::warn!(
+            "public_base_url is not set: SSO callback URLs are derived from each request's \
+             scheme and host (including Forwarded / X-Forwarded-* headers). Set \
+             public_base_url in production."
+        );
+    }
     let sso_login_config = rest::sso_auth::SsoLoginConfig {
         ui_origin: cfg.allowed_origin.clone(),
         public_base_url: cfg.public_base_url.clone(),

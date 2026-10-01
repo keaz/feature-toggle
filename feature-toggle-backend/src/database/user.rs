@@ -194,12 +194,6 @@ pub trait UserRepositoryTx: UserRepository {
         conn: &mut PgConnection,
         input: CreateSsoUser,
     ) -> Result<User, Error>;
-    async fn update_last_login_tx(
-        &self,
-        conn: &mut PgConnection,
-        id: Uuid,
-        when: DateTime<Utc>,
-    ) -> Result<(), Error>;
     /// Whether the user is the shadow user of a system client.
     async fn is_system_client_tx(&self, conn: &mut PgConnection, id: Uuid) -> Result<bool, Error>;
 }
@@ -992,26 +986,6 @@ impl UserRepositoryTx for UserRepositoryImpl {
             is_temporary_password: row.is_temporary_password,
             auth_source: row.auth_source,
         })
-    }
-
-    async fn update_last_login_tx(
-        &self,
-        conn: &mut PgConnection,
-        id: Uuid,
-        when: DateTime<Utc>,
-    ) -> Result<(), Error> {
-        let result = sqlx::query!(
-            r#"UPDATE users SET last_login = $1, updated_at = now() WHERE id = $2"#,
-            when,
-            id
-        )
-        .execute(&mut *conn)
-        .await
-        .map_err(Error::DatabaseError)?;
-        if result.rows_affected() == 0 {
-            return Err(Error::NotFound(id));
-        }
-        Ok(())
     }
 
     async fn is_system_client_tx(&self, conn: &mut PgConnection, id: Uuid) -> Result<bool, Error> {

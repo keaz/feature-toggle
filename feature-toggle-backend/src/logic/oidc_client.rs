@@ -26,6 +26,9 @@ use subtle::ConstantTimeEq;
 /// How long a discovery document and its JWKS are reused.
 pub const METADATA_CACHE_TTL: Duration = Duration::from_secs(600);
 
+/// Minimum time between two JWKS refetches for unknown `kid`s, per issuer.
+pub const JWKS_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+
 /// Clock skew tolerated for `exp`, `nbf` and `iat`.
 pub const CLOCK_LEEWAY_SECONDS: u64 = 60;
 
@@ -172,6 +175,8 @@ fn parse_jwks(value: &serde_json::Value) -> Vec<SigningJwk> {
 struct CachedProvider {
     metadata: Arc<ProviderMetadata>,
     keys: Arc<Vec<SigningJwk>>,
+    /// When the discovery document was fetched; drives the cache TTL. A JWKS
+    /// refetch keeps it, so refreshing keys never extends the metadata lifetime.
     fetched_at: Instant,
 }
 
@@ -331,6 +336,8 @@ fn form_urlencode(value: &str) -> String {
 pub struct OidcClient {
     http: reqwest::Client,
     cache: Arc<Mutex<HashMap<String, Arc<CachedProvider>>>>,
+    /// Last unknown-`kid` JWKS refetch per issuer URL (rate limit).
+    key_refreshes: Arc<Mutex<HashMap<String, Instant>>>,
     ttl: Duration,
 }
 
@@ -345,6 +352,7 @@ impl OidcClient {
         Ok(Self {
             http,
             cache: Arc::new(Mutex::new(HashMap::new())),
+            key_refreshes: Arc::new(Mutex::new(HashMap::new())),
             ttl,
         })
     }
@@ -396,7 +404,22 @@ impl OidcClient {
         Ok(parse_jwks(&jwks))
     }
 
-    /// Refetches the JWKS of a cached provider (unknown `kid`) and stores it.
+    /// Claims the right to refetch the JWKS of `issuer_url`: true at most once per
+    /// [`JWKS_REFRESH_INTERVAL`]. Checked and recorded under one lock, so
+    /// concurrent callers with unknown `kid`s trigger a single refetch.
+    fn claim_key_refresh(&self, issuer_url: &str) -> bool {
+        let mut refreshes = self.key_refreshes.lock().unwrap_or_else(|e| e.into_inner());
+        match refreshes.get(issuer_url) {
+            Some(last) if last.elapsed() < JWKS_REFRESH_INTERVAL => false,
+            _ => {
+                refreshes.insert(issuer_url.to_string(), Instant::now());
+                true
+            }
+        }
+    }
+
+    /// Refetches the JWKS of a cached provider (unknown `kid`) and stores it,
+    /// keeping the metadata and its fetch time.
     async fn refresh_keys(
         &self,
         issuer_url: &str,
@@ -408,7 +431,7 @@ impl OidcClient {
             Arc::new(CachedProvider {
                 metadata: entry.metadata.clone(),
                 keys: keys.clone(),
-                fetched_at: Instant::now(),
+                fetched_at: entry.fetched_at,
             }),
         );
         Ok(keys)
@@ -486,7 +509,10 @@ impl OidcClient {
         }
 
         let mut keys = entry.keys.clone();
-        if header.kid.is_some() && !has_key(&keys, header.kid.as_deref(), alg) {
+        if header.kid.is_some()
+            && !has_key(&keys, header.kid.as_deref(), alg)
+            && self.claim_key_refresh(issuer_url)
+        {
             keys = self.refresh_keys(issuer_url, &entry).await?;
         }
         let candidates: Vec<&SigningJwk> = keys
@@ -537,12 +563,7 @@ impl OidcClient {
         if !bool::from(nonce.as_bytes().ct_eq(expected_nonce.as_bytes())) {
             return Err(OidcError::InvalidToken("nonce mismatch".to_string()));
         }
-        // With several audiences, the authorized party must be this client.
-        if let Some(azp) = claims.get("azp").and_then(|v| v.as_str())
-            && azp != client_id
-        {
-            return Err(OidcError::InvalidToken("azp mismatch".to_string()));
-        }
+        check_authorized_party(&claims, client_id)?;
 
         IdTokenClaims::from_value(claims)
     }
@@ -568,6 +589,23 @@ impl OidcClient {
         read_json_capped(response)
             .await
             .map_err(|err| OidcError::Userinfo(err.to_string()))
+    }
+}
+
+/// `azp`, when present, must be this client; with more than one audience it is
+/// required (OIDC Core 3.1.3.7).
+fn check_authorized_party(claims: &serde_json::Value, client_id: &str) -> Result<(), OidcError> {
+    let azp = claims.get("azp").and_then(|v| v.as_str());
+    let several_audiences = claims
+        .get("aud")
+        .and_then(|v| v.as_array())
+        .is_some_and(|aud| aud.len() > 1);
+    match azp {
+        Some(azp) if azp != client_id => Err(OidcError::InvalidToken("azp mismatch".to_string())),
+        None if several_audiences => Err(OidcError::InvalidToken(
+            "azp required with several audiences".to_string(),
+        )),
+        _ => Ok(()),
     }
 }
 
@@ -683,6 +721,34 @@ mod tests {
         assert!(!keys[0].usable_for(Algorithm::PS256), "alg pinned to RS256");
         assert!(!keys[0].usable_for(Algorithm::ES256));
         assert!(!keys[0].usable_for(Algorithm::HS256));
+    }
+
+    #[test]
+    fn authorized_party_rules() {
+        let check = |v: serde_json::Value| check_authorized_party(&v, "me").is_ok();
+        assert!(check(serde_json::json!({"aud": "me"})));
+        assert!(check(serde_json::json!({"aud": ["me"]})));
+        assert!(check(
+            serde_json::json!({"aud": ["me", "other"], "azp": "me"})
+        ));
+        assert!(!check(serde_json::json!({"aud": ["me", "other"]})));
+        assert!(!check(
+            serde_json::json!({"aud": ["me", "other"], "azp": "other"})
+        ));
+        assert!(!check(serde_json::json!({"aud": "me", "azp": "other"})));
+    }
+
+    #[test]
+    fn key_refresh_is_claimed_once_per_interval_and_issuer() {
+        let client = OidcClient::new().unwrap();
+        assert!(client.claim_key_refresh("https://a.example"));
+        assert!(!client.claim_key_refresh("https://a.example"));
+        assert!(client.claim_key_refresh("https://b.example"));
+        client.key_refreshes.lock().unwrap().insert(
+            "https://a.example".to_string(),
+            Instant::now() - JWKS_REFRESH_INTERVAL - Duration::from_secs(1),
+        );
+        assert!(client.claim_key_refresh("https://a.example"));
     }
 
     #[test]

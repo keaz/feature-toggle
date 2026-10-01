@@ -51,10 +51,13 @@ pub struct SsoLoginRepos<'a, U, I, C> {
 
 /// Resolves the user for `claims` and issues a one-time code.
 ///
-/// Order: email present, email domain allowed, then identity by `(provider, sub)`;
-/// else link by email (only with `allowEmailLinking`, `email_verified: true` and a
-/// non system-client user); else JIT provisioning (if enabled). A disabled user is
-/// rejected after resolution. Any error leaves the transaction to be rolled back.
+/// Order: email present, email domain allowed (a non-empty domain list also needs
+/// `email_verified: true`), then identity by `(provider, sub)`; else link by email
+/// (only with `allowEmailLinking`, `email_verified: true`, and a user that is
+/// neither a system admin nor a system-client user); else JIT provisioning (if
+/// enabled). A disabled user is rejected after resolution. The user's `last_login`
+/// is set later, when the exchange issues a session. Any error leaves the
+/// transaction to be rolled back.
 pub async fn complete_sso_login_in_tx<U, I, C>(
     conn: &mut PgConnection,
     repos: SsoLoginRepos<'_, U, I, C>,
@@ -72,7 +75,11 @@ where
             "email claim is not a usable address".to_string(),
         ));
     }
-    if !email_domain_allowed(email, &provider.allowed_email_domains) {
+    // An unverified email proves nothing about its domain: with a domain
+    // restriction, only a verified email can satisfy it.
+    if !provider.allowed_email_domains.is_empty()
+        && (!claims.email_verified || !email_domain_allowed(email, &provider.allowed_email_domains))
+    {
         return Err(SsoLoginError::EmailDomainNotAllowed);
     }
 
@@ -99,8 +106,11 @@ where
         None => {
             let user = match repos.users.find_user_by_email_ci_tx(conn, email).await? {
                 Some(existing) => {
+                    // Never link to a system admin: an IdP account must not be able
+                    // to take over the break-glass admin by matching its email.
                     let linkable = provider.allow_email_linking
                         && claims.email_verified
+                        && !existing.is_admin
                         && existing.auth_source != "system"
                         && !repos.users.is_system_client_tx(conn, existing.id).await?;
                     if !linkable {
@@ -114,7 +124,7 @@ where
                         return Err(SsoLoginError::UserNotProvisioned);
                     }
                     provisioned = true;
-                    provision_user(conn, repos.users, claims, email, now).await?
+                    provision_user(conn, repos.users, claims, email).await?
                 }
             };
             repos
@@ -138,7 +148,6 @@ where
         return Err(SsoLoginError::AccountDisabled);
     }
 
-    repos.users.update_last_login_tx(conn, user.id, now).await?;
     sync_roles_from_claims(conn, repos.activity, provider, user.id, &claims.raw).await?;
 
     let code = random_token();
@@ -215,7 +224,6 @@ async fn provision_user<U: UserRepositoryTx>(
     users: &U,
     claims: &IdTokenClaims,
     email: &str,
-    now: chrono::DateTime<Utc>,
 ) -> Result<User, SsoLoginError> {
     let base = username_base(claims.preferred_username.as_deref(), email);
     let mut username = None;
@@ -248,7 +256,8 @@ async fn provision_user<U: UserRepositoryTx>(
                 first_name,
                 last_name,
                 email: email.to_string(),
-                last_login: Some(now),
+                // Set when the exchange issues the session.
+                last_login: None,
             },
         )
         .await?)

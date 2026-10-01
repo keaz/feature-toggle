@@ -30,7 +30,7 @@ use feature_toggle_backend::logic::secret_box::SecretBox;
 use feature_toggle_backend::logic::sso_provider::SsoSecrets;
 use feature_toggle_backend::logic::user::user_logic;
 use feature_toggle_backend::rest;
-use feature_toggle_backend::rest::sso_auth::SsoLoginConfig;
+use feature_toggle_backend::rest::sso_auth::{STATE_COOKIE, SsoLoginConfig};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde_json::{Value, json};
 use serial_test::serial;
@@ -74,6 +74,7 @@ struct IdpState {
     grants: HashMap<String, Grant>,
     token_calls: Vec<TokenCall>,
     jwks_fetches: usize,
+    discovery_fetches: usize,
 }
 
 struct MockIdp {
@@ -103,7 +104,8 @@ fn form_decode(value: &str) -> String {
 }
 
 async fn idp_discovery(state: web::Data<Mutex<IdpState>>) -> HttpResponse {
-    let state = state.lock().unwrap();
+    let mut state = state.lock().unwrap();
+    state.discovery_fetches += 1;
     let base = &state.issuer;
     HttpResponse::Ok().json(json!({
         "issuer": base,
@@ -212,6 +214,7 @@ async fn start_idp() -> MockIdp {
         grants: HashMap::new(),
         token_calls: Vec::new(),
         jwks_fetches: 0,
+        discovery_fetches: 0,
     }));
     let data = web::Data::from(state.clone());
     let server = HttpServer::new(move || {
@@ -283,6 +286,17 @@ async fn build_app(
     Response = ServiceResponse<impl MessageBody>,
     Error = actix_web::Error,
 > {
+    build_app_with(pool, OidcClient::new().unwrap()).await
+}
+
+async fn build_app_with(
+    pool: &PgPool,
+    oidc: OidcClient,
+) -> impl Service<
+    actix_http::Request,
+    Response = ServiceResponse<impl MessageBody>,
+    Error = actix_web::Error,
+> {
     let auth = AuthConfig::default();
     let secret_logic = jwt_secret_logic(pool.clone(), auth);
     secret_logic.initialize_secret().await.expect("jwt secret");
@@ -301,7 +315,7 @@ async fn build_app(
             .app_data(web::Data::new(activity))
             .app_data(web::Data::new(tokens))
             .app_data(web::Data::new(secrets()))
-            .app_data(web::Data::new(OidcClient::new().unwrap()))
+            .app_data(web::Data::new(oidc))
             .app_data(web::Data::new(SsoLoginConfig {
                 ui_origin: UI.to_string(),
                 public_base_url: Some(BACKEND.to_string()),
@@ -375,6 +389,8 @@ async fn cleanup(pool: &PgPool, idp: &MockIdp) {
 
 struct AuthRequest {
     state: String,
+    /// Value of the `fluxgate_sso_state` cookie set by authorize.
+    cookie: String,
     nonce: String,
     challenge: String,
     redirect_uri: String,
@@ -386,7 +402,33 @@ where
     S: Service<actix_http::Request, Response = ServiceResponse<B>, Error = actix_web::Error>,
     B: MessageBody,
 {
-    let resp = test::call_service(app, test::TestRequest::get().uri(uri).to_request()).await;
+    get_redirect(app, uri, None).await.0
+}
+
+/// GETs `uri` (optionally with the state cookie) and returns the redirect target
+/// and the `fluxgate_sso_state` cookie the response sets, if any.
+async fn get_redirect<S, B>(
+    app: &S,
+    uri: &str,
+    state_cookie: Option<&str>,
+) -> (String, Option<actix_web::cookie::Cookie<'static>>)
+where
+    S: Service<actix_http::Request, Response = ServiceResponse<B>, Error = actix_web::Error>,
+    B: MessageBody,
+{
+    let mut req = test::TestRequest::get().uri(uri);
+    if let Some(value) = state_cookie {
+        req = req.cookie(actix_web::cookie::Cookie::new(
+            STATE_COOKIE,
+            value.to_string(),
+        ));
+    }
+    let resp = test::call_service(app, req.to_request()).await;
+    let cookie = resp
+        .response()
+        .cookies()
+        .find(|c| c.name() == STATE_COOKIE)
+        .map(|c| c.into_owned());
     assert_eq!(resp.status(), StatusCode::FOUND, "{uri}");
     assert_eq!(
         resp.headers()
@@ -396,12 +438,19 @@ where
             .unwrap(),
         "no-store"
     );
-    resp.headers()
+    let location = resp
+        .headers()
         .get("location")
         .unwrap()
         .to_str()
         .unwrap()
-        .to_string()
+        .to_string();
+    (location, cookie)
+}
+
+/// The cookie value a browser holds for `state`: base64url(SHA-256(state)).
+fn cookie_for(state: &str) -> String {
+    URL_SAFE_NO_PAD.encode(Sha256::digest(state.as_bytes()))
 }
 
 fn query_of(location: &str) -> HashMap<String, String> {
@@ -424,13 +473,24 @@ where
             serde_urlencoded::to_string([("redirect", redirect)]).unwrap()
         ));
     }
-    let location = get_location(app, &uri).await;
+    let (location, cookie) = get_redirect(app, &uri, None).await;
     assert!(
         location.starts_with(&format!("{}/authorize?", idp.issuer)),
         "{location}"
     );
     let params = query_of(&location);
+    let cookie = cookie.expect("authorize sets the state cookie");
+    assert_eq!(cookie.value(), cookie_for(&params["state"]));
+    assert_eq!(cookie.http_only(), Some(true));
+    assert_eq!(cookie.same_site(), Some(actix_web::cookie::SameSite::Lax));
+    assert_ne!(cookie.secure(), Some(true), "http backend");
+    assert_eq!(cookie.path(), Some("/api/v1/auth/sso/"));
+    assert_eq!(
+        cookie.max_age(),
+        Some(actix_web::cookie::time::Duration::seconds(600))
+    );
     AuthRequest {
+        cookie: cookie.value().to_string(),
         state: params["state"].clone(),
         nonce: params["nonce"].clone(),
         challenge: params["code_challenge"].clone(),
@@ -439,13 +499,39 @@ where
     }
 }
 
-async fn callback<S, B>(app: &S, slug: &str, code: &str, state: &str) -> String
+async fn callback<S, B>(
+    app: &S,
+    slug: &str,
+    code: &str,
+    state: &str,
+    cookie: Option<&str>,
+) -> String
 where
     S: Service<actix_http::Request, Response = ServiceResponse<B>, Error = actix_web::Error>,
     B: MessageBody,
 {
     let query = serde_urlencoded::to_string([("code", code), ("state", state)]).unwrap();
-    get_location(app, &format!("/api/v1/auth/sso/{slug}/callback?{query}")).await
+    callback_query(app, slug, &query, cookie).await
+}
+
+/// Calls the callback with a raw query and checks that the response clears the
+/// state cookie, whatever the outcome.
+async fn callback_query<S, B>(app: &S, slug: &str, query: &str, cookie: Option<&str>) -> String
+where
+    S: Service<actix_http::Request, Response = ServiceResponse<B>, Error = actix_web::Error>,
+    B: MessageBody,
+{
+    let (location, set) = get_redirect(
+        app,
+        &format!("/api/v1/auth/sso/{slug}/callback?{query}"),
+        cookie,
+    )
+    .await;
+    let set = set.expect("callback clears the state cookie");
+    assert_eq!(set.value(), "");
+    assert_eq!(set.max_age(), Some(actix_web::cookie::time::Duration::ZERO));
+    assert_eq!(set.path(), Some("/api/v1/auth/sso/"));
+    location
 }
 
 /// authorize -> IdP grant with the id_token built by `make_token` -> callback.
@@ -468,7 +554,7 @@ where
         &auth.redirect_uri,
         make_token(&auth),
     );
-    callback(app, slug, &code, &auth.state).await
+    callback(app, slug, &code, &auth.state, Some(&auth.cookie)).await
 }
 
 fn sso_error(location: &str) -> Option<String> {
@@ -612,7 +698,7 @@ async fn jit_login_provisions_user_and_exchange_issues_one_session() {
         &auth.redirect_uri,
         sign(&claims(&idp, &auth.nonce, &sub, &email)),
     );
-    let location = callback(&app, &provider.slug, code, &auth.state).await;
+    let location = callback(&app, &provider.slug, code, &auth.state, Some(&auth.cookie)).await;
     let params = query_of(&location);
     assert_eq!(params["redirect"], "/features?env=prod");
     let one_time = one_time_code(&location);
@@ -662,7 +748,8 @@ async fn jit_login_provisions_user_and_exchange_issues_one_session() {
     assert_eq!(row.1, None);
     assert_eq!((row.2.as_str(), row.3.as_str()), ("Grace", "Hopper"));
     assert_eq!(row.4, "sso");
-    assert!(!row.5 && !row.6 && row.7);
+    // last_login waits for the exchange (see last_login_is_set_only_when_...).
+    assert!(!row.5 && !row.6 && !row.7);
     assert_eq!(
         activity_types_for(&pool, user_id).await,
         vec!["sso_login", "sso_user_provisioned"]
@@ -683,7 +770,7 @@ async fn jit_login_provisions_user_and_exchange_issues_one_session() {
     let (status, body) = exchange(&app, &one_time).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(body["error"], "invalid_sso_code");
-    let replay = callback(&app, &provider.slug, code, &auth.state).await;
+    let replay = callback(&app, &provider.slug, code, &auth.state, Some(&auth.cookie)).await;
     assert_eq!(sso_error(&replay).as_deref(), Some("sso_state_invalid"));
     cleanup(&pool, &idp).await;
 }
@@ -1062,6 +1149,252 @@ async fn unknown_kid_refetches_jwks_once() {
     })
     .await;
     assert_eq!(sso_error(&location).as_deref(), Some("sso_token_invalid"));
+    // Rate limit: no second refetch within 60 seconds for the same issuer.
+    assert_eq!(idp.state.lock().unwrap().jwks_fetches, 2);
+    cleanup(&pool, &idp).await;
+}
+
+#[actix_web::test]
+async fn jwks_refetch_does_not_extend_the_metadata_cache() {
+    let pool = init_pg_pool().await;
+    let ttl = std::time::Duration::from_millis(2000);
+    let app = build_app_with(&pool, OidcClient::with_ttl(ttl).unwrap()).await;
+    let idp = start_idp().await;
+    let provider = create_provider(&pool, &idp, ProviderOpts::default()).await;
+    let email = || format!("{}@example.com", unique("ttl"));
+
+    // t=0: discovery + JWKS fetched and cached.
+    let location = login_with(&app, &idp, &provider.slug, None, |a| {
+        sign(&claims(&idp, &a.nonce, &unique("sub"), &email()))
+    })
+    .await;
+    one_time_code(&location);
+
+    // t~1.2s: unknown kid refetches only the JWKS.
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    {
+        let mut state = idp.state.lock().unwrap();
+        let other: Value = serde_json::from_str(OTHER_JWK).unwrap();
+        state.jwks["keys"].as_array_mut().unwrap().push(other);
+    }
+    let location = login_with(&app, &idp, &provider.slug, None, |a| {
+        sign_with(
+            &claims(&idp, &a.nonce, &unique("sub"), &email()),
+            OTHER_PRIVATE_KEY,
+            "other-key",
+        )
+    })
+    .await;
+    one_time_code(&location);
+    {
+        let state = idp.state.lock().unwrap();
+        assert_eq!((state.discovery_fetches, state.jwks_fetches), (1, 2));
+    }
+
+    // t~2.4s: past the TTL of the first discovery fetch (but not of the JWKS
+    // refetch): the metadata is loaded again.
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    let location = login_with(&app, &idp, &provider.slug, None, |a| {
+        sign(&claims(&idp, &a.nonce, &unique("sub"), &email()))
+    })
+    .await;
+    one_time_code(&location);
+    assert_eq!(idp.state.lock().unwrap().discovery_fetches, 2);
+    cleanup(&pool, &idp).await;
+}
+
+#[actix_web::test]
+async fn callback_requires_the_state_cookie_of_the_starting_browser() {
+    let pool = init_pg_pool().await;
+    let app = build_app(&pool).await;
+    let idp = start_idp().await;
+    let provider = create_provider(&pool, &idp, ProviderOpts::default()).await;
+    let sub = unique("sub");
+    let email = format!("{sub}@example.com");
+
+    let victim = authorize(&app, &idp, &provider.slug, None).await;
+    let attacker = authorize(&app, &idp, &provider.slug, None).await;
+    let code = "csrf-code";
+    idp.grant(
+        code,
+        &victim.challenge,
+        &victim.redirect_uri,
+        sign(&claims(&idp, &victim.nonce, &sub, &email)),
+    );
+
+    // No cookie, and a cookie of another authorization request: rejected.
+    let location = callback(&app, &provider.slug, code, &victim.state, None).await;
+    assert_eq!(sso_error(&location).as_deref(), Some("sso_state_invalid"));
+    let location = callback(
+        &app,
+        &provider.slug,
+        code,
+        &victim.state,
+        Some(&attacker.cookie),
+    )
+    .await;
+    assert_eq!(sso_error(&location).as_deref(), Some("sso_state_invalid"));
+    let location = callback(
+        &app,
+        &provider.slug,
+        code,
+        &victim.state,
+        Some(&victim.state),
+    )
+    .await;
+    assert_eq!(sso_error(&location).as_deref(), Some("sso_state_invalid"));
+    assert_eq!(identity_user(&pool, &provider, &sub).await, None);
+
+    // The rejected attempts did not burn the state: the right browser completes.
+    let location = callback(
+        &app,
+        &provider.slug,
+        code,
+        &victim.state,
+        Some(&victim.cookie),
+    )
+    .await;
+    one_time_code(&location);
+    assert!(identity_user(&pool, &provider, &sub).await.is_some());
+    cleanup(&pool, &idp).await;
+}
+
+#[actix_web::test]
+async fn unverified_email_never_satisfies_a_domain_restriction() {
+    let pool = init_pg_pool().await;
+    let app = build_app(&pool).await;
+    let idp = start_idp().await;
+    let restricted = create_provider(
+        &pool,
+        &idp,
+        ProviderOpts {
+            domains: vec!["allowed.example".to_string()],
+            ..Default::default()
+        },
+    )
+    .await;
+    let open = create_provider(&pool, &idp, ProviderOpts::default()).await;
+
+    for verified in [json!(false), json!("false"), Value::Null] {
+        let sub = unique("sub");
+        let email = format!("{}@allowed.example", unique("unv"));
+        let location = login_with(&app, &idp, &restricted.slug, None, |a| {
+            let mut c = claims(&idp, &a.nonce, &sub, &email);
+            c["email_verified"] = verified.clone();
+            sign(&c)
+        })
+        .await;
+        assert_eq!(
+            sso_error(&location).as_deref(),
+            Some("sso_email_domain_not_allowed"),
+            "{verified}"
+        );
+    }
+
+    // Without a domain list, an unverified email may still be provisioned.
+    let sub = unique("sub");
+    let email = format!("{}@anywhere.example", unique("unv"));
+    let location = login_with(&app, &idp, &open.slug, None, |a| {
+        let mut c = claims(&idp, &a.nonce, &sub, &email);
+        c["email_verified"] = json!(false);
+        sign(&c)
+    })
+    .await;
+    one_time_code(&location);
+    assert!(identity_user(&pool, &open, &sub).await.is_some());
+    cleanup(&pool, &idp).await;
+}
+
+#[actix_web::test]
+async fn email_linking_never_links_a_system_admin() {
+    let pool = init_pg_pool().await;
+    let app = build_app(&pool).await;
+    let idp = start_idp().await;
+    let linking = create_provider(
+        &pool,
+        &idp,
+        ProviderOpts {
+            linking: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    let email = format!("{}@example.com", unique("admin-link"));
+    insert_user(&pool, &email, Some(PASSWORD), true, "local").await;
+    let sub = unique("sub");
+    let location = login_with(&app, &idp, &linking.slug, None, |a| {
+        sign(&claims(&idp, &a.nonce, &sub, &email))
+    })
+    .await;
+    assert_eq!(
+        sso_error(&location).as_deref(),
+        Some("sso_linking_not_allowed")
+    );
+    assert_eq!(identity_user(&pool, &linking, &sub).await, None);
+    cleanup(&pool, &idp).await;
+}
+
+#[actix_web::test]
+async fn several_audiences_require_azp_of_this_client() {
+    let pool = init_pg_pool().await;
+    let app = build_app(&pool).await;
+    let idp = start_idp().await;
+    let provider = create_provider(&pool, &idp, ProviderOpts::default()).await;
+
+    for (azp, accepted) in [
+        (None, false),
+        (Some("other-client"), false),
+        (Some(CLIENT_ID), true),
+    ] {
+        let sub = unique("sub");
+        let location = login_with(&app, &idp, &provider.slug, None, |a| {
+            let mut c = claims(&idp, &a.nonce, &sub, &format!("{sub}@example.com"));
+            c["aud"] = json!([CLIENT_ID, "other-client"]);
+            if let Some(azp) = azp {
+                c["azp"] = json!(azp);
+            }
+            sign(&c)
+        })
+        .await;
+        if accepted {
+            one_time_code(&location);
+        } else {
+            assert_eq!(
+                sso_error(&location).as_deref(),
+                Some("sso_token_invalid"),
+                "{azp:?}"
+            );
+        }
+    }
+    cleanup(&pool, &idp).await;
+}
+
+async fn last_login(pool: &PgPool, user_id: Uuid) -> Option<chrono::DateTime<chrono::Utc>> {
+    sqlx::query_scalar("SELECT last_login FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[actix_web::test]
+async fn last_login_is_set_only_when_a_session_is_issued_by_sso() {
+    let pool = init_pg_pool().await;
+    let app = build_app(&pool).await;
+    let idp = start_idp().await;
+    let provider = create_provider(&pool, &idp, ProviderOpts::default()).await;
+    let sub = unique("sub");
+    let location = login_with(&app, &idp, &provider.slug, None, |a| {
+        sign(&claims(&idp, &a.nonce, &sub, &format!("{sub}@example.com")))
+    })
+    .await;
+    let code = one_time_code(&location);
+    let user_id = identity_user(&pool, &provider, &sub).await.unwrap();
+    assert_eq!(last_login(&pool, user_id).await, None, "callback alone");
+    let (status, body) = exchange(&app, &code).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(last_login(&pool, user_id).await.is_some(), "after exchange");
+    assert!(body["user"]["lastLogin"].is_string());
     cleanup(&pool, &idp).await;
 }
 
@@ -1073,38 +1406,41 @@ async fn state_and_provider_errors_redirect_with_codes() {
     let provider = create_provider(&pool, &idp, ProviderOpts::default()).await;
 
     // Unknown and missing state.
-    let location = callback(&app, &provider.slug, "c", "not-a-real-state").await;
+    let fake = "not-a-real-state";
+    let location = callback(&app, &provider.slug, "c", fake, Some(&cookie_for(fake))).await;
     assert_eq!(sso_error(&location).as_deref(), Some("sso_state_invalid"));
-    let location = get_location(
-        &app,
-        &format!("/api/v1/auth/sso/{}/callback?code=c", provider.slug),
-    )
-    .await;
+    let location = callback_query(&app, &provider.slug, "code=c", None).await;
     assert_eq!(sso_error(&location).as_deref(), Some("sso_state_invalid"));
 
     // IdP error parameter: provider error, and the state is used up.
     let auth = authorize(&app, &idp, &provider.slug, None).await;
-    let location = get_location(
+    let location = callback_query(
         &app,
-        &format!(
-            "/api/v1/auth/sso/{}/callback?error=access_denied&state={}",
-            provider.slug, auth.state
-        ),
+        &provider.slug,
+        &format!("error=access_denied&state={}", auth.state),
+        Some(&auth.cookie),
     )
     .await;
     assert_eq!(sso_error(&location).as_deref(), Some("sso_provider_error"));
-    let location = callback(&app, &provider.slug, "c", &auth.state).await;
+    let location = callback(&app, &provider.slug, "c", &auth.state, Some(&auth.cookie)).await;
     assert_eq!(sso_error(&location).as_deref(), Some("sso_state_invalid"));
 
     // A state issued for one provider is not accepted on another provider's callback.
     let other = create_provider(&pool, &idp, ProviderOpts::default()).await;
     let auth = authorize(&app, &idp, &provider.slug, None).await;
-    let location = callback(&app, &other.slug, "c", &auth.state).await;
+    let location = callback(&app, &other.slug, "c", &auth.state, Some(&auth.cookie)).await;
     assert_eq!(sso_error(&location).as_deref(), Some("sso_state_invalid"));
 
     // A failed token exchange (unknown code) is a provider error and burns the state.
     let auth = authorize(&app, &idp, &provider.slug, None).await;
-    let location = callback(&app, &provider.slug, "never-granted", &auth.state).await;
+    let location = callback(
+        &app,
+        &provider.slug,
+        "never-granted",
+        &auth.state,
+        Some(&auth.cookie),
+    )
+    .await;
     assert_eq!(sso_error(&location).as_deref(), Some("sso_provider_error"));
 
     // An expired state is rejected.
@@ -1121,7 +1457,7 @@ async fn state_and_provider_errors_redirect_with_codes() {
         &auth.redirect_uri,
         sign(&claims(&idp, &auth.nonce, &unique("sub"), "e@example.com")),
     );
-    let location = callback(&app, &provider.slug, code, &auth.state).await;
+    let location = callback(&app, &provider.slug, code, &auth.state, Some(&auth.cookie)).await;
     assert_eq!(sso_error(&location).as_deref(), Some("sso_state_invalid"));
 
     // Unknown, disabled and malformed providers at authorize.
@@ -1276,7 +1612,7 @@ async fn client_secret_post_is_used_when_basic_is_not_offered() {
 async fn enforce_sso_blocks_password_login_for_non_admins_only() {
     let pool = init_pg_pool().await;
     let app = build_app(&pool).await;
-    let (_, user) = insert_user(
+    let (user_id, user) = insert_user(
         &pool,
         &format!("{}@example.com", unique("enf")),
         Some(PASSWORD),
@@ -1322,11 +1658,21 @@ async fn enforce_sso_blocks_password_login_for_non_admins_only() {
     let (status, _) = password_login(&app, &sso_only, PASSWORD).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
+    // A successful password login records last_login.
+    assert!(last_login(&pool, user_id).await.is_some());
+    sqlx::query("UPDATE users SET last_login = NULL WHERE id = $1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
     set(true).await;
     let outcome = async {
         let (status, body) = password_login(&app, &user, PASSWORD).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(body["error"], "sso_required");
+        // A refused login is not a login.
+        assert_eq!(last_login(&pool, user_id).await, None);
         // Wrong password: the normal 401, not revealing the account.
         let (status, body) = password_login(&app, &user, "wrong password").await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);

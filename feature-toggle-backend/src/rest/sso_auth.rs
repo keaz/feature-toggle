@@ -5,10 +5,16 @@
 //! is redirected to `<ui>/login?ssoError=<code>`. Details are logged server side,
 //! without codes, tokens, verifiers or secrets.
 
+use actix_web::cookie::time::Duration as CookieDuration;
+use actix_web::cookie::{Cookie, SameSite};
 use actix_web::http::header;
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{Duration, Utc};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use utoipa::{IntoParams, ToSchema};
 
 use crate::database::activity_log::ActivityLogRepository;
@@ -72,11 +78,47 @@ impl std::fmt::Debug for SsoExchangeRequest {
     }
 }
 
-fn redirect(location: &str) -> HttpResponse {
-    HttpResponse::Found()
+/// Cookie that binds an authorization request to the browser that started it
+/// (login CSRF protection). Holds base64url(SHA-256(state)), never the state.
+pub const STATE_COOKIE: &str = "fluxgate_sso_state";
+const STATE_COOKIE_PATH: &str = "/api/v1/auth/sso/";
+
+fn redirect(location: &str, cookie: Option<Cookie<'static>>) -> HttpResponse {
+    let mut response = HttpResponse::Found();
+    response
         .insert_header((header::LOCATION, location))
-        .insert_header((header::CACHE_CONTROL, "no-store"))
+        .insert_header((header::CACHE_CONTROL, "no-store"));
+    if let Some(cookie) = cookie {
+        response.cookie(cookie);
+    }
+    response.finish()
+}
+
+/// base64url(SHA-256(state)), the value of [`STATE_COOKIE`].
+fn state_cookie_value(state: &str) -> String {
+    URL_SAFE_NO_PAD.encode(Sha256::digest(state.as_bytes()))
+}
+
+fn state_cookie(value: String, secure: bool) -> Cookie<'static> {
+    Cookie::build(STATE_COOKIE, value)
+        .path(STATE_COOKIE_PATH)
+        .http_only(true)
+        .same_site(SameSite::Lax)
+        .secure(secure)
+        .max_age(CookieDuration::minutes(LOGIN_STATE_TTL_MINUTES))
         .finish()
+}
+
+/// Clears [`STATE_COOKIE`] (same name, path and attributes, expired).
+fn clear_state_cookie(secure: bool) -> Cookie<'static> {
+    let mut cookie = state_cookie(String::new(), secure);
+    cookie.make_removal();
+    cookie
+}
+
+/// Whether the browser-facing backend URL is https (cookies then get `Secure`).
+fn is_https(req: &HttpRequest, config: &SsoLoginConfig) -> bool {
+    public_base(req, config).starts_with("https://")
 }
 
 /// The backend base URL browsers and the IdP use: `public_base_url`, else the
@@ -115,7 +157,7 @@ fn provider_error(err: OidcError) -> SsoLoginError {
         SsoAuthorizeQuery
     ),
     responses(
-        (status = 302, description = "Redirect to the identity provider, or to `<ui>/login?ssoError=sso_provider_error` when the provider is unknown, disabled or unreachable")
+        (status = 302, description = "Redirect to the identity provider and set the HttpOnly `fluxgate_sso_state` cookie (SameSite=Lax, Path=/api/v1/auth/sso/, 10 minutes) that binds the request to this browser; or redirect to `<ui>/login?ssoError=sso_provider_error` when the provider is unknown, disabled or unreachable")
     ),
     security(()),
     tag = "Auth"
@@ -140,10 +182,16 @@ pub(crate) async fn sso_authorize(
     )
     .await
     {
-        Ok(location) => redirect(&location),
+        Ok((location, state)) => redirect(
+            &location,
+            Some(state_cookie(
+                state_cookie_value(&state),
+                is_https(&req, &config),
+            )),
+        ),
         Err(err) => {
             log::warn!("SSO authorize for provider '{slug}' failed: {err}");
-            redirect(&error_url(&config.ui_origin, &err))
+            redirect(&error_url(&config.ui_origin, &err), None)
         }
     }
 }
@@ -155,7 +203,7 @@ async fn start_login(
     pool: &sqlx::PgPool,
     oidc: &OidcClient,
     config: &SsoLoginConfig,
-) -> Result<String, SsoLoginError> {
+) -> Result<(String, String), SsoLoginError> {
     validate_slug(slug).map_err(|_| SsoLoginError::ProviderError("invalid slug".into()))?;
     let provider = sso_provider_repository(pool.clone())
         .find_provider_by_slug(slug)
@@ -194,7 +242,7 @@ async fn start_login(
             expires_at: Utc::now() + Duration::minutes(LOGIN_STATE_TTL_MINUTES),
         })
         .await?;
-    Ok(location)
+    Ok((location, state))
 }
 
 #[utoipa::path(
@@ -205,7 +253,7 @@ async fn start_login(
         SsoCallbackQuery
     ),
     responses(
-        (status = 302, description = "Redirect to `<ui>/auth/sso/complete?code=<one-time>[&redirect=<path>]`, or to `<ui>/login?ssoError=<code>` with one of sso_state_invalid, sso_provider_error, sso_token_invalid, sso_email_missing, sso_email_domain_not_allowed, sso_user_not_provisioned, sso_linking_not_allowed, sso_account_disabled")
+        (status = 302, description = "Requires the `fluxgate_sso_state` cookie set by authorize (missing or not matching the state gives sso_state_invalid) and always clears it. Redirect to `<ui>/auth/sso/complete?code=<one-time>[&redirect=<path>]`, or to `<ui>/login?ssoError=<code>` with one of sso_state_invalid, sso_provider_error, sso_token_invalid, sso_email_missing, sso_email_domain_not_allowed, sso_user_not_provisioned, sso_linking_not_allowed, sso_account_disabled")
     ),
     security(()),
     tag = "Auth"
@@ -233,11 +281,13 @@ pub(crate) async fn sso_callback(
         activity_repo.as_ref().as_ref(),
     )
     .await;
+    // The state cookie is single use like the state: cleared on every outcome.
+    let clear = clear_state_cookie(is_https(&req, &config));
     match result {
-        Ok(location) => redirect(&location),
+        Ok(location) => redirect(&location, Some(clear)),
         Err(err) => {
             log::warn!("SSO callback for provider '{slug}' failed: {err}");
-            redirect(&error_url(&config.ui_origin, &err))
+            redirect(&error_url(&config.ui_origin, &err), Some(clear))
         }
     }
 }
@@ -259,6 +309,19 @@ async fn finish_login(
         .as_deref()
         .filter(|s| !s.is_empty())
         .ok_or(SsoLoginError::StateInvalid)?;
+    // Login CSRF: the callback must come from the browser that started the
+    // request, which holds the hash of this state in its cookie.
+    let bound = req.cookie(STATE_COOKIE).is_some_and(|cookie| {
+        bool::from(
+            cookie
+                .value()
+                .as_bytes()
+                .ct_eq(state_cookie_value(state_param).as_bytes()),
+        )
+    });
+    if !bound {
+        return Err(SsoLoginError::StateInvalid);
+    }
     let state = sso_login_state_repository(pool.clone())
         .consume_state(&hash_token(state_param))
         .await?

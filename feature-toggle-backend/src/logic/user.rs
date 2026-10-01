@@ -370,9 +370,8 @@ impl UserLogic for UserLogicImpl {
         if !u.enabled {
             return Err(Error::AccountDisabled);
         }
-        let now = Utc::now();
-        let _ = self.repository.update_last_login(u.id, now).await?;
-        let u = self.repository.get_user_by_id(u.id).await?; // reload to get updated last_login
+        // last_login is not touched here: a verified password may still be refused
+        // (enforced SSO). It is recorded when a session is stored (`store_session_tx`).
         Ok(ApiUser {
             id: ID::from(u.id),
             username: u.username,
@@ -972,7 +971,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_authenticate_user_success_updates_last_login() {
+    async fn test_authenticate_user_success_does_not_update_last_login() {
         // Build a real argon2 password hash from a known password for verification
         let salt = SaltString::generate(&mut OsRng);
         let hash = Argon2::default()
@@ -987,22 +986,15 @@ mod tests {
         let u_clone = u.clone();
         mock.expect_get_user_by_username()
             .returning(move |_| Ok(u_clone.clone()));
-        // Expect update_last_login to be called
-        mock.expect_update_last_login()
-            .with(eq(id), function(|_| true))
-            .returning(|_, _| Ok(()));
-        // After update, logic reloads by id
-        let mut u_after = u.clone();
-        u_after.last_login = Some(Utc::now());
-        mock.expect_get_user_by_id()
-            .returning(move |_| Ok(u_after.clone()));
+        // Recorded only when a session is stored, never by authentication alone.
+        mock.expect_update_last_login().never();
 
         let logic = user_logic(Box::new(mock), create_mock_activity_log());
         let res = logic
             .authenticate_user("jdoe".to_string(), "topsecret".to_string())
             .await
             .unwrap();
-        assert!(res.last_login.is_some());
+        assert_eq!(res.id, ID::from(id));
     }
 
     #[tokio::test]

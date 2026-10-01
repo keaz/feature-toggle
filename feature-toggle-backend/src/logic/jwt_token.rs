@@ -195,6 +195,9 @@ impl JwtTokenLogic for JwtTokenLogicImpl {
                 })
                 .await?;
             if stored {
+                let mut user = user;
+                // `store_session` recorded the login.
+                user.last_login = Some(Utc::now());
                 let is_temporary = user.is_temporary_password;
                 return Ok(LoginResult {
                     user,
