@@ -1,5 +1,6 @@
 use crate::Error;
-use crate::database::refresh_token::revoke_all_user_refresh_tokens_tx;
+use crate::database::jwt_secret::lock_signing_secret_tx;
+use crate::database::refresh_token::{create_token_tx, revoke_all_user_refresh_tokens_tx};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use mockall::automock;
@@ -17,9 +18,26 @@ pub struct JwtToken {
     pub is_revoked: bool,
 }
 
+/// The access and refresh token rows of a new session (login).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewSession {
+    pub user_id: Uuid,
+    /// Id of the secret that signed the access token.
+    pub kid: Uuid,
+    pub access_token_hash: String,
+    pub access_expires_at: DateTime<Utc>,
+    pub refresh_family_id: Uuid,
+    pub refresh_token_hash: String,
+    pub refresh_expires_at: DateTime<Utc>,
+}
+
 #[automock]
 #[async_trait]
 pub trait JwtTokenRepository: Send + Sync {
+    /// Stores a new session's access and refresh tokens in one transaction,
+    /// only while the signing secret `session.kid` is active and unrevoked
+    /// (see [`store_session_tx`]). Returns false, storing nothing, otherwise.
+    async fn store_session(&self, session: NewSession) -> Result<bool, Error>;
     async fn store_token(
         &self,
         user_id: Uuid,
@@ -83,6 +101,35 @@ pub async fn revoke_all_tokens_tx(conn: &mut PgConnection) -> Result<u64, Error>
     Ok(result.rows_affected())
 }
 
+/// Stores a session's access and refresh tokens on the given connection after
+/// locking its signing secret `FOR SHARE`, so an emergency deactivation either
+/// runs first (the secret is revoked: returns false, nothing stored) or waits
+/// and then revokes these rows too.
+pub async fn store_session_tx(
+    conn: &mut PgConnection,
+    session: &NewSession,
+) -> Result<bool, Error> {
+    if !lock_signing_secret_tx(conn, session.kid).await? {
+        return Ok(false);
+    }
+    store_token_tx(
+        conn,
+        session.user_id,
+        session.access_token_hash.clone(),
+        session.access_expires_at,
+    )
+    .await?;
+    create_token_tx(
+        conn,
+        session.user_id,
+        session.refresh_family_id,
+        session.refresh_token_hash.clone(),
+        session.refresh_expires_at,
+    )
+    .await?;
+    Ok(true)
+}
+
 /// Stores an access token hash on the given connection.
 pub async fn store_token_tx(
     conn: &mut PgConnection,
@@ -117,6 +164,16 @@ struct JwtTokenRepositoryImpl {
 
 #[async_trait]
 impl JwtTokenRepository for JwtTokenRepositoryImpl {
+    async fn store_session(&self, session: NewSession) -> Result<bool, Error> {
+        let mut tx = self.pool.begin().await.map_err(Error::DatabaseError)?;
+        if !store_session_tx(&mut tx, &session).await? {
+            tx.rollback().await.map_err(Error::DatabaseError)?;
+            return Ok(false);
+        }
+        tx.commit().await.map_err(Error::DatabaseError)?;
+        Ok(true)
+    }
+
     async fn store_token(
         &self,
         user_id: Uuid,
@@ -217,6 +274,7 @@ mod tests {
 
         #[async_trait]
         impl JwtTokenRepository for JwtTokenRepository {
+            async fn store_session(&self, session: NewSession) -> Result<bool, Error>;
             async fn store_token(&self, user_id: Uuid, token_hash: String, expires_at: DateTime<Utc>) -> Result<JwtToken, Error>;
             async fn is_token_valid(&self, token_hash: &str) -> Result<bool, Error>;
             async fn revoke_token(&self, token_hash: &str) -> Result<bool, Error>;

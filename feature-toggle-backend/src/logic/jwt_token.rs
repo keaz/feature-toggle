@@ -1,6 +1,6 @@
 use crate::Error;
 use crate::config::AuthConfig;
-use crate::database::jwt_token::{JwtToken, JwtTokenRepository};
+use crate::database::jwt_token::{JwtToken, JwtTokenRepository, NewSession};
 use crate::database::refresh_token::RefreshTokenRepository;
 use crate::logic::jwt_secret::{JwtSecretLogic, SigningKey};
 use crate::logic::role::RoleLogic;
@@ -138,44 +138,55 @@ impl JwtTokenLogic for JwtTokenLogicImpl {
         let roles = self.role_logic.get_user_roles(user.id.clone()).await?;
         let role_names: Vec<String> = roles.into_iter().map(|r| r.name).collect();
 
-        // Get the active JWT secret (and its id, the token's `kid`) from the database
-        let signing_key = self
-            .jwt_secret_logic
-            .get_signing_key()
-            .await
-            .map_err(|e| Error::InvalidInput(format!("Failed to get JWT secret: {}", e)))?;
+        // The access-token and refresh-token rows are stored in one transaction
+        // that first locks the signing secret, so an emergency deactivation
+        // cannot miss them (see `store_session_tx`). If the secret was rotated
+        // or revoked since it was read, sign again with the current one, once.
+        for _ in 0..2 {
+            // Get the active JWT secret (and its id, the token's `kid`) from the database
+            let signing_key = self
+                .jwt_secret_logic
+                .get_signing_key()
+                .await
+                .map_err(|e| Error::InvalidInput(format!("Failed to get JWT secret: {}", e)))?;
 
-        let access = issue_access_token(
-            user_id,
-            &user.username,
-            user.is_admin,
-            role_names,
-            &signing_key,
-            &self.auth,
-        )?;
-        self.repository
-            .store_token(user_id, access.token_hash, access.expires_at)
-            .await?;
-
-        // Every login starts a new refresh-token family.
-        let (refresh_token, refresh_token_hash) = generate_refresh_token();
-        self.refresh_repository
-            .create_token(
+            let access = issue_access_token(
                 user_id,
-                Uuid::new_v4(),
-                refresh_token_hash,
-                Utc::now() + self.auth.refresh_token_ttl(),
-            )
-            .await?;
+                &user.username,
+                user.is_admin,
+                role_names.clone(),
+                &signing_key,
+                &self.auth,
+            )?;
+            // Every login starts a new refresh-token family.
+            let (refresh_token, refresh_token_hash) = generate_refresh_token();
+            let stored = self
+                .repository
+                .store_session(NewSession {
+                    user_id,
+                    kid: signing_key.kid,
+                    access_token_hash: access.token_hash,
+                    access_expires_at: access.expires_at,
+                    refresh_family_id: Uuid::new_v4(),
+                    refresh_token_hash,
+                    refresh_expires_at: Utc::now() + self.auth.refresh_token_ttl(),
+                })
+                .await?;
+            if stored {
+                let is_temporary = user.is_temporary_password;
+                return Ok(LoginResult {
+                    user,
+                    token: access.token,
+                    is_temporary,
+                    refresh_token,
+                    expires_in: self.auth.access_token_ttl().num_seconds(),
+                });
+            }
+        }
 
-        let is_temporary = user.is_temporary_password;
-        Ok(LoginResult {
-            user,
-            token: access.token,
-            is_temporary,
-            refresh_token,
-            expires_in: self.auth.access_token_ttl().num_seconds(),
-        })
+        Err(Error::InvalidInput(
+            "Failed to get JWT secret: the signing secret is no longer active".to_string(),
+        ))
     }
 
     async fn logout_user(&self, user_id: Uuid) -> Result<u64, Error> {
@@ -233,7 +244,7 @@ impl JwtTokenLogic for JwtTokenLogicImpl {
 mod tests {
     use super::*;
     use crate::database::jwt_token::MockJwtTokenRepository;
-    use crate::database::refresh_token::{MockRefreshTokenRepository, RefreshToken};
+    use crate::database::refresh_token::MockRefreshTokenRepository;
     use crate::logic::jwt_secret::MockJwtSecretLogic;
     use crate::logic::role::MockRoleLogic;
     use crate::logic::user::ApiUser;
@@ -248,24 +259,6 @@ mod tests {
             kid: Uuid::from_u128(0x5ec2e7),
             secret: "secret".to_string(),
         }
-    }
-
-    fn refresh_repo_accepting_creates() -> MockRefreshTokenRepository {
-        let mut mock = MockRefreshTokenRepository::new();
-        mock.expect_create_token()
-            .returning(|user_id, family_id, token_hash, expires_at| {
-                Ok(RefreshToken {
-                    id: Uuid::new_v4(),
-                    user_id,
-                    family_id,
-                    token_hash,
-                    expires_at,
-                    created_at: Utc::now(),
-                    revoked_at: None,
-                    replaced_by: None,
-                })
-            });
-        mock
     }
 
     fn sample_api_user() -> ApiUser {
@@ -305,23 +298,11 @@ mod tests {
             .returning(|| Ok(test_signing_key()));
 
         let mut mock_repo = MockJwtTokenRepository::new();
-        mock_repo
-            .expect_store_token()
-            .returning(|user_id, token_hash, expires_at| {
-                Ok(JwtToken {
-                    id: Uuid::new_v4(),
-                    user_id,
-                    token_hash,
-                    expires_at,
-                    created_at: Utc::now(),
-                    revoked_at: None,
-                    is_revoked: false,
-                })
-            });
+        mock_repo.expect_store_session().returning(|_| Ok(true));
 
         let logic = jwt_token_logic(
             Box::new(mock_repo),
-            Box::new(refresh_repo_accepting_creates()),
+            Box::new(MockRefreshTokenRepository::new()),
             Box::new(mock_user_logic),
             Box::new(mock_role_logic),
             Box::new(mock_jwt_secret_logic),
@@ -387,23 +368,11 @@ mod tests {
             .returning(|| Ok(test_signing_key()));
 
         let mut mock_repo = MockJwtTokenRepository::new();
-        mock_repo
-            .expect_store_token()
-            .returning(|user_id, token_hash, expires_at| {
-                Ok(JwtToken {
-                    id: Uuid::new_v4(),
-                    user_id,
-                    token_hash,
-                    expires_at,
-                    created_at: Utc::now(),
-                    revoked_at: None,
-                    is_revoked: false,
-                })
-            });
+        mock_repo.expect_store_session().returning(|_| Ok(true));
 
         let logic = jwt_token_logic(
             Box::new(mock_repo),
-            Box::new(refresh_repo_accepting_creates()),
+            Box::new(MockRefreshTokenRepository::new()),
             Box::new(mock_user_logic),
             Box::new(mock_role_logic),
             Box::new(mock_jwt_secret_logic),
@@ -438,43 +407,16 @@ mod tests {
             .expect_get_signing_key()
             .returning(|| Ok(test_signing_key()));
 
-        let stored_access = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let stored_access_clone = stored_access.clone();
+        let stored = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let stored_clone = stored.clone();
         let mut mock_repo = MockJwtTokenRepository::new();
-        mock_repo.expect_store_token().times(1).returning(
-            move |user_id, token_hash, expires_at| {
-                *stored_access_clone.lock().unwrap() = Some((token_hash.clone(), expires_at));
-                Ok(JwtToken {
-                    id: Uuid::new_v4(),
-                    user_id,
-                    token_hash,
-                    expires_at,
-                    created_at: Utc::now(),
-                    revoked_at: None,
-                    is_revoked: false,
-                })
-            },
-        );
-
-        let stored_refresh = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let stored_refresh_clone = stored_refresh.clone();
-        let mut mock_refresh = MockRefreshTokenRepository::new();
-        mock_refresh.expect_create_token().times(1).returning(
-            move |user_id, family_id, token_hash, expires_at| {
-                *stored_refresh_clone.lock().unwrap() =
-                    Some((user_id, token_hash.clone(), expires_at));
-                Ok(RefreshToken {
-                    id: Uuid::new_v4(),
-                    user_id,
-                    family_id,
-                    token_hash,
-                    expires_at,
-                    created_at: Utc::now(),
-                    revoked_at: None,
-                    replaced_by: None,
-                })
-            },
-        );
+        mock_repo
+            .expect_store_session()
+            .times(1)
+            .returning(move |session| {
+                *stored_clone.lock().unwrap() = Some(session);
+                Ok(true)
+            });
 
         let auth = AuthConfig {
             access_token_ttl_minutes: 5,
@@ -482,7 +424,7 @@ mod tests {
         };
         let logic = jwt_token_logic(
             Box::new(mock_repo),
-            Box::new(mock_refresh),
+            Box::new(MockRefreshTokenRepository::new()),
             Box::new(mock_user_logic),
             Box::new(mock_role_logic),
             Box::new(mock_jwt_secret_logic),
@@ -498,8 +440,14 @@ mod tests {
 
         assert_eq!(result.expires_in, 300);
 
+        // Both rows are stored together, under the kid that signed the token.
+        let session: NewSession = stored.lock().unwrap().clone().unwrap();
+        assert_eq!(session.kid, test_signing_key().kid);
+        assert_eq!(session.user_id, expected_user_id);
+
         // The access token's exp and the stored row's expires_at are both now + 5 minutes.
-        let (access_hash, access_expires_at) = stored_access.lock().unwrap().clone().unwrap();
+        let (access_hash, access_expires_at) =
+            (session.access_token_hash.clone(), session.access_expires_at);
         assert_eq!(
             access_hash,
             crate::middleware::jwt_guard::hash_token(&result.token)
@@ -522,9 +470,10 @@ mod tests {
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
         );
-        let (refresh_user, refresh_hash, refresh_expires_at) =
-            stored_refresh.lock().unwrap().clone().unwrap();
-        assert_eq!(refresh_user, expected_user_id);
+        let (refresh_hash, refresh_expires_at) = (
+            session.refresh_token_hash.clone(),
+            session.refresh_expires_at,
+        );
         assert_eq!(
             refresh_hash,
             crate::middleware::jwt_guard::hash_token(&result.refresh_token)
@@ -532,6 +481,84 @@ mod tests {
         assert_ne!(refresh_hash, result.refresh_token);
         assert!(refresh_expires_at >= before + chrono::Duration::days(2));
         assert!(refresh_expires_at <= after + chrono::Duration::days(2));
+    }
+
+    fn login_logic(
+        repo: MockJwtTokenRepository,
+        secret_logic: MockJwtSecretLogic,
+    ) -> Box<dyn JwtTokenLogic> {
+        let user = sample_api_user();
+        let mut mock_user_logic = MockUserLogic::new();
+        mock_user_logic
+            .expect_authenticate_user()
+            .returning(move |_, _| Ok(user.clone()));
+        let mut mock_role_logic = MockRoleLogic::new();
+        mock_role_logic
+            .expect_get_user_roles()
+            .returning(|_| Ok(vec![]));
+        jwt_token_logic(
+            Box::new(repo),
+            Box::new(MockRefreshTokenRepository::new()),
+            Box::new(mock_user_logic),
+            Box::new(mock_role_logic),
+            Box::new(secret_logic),
+            AuthConfig::default(),
+        )
+    }
+
+    #[tokio::test]
+    async fn login_fails_when_the_signing_secret_is_revoked() {
+        let mut secret_logic = MockJwtSecretLogic::new();
+        secret_logic
+            .expect_get_signing_key()
+            .times(2)
+            .returning(|| Ok(test_signing_key()));
+        // The secret was revoked after it was read: nothing is stored.
+        let mut repo = MockJwtTokenRepository::new();
+        repo.expect_store_session()
+            .times(2)
+            .returning(|_| Ok(false));
+
+        let err = login_logic(repo, secret_logic)
+            .login_user("testuser".to_string(), "password".to_string())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::InvalidInput(msg) if msg.contains("JWT secret")));
+    }
+
+    #[tokio::test]
+    async fn login_signs_again_when_the_signing_secret_was_rotated() {
+        let old_key = test_signing_key();
+        let new_key = SigningKey {
+            kid: Uuid::from_u128(0x2e3),
+            secret: "rotated".to_string(),
+        };
+        let keys = std::sync::Arc::new(std::sync::Mutex::new(vec![
+            new_key.clone(),
+            old_key.clone(),
+        ]));
+        let mut secret_logic = MockJwtSecretLogic::new();
+        secret_logic
+            .expect_get_signing_key()
+            .times(2)
+            .returning(move || Ok(keys.lock().unwrap().pop().unwrap()));
+        let new_kid = new_key.kid;
+        let mut repo = MockJwtTokenRepository::new();
+        repo.expect_store_session()
+            .times(2)
+            .returning(move |session| Ok(session.kid == new_kid));
+
+        let result = login_logic(repo, secret_logic)
+            .login_user("testuser".to_string(), "password".to_string())
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::middleware::jwt_guard::token_kid(&result.token).unwrap(),
+            Some(new_key.kid)
+        );
+        assert!(
+            crate::middleware::jwt_guard::decode_verified_claims(&result.token, "rotated").is_ok()
+        );
     }
 
     #[test]

@@ -71,6 +71,52 @@ pub async fn create_secret_tx(
     handle_error(None, result)
 }
 
+/// Loads the active, unrevoked signing secret and locks its row `FOR SHARE`
+/// until the transaction ends. Call it before writing any session token: an
+/// emergency deactivation updates `jwt_secrets` first, so it waits for this
+/// transaction, and its later revocations of `jwt_tokens` / `refresh_tokens`
+/// then see the rows written here. Returns `None` when no secret is usable.
+///
+/// A rotation committing while this waits leaves the first read empty (the old
+/// row is no longer active and the new row is not in that statement's
+/// snapshot), so the read is retried once with a fresh snapshot.
+pub async fn lock_active_signing_secret_tx(
+    conn: &mut PgConnection,
+) -> Result<Option<JwtSecret>, Error> {
+    for _ in 0..2 {
+        let result = sqlx::query_as!(
+            JwtSecret,
+            r#"SELECT id, secret, is_active, created_at, created_by, expires_at,
+                      deactivated_at, revoked_at
+               FROM jwt_secrets
+               WHERE is_active = true AND revoked_at IS NULL
+               ORDER BY created_at DESC
+               LIMIT 1
+               FOR SHARE"#
+        )
+        .fetch_optional(&mut *conn)
+        .await;
+        if let Some(secret) = handle_error(None, result)? {
+            return Ok(Some(secret));
+        }
+    }
+    Ok(None)
+}
+
+/// Like [`lock_active_signing_secret_tx`] for a known secret id: locks the
+/// secret `FOR SHARE` and returns whether it is still active and unrevoked.
+pub async fn lock_signing_secret_tx(conn: &mut PgConnection, id: Uuid) -> Result<bool, Error> {
+    let result = sqlx::query_scalar!(
+        r#"SELECT id FROM jwt_secrets
+           WHERE id = $1 AND is_active = true AND revoked_at IS NULL
+           FOR SHARE"#,
+        id
+    )
+    .fetch_optional(&mut *conn)
+    .await;
+    Ok(handle_error(None, result)?.is_some())
+}
+
 /// Emergency deactivation on the given connection: every secret is deactivated
 /// and revoked, so no token signed by any of them verifies, with no rotation
 /// grace. Returns the number of secrets revoked.

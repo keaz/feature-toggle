@@ -10,7 +10,6 @@ use crate::database::activity_log::ActivityLogRepository;
 use crate::database::role::role_repository_tx;
 use crate::database::user::user_repository_tx;
 use crate::logic::ActorContext;
-use crate::logic::jwt_secret::JwtSecretLogic;
 use crate::logic::jwt_token::JwtTokenLogic;
 use crate::logic::jwt_token_tx::{RefreshOutcome, RefreshRejection, refresh_session_in_tx};
 use crate::logic::user::UserLogic;
@@ -144,15 +143,9 @@ pub(crate) async fn login(
 #[post("/auth/refresh")]
 pub(crate) async fn refresh(
     db_pool: web::Data<sqlx::PgPool>,
-    jwt_secret_logic: web::Data<Box<dyn JwtSecretLogic>>,
     auth: web::Data<AuthConfig>,
     payload: web::Json<RefreshRequest>,
 ) -> Result<impl Responder, RestError> {
-    let signing_key = jwt_secret_logic
-        .get_signing_key()
-        .await
-        .map_err(|e| RestError::internal(format!("Failed to get JWT secret: {e}")))?;
-
     let user_repo = user_repository_tx(db_pool.get_ref().clone());
     let role_repo = role_repository_tx(db_pool.get_ref().clone());
     let mut tx = db_pool
@@ -164,7 +157,6 @@ pub(crate) async fn refresh(
         &mut tx,
         &user_repo,
         &role_repo,
-        &signing_key,
         auth.get_ref(),
         &payload.refresh_token,
     )

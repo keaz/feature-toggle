@@ -6,11 +6,15 @@ use chrono::{DateTime, Duration, Utc};
 use feature_toggle_backend::config::AuthConfig;
 use feature_toggle_backend::database::activity_log::activity_log_repository;
 use feature_toggle_backend::database::init_pg_pool;
-use feature_toggle_backend::database::jwt_token::jwt_token_repository;
+use feature_toggle_backend::database::jwt_secret::create_secret_tx;
+use feature_toggle_backend::database::jwt_token::{
+    NewSession, jwt_token_repository, store_session_tx,
+};
 use feature_toggle_backend::database::refresh_token::refresh_token_repository;
 use feature_toggle_backend::database::role::{role_repository, role_repository_tx};
 use feature_toggle_backend::database::user::{CreateUser, user_repository, user_repository_tx};
 use feature_toggle_backend::logic::jwt_secret::{SigningKey, jwt_secret_logic};
+use feature_toggle_backend::logic::jwt_secret_tx::deactivate_all_secrets_in_tx;
 use feature_toggle_backend::logic::jwt_token::{JwtTokenLogic, LoginResult, jwt_token_logic};
 use feature_toggle_backend::logic::jwt_token_tx::{
     RefreshOutcome, RefreshRejection, refresh_session_in_tx,
@@ -100,13 +104,12 @@ async fn login(pool: &PgPool, username: &str, auth: AuthConfig) -> LoginResult {
 
 /// Runs one refresh in its own committed transaction, as the REST handler does.
 async fn refresh(pool: &PgPool, token: &str, auth: AuthConfig) -> RefreshOutcome {
-    let secret = secret(pool).await;
+    secret(pool).await;
     let mut tx = pool.begin().await.unwrap();
     let outcome = refresh_session_in_tx(
         &mut tx,
         &user_repository_tx(pool.clone()),
         &role_repository_tx(pool.clone()),
-        &secret,
         &auth,
         token,
     )
@@ -594,13 +597,12 @@ async fn concurrent_refreshes_with_one_token_are_serialized() {
 
     // Every task opens its transaction first, then all refresh at once.
     const TASKS: usize = 4;
-    let secret = secret(&pool).await;
+    secret(&pool).await;
     let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(TASKS));
     let mut handles = Vec::new();
     for _ in 0..TASKS {
         let pool = pool.clone();
         let token = session.refresh_token.clone();
-        let secret = secret.clone();
         let barrier = barrier.clone();
         handles.push(tokio::spawn(async move {
             let mut tx = pool.begin().await.unwrap();
@@ -609,7 +611,6 @@ async fn concurrent_refreshes_with_one_token_are_serialized() {
                 &mut tx,
                 &user_repository_tx(pool.clone()),
                 &role_repository_tx(pool.clone()),
-                &secret,
                 &auth,
                 &token,
             )
@@ -771,4 +772,149 @@ async fn refresh_endpoint_follows_the_rest_contract() {
 
     let resp = test::call_service(&app, post("/api/v1/auth/refresh", serde_json::json!({}))).await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+// ---- emergency deactivation (deactivate-all) vs session writes ----
+
+async fn refresh_in(
+    conn: &mut sqlx::PgConnection,
+    pool: &PgPool,
+    token: &str,
+    auth: AuthConfig,
+) -> RefreshOutcome {
+    refresh_session_in_tx(
+        conn,
+        &user_repository_tx(pool.clone()),
+        &role_repository_tx(pool.clone()),
+        &auth,
+        token,
+    )
+    .await
+    .expect("refresh")
+}
+
+#[tokio::test]
+async fn refresh_is_rejected_when_the_signing_secret_is_revoked() {
+    let pool = init_pg_pool().await;
+    let (_, username) = create_user(&pool).await;
+    let auth = AuthConfig::default();
+    let session = login(&pool, &username, auth).await;
+
+    // Rolled back, so the shared secret and other sessions stay untouched.
+    let mut tx = pool.begin().await.unwrap();
+    deactivate_all_secrets_in_tx(&mut tx)
+        .await
+        .expect("deactivate all");
+    let outcome = refresh_in(&mut tx, &pool, &session.refresh_token, auth).await;
+    assert_eq!(rejection(outcome), RefreshRejection::Invalid);
+    tx.rollback().await.unwrap();
+
+    // With the secret live again the same token rotates.
+    rotated(refresh(&pool, &session.refresh_token, auth).await);
+}
+
+#[tokio::test]
+async fn login_session_is_stored_only_under_an_active_unrevoked_secret() {
+    let pool = init_pg_pool().await;
+    let (user_id, _) = create_user(&pool).await;
+    let active_kid = secret(&pool).await.kid;
+    let new_session = |kid: Uuid| NewSession {
+        user_id,
+        kid,
+        access_token_hash: format!("session-access-{}", Uuid::new_v4()),
+        access_expires_at: Utc::now() + Duration::minutes(30),
+        refresh_family_id: Uuid::new_v4(),
+        refresh_token_hash: format!("session-refresh-{}", Uuid::new_v4()),
+        refresh_expires_at: Utc::now() + Duration::days(7),
+    };
+    async fn stored_rows(conn: &mut sqlx::PgConnection, session: &NewSession) -> i64 {
+        sqlx::query_scalar(
+            "SELECT (SELECT COUNT(*) FROM jwt_tokens WHERE token_hash = $1)
+                  + (SELECT COUNT(*) FROM refresh_tokens WHERE token_hash = $2)",
+        )
+        .bind(&session.access_token_hash)
+        .bind(&session.refresh_token_hash)
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap()
+    }
+
+    let mut tx = pool.begin().await.unwrap();
+    let live = new_session(active_kid);
+    assert!(store_session_tx(&mut tx, &live).await.unwrap());
+    assert_eq!(stored_rows(&mut tx, &live).await, 2);
+
+    // Signed by a secret that has since been rotated out: not stored.
+    create_secret_tx(&mut tx, format!("session-test-{}", Uuid::new_v4()), None)
+        .await
+        .expect("rotate secret");
+    let rotated_out = new_session(active_kid);
+    assert!(!store_session_tx(&mut tx, &rotated_out).await.unwrap());
+    assert_eq!(stored_rows(&mut tx, &rotated_out).await, 0);
+    tx.rollback().await.unwrap();
+
+    // Signed by a secret revoked by deactivate-all: not stored.
+    let mut tx = pool.begin().await.unwrap();
+    deactivate_all_secrets_in_tx(&mut tx)
+        .await
+        .expect("deactivate all");
+    let revoked = new_session(active_kid);
+    assert!(!store_session_tx(&mut tx, &revoked).await.unwrap());
+    assert_eq!(stored_rows(&mut tx, &revoked).await, 0);
+    tx.rollback().await.unwrap();
+}
+
+/// deactivate-all started while a refresh transaction holds the signing-secret
+/// lock waits for it, and then revokes the tokens that refresh created.
+#[tokio::test]
+async fn deactivate_all_waits_for_an_in_flight_refresh_and_revokes_its_tokens() {
+    let pool = init_pg_pool().await;
+    let (_, username) = create_user(&pool).await;
+    let auth = AuthConfig::default();
+    let session = login(&pool, &username, auth).await;
+
+    let mut refresh_tx = pool.begin().await.unwrap();
+    let new_session =
+        rotated(refresh_in(&mut refresh_tx, &pool, &session.refresh_token, auth).await);
+    let new_refresh_hash = sha256_hex(&new_session.refresh_token);
+    let new_access_hash = sha256_hex(&new_session.token);
+
+    let deactivate = {
+        let pool = pool.clone();
+        let (new_refresh_hash, new_access_hash) =
+            (new_refresh_hash.clone(), new_access_hash.clone());
+        tokio::spawn(async move {
+            let mut tx = pool.begin().await.unwrap();
+            deactivate_all_secrets_in_tx(&mut tx)
+                .await
+                .expect("deactivate all");
+            let refresh_revoked_at: Option<DateTime<Utc>> =
+                sqlx::query_scalar("SELECT revoked_at FROM refresh_tokens WHERE token_hash = $1")
+                    .bind(&new_refresh_hash)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .unwrap();
+            let access_revoked: bool =
+                sqlx::query_scalar("SELECT is_revoked FROM jwt_tokens WHERE token_hash = $1")
+                    .bind(&new_access_hash)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .unwrap();
+            // Rolled back, so the shared secret and other sessions stay untouched.
+            tx.rollback().await.unwrap();
+            (refresh_revoked_at, access_revoked)
+        })
+    };
+
+    // deactivate-all blocks on the secret row the refresh holds FOR SHARE.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(!deactivate.is_finished(), "deactivate-all did not wait");
+
+    refresh_tx.commit().await.unwrap();
+    let (refresh_revoked_at, access_revoked) = deactivate.await.unwrap();
+    assert!(
+        refresh_revoked_at.is_some(),
+        "refresh token minted during deactivate-all survived"
+    );
+    assert!(access_revoked);
 }

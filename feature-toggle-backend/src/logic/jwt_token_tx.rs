@@ -2,6 +2,7 @@
 
 use crate::Error;
 use crate::config::AuthConfig;
+use crate::database::jwt_secret::lock_active_signing_secret_tx;
 use crate::database::jwt_token::store_token_tx;
 use crate::database::refresh_token::{
     RefreshToken, create_token_tx, family_has_active_token_tx, find_by_hash_for_update_tx,
@@ -23,7 +24,8 @@ pub const REFRESH_REUSE_GRACE_SECONDS: i64 = 10;
 /// Why a refresh token was not accepted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefreshRejection {
-    /// Unknown or expired token, or its user is missing or disabled.
+    /// Unknown or expired token, or its user is missing or disabled, or no
+    /// usable signing secret (after an emergency deactivation).
     Invalid,
     /// The token had already been revoked; its whole family is now revoked.
     Reused,
@@ -39,6 +41,13 @@ pub enum RefreshOutcome {
 
 /// Rotates `refresh_token` inside the caller's transaction.
 ///
+/// The active signing secret is locked first (`FOR SHARE`) and the new access
+/// token is signed with it. An emergency deactivation therefore either runs
+/// first (no usable secret: rejected as invalid, since it revokes every refresh
+/// token anyway) or waits for this transaction and then revokes the tokens it
+/// created. Locking the secret before the refresh-token row keeps the lock
+/// order of deactivate-all (secrets, then tokens), so the two cannot deadlock.
+///
 /// The presented token's row is locked (`SELECT ... FOR UPDATE`), so concurrent
 /// refreshes with the same token are serialized: the first rotates it, and a
 /// later one sees it revoked. A revoked token is accepted only within the reuse
@@ -48,7 +57,6 @@ pub async fn refresh_session_in_tx<U, R>(
     conn: &mut PgConnection,
     user_repo: &U,
     role_repo: &R,
-    signing_key: &SigningKey,
     auth: &AuthConfig,
     refresh_token: &str,
 ) -> Result<RefreshOutcome, Error>
@@ -56,6 +64,12 @@ where
     U: UserRepositoryTx,
     R: RoleRepositoryTx,
 {
+    let Some(signing_secret) = lock_active_signing_secret_tx(conn).await? else {
+        log::warn!("Refresh rejected: no active JWT signing secret");
+        return Ok(RefreshOutcome::Rejected(RefreshRejection::Invalid));
+    };
+    let signing_key = SigningKey::from(signing_secret);
+
     let token_hash = crate::middleware::jwt_guard::hash_token(refresh_token);
     let Some(stored) = find_by_hash_for_update_tx(conn, &token_hash).await? else {
         return Ok(RefreshOutcome::Rejected(RefreshRejection::Invalid));
@@ -118,7 +132,7 @@ where
         &user.username,
         user.is_admin,
         role_names,
-        signing_key,
+        &signing_key,
         auth,
     )?;
     store_token_tx(conn, user.id, access.token_hash, access.expires_at).await?;
