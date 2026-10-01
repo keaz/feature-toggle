@@ -8,6 +8,7 @@ mod dependency_value_type_test;
 mod environment_test;
 mod feature_evaluation_test;
 mod feature_test;
+mod jwt_secret_test;
 mod metrics_test;
 mod notification_test;
 mod pipeline_test;

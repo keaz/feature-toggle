@@ -10,7 +10,7 @@ use feature_toggle_backend::database::jwt_token::jwt_token_repository;
 use feature_toggle_backend::database::refresh_token::refresh_token_repository;
 use feature_toggle_backend::database::role::{role_repository, role_repository_tx};
 use feature_toggle_backend::database::user::{CreateUser, user_repository, user_repository_tx};
-use feature_toggle_backend::logic::jwt_secret::jwt_secret_logic;
+use feature_toggle_backend::logic::jwt_secret::{SigningKey, jwt_secret_logic};
 use feature_toggle_backend::logic::jwt_token::{JwtTokenLogic, LoginResult, jwt_token_logic};
 use feature_toggle_backend::logic::jwt_token_tx::{
     RefreshOutcome, RefreshRejection, refresh_session_in_tx,
@@ -67,10 +67,10 @@ async fn create_user(pool: &PgPool) -> (Uuid, String) {
     (created.id, username)
 }
 
-async fn secret(pool: &PgPool) -> String {
-    let logic = jwt_secret_logic(pool.clone());
+async fn secret(pool: &PgPool) -> SigningKey {
+    let logic = jwt_secret_logic(pool.clone(), AuthConfig::default());
     logic.initialize_secret().await.expect("init jwt secret");
-    logic.get_current_secret().await.expect("jwt secret")
+    logic.get_signing_key().await.expect("jwt signing key")
 }
 
 fn token_logic(pool: &PgPool, auth: AuthConfig) -> Box<dyn JwtTokenLogic> {
@@ -85,7 +85,7 @@ fn token_logic(pool: &PgPool, auth: AuthConfig) -> Box<dyn JwtTokenLogic> {
             role_repository(pool.clone()),
             activity_log_repository(pool.clone()),
         ),
-        jwt_secret_logic(pool.clone()),
+        jwt_secret_logic(pool.clone(), auth),
         auth,
     )
 }
@@ -131,11 +131,17 @@ fn rejection(outcome: RefreshOutcome) -> RefreshRejection {
 }
 
 async fn decode_claims(pool: &PgPool, token: &str) -> Claims {
-    let secret = secret(pool).await;
+    let key = secret(pool).await;
+    let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
+    validation.set_issuer(&["fluxgate"]);
+    validation.set_audience(&["fluxgate-api"]);
+    validation.set_required_spec_claims(&["exp", "iss", "aud"]);
+    let header = jsonwebtoken::decode_header(token).expect("decode header");
+    assert_eq!(header.kid, Some(key.kid.to_string()));
     jsonwebtoken::decode::<Claims>(
         token,
-        &jsonwebtoken::DecodingKey::from_secret(secret.as_bytes()),
-        &jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256),
+        &jsonwebtoken::DecodingKey::from_secret(key.secret.as_bytes()),
+        &validation,
     )
     .expect("decode access token")
     .claims
@@ -694,7 +700,7 @@ async fn refresh_endpoint_follows_the_rest_contract() {
             .app_data(web::Data::new(auth))
             .app_data(web::Data::new(token_logic(&pool, auth)))
             .app_data(web::Data::new(
-                jwt_secret_logic(pool.clone()) as Box<dyn JwtSecretLogic>
+                jwt_secret_logic(pool.clone(), auth) as Box<dyn JwtSecretLogic>
             ))
             .service(
                 web::scope("/api/v1").configure(feature_toggle_backend::rest::auth::configure),

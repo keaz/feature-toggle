@@ -10,13 +10,11 @@ http_addr = "0.0.0.0:8080"
 # Address that the gRPC server binds to
 grpc_addr = "0.0.0.0:50051"
 
-# JWT secret for token signing and verification
-# IMPORTANT: Change this to a secure random string in production
-jwt_secret = "your_secure_jwt_secret_change_in_production_minimum_32_characters"
-
 # Session token lifetimes (optional section; these are the defaults).
 # Access tokens (JWT) are short-lived; clients renew them with the rotating
 # refresh token returned by POST /api/v1/auth/login and POST /api/v1/auth/refresh.
+# Values below 1 are raised to 1. After a JWT signing-secret rotation, tokens
+# signed by the previous secret stay valid for access_token_ttl_minutes.
 [auth]
 access_token_ttl_minutes = 30
 refresh_token_ttl_days = 7

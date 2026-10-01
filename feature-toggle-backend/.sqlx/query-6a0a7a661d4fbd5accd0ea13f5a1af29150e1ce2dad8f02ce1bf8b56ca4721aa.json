@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, secret, is_active, created_at, created_by, expires_at\n               FROM jwt_secrets \n               ORDER BY created_at DESC",
+  "query": "INSERT INTO jwt_secrets (secret, is_active, created_by)\n           VALUES ($1, true, $2)\n           RETURNING id, secret, is_active, created_at, created_by, expires_at,\n                     deactivated_at, revoked_at",
   "describe": {
     "columns": [
       {
@@ -32,10 +32,23 @@
         "ordinal": 5,
         "name": "expires_at",
         "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 6,
+        "name": "deactivated_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "revoked_at",
+        "type_info": "Timestamptz"
       }
     ],
     "parameters": {
-      "Left": []
+      "Left": [
+        "Text",
+        "Uuid"
+      ]
     },
     "nullable": [
       false,
@@ -43,8 +56,10 @@
       false,
       false,
       true,
+      true,
+      true,
       true
     ]
   },
-  "hash": "2382a42e824bbeccbad09b33e688bcd107e247f06f51d69bcc1a81829e3e2361"
+  "hash": "6a0a7a661d4fbd5accd0ea13f5a1af29150e1ce2dad8f02ce1bf8b56ca4721aa"
 }

@@ -9,6 +9,7 @@ use crate::database::refresh_token::{
 };
 use crate::database::role::RoleRepositoryTx;
 use crate::database::user::UserRepositoryTx;
+use crate::logic::jwt_secret::SigningKey;
 use crate::logic::jwt_token::{LoginResult, generate_refresh_token, issue_access_token};
 use crate::logic::user::ApiUser;
 use chrono::{Duration, Utc};
@@ -47,7 +48,7 @@ pub async fn refresh_session_in_tx<U, R>(
     conn: &mut PgConnection,
     user_repo: &U,
     role_repo: &R,
-    jwt_secret: &str,
+    signing_key: &SigningKey,
     auth: &AuthConfig,
     refresh_token: &str,
 ) -> Result<RefreshOutcome, Error>
@@ -117,7 +118,7 @@ where
         &user.username,
         user.is_admin,
         role_names,
-        jwt_secret,
+        signing_key,
         auth,
     )?;
     store_token_tx(conn, user.id, access.token_hash, access.expires_at).await?;

@@ -2,7 +2,7 @@ use crate::Error;
 use crate::config::AuthConfig;
 use crate::database::jwt_token::{JwtToken, JwtTokenRepository};
 use crate::database::refresh_token::RefreshTokenRepository;
-use crate::logic::jwt_secret::JwtSecretLogic;
+use crate::logic::jwt_secret::{JwtSecretLogic, SigningKey};
 use crate::logic::role::RoleLogic;
 use crate::logic::user::{ApiUser, UserLogic};
 use base64::Engine;
@@ -35,12 +35,17 @@ pub(crate) fn issue_access_token(
     username: &str,
     is_admin: bool,
     roles: Vec<String>,
-    jwt_secret: &str,
+    signing_key: &SigningKey,
     auth: &AuthConfig,
 ) -> Result<IssuedAccessToken, Error> {
     let expires_at = Utc::now() + auth.access_token_ttl();
     let token = crate::middleware::jwt_guard::create_jwt_token(
-        user_id, username, is_admin, roles, jwt_secret, expires_at,
+        user_id,
+        username,
+        is_admin,
+        roles,
+        signing_key,
+        expires_at,
     )
     .map_err(|e| Error::InvalidInput(format!("Failed to create token: {}", e)))?;
     let token_hash = crate::middleware::jwt_guard::hash_token(&token);
@@ -133,10 +138,10 @@ impl JwtTokenLogic for JwtTokenLogicImpl {
         let roles = self.role_logic.get_user_roles(user.id.clone()).await?;
         let role_names: Vec<String> = roles.into_iter().map(|r| r.name).collect();
 
-        // Get current JWT secret from database
-        let jwt_secret = self
+        // Get the active JWT secret (and its id, the token's `kid`) from the database
+        let signing_key = self
             .jwt_secret_logic
-            .get_current_secret()
+            .get_signing_key()
             .await
             .map_err(|e| Error::InvalidInput(format!("Failed to get JWT secret: {}", e)))?;
 
@@ -145,7 +150,7 @@ impl JwtTokenLogic for JwtTokenLogicImpl {
             &user.username,
             user.is_admin,
             role_names,
-            &jwt_secret,
+            &signing_key,
             &self.auth,
         )?;
         self.repository
@@ -238,6 +243,13 @@ mod tests {
     use mockall::predicate::*;
     use uuid::Uuid;
 
+    fn test_signing_key() -> SigningKey {
+        SigningKey {
+            kid: Uuid::from_u128(0x5ec2e7),
+            secret: "secret".to_string(),
+        }
+    }
+
     fn refresh_repo_accepting_creates() -> MockRefreshTokenRepository {
         let mut mock = MockRefreshTokenRepository::new();
         mock.expect_create_token()
@@ -289,8 +301,8 @@ mod tests {
 
         let mut mock_jwt_secret_logic = MockJwtSecretLogic::new();
         mock_jwt_secret_logic
-            .expect_get_current_secret()
-            .returning(|| Ok("secret".to_string()));
+            .expect_get_signing_key()
+            .returning(|| Ok(test_signing_key()));
 
         let mut mock_repo = MockJwtTokenRepository::new();
         mock_repo
@@ -371,8 +383,8 @@ mod tests {
 
         let mut mock_jwt_secret_logic = MockJwtSecretLogic::new();
         mock_jwt_secret_logic
-            .expect_get_current_secret()
-            .returning(|| Ok("secret".to_string()));
+            .expect_get_signing_key()
+            .returning(|| Ok(test_signing_key()));
 
         let mut mock_repo = MockJwtTokenRepository::new();
         mock_repo
@@ -423,8 +435,8 @@ mod tests {
             .returning(|_| Ok(vec![]));
         let mut mock_jwt_secret_logic = MockJwtSecretLogic::new();
         mock_jwt_secret_logic
-            .expect_get_current_secret()
-            .returning(|| Ok("secret".to_string()));
+            .expect_get_signing_key()
+            .returning(|| Ok(test_signing_key()));
 
         let stored_access = std::sync::Arc::new(std::sync::Mutex::new(None));
         let stored_access_clone = stored_access.clone();
@@ -494,14 +506,13 @@ mod tests {
         );
         assert!(access_expires_at >= before + chrono::Duration::minutes(5));
         assert!(access_expires_at <= after + chrono::Duration::minutes(5));
-        let claims = jsonwebtoken::decode::<crate::middleware::jwt_guard::Claims>(
-            &result.token,
-            &jsonwebtoken::DecodingKey::from_secret(b"secret"),
-            &jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256),
-        )
-        .unwrap()
-        .claims;
+        let claims =
+            crate::middleware::jwt_guard::decode_verified_claims(&result.token, "secret").unwrap();
         assert_eq!(claims.exp as i64, access_expires_at.timestamp());
+        assert_eq!(
+            crate::middleware::jwt_guard::token_kid(&result.token).unwrap(),
+            Some(test_signing_key().kid)
+        );
 
         // The refresh token is opaque base64url of 32 bytes; only its hash is stored.
         assert_eq!(result.refresh_token.len(), 43);

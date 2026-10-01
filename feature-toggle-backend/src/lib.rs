@@ -139,7 +139,7 @@ pub async fn run() -> std::io::Result<()> {
         database::role::role_repository(db_pool.clone()),
         activity_log_repository.clone_box(),
     );
-    let jwt_secret_logic = logic::jwt_secret::jwt_secret_logic(db_pool.clone());
+    let jwt_secret_logic = logic::jwt_secret::jwt_secret_logic(db_pool.clone(), cfg.auth);
     let jwt_token_logic = logic::jwt_token::jwt_token_logic(
         database::jwt_token::jwt_token_repository(db_pool.clone()),
         database::refresh_token::refresh_token_repository(db_pool.clone()),

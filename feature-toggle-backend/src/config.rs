@@ -42,6 +42,29 @@ impl Default for AuthConfig {
 }
 
 impl AuthConfig {
+    /// Raises lifetimes below 1 to 1, with a warning: a zero access-token
+    /// lifetime would issue already-expired tokens (and give rotated JWT
+    /// secrets no grace), a zero refresh-token lifetime already-expired
+    /// refresh tokens.
+    pub fn sanitized(self) -> Self {
+        let mut auth = self;
+        if auth.access_token_ttl_minutes < 1 {
+            warn!(
+                "auth.access_token_ttl_minutes = {} is below 1; using 1",
+                auth.access_token_ttl_minutes
+            );
+            auth.access_token_ttl_minutes = 1;
+        }
+        if auth.refresh_token_ttl_days < 1 {
+            warn!(
+                "auth.refresh_token_ttl_days = {} is below 1; using 1",
+                auth.refresh_token_ttl_days
+            );
+            auth.refresh_token_ttl_days = 1;
+        }
+        auth
+    }
+
     pub fn access_token_ttl(&self) -> chrono::Duration {
         chrono::Duration::minutes(i64::from(self.access_token_ttl_minutes))
     }
@@ -82,7 +105,7 @@ impl Config {
             let path = Path::new(&path_str);
             if path.exists() {
                 match fs::read_to_string(path) {
-                    Ok(content) => match toml::from_str::<Config>(&content) {
+                    Ok(content) => match Self::from_toml(&content) {
                         Ok(cfg) => {
                             info!("Loaded configuration from {}", path_str);
                             return cfg;
@@ -106,6 +129,13 @@ impl Config {
 
         warn!("Using default configuration values.");
         default
+    }
+
+    /// Parses a TOML configuration and sanitizes values that must be positive.
+    pub fn from_toml(content: &str) -> Result<Self, toml::de::Error> {
+        let mut cfg: Config = toml::from_str(content)?;
+        cfg.auth = cfg.auth.sanitized();
+        Ok(cfg)
     }
 
     pub fn grpc_socket_addr(&self) -> Result<SocketAddr, std::net::AddrParseError> {
@@ -149,9 +179,28 @@ grpc_addr = "0.0.0.0:50051"
     }
 
     #[test]
+    fn auth_lifetimes_below_one_are_raised_to_one() {
+        let cfg = Config::from_toml(&format!(
+            "{BASE}\n[auth]\naccess_token_ttl_minutes = 0\nrefresh_token_ttl_days = 0\n"
+        ))
+        .unwrap();
+        assert_eq!(cfg.auth.access_token_ttl_minutes, 1);
+        assert_eq!(cfg.auth.refresh_token_ttl_days, 1);
+        assert_eq!(cfg.auth.access_token_ttl(), chrono::Duration::minutes(1));
+
+        // Valid values are kept as they are.
+        let cfg = Config::from_toml(&format!(
+            "{BASE}\n[auth]\naccess_token_ttl_minutes = 1\nrefresh_token_ttl_days = 3\n"
+        ))
+        .unwrap();
+        assert_eq!(cfg.auth.access_token_ttl_minutes, 1);
+        assert_eq!(cfg.auth.refresh_token_ttl_days, 3);
+    }
+
+    #[test]
     fn shipped_config_file_parses_with_default_auth_values() {
         let content = include_str!("../config.toml");
-        let cfg: Config = toml::from_str(content).unwrap();
+        let cfg = Config::from_toml(content).unwrap();
         assert_eq!(cfg.auth, AuthConfig::default());
     }
 }

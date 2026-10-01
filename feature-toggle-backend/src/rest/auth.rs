@@ -148,8 +148,8 @@ pub(crate) async fn refresh(
     auth: web::Data<AuthConfig>,
     payload: web::Json<RefreshRequest>,
 ) -> Result<impl Responder, RestError> {
-    let jwt_secret = jwt_secret_logic
-        .get_current_secret()
+    let signing_key = jwt_secret_logic
+        .get_signing_key()
         .await
         .map_err(|e| RestError::internal(format!("Failed to get JWT secret: {e}")))?;
 
@@ -164,7 +164,7 @@ pub(crate) async fn refresh(
         &mut tx,
         &user_repo,
         &role_repo,
-        &jwt_secret,
+        &signing_key,
         auth.get_ref(),
         &payload.refresh_token,
     )

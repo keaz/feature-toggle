@@ -181,6 +181,23 @@ pub async fn revoke_all_user_refresh_tokens_tx(
     Ok(result.rows_affected())
 }
 
+/// Revokes every still-active refresh token of every user (emergency JWT
+/// secret deactivation).
+pub async fn revoke_all_refresh_tokens_tx(conn: &mut PgConnection) -> Result<u64, Error> {
+    let result = sqlx::query!(
+        r#"
+        UPDATE refresh_tokens
+        SET revoked_at = now()
+        WHERE revoked_at IS NULL
+        "#
+    )
+    .execute(&mut *conn)
+    .await
+    .map_err(Error::DatabaseError)?;
+
+    Ok(result.rows_affected())
+}
+
 #[derive(Clone)]
 struct RefreshTokenRepositoryImpl {
     pool: PgPool,

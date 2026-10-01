@@ -66,6 +66,23 @@ pub async fn revoke_all_user_tokens_tx(
     Ok(result.rows_affected() + refresh_revoked)
 }
 
+/// Revokes every active access token of every user on the given connection
+/// (emergency JWT secret deactivation). Returns the number revoked.
+pub async fn revoke_all_tokens_tx(conn: &mut PgConnection) -> Result<u64, Error> {
+    let result = sqlx::query!(
+        r#"
+        UPDATE jwt_tokens
+        SET is_revoked = TRUE, revoked_at = CURRENT_TIMESTAMP
+        WHERE is_revoked = FALSE
+        "#
+    )
+    .execute(&mut *conn)
+    .await
+    .map_err(Error::DatabaseError)?;
+
+    Ok(result.rows_affected())
+}
+
 /// Stores an access token hash on the given connection.
 pub async fn store_token_tx(
     conn: &mut PgConnection,
