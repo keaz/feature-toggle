@@ -1704,6 +1704,14 @@ pub(crate) async fn update_feature(
         }
     };
 
+    if updated.key != existing_feature.key {
+        // Edges cache by key, so a rename must drop the old key. Send it before
+        // the Upsert: the edge's Delete also drops the shared feature id index.
+        let _ = updates_tx.send(crate::grpc::team_scoped_delete(
+            team_uuid,
+            &existing_feature.key,
+        ));
+    }
     if let Ok(fid) = Uuid::try_from(existing_feature.id.clone()) {
         broadcast_feature_update(feature_repo.as_ref().as_ref(), updates_tx.get_ref(), fid).await;
     }
@@ -2503,5 +2511,181 @@ mod tests {
         let body = test::read_body(resp).await;
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["error"], "conflict");
+    }
+
+    #[actix_web::test]
+    async fn update_feature_rename_broadcasts_delete_for_old_key() {
+        let pool = test_pool().await;
+        let team_id = insert_team(&pool).await;
+        let env_id = insert_environment(&pool, team_id).await;
+        // Activity and version rows reference the acting user.
+        let user_id = Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO users (id, username, password_hash, first_name, last_name, email)
+               VALUES ($1, $2, 'x', 'B15', 'Test', $3)"#,
+        )
+        .bind(user_id)
+        .bind(format!("b15-{user_id}"))
+        .bind(format!("b15-{user_id}@example.test"))
+        .execute(&pool)
+        .await
+        .expect("Failed to insert user");
+        let jwt_user = JwtUser {
+            id: user_id,
+            username: format!("b15-{user_id}"),
+            is_admin: true,
+            roles: vec![],
+            team_id: Some(team_id),
+            token_hash: "hash".to_string(),
+        };
+
+        let mut mock_pipeline_logic = MockPipelineLogic::new();
+        mock_pipeline_logic
+            .expect_get_pipelines()
+            .returning(|_, _, _, _| Ok(vec![]));
+        let new_env_logic = || {
+            environment_logic(
+                environment_repository(pool.clone()),
+                Box::new(PgActivityLogRepository::new(pool.clone())),
+            )
+        };
+        let feature_logic = feature_logic(
+            feature_repository(pool.clone()),
+            new_env_logic(),
+            Box::new(PgActivityLogRepository::new(pool.clone())),
+            user_repository(pool.clone()),
+        );
+        let (updates_tx, mut updates_rx) =
+            tokio::sync::broadcast::channel::<crate::grpc::pb::FeatureUpdate>(16);
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(pool.clone()))
+                .app_data(web::Data::new(
+                    Box::new(PgActivityLogRepository::new(pool.clone()))
+                        as Box<dyn ActivityLogRepository>,
+                ))
+                .app_data(web::Data::new(feature_logic))
+                .app_data(web::Data::new(
+                    Box::new(mock_pipeline_logic) as Box<dyn PipelineLogic>
+                ))
+                .app_data(web::Data::new(feature_repository(pool.clone())))
+                .app_data(web::Data::new(new_env_logic()))
+                .app_data(web::Data::new(updates_tx))
+                .service(web::scope("/api/v1").configure(super::configure)),
+        )
+        .await;
+
+        let old_key = format!("b15-old-{}", Uuid::new_v4().simple());
+        let new_key = format!("b15-new-{}", Uuid::new_v4().simple());
+        let stages = vec![CreateFeatureStageRequest {
+            id: None,
+            environment_id: env_id.to_string(),
+            order_index: 0,
+            position: "{\"x\":0,\"y\":0}".to_string(),
+            bucketing_key: None,
+        }];
+
+        let req = test::TestRequest::post()
+            .uri(&format!("/api/v1/teams/{team_id}/features"))
+            .set_json(CreateFeatureRequest {
+                key: old_key.clone(),
+                description: None,
+                feature_type: FeatureType::Simple,
+                enabled: Some(true),
+                lifecycle_stage: None,
+                owner: None,
+                purpose: None,
+                reference_url: None,
+                expires_at: None,
+                cleanup_reason: None,
+                tags: None,
+                dependencies: vec![],
+                relationships: vec![],
+                stages: stages.clone(),
+                variants: None,
+            })
+            .to_request();
+        req.extensions_mut().insert(jwt_user.clone());
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let created: serde_json::Value =
+            serde_json::from_slice(&test::read_body(resp).await).unwrap();
+        let feature_id = created["id"].as_str().unwrap().to_string();
+        while updates_rx.try_recv().is_ok() {}
+
+        let req = test::TestRequest::patch()
+            .uri(&format!("/api/v1/features/{feature_id}"))
+            .set_json(UpdateFeatureRequest {
+                key: new_key.clone(),
+                description: None,
+                feature_type: FeatureType::Simple,
+                enabled: Some(true),
+                lifecycle_stage: None,
+                owner: None,
+                purpose: None,
+                reference_url: None,
+                expires_at: None,
+                cleanup_reason: None,
+                tags: None,
+                archive_confirmation: None,
+                dependencies: vec![],
+                relationships: vec![],
+                stages,
+                variants: None,
+                freeze_override_reason: None,
+            })
+            .to_request();
+        req.extensions_mut().insert(jwt_user);
+        let resp = test::call_service(&app, req).await;
+        let status = resp.status();
+
+        let mut broadcast = Vec::new();
+        while let Ok(update) = updates_rx.try_recv() {
+            broadcast.push(update);
+        }
+
+        sqlx::query("DELETE FROM activity_log WHERE entity_id = $1 OR actor_id = $2")
+            .bind(&feature_id)
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .expect("Failed to delete activity rows");
+        sqlx::query("DELETE FROM teams WHERE id = $1")
+            .bind(team_id)
+            .execute(&pool)
+            .await
+            .expect("Failed to delete team");
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .expect("Failed to delete user");
+
+        assert_eq!(status, StatusCode::OK);
+        use crate::grpc::pb::feature_update::Action;
+        let delete_pos = broadcast
+            .iter()
+            .position(|u| u.action == Action::Delete as i32 && u.feature_key == old_key)
+            .unwrap_or_else(|| panic!("no Delete for the old key in {broadcast:?}"));
+        let delete_team = broadcast[delete_pos]
+            .feature
+            .as_ref()
+            .map(|f| f.team_id.clone());
+        assert_eq!(
+            delete_team,
+            Some(team_id.to_string()),
+            "Delete must be scoped to the owning team"
+        );
+        let upsert_pos = broadcast
+            .iter()
+            .position(|u| {
+                u.action == Action::Upsert as i32
+                    && u.feature.as_ref().map(|f| f.key.as_str()) == Some(new_key.as_str())
+            })
+            .expect("no Upsert for the new key");
+        // The edge drops its id index entry on Delete, so the Delete for the old
+        // key must come before the Upsert that re-adds the same id.
+        assert!(delete_pos < upsert_pos);
     }
 }

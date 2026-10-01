@@ -5,28 +5,20 @@ use tokio_stream::StreamExt;
 use tracing::{debug, error, info, warn};
 
 /// Send the initial subscription payload for a stream connection.
+///
+/// Every connection subscribes with empty keys, which means all of the team's
+/// features and a full snapshot. Subscribing with only the cached keys would
+/// hide flags created while the edge was disconnected.
 pub(crate) async fn send_initial_subscribe(
     tx: &tokio::sync::mpsc::Sender<pb::StreamRequest>,
     app: &AppState,
-    force_full_snapshot: bool,
 ) {
-    // Under normal reconnects, we resubscribe to the cached key set so the
-    // backend can continue sending the subset we already care about. After a
-    // lag signal, we intentionally request a full snapshot to converge stale
-    // local state, including deletes that may have been missed.
-    let cached_keys = if force_full_snapshot {
-        tracing::info!("Subscribing with full snapshot resync after lag");
-        Vec::new()
-    } else {
-        let keys = app.mapped_cache.get_all_keys().await;
-        tracing::info!("Subscribing with {} cached feature keys", keys.len());
-        keys
-    };
+    tracing::info!("Subscribing to all team features (full snapshot)");
 
     let subscribe = pb::SubscribeRequest {
         client_id: app.client_id.clone(),
         client_secret: app.client_secret.clone(),
-        feature_keys: cached_keys,
+        feature_keys: Vec::new(),
         environment_id: "".into(),
     };
     let initial = pb::StreamRequest {
@@ -196,7 +188,7 @@ pub async fn run_stream_task(app: AppState, grpc_addr: String) {
                 }
 
                 let (tx, rx) = tokio::sync::mpsc::channel::<pb::StreamRequest>(16);
-                send_initial_subscribe(&tx, &app, force_full_resync).await;
+                send_initial_subscribe(&tx, &app).await;
                 spawn_heartbeat(tx.clone());
 
                 let response = match open_streaming_call(client, rx).await {

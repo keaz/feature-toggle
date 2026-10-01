@@ -4,7 +4,7 @@
 |---|---|
 | Type | Bug (correctness, cache staleness) |
 | Severity | High |
-| Status | Verified (independent code trace) |
+| Status | Fixed on branch fix/b15-stale-flags-deletes |
 | Crates | `feature-toggle-backend`, `feature-edge-server` |
 | Behavior change | Yes, intended: edges receive Delete messages and drop stale keys |
 | Depends on | [B01](B01-feature-key-lookup-substring-match.md) (exact key match), [B03](B03-stream-updates-cross-team.md) (team scoping of Deletes) |

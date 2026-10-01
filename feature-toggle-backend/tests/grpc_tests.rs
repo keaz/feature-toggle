@@ -2074,3 +2074,155 @@ async fn get_feature_by_key_returns_exact_key_match() {
     assert_eq!(feature.key, "checkout");
     assert_eq!(feature.id, checkout_id.to_string());
 }
+
+#[tokio::test]
+async fn stream_keys_snapshot_sends_delete_for_missing_key() {
+    let (updates_tx, _updates_rx) = broadcast::channel::<pb::FeatureUpdate>(8);
+    let (cid, sec) = client_ids();
+    let client_id = Uuid::parse_str(&cid).unwrap();
+    let team_id = Uuid::new_v4();
+    let client_mock = stream_client_mock(client_id, team_id, sec.clone());
+
+    let present_id = Uuid::new_v4();
+    let mut feature_mock = MockFeatureRepository::new();
+    feature_mock
+        .expect_get_feature_stages()
+        .returning(|_fid| Ok(Vec::new()));
+    feature_mock
+        .expect_get_feature_by_key()
+        .returning(move |_team, key| match key.as_str() {
+            "present" => Ok(Some(test_feature(
+                present_id,
+                "present",
+                team_id,
+                true,
+                false,
+                vec![],
+            ))),
+            _ => Ok(None),
+        });
+
+    let (addr, _server) =
+        start_server_with_repos(Box::new(feature_mock), Box::new(client_mock), updates_tx).await;
+
+    // An edge reconnecting with cached keys, one of which no longer exists.
+    let (mut stream, _tx) = open_update_stream(
+        addr,
+        cid,
+        sec,
+        vec!["gone".to_string(), "present".to_string()],
+    )
+    .await;
+
+    let mut received = Vec::new();
+    while let Some(update) = recv_update_with_timeout(&mut stream, Duration::from_millis(500)).await
+    {
+        received.push(update);
+    }
+
+    let delete_pos = received
+        .iter()
+        .position(|u| {
+            u.action == pb::feature_update::Action::Delete as i32 && u.feature_key == "gone"
+        })
+        .unwrap_or_else(|| panic!("no Delete for missing key 'gone' in {received:?}"));
+    assert!(
+        received[delete_pos].feature.is_none(),
+        "Delete must reach the edge without a feature payload"
+    );
+    let snapshot_pos = received
+        .iter()
+        .position(|u| {
+            u.action == pb::feature_update::Action::Snapshot as i32
+                && u.feature.as_ref().map(|f| f.key.as_str()) == Some("present")
+        })
+        .expect("existing key should still arrive as a Snapshot");
+    // Deletes go first: after a rename, a later Delete for the old key would
+    // otherwise drop the edge's id index entry for the renamed feature.
+    assert!(delete_pos < snapshot_pos);
+    assert!(
+        !received.iter().any(|u| {
+            u.action == pb::feature_update::Action::Delete as i32 && u.feature_key == "present"
+        }),
+        "existing key must not be deleted"
+    );
+}
+
+#[tokio::test]
+async fn stream_forwards_deletes_only_to_owning_team() {
+    let (updates_tx, _updates_rx) = broadcast::channel::<pb::FeatureUpdate>(16);
+    let (cid, sec) = client_ids();
+    let client_id = Uuid::parse_str(&cid).unwrap();
+    let team_a = Uuid::new_v4();
+    let team_b = Uuid::new_v4();
+    let client_mock = stream_client_mock(client_id, team_a, sec.clone());
+
+    let mut feature_mock = MockFeatureRepository::new();
+    feature_mock
+        .expect_get_feature_stages()
+        .returning(|_fid| Ok(Vec::new()));
+    feature_mock
+        .expect_get_features()
+        .returning(move |_team, _key, _ftype| {
+            Ok(vec![test_feature(
+                Uuid::new_v4(),
+                "shared",
+                team_a,
+                true,
+                false,
+                vec![],
+            )])
+        });
+
+    let (addr, _server) = start_server_with_repos(
+        Box::new(feature_mock),
+        Box::new(client_mock),
+        updates_tx.clone(),
+    )
+    .await;
+
+    // Subscribe as Team A for all features and drain the snapshot.
+    let (mut stream, _tx) = open_update_stream(addr, cid, sec, vec![]).await;
+    let snapshot = recv_update_with_timeout(&mut stream, Duration::from_secs(2))
+        .await
+        .expect("missing snapshot");
+    assert_eq!(snapshot.action, pb::feature_update::Action::Snapshot as i32);
+
+    // Team B renames its own "shared": Team A must keep its flag.
+    updates_tx
+        .send(feature_toggle_backend::grpc::team_scoped_delete(
+            team_b, "shared",
+        ))
+        .unwrap();
+    // A Delete with no owning team cannot be scoped, so it is dropped.
+    updates_tx
+        .send(pb::FeatureUpdate {
+            message_id: Uuid::new_v4().to_string(),
+            action: pb::feature_update::Action::Delete as i32,
+            feature: None,
+            feature_key: "shared".to_string(),
+            error: String::new(),
+        })
+        .unwrap();
+    let leaked = recv_update_with_timeout(&mut stream, Duration::from_millis(300)).await;
+    assert!(
+        leaked.is_none(),
+        "Team A stream received a Delete it does not own: {leaked:?}"
+    );
+
+    // Control: Team A's own Delete arrives as a plain proto Delete.
+    updates_tx
+        .send(feature_toggle_backend::grpc::team_scoped_delete(
+            team_a, "shared",
+        ))
+        .unwrap();
+    let own = recv_update_with_timeout(&mut stream, Duration::from_secs(2))
+        .await
+        .expect("Team A Delete was not forwarded");
+    assert_eq!(own.action, pb::feature_update::Action::Delete as i32);
+    assert_eq!(own.feature_key, "shared");
+    assert!(
+        own.feature.is_none(),
+        "internal team tag must not reach the edge"
+    );
+}
