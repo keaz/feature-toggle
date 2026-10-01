@@ -1,4 +1,5 @@
-use super::{AppState, build_endpoint, pb};
+use super::{AppState, backend_client, build_endpoint, pb};
+use crate::config::GrpcConfig;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio_stream::StreamExt;
@@ -168,7 +169,7 @@ pub(crate) async fn handle_feature_update(app: &AppState, update: pb::FeatureUpd
 
 /// Maintain the long-lived backend update stream. Lag markers force a full
 /// snapshot resubscribe so deletes and missed updates converge deterministically.
-pub async fn run_stream_task(app: AppState, grpc_addr: String) {
+pub async fn run_stream_task(app: AppState, grpc_addr: String, grpc_config: GrpcConfig) {
     let mut retry_delay = app.retry_config.stream_initial_delay();
     let max_retry_delay = app.retry_config.stream_max_delay();
     let mut force_full_resync = false;
@@ -180,11 +181,10 @@ pub async fn run_stream_task(app: AppState, grpc_addr: String) {
             prepare_for_full_resync(&app).await;
         }
 
-        let endpoint = build_endpoint(&grpc_addr);
+        let endpoint = build_endpoint(&grpc_addr, &grpc_config);
         match endpoint.connect().await {
             Ok(channel) => {
-                let mut client =
-                    pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
+                let mut client = backend_client(channel, &grpc_config);
                 info!("Connected to backend gRPC {}", &grpc_addr);
 
                 retry_delay = app.retry_config.stream_initial_delay();

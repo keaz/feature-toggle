@@ -5,7 +5,8 @@ use crate::AppState;
 use crate::pb;
 use std::time::Duration;
 use tokio_retry::RetryIf;
-use tonic::transport::Endpoint;
+use tonic::codec::CompressionEncoding;
+use tonic::transport::{Channel, Endpoint};
 use tracing::{error, info};
 
 pub use flush::{run_evaluation_flush_task, run_flush_task};
@@ -254,16 +255,32 @@ pub(crate) fn warm_assignment_cache(
 }
 
 /// Build a gRPC endpoint with standard configuration
-pub fn build_endpoint(grpc_addr: &str) -> Endpoint {
+/// Backend endpoint built from the `[grpc]` settings. Used by both the
+/// direct-call client and the update stream.
+pub fn build_endpoint(grpc_addr: &str, cfg: &crate::config::GrpcConfig) -> Endpoint {
     Endpoint::from_shared(grpc_addr.to_string())
         .expect("invalid gRPC address")
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(10))
-        .tcp_keepalive(Some(Duration::from_secs(30)))
-        .http2_keep_alive_interval(Duration::from_secs(20))
-        .keep_alive_while_idle(true)
-        .concurrency_limit(256)
-        .tcp_nodelay(true)
+        .connect_timeout(cfg.connect_timeout())
+        .timeout(cfg.timeout())
+        .tcp_keepalive(cfg.tcp_keepalive())
+        .http2_keep_alive_interval(cfg.http2_keepalive())
+        .keep_alive_while_idle(cfg.keep_alive_while_idle)
+        .concurrency_limit(cfg.concurrency_limit)
+        .tcp_nodelay(cfg.tcp_nodelay)
+}
+
+/// Backend client on `channel` with the configured compression.
+pub fn backend_client(
+    channel: Channel,
+    cfg: &crate::config::GrpcConfig,
+) -> pb::feature_evaluation_client::FeatureEvaluationClient<Channel> {
+    let client = pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
+    match cfg.compression {
+        crate::config::GrpcCompression::Gzip => client
+            .send_compressed(CompressionEncoding::Gzip)
+            .accept_compressed(CompressionEncoding::Gzip),
+        crate::config::GrpcCompression::None => client,
+    }
 }
 
 /// Generate a unique key for user assignment caching
