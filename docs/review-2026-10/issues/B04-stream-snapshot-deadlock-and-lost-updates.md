@@ -4,7 +4,7 @@
 |---|---|
 | Type | Bug (availability, correctness) |
 | Severity | Critical (hang), High (lost updates) |
-| Status | Verified (code traced: `mpsc::channel(64)` at `grpc/mod.rs:1245`, receiver returned only at `:1427`) |
+| Status | Fixed on branch fix/b04-stream-snapshot-deadlock |
 | Crate | `feature-toggle-backend` |
 | Behavior change | Small: see "Behavior impact" |
 | Related | [B03](B03-stream-updates-cross-team.md), [P02](P02-snapshot-n-plus-one-queries.md) |

@@ -231,7 +231,9 @@ struct EngineFeatureBase {
 
 pub struct FeatureEvaluationSvc {
     pool: sqlx::PgPool,
-    feature_repo: Box<dyn crate::database::feature::FeatureRepository>,
+    // Shared (not boxed) so long-lived stream tasks can read snapshots after
+    // the handler returns.
+    feature_repo: std::sync::Arc<dyn crate::database::feature::FeatureRepository>,
     client_repo: Box<dyn crate::database::client::ClientRepository>,
     user_flag_repo: Box<dyn crate::database::user_flag_assignment::UserFlagAssignmentRepository>,
     user_flag_logic: Box<dyn crate::logic::user_flag::UserFlagLogic>,
@@ -252,7 +254,7 @@ impl Clone for FeatureEvaluationSvc {
     fn clone(&self) -> Self {
         Self {
             pool: self.pool.clone(),
-            feature_repo: self.feature_repo.clone_box(),
+            feature_repo: self.feature_repo.clone(),
             client_repo: self.client_repo.clone_box(),
             user_flag_repo: self.user_flag_repo.clone_box(),
             user_flag_logic: self.user_flag_logic.clone_box(),
@@ -286,7 +288,8 @@ impl FeatureEvaluationSvc {
             crate::logic::feature_evaluation::FeatureEvaluationEvent,
         >,
     ) -> Self {
-        let feature_repo = crate::database::feature::feature_repository(pool.clone());
+        let feature_repo: std::sync::Arc<dyn crate::database::feature::FeatureRepository> =
+            crate::database::feature::feature_repository(pool.clone()).into();
         let client_repo = crate::database::client::client_repository(pool.clone());
         let user_flag_repo =
             crate::database::user_flag_assignment::user_flag_assignment_repository(pool.clone());
@@ -381,6 +384,8 @@ impl FeatureEvaluationSvc {
             crate::logic::feature_evaluation::FeatureEvaluationEvent,
         >,
     ) -> Self {
+        let feature_repo: std::sync::Arc<dyn crate::database::feature::FeatureRepository> =
+            feature_repo.into();
         // Use a dummy pool; not used when repos are injected
         let pool = sqlx::PgPool::connect_lazy("postgres://unused").expect("lazy pool");
         let user_flag_repo =
@@ -685,8 +690,13 @@ impl FeatureEvaluationSvc {
     }
 
     async fn map_db_feature_to_full(&self, f: db::Feature) -> Result<pb::FeatureFull, Status> {
-        let repo = &self.feature_repo;
+        Self::map_db_feature_to_full_with_repo(self.feature_repo.as_ref(), f).await
+    }
 
+    async fn map_db_feature_to_full_with_repo(
+        repo: &dyn crate::database::feature::FeatureRepository,
+        f: db::Feature,
+    ) -> Result<pb::FeatureFull, Status> {
         // Map stages and load criterias for each
         let stages = repo.get_feature_stages(f.id).await;
         if stages.is_err() {
@@ -819,6 +829,68 @@ impl FeatureEvaluationSvc {
         };
 
         Ok(feature)
+    }
+
+    /// Reads the initial stream snapshot and sends each feature as a Snapshot update.
+    async fn send_stream_snapshot(
+        feature_repo: &dyn crate::database::feature::FeatureRepository,
+        team_id: Uuid,
+        client_id: Uuid,
+        subscription_filter: &SubscriptionFilter,
+        requested_keys_for_client: &std::collections::HashSet<String>,
+        out_tx: &mpsc::Sender<Result<pb::FeatureUpdate, Status>>,
+    ) -> Result<(), Status> {
+        let features_to_send = match subscription_filter.snapshot_keys(requested_keys_for_client) {
+            None => {
+                log::info!("gRPC: Sending full snapshot for client {}", client_id);
+                feature_repo
+                    .get_features(team_id, None, None)
+                    .await
+                    .map_err(|e| Status::internal(format!("db error: {}", e)))?
+            }
+            Some(subscription_keys) => {
+                if subscription_keys.is_empty() {
+                    vec![]
+                } else {
+                    log::info!(
+                        "gRPC: Sending snapshot of {} feature key(s) for client {}",
+                        subscription_keys.len(),
+                        client_id
+                    );
+                    let mut all_features = Vec::new();
+                    for feature_key in &subscription_keys {
+                        let features = feature_repo
+                            .get_features(team_id, Some(feature_key.clone()), None)
+                            .await
+                            .map_err(|e| Status::internal(format!("db error: {}", e)))?;
+                        all_features.extend(features);
+                    }
+                    all_features
+                }
+            }
+        };
+
+        log::info!(
+            "gRPC: Snapshot contains {} features",
+            features_to_send.len()
+        );
+
+        // Send each feature as a snapshot update
+        for f in features_to_send {
+            let full = Self::map_db_feature_to_full_with_repo(feature_repo, f).await?;
+            let _ = out_tx
+                .send(Ok(pb::FeatureUpdate {
+                    message_id: uuid::Uuid::new_v4().to_string(),
+                    action: pb::feature_update::Action::Snapshot as i32,
+                    feature: Some(full),
+                    feature_key: String::new(),
+                    error: String::new(),
+                }))
+                .await;
+        }
+
+        log::info!("gRPC: Snapshot sent successfully");
+        Ok(())
     }
 }
 
@@ -1252,6 +1324,12 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
             per_client.insert(stream_id, subscription_filter.clone());
         }
 
+        // Subscribe to shared broadcaster for live updates before reading the
+        // snapshot, so updates broadcast while the snapshot is read are queued
+        // instead of lost. A replayed Upsert that the snapshot already holds is
+        // harmless: Upserts carry full state and arrive in broadcast order.
+        let mut rx = self.updates_tx.subscribe();
+
         // Include keys requested via unary GetFeatureByKey so long-lived streams
         // can pick up those updates without reconnecting. These keys remain
         // client-scoped only while the client still has at least one live stream.
@@ -1260,119 +1338,83 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
             map.get(&client_id).cloned().unwrap_or_default()
         };
 
-        // Send initial snapshot
-        {
-            let feature_repo = &self.feature_repo;
-
-            let features_to_send =
-                match subscription_filter.snapshot_keys(&requested_keys_for_client) {
-                    None => {
-                        log::info!("gRPC: Sending full snapshot for client {}", client_id);
-                        feature_repo
-                            .get_features(team_id, None, None)
-                            .await
-                            .map_err(|e| Status::internal(format!("db error: {}", e)))?
-                    }
-                    Some(subscription_keys) => {
-                        if subscription_keys.is_empty() {
-                            vec![]
-                        } else {
-                            log::info!(
-                                "gRPC: Sending snapshot of {} feature key(s) for client {}",
-                                subscription_keys.len(),
-                                client_id
-                            );
-                            let mut all_features = Vec::new();
-                            for feature_key in &subscription_keys {
-                                let features = feature_repo
-                                    .get_features(team_id, Some(feature_key.clone()), None)
-                                    .await
-                                    .map_err(|e| Status::internal(format!("db error: {}", e)))?;
-                                all_features.extend(features);
-                            }
-                            all_features
-                        }
-                    }
-                };
-
-            log::info!(
-                "gRPC: Snapshot contains {} features",
-                features_to_send.len()
-            );
-
-            // Send each feature as a snapshot update
-            for f in features_to_send {
-                let full = self.map_db_feature_to_full(f).await?;
-                let _ = out_tx
-                    .send(Ok(pb::FeatureUpdate {
-                        message_id: uuid::Uuid::new_v4().to_string(),
-                        action: pb::feature_update::Action::Snapshot as i32,
-                        feature: Some(full),
-                        feature_key: String::new(),
-                        error: String::new(),
-                    }))
-                    .await;
-            }
-
-            log::info!("gRPC: Snapshot sent successfully");
-        }
-
-        // Subscribe to shared broadcaster for live updates
-        let mut rx = self.updates_tx.subscribe();
+        let feature_repo = self.feature_repo.clone();
         let out_tx_clone = out_tx.clone();
         let requested_keys_clone = self.requested_keys.clone();
         let subscriptions_clone = self.active_subscriptions.clone();
 
+        // The snapshot is sent from the spawned task so this handler returns
+        // right away and tonic starts draining `out_rx`. Sending it inline would
+        // block forever once the snapshot exceeds the channel capacity.
         tokio::spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(update) => {
-                        // Determine feature key for the update
-                        let key_for_update = if let Some(ref feature) = update.feature {
-                            feature.key.clone()
-                        } else {
-                            update.feature_key.clone()
-                        };
+            let snapshot = Self::send_stream_snapshot(
+                feature_repo.as_ref(),
+                team_id,
+                client_id,
+                &subscription_filter,
+                &requested_keys_for_client,
+                &out_tx_clone,
+            )
+            .await;
 
-                        let should_send = stream_allows_feature(
-                            &requested_keys_clone,
-                            &subscriptions_clone,
-                            client_id,
-                            stream_id,
-                            &key_for_update,
-                        )
-                        .await;
+            if let Err(status) = snapshot {
+                log::error!(
+                    "gRPC: Failed to send snapshot for client {}: {}",
+                    client_id,
+                    status.message()
+                );
+                let _ = out_tx_clone.send(Err(status)).await;
+            } else {
+                loop {
+                    match rx.recv().await {
+                        Ok(update) => {
+                            // Determine feature key for the update
+                            let key_for_update = if let Some(ref feature) = update.feature {
+                                feature.key.clone()
+                            } else {
+                                update.feature_key.clone()
+                            };
 
-                        if should_send {
-                            log::info!(
-                                "gRPC: Sending feature update message_id={} key='{}' to edge client",
-                                update.message_id,
-                                key_for_update
-                            );
-                            if out_tx_clone.send(Ok(update)).await.is_err() {
-                                log::warn!("gRPC: Client stream closed, stopping update task");
-                                break;
-                            }
-                        } else {
-                            log::debug!(
-                                "gRPC: Filtering out update message_id={} key='{}' (not in subscription keys)",
-                                update.message_id,
-                                key_for_update
-                            );
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                    Err(broadcast::error::RecvError::Lagged(_)) => {
-                        let _ = out_tx_clone
-                            .send(Ok(pb::FeatureUpdate {
-                                message_id: uuid::Uuid::new_v4().to_string(),
-                                action: pb::feature_update::Action::Error as i32,
-                                feature: None,
-                                feature_key: String::new(),
-                                error: "lagged".into(),
-                            }))
+                            let should_send = stream_allows_feature(
+                                &requested_keys_clone,
+                                &subscriptions_clone,
+                                client_id,
+                                stream_id,
+                                &key_for_update,
+                            )
                             .await;
-                        break;
+
+                            if should_send {
+                                log::info!(
+                                    "gRPC: Sending feature update message_id={} key='{}' to edge client",
+                                    update.message_id,
+                                    key_for_update
+                                );
+                                if out_tx_clone.send(Ok(update)).await.is_err() {
+                                    log::warn!("gRPC: Client stream closed, stopping update task");
+                                    break;
+                                }
+                            } else {
+                                log::debug!(
+                                    "gRPC: Filtering out update message_id={} key='{}' (not in subscription keys)",
+                                    update.message_id,
+                                    key_for_update
+                                );
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            let _ = out_tx_clone
+                                .send(Ok(pb::FeatureUpdate {
+                                    message_id: uuid::Uuid::new_v4().to_string(),
+                                    action: pb::feature_update::Action::Error as i32,
+                                    feature: None,
+                                    feature_key: String::new(),
+                                    error: "lagged".into(),
+                                }))
+                                .await;
+                            break;
+                        }
                     }
                 }
             }
@@ -1725,7 +1767,7 @@ mod tests {
         evaluation_writer_tx: mpsc::Sender<EvaluationWriteJob>,
     ) -> FeatureEvaluationSvc {
         let pool = sqlx::PgPool::connect_lazy("postgres://unused").expect("lazy pool");
-        let feature_repo = Box::new(MockFeatureRepository::new());
+        let feature_repo = Arc::new(MockFeatureRepository::new());
         let client_repo = Box::new(MockClientRepository::new());
         let user_flag_repo =
             crate::database::user_flag_assignment::user_flag_assignment_repository(pool.clone());

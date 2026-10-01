@@ -1749,3 +1749,179 @@ async fn requested_keys_are_cleared_when_last_stream_disconnects() {
     );
     assert!(second_snapshot_keys.contains("feature-B"));
 }
+
+fn stream_client_mock(client_id: Uuid, team_id: Uuid, secret: String) -> MockClientRepository {
+    let mut client_mock = MockClientRepository::new();
+    client_mock.expect_get_client_by_id().returning(move |id| {
+        if id == client_id {
+            Ok(test_client(
+                id,
+                team_id,
+                team_id,
+                &secret,
+                db::ClientType::Web,
+                true,
+            ))
+        } else {
+            Err(Error::NotFound(id))
+        }
+    });
+    client_mock
+}
+
+async fn open_update_stream(
+    addr: SocketAddr,
+    client_id: String,
+    client_secret: String,
+    feature_keys: Vec<String>,
+) -> (
+    tonic::Streaming<pb::FeatureUpdate>,
+    tokio::sync::mpsc::Sender<pb::StreamRequest>,
+) {
+    let mut raw = FeatureEvaluationClient::connect(format!("http://{}", addr))
+        .await
+        .unwrap();
+    let (tx, rx) = tokio::sync::mpsc::channel::<pb::StreamRequest>(16);
+    tx.send(StreamRequest {
+        payload: Some(pb::stream_request::Payload::Subscribe(
+            pb::SubscribeRequest {
+                client_id,
+                client_secret,
+                feature_keys,
+                environment_id: String::new(),
+            },
+        )),
+    })
+    .await
+    .unwrap();
+    let stream = raw
+        .stream_updates(ReceiverStream::new(rx))
+        .await
+        .unwrap()
+        .into_inner();
+    (stream, tx)
+}
+
+fn upsert_for(key: &str, team_id: Uuid) -> pb::FeatureUpdate {
+    pb::FeatureUpdate {
+        message_id: Uuid::new_v4().to_string(),
+        action: pb::feature_update::Action::Upsert as i32,
+        feature: Some(pb::FeatureFull {
+            id: Uuid::new_v4().to_string(),
+            key: key.to_string(),
+            team_id: team_id.to_string(),
+            feature_type: "Simple".into(),
+            active: true,
+            ..Default::default()
+        }),
+        feature_key: String::new(),
+        error: String::new(),
+    }
+}
+
+#[tokio::test]
+async fn stream_snapshot_larger_than_channel_capacity_completes() {
+    let (updates_tx, _updates_rx) = broadcast::channel::<pb::FeatureUpdate>(8);
+    let (cid, sec) = client_ids();
+    let client_id = Uuid::parse_str(&cid).unwrap();
+    let team_id = Uuid::new_v4();
+    let client_mock = stream_client_mock(client_id, team_id, sec.clone());
+
+    let mut feature_mock = MockFeatureRepository::new();
+    feature_mock
+        .expect_get_feature_stages()
+        .returning(|_fid| Ok(Vec::new()));
+    feature_mock
+        .expect_get_features()
+        .returning(move |_team, _key, _ftype| {
+            Ok((0..100)
+                .map(|i| {
+                    test_feature(
+                        Uuid::new_v4(),
+                        &format!("bulk-{i:03}"),
+                        team_id,
+                        true,
+                        false,
+                        vec![],
+                    )
+                })
+                .collect())
+        });
+
+    let (addr, _server) =
+        start_server_with_repos(Box::new(feature_mock), Box::new(client_mock), updates_tx).await;
+
+    let (mut stream, _tx) = tokio::time::timeout(
+        Duration::from_secs(5),
+        open_update_stream(addr, cid, sec, vec![]),
+    )
+    .await
+    .expect("stream_updates did not return within 5s for a 100-feature snapshot");
+
+    let mut keys = std::collections::HashSet::new();
+    while keys.len() < 100 {
+        let update = recv_update_with_timeout(&mut stream, Duration::from_secs(2))
+            .await
+            .expect("snapshot stream ended before all 100 features arrived");
+        assert_eq!(update.action, pb::feature_update::Action::Snapshot as i32);
+        keys.insert(update.feature.unwrap().key);
+    }
+    assert_eq!(keys.len(), 100);
+}
+
+#[tokio::test]
+async fn stream_forwards_update_broadcast_during_snapshot_read() {
+    let (updates_tx, _updates_rx) = broadcast::channel::<pb::FeatureUpdate>(16);
+    let (cid, sec) = client_ids();
+    let client_id = Uuid::parse_str(&cid).unwrap();
+    let team_id = Uuid::new_v4();
+    let client_mock = stream_client_mock(client_id, team_id, sec.clone());
+
+    let mut feature_mock = MockFeatureRepository::new();
+    feature_mock
+        .expect_get_feature_stages()
+        .returning(|_fid| Ok(Vec::new()));
+    let tx_clone = updates_tx.clone();
+    feature_mock
+        .expect_get_features()
+        .returning(move |_team, _key, _ftype| {
+            // An operator change lands while the snapshot is being read.
+            let _ = tx_clone.send(upsert_for("x", team_id));
+            Ok(vec![test_feature(
+                Uuid::new_v4(),
+                "snapshot-feature",
+                team_id,
+                true,
+                false,
+                vec![],
+            )])
+        });
+
+    let (addr, _server) =
+        start_server_with_repos(Box::new(feature_mock), Box::new(client_mock), updates_tx).await;
+
+    let (mut stream, _tx) = tokio::time::timeout(
+        Duration::from_secs(5),
+        open_update_stream(addr, cid, sec, vec![]),
+    )
+    .await
+    .expect("stream_updates did not return");
+
+    let mut saw_upsert_x = false;
+    for _ in 0..5 {
+        let Some(update) = recv_update_with_timeout(&mut stream, Duration::from_millis(500)).await
+        else {
+            break;
+        };
+        if update.action == pb::feature_update::Action::Upsert as i32
+            && update.feature.as_ref().map(|f| f.key.as_str()) == Some("x")
+        {
+            saw_upsert_x = true;
+            break;
+        }
+    }
+    assert!(
+        saw_upsert_x,
+        "update broadcast during the snapshot read was lost"
+    );
+}
