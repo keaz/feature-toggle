@@ -394,30 +394,52 @@ where
                                                 }
                                             };
 
+                                        // Load the user on every request: a disabled (or deleted) user must be
+                                        // rejected even if their token has not yet been revoked.
+                                        let user_repo =
+                                            crate::database::user::user_repository(pool.clone());
+                                        let user =
+                                            match user_repo.get_user_by_id(user_id_uuid).await {
+                                                Ok(user) => user,
+                                                Err(crate::Error::NotFound(_)) => {
+                                                    let res = unauthorized_response(&ui_origin)
+                                                        .map_into_right_body();
+                                                    return Ok(req.into_response(res));
+                                                }
+                                                Err(err) => {
+                                                    log::error!(
+                                                        "Failed to load user for request {}: {:?}",
+                                                        path,
+                                                        err
+                                                    );
+                                                    let res = policy_internal_error_response()
+                                                        .map_into_right_body();
+                                                    return Ok(req.into_response(res));
+                                                }
+                                            };
+                                        if !user.enabled {
+                                            let res = unauthorized_response(&ui_origin)
+                                                .map_into_right_body();
+                                            return Ok(req.into_response(res));
+                                        }
+
                                         // Check if user has temporary password (unless this is resetPassword mutation)
                                         // Users with temporary passwords must reset their password before accessing other endpoints
                                         // However, the resetPassword mutation itself is allowed with valid JWT
-                                        if !is_reset_password_request {
-                                            let user_repo = crate::database::user::user_repository(
-                                                pool.clone(),
+                                        if !is_reset_password_request && user.is_temporary_password
+                                        {
+                                            let target = format!(
+                                                "{}/reset-password",
+                                                ui_origin.trim_end_matches('/')
                                             );
-                                            if let Ok(user) =
-                                                user_repo.get_user_by_id(user_id_uuid).await
-                                                && user.is_temporary_password
-                                            {
-                                                let target = format!(
-                                                    "{}/reset-password",
-                                                    ui_origin.trim_end_matches('/')
-                                                );
-                                                let res = HttpResponse::Unauthorized()
-                                                        .json(serde_json::json!({
-                                                            "error": "temporary_password_reset_required",
-                                                            "message": "You must reset your temporary password before continuing",
-                                                            "redirect": target
-                                                        }))
-                                                        .map_into_right_body();
-                                                return Ok(req.into_response(res));
-                                            }
+                                            let res = HttpResponse::Unauthorized()
+                                                .json(serde_json::json!({
+                                                    "error": "temporary_password_reset_required",
+                                                    "message": "You must reset your temporary password before continuing",
+                                                    "redirect": target
+                                                }))
+                                                .map_into_right_body();
+                                            return Ok(req.into_response(res));
                                         }
 
                                         let policy_actor = crate::logic::policy::PolicyActor::user(
@@ -1087,5 +1109,176 @@ mod tests {
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert!(resp.status().is_success());
+    }
+
+    // ---- DB-backed tests: disabled users are rejected by the guard ----
+
+    fn db_secret_logic() -> Box<dyn crate::logic::jwt_secret::JwtSecretLogic> {
+        use crate::logic::jwt_secret::MockJwtSecretLogic;
+        let mut mock = MockJwtSecretLogic::new();
+        mock.expect_get_current_secret()
+            .returning(|| Ok("test_secret".to_string()));
+        mock.expect_clone_box().returning(db_secret_logic);
+        Box::new(mock)
+    }
+
+    async fn db_pool() -> sqlx::PgPool {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL not set");
+        PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&url)
+            .await
+            .expect("connect to database")
+    }
+
+    /// Inserts a user and a live session token for it; returns (user id, bearer token).
+    async fn insert_user_with_session(pool: &sqlx::PgPool, enabled: bool) -> (Uuid, String) {
+        let user_id = Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO users (id, username, password_hash, first_name, last_name, email, enabled)
+               VALUES ($1, $2, 'x', 'Guard', 'Test', $3, $4)"#,
+        )
+        .bind(user_id)
+        .bind(format!("guard_user_{user_id}"))
+        .bind(format!("guard_user_{user_id}@example.com"))
+        .bind(enabled)
+        .execute(pool)
+        .await
+        .expect("insert user");
+
+        let token = create_jwt_token(user_id, "guard-user", false, vec![], "test_secret").unwrap();
+        crate::database::jwt_token::jwt_token_repository(pool.clone())
+            .store_token(
+                user_id,
+                hash_token(&token),
+                chrono::Utc::now() + chrono::Duration::hours(1),
+            )
+            .await
+            .expect("store token");
+        (user_id, token)
+    }
+
+    async fn call_guarded(
+        pool: &sqlx::PgPool,
+        token: &str,
+    ) -> (actix_web::http::StatusCode, serde_json::Value) {
+        let app = test::init_service(
+            App::new()
+                .wrap(JwtGuard::new(
+                    "http://ui".to_string(),
+                    db_secret_logic(),
+                    pool.clone(),
+                ))
+                .route(
+                    "/api/v1/teams",
+                    web::get()
+                        .to(|| async { HttpResponse::Ok().json(serde_json::json!({"ok": true})) }),
+                ),
+        )
+        .await;
+        let req = test::TestRequest::get()
+            .uri("/api/v1/teams")
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        let status = resp.status();
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        (status, body)
+    }
+
+    #[actix_web::test]
+    async fn allows_enabled_user_with_live_token() {
+        let pool = db_pool().await;
+        let (_, token) = insert_user_with_session(&pool, true).await;
+        let (status, body) = call_guarded(&pool, &token).await;
+        assert_eq!(status, actix_web::http::StatusCode::OK);
+        assert_eq!(body["ok"], true);
+    }
+
+    #[actix_web::test]
+    async fn rejects_disabled_user_even_with_unrevoked_token() {
+        let pool = db_pool().await;
+        let (user_id, token) = insert_user_with_session(&pool, true).await;
+        assert_eq!(
+            call_guarded(&pool, &token).await.0,
+            actix_web::http::StatusCode::OK
+        );
+
+        // Disable directly in the table (no revocation) to prove the guard itself checks.
+        sqlx::query("UPDATE users SET enabled = FALSE WHERE id = $1")
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let (status, body) = call_guarded(&pool, &token).await;
+        assert_eq!(status, actix_web::http::StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"], "log_in_required");
+        assert_eq!(body["redirect"], "http://ui/login");
+    }
+
+    #[actix_web::test]
+    async fn rejects_token_issued_before_user_was_disabled_via_users_api_path() {
+        use crate::database::user::user_repository_tx;
+        use crate::logic::user::UpdateUserInput;
+
+        let pool = db_pool().await;
+        let (user_id, token) = insert_user_with_session(&pool, true).await;
+        assert_eq!(
+            call_guarded(&pool, &token).await.0,
+            actix_web::http::StatusCode::OK
+        );
+
+        let repo = user_repository_tx(pool.clone());
+        let activity = crate::database::activity_log::activity_log_repository(pool.clone());
+        let mut tx = pool.begin().await.unwrap();
+        crate::logic::user_tx::update_user_in_tx(
+            &mut tx,
+            &repo,
+            activity.as_ref(),
+            crate::model::ID::from(user_id),
+            UpdateUserInput {
+                first_name: None,
+                last_name: None,
+                email: None,
+                mobile_number: None,
+                is_admin: None,
+                enabled: Some(false),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+
+        let (status, body) = call_guarded(&pool, &token).await;
+        assert_eq!(status, actix_web::http::StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"], "log_in_required");
+    }
+
+    #[actix_web::test]
+    async fn rejects_disabled_user_on_reset_password_route() {
+        let pool = db_pool().await;
+        let (_, token) = insert_user_with_session(&pool, false).await;
+
+        let app = test::init_service(
+            App::new()
+                .wrap(JwtGuard::new(
+                    "http://ui".to_string(),
+                    db_secret_logic(),
+                    pool.clone(),
+                ))
+                .route(
+                    "/api/v1/auth/reset-password",
+                    web::post().to(|| async { HttpResponse::Ok().finish() }),
+                ),
+        )
+        .await;
+        let req = test::TestRequest::post()
+            .uri("/api/v1/auth/reset-password")
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), actix_web::http::StatusCode::UNAUTHORIZED);
     }
 }

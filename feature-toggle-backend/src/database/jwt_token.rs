@@ -2,7 +2,7 @@ use crate::Error;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use mockall::automock;
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -37,6 +37,29 @@ impl Clone for Box<dyn JwtTokenRepository> {
     fn clone(&self) -> Box<dyn JwtTokenRepository> {
         self.clone_box()
     }
+}
+
+/// Revokes every active session token of a user on the given connection, so it
+/// can join a caller's transaction (e.g. when disabling a user).
+///
+/// This is the single place that defines "kill all sessions of a user".
+pub async fn revoke_all_user_tokens_tx(
+    conn: &mut PgConnection,
+    user_id: Uuid,
+) -> Result<u64, Error> {
+    let result = sqlx::query!(
+        r#"
+        UPDATE jwt_tokens 
+        SET is_revoked = TRUE, revoked_at = CURRENT_TIMESTAMP
+        WHERE user_id = $1 AND is_revoked = FALSE
+        "#,
+        user_id
+    )
+    .execute(&mut *conn)
+    .await
+    .map_err(Error::DatabaseError)?;
+
+    Ok(result.rows_affected())
 }
 
 pub fn jwt_token_repository(pool: PgPool) -> Box<dyn JwtTokenRepository> {
@@ -109,19 +132,8 @@ impl JwtTokenRepository for JwtTokenRepositoryImpl {
     }
 
     async fn revoke_all_user_tokens(&self, user_id: Uuid) -> Result<u64, Error> {
-        let result = sqlx::query!(
-            r#"
-            UPDATE jwt_tokens 
-            SET is_revoked = TRUE, revoked_at = CURRENT_TIMESTAMP
-            WHERE user_id = $1 AND is_revoked = FALSE
-            "#,
-            user_id
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(Error::DatabaseError)?;
-
-        Ok(result.rows_affected())
+        let mut conn = self.pool.acquire().await.map_err(Error::DatabaseError)?;
+        revoke_all_user_tokens_tx(&mut conn, user_id).await
     }
 
     async fn cleanup_expired_tokens(&self) -> Result<u64, Error> {

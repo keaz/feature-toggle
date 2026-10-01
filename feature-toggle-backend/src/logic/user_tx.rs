@@ -6,6 +6,7 @@
 
 use crate::Error;
 use crate::database::activity_log::{ActivityLogRepository, CreateActivityLog};
+use crate::database::jwt_token::revoke_all_user_tokens_tx;
 use crate::database::user::{CreateUser, UpdateUser, UserRepositoryTx};
 use crate::logic::ActorContext;
 use crate::logic::user::{ApiUser, RegisterUserInput, UpdateUserInput};
@@ -138,6 +139,8 @@ where
         return Err(Error::RecordAlreadyExists("email".to_string()));
     }
 
+    let input_enabled = input.enabled;
+
     // Update user within transaction
     let updated = repo
         .update_user_tx(
@@ -153,6 +156,12 @@ where
             },
         )
         .await?;
+
+    // A disabled user must not keep any live session: revoke in the same transaction
+    // so the disable and the revocation commit (or roll back) together.
+    if input_enabled == Some(false) {
+        revoke_all_user_tokens_tx(conn, updated.id).await?;
+    }
 
     // Extract actor information
     let (actor_id, actor_name) = actor

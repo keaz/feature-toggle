@@ -103,12 +103,7 @@ where
         Box::pin(async move {
             // Initialize cache once lazily
             if !state.is_initialized() {
-                if let Ok(exists) = sqlx::query_scalar::<_, bool>(
-                    "SELECT EXISTS(SELECT 1 FROM users WHERE is_admin = TRUE)",
-                )
-                .fetch_one(&pool)
-                .await
-                {
+                if let Ok(exists) = crate::logic::policy::admin_exists(&pool).await {
                     state.set_exists(exists);
                 } else {
                     // On DB error, be conservative: allow the request to proceed

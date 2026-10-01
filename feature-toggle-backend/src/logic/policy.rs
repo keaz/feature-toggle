@@ -384,11 +384,18 @@ async fn evaluate_team_resource_update(
     }
 }
 
-async fn admin_exists(pool: &sqlx::PgPool) -> Result<bool, PolicyError> {
-    sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM users WHERE is_admin = TRUE)")
-        .fetch_one(pool)
-        .await
-        .map_err(|e| PolicyError::Internal(crate::Error::DatabaseError(e)))
+/// Whether at least one enabled admin account exists. Disabled admins cannot log
+/// in, so they must not count towards the "admin already configured" decision.
+pub(crate) async fn admin_exists<'e, E>(executor: E) -> Result<bool, PolicyError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM users WHERE is_admin = TRUE AND enabled = TRUE)",
+    )
+    .fetch_one(executor)
+    .await
+    .map_err(|e| PolicyError::Internal(crate::Error::DatabaseError(e)))
 }
 
 async fn user_in_team(
@@ -708,5 +715,34 @@ mod tests {
         let admin_result =
             enforce_for_route(&pool, &Method::POST, "/api/v1/admins", Some(actor_admin)).await;
         assert!(admin_result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn admin_exists_ignores_disabled_admins() {
+        let pool = test_pool().await;
+        let mut tx = pool.begin().await.expect("begin tx");
+
+        // Disable every admin inside a transaction that is rolled back afterwards.
+        sqlx::query("UPDATE users SET enabled = FALSE WHERE is_admin = TRUE")
+            .execute(&mut *tx)
+            .await
+            .expect("disable admins");
+        assert!(!admin_exists(&mut *tx).await.expect("query admins"));
+
+        // A single enabled admin flips the answer back.
+        let enabled_admin = Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO users (id, username, password_hash, first_name, last_name, email, is_admin, enabled)
+               VALUES ($1, $2, 'x', 'A', 'B', $3, TRUE, TRUE)"#,
+        )
+        .bind(enabled_admin)
+        .bind(format!("policy_admin_exists_{enabled_admin}"))
+        .bind(format!("policy_admin_exists_{enabled_admin}@example.com"))
+        .execute(&mut *tx)
+        .await
+        .expect("insert admin");
+        assert!(admin_exists(&mut *tx).await.expect("query admins"));
+
+        tx.rollback().await.expect("rollback");
     }
 }

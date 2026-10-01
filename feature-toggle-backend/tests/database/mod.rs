@@ -16,5 +16,6 @@ mod system_client_approval_test;
 mod team_test;
 mod transaction_purity_test;
 mod user_db;
+mod user_disable_test;
 mod user_flag_assignment_test;
 mod variant_test;

@@ -36,6 +36,8 @@ pub enum Error {
     InvalidInput(String),
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
+    #[error("Account is disabled")]
+    AccountDisabled,
 }
 
 pub async fn run() -> std::io::Result<()> {
