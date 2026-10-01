@@ -426,3 +426,116 @@ async fn push_user_assignments_rejects_environment_of_another_team() {
     assert_eq!(status.code(), tonic::Code::PermissionDenied, "{status:?}");
     assert_eq!(unknown_ids_rows, 0);
 }
+
+fn seeded_assignment(
+    user_id: &str,
+    variant: &str,
+    with_credentials: bool,
+) -> pb::UserFlagAssignment {
+    pb::UserFlagAssignment {
+        user_id: user_id.to_string(),
+        feature_id: SEEDED_FEATURE_ID.to_string(),
+        environment_id: SEEDED_ENV_ID.to_string(),
+        assigned: true,
+        client_id: if with_credentials {
+            SEEDED_CLIENT_ID.to_string()
+        } else {
+            String::new()
+        },
+        client_secret: if with_credentials {
+            SEEDED_CLIENT_SECRET.to_string()
+        } else {
+            String::new()
+        },
+        variant: variant.to_string(),
+    }
+}
+
+#[tokio::test]
+async fn push_user_assignments_keeps_last_write_for_duplicate_keys_in_one_stream() {
+    if std::env::var("DATABASE_URL").is_err() {
+        eprintln!("Skipping test: DATABASE_URL is not set");
+        return;
+    }
+
+    let pool = init_pg_pool().await;
+    run_migrations(&pool)
+        .await
+        .expect("feature evaluation migrations should be applied");
+    let (addr, server_handle) = start_server(pool.clone()).await;
+    let mut client = FeatureEvaluationClient::connect(format!("http://{}", addr))
+        .await
+        .expect("connect grpc client");
+
+    let user_id = format!("p03-last-write-user-{}", Uuid::new_v4());
+    let result = client
+        .push_user_assignments(tokio_stream::iter(vec![
+            seeded_assignment(&user_id, "variant-a", true),
+            seeded_assignment(&user_id, "variant-b", false),
+        ]))
+        .await;
+
+    let stored = sqlx::query_as::<_, (Option<String>,)>(
+        "SELECT variant FROM user_flag_assignments WHERE user_id = $1",
+    )
+    .bind(&user_id)
+    .fetch_all(&pool)
+    .await
+    .expect("query stored assignments");
+
+    sqlx::query("DELETE FROM user_flag_assignments WHERE user_id = $1")
+        .bind(&user_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup assignments");
+    server_handle.abort();
+
+    result.expect("push with a repeated key should succeed");
+    assert_eq!(stored, vec![(Some("variant-b".to_string()),)]);
+}
+
+#[tokio::test]
+async fn push_user_assignments_stores_every_row_of_a_large_stream() {
+    if std::env::var("DATABASE_URL").is_err() {
+        eprintln!("Skipping test: DATABASE_URL is not set");
+        return;
+    }
+
+    let pool = init_pg_pool().await;
+    run_migrations(&pool)
+        .await
+        .expect("feature evaluation migrations should be applied");
+    let (addr, server_handle) = start_server(pool.clone()).await;
+    let mut client = FeatureEvaluationClient::connect(format!("http://{}", addr))
+        .await
+        .expect("connect grpc client");
+
+    // More than two backend chunks, with a partial last chunk.
+    const ROWS: usize = 1500;
+    let prefix = format!("p03-large-stream-{}-", Uuid::new_v4());
+    let messages: Vec<_> = (0..ROWS)
+        .map(|i| seeded_assignment(&format!("{prefix}{i}"), "variant-a", i == 0))
+        .collect();
+
+    let result = client
+        .push_user_assignments(tokio_stream::iter(messages))
+        .await;
+
+    let count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::bigint FROM user_flag_assignments WHERE user_id LIKE $1",
+    )
+    .bind(format!("{prefix}%"))
+    .fetch_one(&pool)
+    .await
+    .expect("count stored assignments");
+
+    sqlx::query("DELETE FROM user_flag_assignments WHERE user_id LIKE $1")
+        .bind(format!("{prefix}%"))
+        .execute(&pool)
+        .await
+        .expect("cleanup assignments");
+    server_handle.abort();
+
+    result.expect("large push should succeed");
+    assert_eq!(count, ROWS as i64);
+}

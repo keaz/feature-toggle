@@ -13,4 +13,5 @@ mod stage_contexts_test;
 mod team_test;
 mod transaction_purity_test;
 mod user_db;
+mod user_flag_assignment_test;
 mod variant_test;

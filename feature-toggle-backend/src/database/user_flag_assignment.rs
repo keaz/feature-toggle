@@ -25,6 +25,11 @@ pub trait UserFlagAssignmentRepository: Send + Sync {
         variant: Option<String>,
     ) -> Result<(), Error>;
 
+    /// Upserts all rows in one statement. Keys `(user_id, feature_id,
+    /// environment_id)` must be unique within `rows`; Postgres rejects an
+    /// `ON CONFLICT DO UPDATE` that touches the same row twice.
+    async fn upsert_many(&self, rows: &[UserFlagAssignmentRow]) -> Result<(), Error>;
+
     /// Returns true only when every feature and every environment in the given
     /// lists exists and belongs to `team_id`. Duplicate ids are allowed.
     async fn all_owned_by_team(
@@ -85,6 +90,42 @@ impl UserFlagAssignmentRepository for UserFlagAssignmentRepositoryImpl {
         .bind(environment_id)
         .bind(assigned)
         .bind(variant.as_deref())
+        .execute(&self.pool)
+        .await;
+
+        handle_error(None, res).map(|_| ())
+    }
+
+    async fn upsert_many(&self, rows: &[UserFlagAssignmentRow]) -> Result<(), Error> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let mut user_ids = Vec::with_capacity(rows.len());
+        let mut feature_ids = Vec::with_capacity(rows.len());
+        let mut environment_ids = Vec::with_capacity(rows.len());
+        let mut assigned = Vec::with_capacity(rows.len());
+        let mut variants: Vec<Option<String>> = Vec::with_capacity(rows.len());
+        for row in rows {
+            user_ids.push(row.user_id.clone());
+            feature_ids.push(row.feature_id);
+            environment_ids.push(row.environment_id);
+            assigned.push(row.assigned);
+            variants.push(row.variant.clone());
+        }
+
+        let res = sqlx::query(
+            r#"INSERT INTO user_flag_assignments (user_id, feature_id, environment_id, assigned, variant)
+               SELECT u.user_id, u.feature_id, u.environment_id, u.assigned, u.variant
+               FROM UNNEST($1::text[], $2::uuid[], $3::uuid[], $4::bool[], $5::text[])
+                    AS u(user_id, feature_id, environment_id, assigned, variant)
+               ON CONFLICT (user_id, feature_id, environment_id)
+               DO UPDATE SET assigned = EXCLUDED.assigned, variant = EXCLUDED.variant, assigned_at = now()"#,
+        )
+        .bind(&user_ids)
+        .bind(&feature_ids)
+        .bind(&environment_ids)
+        .bind(&assigned)
+        .bind(&variants)
         .execute(&self.pool)
         .await;
 
