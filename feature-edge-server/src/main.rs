@@ -60,6 +60,115 @@ impl CachedAssignment {
     }
 }
 
+/// Shards of each per-feature assignment map. dashmap's default (4x the
+/// cores) cache-pads every shard, which costs several KB per feature.
+const ASSIGNMENT_SHARDS_PER_FEATURE: usize = 8;
+
+/// Sticky assignments indexed by feature, so purging a feature is one
+/// removal instead of a scan over every cached assignment.
+#[derive(Default)]
+pub struct AssignmentCache {
+    // feature_id -> "user_id|environment_id" -> assignment
+    by_feature: dashmap::DashMap<String, dashmap::DashMap<String, CachedAssignment>>,
+}
+
+impl AssignmentCache {
+    fn user_key(user_id: &str, environment_id: &str) -> String {
+        format!("{user_id}|{environment_id}")
+    }
+
+    pub fn get(
+        &self,
+        user_id: &str,
+        feature_id: &str,
+        environment_id: &str,
+    ) -> Option<CachedAssignment> {
+        self.by_feature
+            .get(feature_id)?
+            .get(&Self::user_key(user_id, environment_id))
+            .map(|entry| entry.value().clone())
+    }
+
+    pub fn insert(
+        &self,
+        user_id: &str,
+        feature_id: &str,
+        environment_id: &str,
+        assignment: CachedAssignment,
+    ) {
+        let key = Self::user_key(user_id, environment_id);
+        // Common case: only a read lock on the outer shard.
+        if let Some(users) = self.by_feature.get(feature_id) {
+            users.insert(key, assignment);
+            return;
+        }
+        self.by_feature
+            .entry(feature_id.to_string())
+            .or_insert_with(|| dashmap::DashMap::with_shard_amount(ASSIGNMENT_SHARDS_PER_FEATURE))
+            .insert(key, assignment);
+    }
+
+    pub fn remove_feature(&self, feature_id: &str) {
+        self.by_feature.remove(feature_id);
+    }
+
+    pub fn clear(&self) {
+        self.by_feature.clear();
+    }
+
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.by_feature.iter().map(|users| users.len()).sum()
+    }
+
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// Sticky assignments waiting to be flushed to the backend. Purging a feature
+/// bumps its generation instead of draining the queue: entries queued under
+/// an older generation are dropped when popped.
+#[derive(Default)]
+pub struct PendingAssignments {
+    queue: crossbeam::queue::SegQueue<(u64, grpc_client::UserAssignment)>,
+    generations: dashmap::DashMap<String, u64>,
+}
+
+impl PendingAssignments {
+    fn generation(&self, feature_id: &str) -> u64 {
+        self.generations
+            .get(feature_id)
+            .map_or(0, |generation| *generation)
+    }
+
+    /// Queue an assignment under its feature's current generation.
+    pub fn push(&self, assignment: grpc_client::UserAssignment) {
+        let generation = self.generation(&assignment.feature_id);
+        self.queue.push((generation, assignment));
+    }
+
+    /// Next assignment whose feature was not purged since it was queued.
+    pub fn pop(&self) -> Option<grpc_client::UserAssignment> {
+        while let Some((generation, assignment)) = self.queue.pop() {
+            if generation == self.generation(&assignment.feature_id) {
+                return Some(assignment);
+            }
+        }
+        None
+    }
+
+    /// Drop every assignment of `feature_id` queued so far.
+    pub fn purge_feature(&self, feature_id: &str) {
+        *self.generations.entry(feature_id.to_string()).or_insert(0) += 1;
+    }
+
+    pub fn clear(&self) {
+        while self.queue.pop().is_some() {}
+    }
+}
+
 /// How long a rejected client credential is remembered. Kept short because a
 /// client created or re-enabled after a failed attempt is rejected for up to
 /// this long.
@@ -131,9 +240,9 @@ pub struct AppState {
     // serves one team: the feature cache only holds this team's features.
     edge_team_id: Arc<std::sync::OnceLock<String>>,
     connected: Arc<std::sync::atomic::AtomicBool>,
-    // Sticky assignments cache with variant information and pending flush queue (lock-free!)
-    assigned_cache: Arc<dashmap::DashMap<String, CachedAssignment>>,
-    pending_assignments: Arc<crossbeam::queue::SegQueue<grpc_client::UserAssignment>>,
+    // Sticky assignments cache with variant information and pending flush queue
+    assigned_cache: Arc<AssignmentCache>,
+    pending_assignments: Arc<PendingAssignments>,
     flush_interval: Duration,
     assignment_flush_batch_size: usize,
     // Evaluation events tracking (using channel for lock-free writes)
@@ -398,30 +507,19 @@ impl AppState {
 
     pub fn clear_assignment_caches(&self) {
         self.assigned_cache.clear();
-        while self.pending_assignments.pop().is_some() {}
+        self.pending_assignments.clear();
     }
 
+    /// Drop the feature's cached and pending assignments. O(1): independent
+    /// of how many assignments are cached or queued.
     pub async fn purge_assignments_for_feature(&self, feature_id: &str) {
-        // DashMap allows concurrent iteration and removal
-        self.assigned_cache
-            .retain(|key, _| key.split('|').nth(1) != Some(feature_id));
-
-        // SegQueue doesn't have retain, so we drain, filter, and re-add
-        let mut to_keep = Vec::new();
-        while let Some(assignment) = self.pending_assignments.pop() {
-            if assignment.feature_id != feature_id {
-                to_keep.push(assignment);
-            }
-        }
-        // Re-add the assignments we want to keep
-        for assignment in to_keep {
-            self.pending_assignments.push(assignment);
-        }
+        self.assigned_cache.remove_feature(feature_id);
+        self.pending_assignments.purge_feature(feature_id);
     }
 
     pub fn purge_all_assignments(&self) {
         self.assigned_cache.clear();
-        while self.pending_assignments.pop().is_some() {}
+        self.pending_assignments.clear();
     }
 }
 
@@ -510,8 +608,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         client_secret: cfg.client_secret.clone(),
         edge_team_id: Arc::new(std::sync::OnceLock::new()),
         connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        assigned_cache: Arc::new(dashmap::DashMap::new()),
-        pending_assignments: Arc::new(crossbeam::queue::SegQueue::new()),
+        assigned_cache: Arc::new(crate::AssignmentCache::default()),
+        pending_assignments: Arc::new(crate::PendingAssignments::default()),
         flush_interval: cfg.flush.assignment_flush_interval(),
         assignment_flush_batch_size: cfg.flush.assignment_flush_batch_size(),
         evaluation_event_tx: event_tx,
@@ -578,14 +676,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_purge_assignments_for_feature() {
+    fn test_state() -> AppState {
         let mapped_cache = Arc::new(MappedFeatureCache::new(1000));
         let client_info_cache = Arc::new(ClientInfoCache::new(Duration::from_secs(300)));
         let channel = Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
         let grpc_client = pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
         let (event_tx, _event_rx) = tokio::sync::mpsc::channel(10);
-        let state = AppState {
+        AppState {
             mapped_cache,
             client_info_cache,
             grpc: Arc::new(tokio::sync::Mutex::new(grpc_client)),
@@ -593,8 +690,8 @@ mod tests {
             client_secret: "secret".into(),
             edge_team_id: Arc::new(std::sync::OnceLock::new()),
             connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            assigned_cache: Arc::new(dashmap::DashMap::new()),
-            pending_assignments: Arc::new(crossbeam::queue::SegQueue::new()),
+            assigned_cache: Arc::new(crate::AssignmentCache::default()),
+            pending_assignments: Arc::new(crate::PendingAssignments::default()),
             flush_interval: Duration::from_secs(60),
             assignment_flush_batch_size: 1000,
             evaluation_event_tx: event_tx,
@@ -603,11 +700,128 @@ mod tests {
             evaluation_event_queue_capacity: 10,
             evaluation_event_dropped: Arc::new(AtomicU64::new(0)),
             retry_config: config::RetryConfig::default(),
-        };
+        }
+    }
+
+    fn sticky_true() -> CachedAssignment {
+        CachedAssignment {
+            value: Some(serde_json::json!(true)),
+            variant: None,
+            reason: evaluation_engine::EvaluationReason::TargetingMatch,
+        }
+    }
+
+    fn pending(user_id: &str, feature_id: &str) -> crate::grpc_client::UserAssignment {
+        crate::grpc_client::UserAssignment {
+            user_id: user_id.into(),
+            feature_id: feature_id.into(),
+            environment_id: "env-1".into(),
+            assigned: true,
+            variant: None,
+        }
+    }
+
+    /// Purge cost must not grow with the total number of assignments.
+    #[tokio::test]
+    async fn purge_cost_does_not_depend_on_total_assignments() {
+        const FEATURES: usize = 1_000;
+        const USERS_PER_FEATURE: usize = 100;
+        let state = test_state();
+        for feature in 0..FEATURES {
+            let feature_id = format!("feature-{feature}");
+            for user in 0..USERS_PER_FEATURE {
+                let user_id = format!("user-{user}");
+                state
+                    .assigned_cache
+                    .insert(&user_id, &feature_id, "env-1", sticky_true());
+                state
+                    .pending_assignments
+                    .push(pending(&user_id, &feature_id));
+            }
+        }
+
+        let started = std::time::Instant::now();
+        for feature in 0..FEATURES {
+            state
+                .purge_assignments_for_feature(&format!("feature-{feature}"))
+                .await;
+        }
+        let elapsed = started.elapsed();
+
+        assert!(state.assigned_cache.is_empty());
+        assert!(state.pending_assignments.pop().is_none());
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "{FEATURES} purges over {} assignments took {elapsed:?}",
+            FEATURES * USERS_PER_FEATURE
+        );
+    }
+
+    #[tokio::test]
+    async fn purge_keeps_other_features_and_later_assignments() {
+        let state = test_state();
+        state
+            .assigned_cache
+            .insert("user-1", "x", "env-1", sticky_true());
+        state
+            .assigned_cache
+            .insert("user-1", "y", "env-1", sticky_true());
+        state.pending_assignments.push(pending("user-1", "x"));
+        state.pending_assignments.push(pending("user-1", "y"));
+
+        state.purge_assignments_for_feature("x").await;
+        // Assignments made after the purge are kept.
+        state
+            .assigned_cache
+            .insert("user-2", "x", "env-1", sticky_true());
+        state.pending_assignments.push(pending("user-2", "x"));
+        // Purging a feature without assignments is a no-op.
+        state.purge_assignments_for_feature("unknown").await;
+
+        assert!(state.assigned_cache.get("user-1", "x", "env-1").is_none());
+        assert!(state.assigned_cache.get("user-1", "y", "env-1").is_some());
+        assert!(state.assigned_cache.get("user-2", "x", "env-1").is_some());
+
+        let mut remaining = Vec::new();
+        while let Some(assignment) = state.pending_assignments.pop() {
+            remaining.push((assignment.user_id, assignment.feature_id));
+        }
+        remaining.sort();
+        assert_eq!(
+            remaining,
+            vec![
+                ("user-1".to_string(), "y".to_string()),
+                ("user-2".to_string(), "x".to_string()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn purge_all_assignments_clears_everything() {
+        let state = test_state();
+        state
+            .assigned_cache
+            .insert("user-1", "x", "env-1", sticky_true());
+        state.pending_assignments.push(pending("user-1", "x"));
+
+        state.purge_all_assignments();
+
+        assert!(state.assigned_cache.is_empty());
+        assert!(state.pending_assignments.pop().is_none());
+        // The queue still accepts new assignments afterwards.
+        state.pending_assignments.push(pending("user-2", "x"));
+        assert!(state.pending_assignments.pop().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_purge_assignments_for_feature() {
+        let state = test_state();
 
         let feature_id = "fea-123";
         state.assigned_cache.insert(
-            format!("user-1|{}|env-1", feature_id),
+            "user-1",
+            feature_id,
+            "env-1",
             CachedAssignment {
                 value: Some(serde_json::json!(true)),
                 variant: None,
@@ -615,7 +829,9 @@ mod tests {
             },
         );
         state.assigned_cache.insert(
-            format!("user-2|{}|env-1", feature_id),
+            "user-2",
+            feature_id,
+            "env-1",
             CachedAssignment {
                 value: Some(serde_json::json!(true)),
                 variant: None,
@@ -623,7 +839,9 @@ mod tests {
             },
         );
         state.assigned_cache.insert(
-            "user-3|other|env".to_string(),
+            "user-3",
+            "other",
+            "env",
             CachedAssignment {
                 value: Some(serde_json::json!(true)),
                 variant: None,
@@ -657,9 +875,16 @@ mod tests {
         assert!(
             state
                 .assigned_cache
-                .iter()
-                .all(|entry| !entry.key().contains(feature_id))
+                .get("user-1", feature_id, "env-1")
+                .is_none()
         );
+        assert!(
+            state
+                .assigned_cache
+                .get("user-2", feature_id, "env-1")
+                .is_none()
+        );
+        assert!(state.assigned_cache.get("user-3", "other", "env").is_some());
 
         // Drain queue to check contents
         let mut remaining = Vec::new();
