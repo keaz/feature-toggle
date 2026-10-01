@@ -4,7 +4,7 @@
 |---|---|
 | Type | Performance (latency, lock contention). Also data loss of pending assignments. |
 | Severity | High under load |
-| Status | Steps 1–2 fixed on branch `perf/p01-purge-assignments`; step 3 open |
+| Status | Fixed: steps 1–2 on branch `perf/p01-purge-assignments`, step 3 on `review-followups` |
 | Crate | `feature-edge-server` |
 | Behavior change | None for the structural fix (steps 1–2). Step 3 is optional and changes persisted data. |
 | Depends on | [B18](B18-assignment-warmup-caches-true-for-all-variants.md) if you do step 3 |
