@@ -530,8 +530,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_send_initial_subscribe_with_cached_keys() {
-        // Create a cache and populate it with features
+    async fn test_send_initial_subscribe_requests_full_snapshot_with_cached_keys() {
+        // A normal reconnect with a warm cache still asks for every team flag,
+        // so flags created while disconnected reach the edge.
         let mapped_cache = Arc::new(crate::MappedFeatureCache::new(100));
 
         // Add some features to the cache
@@ -555,7 +556,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::pb::StreamRequest>(10);
 
         // Call send_initial_subscribe
-        send_initial_subscribe(&tx, &app_state, false).await;
+        send_initial_subscribe(&tx, &app_state).await;
 
         // Receive the message
         let received = rx.recv().await;
@@ -571,18 +572,12 @@ mod tests {
                 assert_eq!(subscribe.client_id, "test-client-id");
                 assert_eq!(subscribe.client_secret, "test-secret");
 
-                // Verify that cached feature keys were sent
-                assert_eq!(subscribe.feature_keys.len(), 5);
-
-                // Verify all feature keys are present
-                for i in 1..=5 {
-                    let expected_key = format!("feature_key_{}", i);
-                    assert!(
-                        subscribe.feature_keys.contains(&expected_key),
-                        "Expected to find {} in feature_keys",
-                        expected_key
-                    );
-                }
+                // Empty keys subscribe to all features (full snapshot).
+                assert!(
+                    subscribe.feature_keys.is_empty(),
+                    "reconnect must not narrow the subscription to cached keys: {:?}",
+                    subscribe.feature_keys
+                );
             }
             _ => panic!("Expected Subscribe payload"),
         }
@@ -596,7 +591,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::pb::StreamRequest>(10);
 
-        send_initial_subscribe(&tx, &app_state, false).await;
+        send_initial_subscribe(&tx, &app_state).await;
 
         let received = rx.recv().await;
         assert!(received.is_some());
@@ -606,41 +601,6 @@ mod tests {
             crate::pb::stream_request::Payload::Subscribe(subscribe) => {
                 // Empty cache should send empty feature_keys array
                 assert_eq!(subscribe.feature_keys.len(), 0);
-            }
-            _ => panic!("Expected Subscribe payload"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_send_initial_subscribe_forces_full_snapshot_after_lag() {
-        let mapped_cache = Arc::new(crate::MappedFeatureCache::new(100));
-        mapped_cache
-            .insert(
-                "team-1",
-                Arc::new(evaluation_engine::Feature {
-                    id: "id_1".to_string(),
-                    key: "feature_key_1".to_string(),
-                    feature_type: "Simple".to_string(),
-                    active: true,
-                    enabled: true,
-                    dependencies: vec![],
-                    stages: vec![],
-                    variants: vec![],
-                }),
-            )
-            .await;
-        let app_state = test_app_state(mapped_cache);
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::pb::StreamRequest>(10);
-
-        send_initial_subscribe(&tx, &app_state, true).await;
-
-        let received = rx.recv().await.expect("missing subscribe request");
-        match received.payload.expect("missing payload") {
-            crate::pb::stream_request::Payload::Subscribe(subscribe) => {
-                assert!(
-                    subscribe.feature_keys.is_empty(),
-                    "full resync should request a complete snapshot"
-                );
             }
             _ => panic!("Expected Subscribe payload"),
         }
@@ -764,6 +724,34 @@ mod tests {
             "Mapped cache should contain the feature"
         );
         assert_eq!(cached_mapped.unwrap().id, "feature-id-123");
+    }
+
+    #[tokio::test]
+    async fn test_handle_feature_update_delete_removes_cached_key() {
+        let mapped_cache = Arc::new(crate::MappedFeatureCache::new(100));
+        let app_state = test_app_state(mapped_cache.clone());
+        handle_feature_update(
+            &app_state,
+            feature_update(
+                crate::pb::feature_update::Action::Upsert,
+                team_feature_full("gone-id", "gone", "team-1"),
+            ),
+        )
+        .await;
+        assert!(mapped_cache.get("gone").await.is_some());
+
+        // The backend sends Deletes with only the key (no feature payload).
+        let delete = crate::pb::FeatureUpdate {
+            action: crate::pb::feature_update::Action::Delete as i32,
+            feature: None,
+            feature_key: "gone".to_string(),
+            error: String::new(),
+            message_id: String::new(),
+        };
+        assert!(!handle_feature_update(&app_state, delete).await);
+
+        assert!(mapped_cache.get("gone").await.is_none());
+        assert!(mapped_cache.get_by_id("gone-id").await.is_none());
     }
 
     fn team_feature_full(id: &str, key: &str, team_id: &str) -> crate::pb::FeatureFull {
@@ -922,7 +910,7 @@ mod tests {
         assert!(app_state.pending_assignments.pop().is_none());
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::pb::StreamRequest>(10);
-        send_initial_subscribe(&tx, &app_state, true).await;
+        send_initial_subscribe(&tx, &app_state).await;
         let subscribe = rx.recv().await.expect("missing subscribe message");
         match subscribe.payload.expect("missing payload") {
             crate::pb::stream_request::Payload::Subscribe(subscribe) => {

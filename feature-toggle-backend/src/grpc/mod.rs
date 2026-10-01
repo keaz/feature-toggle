@@ -134,6 +134,27 @@ impl crate::logic::metrics::MetricLogic for NoopMetricLogic {
     }
 }
 
+/// Builds a Delete for the internal `updates_tx` broadcast channel.
+///
+/// A proto Delete carries only `feature_key`, and keys are unique only per
+/// team. So the owning team rides in `feature.team_id` while the update is on
+/// the internal channel (and in cluster replication). `stream_updates` forwards
+/// it only to that team's streams and strips `feature` before sending, so edges
+/// receive a plain Delete.
+pub fn team_scoped_delete(team_id: Uuid, feature_key: &str) -> pb::FeatureUpdate {
+    pb::FeatureUpdate {
+        message_id: Uuid::new_v4().to_string(),
+        action: pb::feature_update::Action::Delete as i32,
+        feature: Some(pb::FeatureFull {
+            key: feature_key.to_string(),
+            team_id: team_id.to_string(),
+            ..Default::default()
+        }),
+        feature_key: feature_key.to_string(),
+        error: String::new(),
+    }
+}
+
 type ActiveSubscriptionMap =
     std::collections::HashMap<Uuid, std::collections::HashMap<Uuid, SubscriptionFilter>>;
 
@@ -840,6 +861,9 @@ impl FeatureEvaluationSvc {
         requested_keys_for_client: &std::collections::HashSet<String>,
         out_tx: &mpsc::Sender<Result<pb::FeatureUpdate, Status>>,
     ) -> Result<(), Status> {
+        // Requested keys with no exact match for this team. The edge may still
+        // cache them (renamed or removed while it was disconnected).
+        let mut missing_keys = Vec::new();
         let features_to_send = match subscription_filter.snapshot_keys(requested_keys_for_client) {
             None => {
                 log::info!("gRPC: Sending full snapshot for client {}", client_id);
@@ -863,7 +887,10 @@ impl FeatureEvaluationSvc {
                             .get_feature_by_key(team_id, feature_key.clone())
                             .await
                             .map_err(|e| Status::internal(format!("db error: {}", e)))?;
-                        all_features.extend(feature);
+                        match feature {
+                            Some(feature) => all_features.push(feature),
+                            None => missing_keys.push(feature_key.clone()),
+                        }
                     }
                     all_features
                 }
@@ -874,6 +901,20 @@ impl FeatureEvaluationSvc {
             "gRPC: Snapshot contains {} features",
             features_to_send.len()
         );
+
+        // Deletes go before Snapshots: after a rename, the old and new keys
+        // share a feature id, and the edge drops that id's index on Delete.
+        for feature_key in missing_keys {
+            let _ = out_tx
+                .send(Ok(pb::FeatureUpdate {
+                    message_id: uuid::Uuid::new_v4().to_string(),
+                    action: pb::feature_update::Action::Delete as i32,
+                    feature: None,
+                    feature_key,
+                    error: String::new(),
+                }))
+                .await;
+        }
 
         // Send each feature as a snapshot update
         for f in features_to_send {
@@ -1368,20 +1409,31 @@ impl FeatureEvaluation for FeatureEvaluationSvc {
             } else {
                 loop {
                     match rx.recv().await {
-                        Ok(update) => {
+                        Ok(mut update) => {
                             // The broadcast carries every team's updates. Keys are
                             // unique only per team, so forward only this client's team.
-                            if update.action == pb::feature_update::Action::Upsert as i32
-                                && update
-                                    .feature
-                                    .as_ref()
-                                    .is_some_and(|feature| feature.team_id != team_id_str)
-                            {
+                            let is_upsert =
+                                update.action == pb::feature_update::Action::Upsert as i32;
+                            let is_delete =
+                                update.action == pb::feature_update::Action::Delete as i32;
+                            let other_team = match update.feature.as_ref() {
+                                Some(feature) => {
+                                    (is_upsert || is_delete) && feature.team_id != team_id_str
+                                }
+                                // A Delete without an owning team cannot be scoped.
+                                None => is_delete,
+                            };
+                            if other_team {
                                 log::debug!(
                                     "gRPC: Filtering out update message_id={} (other team)",
                                     update.message_id
                                 );
                                 continue;
+                            }
+                            if is_delete {
+                                // The team tag is internal (see `team_scoped_delete`);
+                                // on the wire a Delete carries only `feature_key`.
+                                update.feature = None;
                             }
 
                             // Determine feature key for the update
