@@ -250,40 +250,18 @@ struct EngineFeatureBase {
 /// Number of features mapped per batched child-row load in a stream snapshot.
 pub(crate) const SNAPSHOT_MAPPING_BATCH_SIZE: usize = 200;
 
-/// Which features carry their variants in a mapped `pb::FeatureFull`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum VariantScope {
-    /// Only Contextual features carry variants (snapshot, `GetFeatureByKey`,
-    /// Evaluate).
-    ContextualOnly,
-    /// Every feature carries its variants (`broadcast` live updates).
-    AllFeatureTypes,
-}
-
-impl VariantScope {
-    fn includes(self, feature_type: &db::FeatureType) -> bool {
-        match self {
-            Self::ContextualOnly => matches!(feature_type, db::FeatureType::Contextual),
-            Self::AllFeatureTypes => true,
-        }
-    }
-}
-
 /// Maps features to `pb::FeatureFull` with one batched load of their stages,
 /// criteria and variants, keeping the input order. This is the one mapping
-/// used by snapshots, `GetFeatureByKey` and live updates.
+/// used by snapshots, `GetFeatureByKey` and live updates. Only Contextual
+/// features carry variants.
 pub(crate) async fn map_features_to_full(
     repo: &dyn crate::database::feature::FeatureRepository,
     features: Vec<db::Feature>,
-    variant_scope: VariantScope,
 ) -> Result<Vec<pb::FeatureFull>, crate::Error> {
-    let children =
-        FeatureChildren::load(repo, &features.iter().collect::<Vec<_>>(), variant_scope).await?;
+    let children = FeatureChildren::load(repo, &features.iter().collect::<Vec<_>>()).await?;
     Ok(features
         .into_iter()
-        .map(|f| {
-            FeatureEvaluationSvc::map_db_feature_to_full_with_children(f, &children, variant_scope)
-        })
+        .map(|f| FeatureEvaluationSvc::map_db_feature_to_full_with_children(f, &children))
         .collect())
 }
 
@@ -304,7 +282,6 @@ impl FeatureChildren {
     async fn load(
         repo: &dyn crate::database::feature::FeatureRepository,
         features: &[&db::Feature],
-        variant_scope: VariantScope,
     ) -> Result<Self, crate::Error> {
         if features.is_empty() {
             return Ok(Self::default());
@@ -330,17 +307,16 @@ impl FeatureChildren {
             criteria.extend(repo.get_stage_criteria_batch(team_id, &stage_ids).await?);
         }
 
-        // Variants are only loaded for the features that carry them.
-        let variant_feature_ids = features
+        // Variants are only mapped for Contextual features.
+        let contextual_ids = features
             .iter()
-            .filter(|f| variant_scope.includes(&f.feature_type))
+            .filter(|f| matches!(f.feature_type, db::FeatureType::Contextual))
             .map(|f| f.id)
             .collect::<Vec<_>>();
-        let variants = if variant_feature_ids.is_empty() {
+        let variants = if contextual_ids.is_empty() {
             std::collections::HashMap::new()
         } else {
-            repo.get_feature_variants_batch(&variant_feature_ids)
-                .await?
+            repo.get_feature_variants_batch(&contextual_ids).await?
         };
 
         Ok(Self {
@@ -646,10 +622,9 @@ impl FeatureEvaluationSvc {
         }
 
         let graph_features = feature_graph.values().collect::<Vec<_>>();
-        let children =
-            FeatureChildren::load(repo.as_ref(), &graph_features, VariantScope::ContextualOnly)
-                .await
-                .map_err(db_error_status)?;
+        let children = FeatureChildren::load(repo.as_ref(), &graph_features)
+            .await
+            .map_err(db_error_status)?;
 
         let mut base_map: std::collections::HashMap<Uuid, EngineFeatureBase> =
             std::collections::HashMap::new();
@@ -882,7 +857,7 @@ impl FeatureEvaluationSvc {
         repo: &dyn crate::database::feature::FeatureRepository,
         f: db::Feature,
     ) -> Result<pb::FeatureFull, Status> {
-        let mut mapped = map_features_to_full(repo, vec![f], VariantScope::ContextualOnly)
+        let mut mapped = map_features_to_full(repo, vec![f])
             .await
             .map_err(db_error_status)?;
         Ok(mapped.remove(0))
@@ -891,7 +866,6 @@ impl FeatureEvaluationSvc {
     fn map_db_feature_to_full_with_children(
         f: db::Feature,
         children: &FeatureChildren,
-        variant_scope: VariantScope,
     ) -> pb::FeatureFull {
         // Map stages with their criterias
         let stages = children.stages_of(f.id);
@@ -974,7 +948,9 @@ impl FeatureEvaluationSvc {
             })
             .collect::<Vec<_>>();
 
-        let variant_msgs = if variant_scope.includes(&f.feature_type) {
+        // Only Contextual features carry variants, in snapshots and live
+        // updates alike.
+        let variant_msgs = if matches!(f.feature_type, db::FeatureType::Contextual) {
             let db_variants = children.variants_of(f.id);
 
             db_variants
@@ -1095,7 +1071,7 @@ impl FeatureEvaluationSvc {
             if batch.is_empty() {
                 break;
             }
-            let mapped = map_features_to_full(feature_repo, batch, VariantScope::ContextualOnly)
+            let mapped = map_features_to_full(feature_repo, batch)
                 .await
                 .map_err(db_error_status)?;
             for full in mapped {

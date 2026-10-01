@@ -95,19 +95,14 @@ impl ContextLogicImpl {
                 .iter()
                 .filter_map(|id| by_id.remove(id))
                 .collect::<Vec<_>>();
-            let mapped = match crate::grpc::map_features_to_full(
-                &*self.feature_repo,
-                features,
-                crate::grpc::VariantScope::ContextualOnly,
-            )
-            .await
-            {
-                Ok(mapped) => mapped,
-                Err(e) => {
-                    log::warn!("Failed to map features for context update broadcast: {e}");
-                    continue;
-                }
-            };
+            let mapped =
+                match crate::grpc::map_features_to_full(&*self.feature_repo, features).await {
+                    Ok(mapped) => mapped,
+                    Err(e) => {
+                        log::warn!("Failed to map features for context update broadcast: {e}");
+                        continue;
+                    }
+                };
             for full in mapped {
                 let _ = self.updates_tx.send(crate::grpc::pb::FeatureUpdate {
                     message_id: uuid::Uuid::new_v4().to_string(),

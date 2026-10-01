@@ -166,12 +166,7 @@ impl KillSwitchRollbackScheduler {
         f: crate::database::entity::Feature,
     ) -> Result<crate::grpc::pb::FeatureFull, crate::Error> {
         let feature_repository = crate::database::feature::feature_repository(pool);
-        let mut mapped = crate::grpc::map_features_to_full(
-            &*feature_repository,
-            vec![f],
-            crate::grpc::VariantScope::ContextualOnly,
-        )
-        .await?;
+        let mut mapped = crate::grpc::map_features_to_full(&*feature_repository, vec![f]).await?;
         Ok(mapped.remove(0))
     }
 }

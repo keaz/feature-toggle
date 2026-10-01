@@ -19,3 +19,7 @@ All notable user-visible changes to FluxGate are recorded here.
   **How many users change:** let `q` be the share of `D`'s bucket range that is truthy. Among users whose evaluation of `F` reaches `D`'s weighted check, `2q(1−q)` see a different `D` result: half of them (`q(1−q)`) lose `F` and half gain it. For example, a 50% rollout flips 50% of those users and a 10% rollout flips 18%.
 
   **When it takes effect:** backend REST and gRPC evaluations change immediately after the backend is upgraded. Edge servers change once they run the new engine; users who already have a cached truthy result for `F` on an edge keep it until `F` is re-synced (the next upsert or snapshot of `F`, in practice the next edge restart or reconnect).
+
+### Fixed
+
+- **Live updates no longer send variants for Simple flags (backend).** Live `FeatureUpdate` upserts from REST feature and criteria changes and from approvals included the stored variants of `SIMPLE` features, and edge servers applied them. The stream snapshot, `GetFeatureByKey` and REST evaluation omit variants for `SIMPLE` features. So a Simple flag with non-boolean stored variants could act non-boolean on an edge after a live update until the next snapshot. Live updates now use the snapshot mapping: only `CONTEXTUAL` features carry variants.

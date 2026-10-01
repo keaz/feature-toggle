@@ -3543,19 +3543,9 @@ fn fixture_with_simple_variants() -> MappingFixture {
 #[tokio::test]
 async fn broadcast_mapping_output_is_pinned() {
     let fixture = fixture_with_simple_variants();
-    let mut expected = expected_mapping_messages(&fixture);
-    // Recorded behavior before the P02 follow-up: the broadcast mapper also
-    // sends the variants of Simple features.
-    expected[0].variants = vec![
-        pb::FeatureVariant {
-            control: "small".into(),
-            value: "\"s\"".into(),
-        },
-        pb::FeatureVariant {
-            control: "large".into(),
-            value: "\"l\"".into(),
-        },
-    ];
+    // Same messages as the snapshot: no variants for the Simple feature
+    // `pin-a`. Before the Simple-variants fix, `pin-a` carried its two.
+    let expected = expected_mapping_messages(&fixture);
 
     let mut feature_mock = MockFeatureRepository::new();
     let counters = child_loader_mock(&fixture, &mut feature_mock);
@@ -3578,9 +3568,10 @@ async fn broadcast_mapping_output_is_pinned() {
     assert_eq!(counters.stages.get(), 0);
     assert_eq!(counters.criteria.get(), 0);
     assert_eq!(counters.variants.get(), 0);
+    // Variants are loaded for the Contextual feature only.
     assert_eq!(counters.stages_batch.get(), 3);
     assert_eq!(counters.criteria_batch.get(), 3);
-    assert_eq!(counters.variants_batch.get(), 3);
+    assert_eq!(counters.variants_batch.get(), 1);
 }
 
 /// Pins the Upserts that a context update broadcasts for the features that
@@ -3666,4 +3657,56 @@ async fn context_update_broadcast_output_is_pinned() {
     assert_eq!(counters.stages_batch.get(), 1);
     assert_eq!(counters.criteria_batch.get(), 1);
     assert_eq!(counters.variants_batch.get(), 1);
+}
+
+/// A live update for a Simple feature carries no variants, like the snapshot:
+/// otherwise a Simple flag with non-boolean variants could act non-boolean on
+/// an edge after a live update. Each broadcast mapping equals the snapshot
+/// message of the same feature.
+#[tokio::test]
+async fn broadcast_upsert_for_simple_feature_matches_snapshot_without_variants() {
+    let fixture = fixture_with_simple_variants();
+    let (updates_tx, _updates_rx) = broadcast::channel::<pb::FeatureUpdate>(8);
+    let (cid, sec) = client_ids();
+    let client_id = Uuid::parse_str(&cid).unwrap();
+    let client_mock = stream_client_mock(client_id, fixture.team_id, sec.clone());
+    let (addr, _server) = start_server_with_repos(
+        Box::new(mapping_repo_mock(&fixture)),
+        Box::new(client_mock),
+        updates_tx,
+    )
+    .await;
+    let (mut stream, _tx) = open_update_stream(addr, cid, sec, vec![]).await;
+    let mut snapshot = Vec::new();
+    while snapshot.len() < fixture.features.len() {
+        let update = recv_update_with_timeout(&mut stream, Duration::from_secs(2))
+            .await
+            .expect("snapshot ended early");
+        snapshot.push(update.feature.expect("snapshot carries a feature"));
+    }
+
+    let mut feature_mock = MockFeatureRepository::new();
+    child_loader_mock(&fixture, &mut feature_mock);
+    for feature in fixture.features.clone() {
+        let key = feature.key.clone();
+        let simple = matches!(feature.feature_type, db::FeatureType::Simple);
+        let live = feature_toggle_backend::broadcast::map_db_feature_to_full_for_broadcast(
+            &feature_mock,
+            feature,
+        )
+        .await
+        .expect("mapping succeeds");
+        if simple {
+            assert!(
+                live.variants.is_empty(),
+                "live update for Simple feature {key} carries variants: {:?}",
+                live.variants
+            );
+        }
+        let from_snapshot = snapshot
+            .iter()
+            .find(|f| f.key == key)
+            .expect("feature is in the snapshot");
+        assert_eq!(&live, from_snapshot, "live update differs for {key}");
+    }
 }
