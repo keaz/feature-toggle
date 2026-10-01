@@ -27,9 +27,18 @@ pub struct CachedAssignment {
     pub reason: evaluation_engine::EvaluationReason,
 }
 
+/// How long a rejected client credential is remembered. Kept short because a
+/// client created or re-enabled after a failed attempt is rejected for up to
+/// this long.
+const CLIENT_INFO_FAILURE_TTL: Duration = Duration::from_secs(30);
+const CLIENT_INFO_FAILURE_CAPACITY: u64 = 10_000;
+
 pub struct ClientInfoCache {
     // Cache with TTL for client info
     cache: moka::future::Cache<String, pb::GetClientInfoResponse>,
+    // Permanent auth failures (bad credentials, unknown or disabled client),
+    // so repeated bad requests do not reach the backend.
+    failures: moka::future::Cache<String, tonic::Code>,
 }
 
 impl ClientInfoCache {
@@ -41,7 +50,19 @@ impl ClientInfoCache {
                 .time_to_live(ttl)
                 .max_capacity(1000) // Support up to 1000 different clients
                 .build(),
+            failures: moka::future::Cache::builder()
+                .time_to_live(CLIENT_INFO_FAILURE_TTL)
+                .max_capacity(CLIENT_INFO_FAILURE_CAPACITY)
+                .build(),
         }
+    }
+
+    pub async fn get_failure(&self, key: &str) -> Option<tonic::Code> {
+        self.failures.get(key).await
+    }
+
+    pub async fn insert_failure(&self, key: String, code: tonic::Code) {
+        self.failures.insert(key, code).await;
     }
 
     pub async fn get(&self, client_id: &str) -> Option<pb::GetClientInfoResponse> {

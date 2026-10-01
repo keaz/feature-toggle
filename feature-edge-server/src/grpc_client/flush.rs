@@ -1,7 +1,7 @@
-use super::{AppState, UserAssignment, assignment_key, backoff, pb};
+use super::{AppState, UserAssignment, assignment_key, backoff, is_transient, pb};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
-use tokio_retry::Retry;
+use tokio_retry::RetryIf;
 use tracing::{error, info, warn};
 
 /// Flush queued sticky user-assignment writes. Failed batches are requeued so
@@ -228,7 +228,7 @@ pub async fn run_evaluation_flush_task(
                 client.push_evaluation_events(req).await
             };
 
-            match Retry::spawn(retry_strategy, action).await {
+            match RetryIf::spawn(retry_strategy, action, is_transient).await {
                 Ok(response) => {
                     let resp = response.into_inner();
                     total_sent += chunk.len();

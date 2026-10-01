@@ -1,4 +1,6 @@
-use crate::grpc_client::{assignment_key, fetch_feature_via_grpc, get_or_fetch_client_info};
+use crate::grpc_client::{
+    assignment_key, fetch_feature_via_grpc, get_or_fetch_client_info, try_get_or_fetch_client_info,
+};
 use crate::pb;
 use crate::{AppState, EvaluationEvent};
 use actix_web::{HttpResponse, Responder, http::header, web};
@@ -946,6 +948,27 @@ fn ofrep_error(
     }
 }
 
+/// OFREP response for a failed client-info lookup. Bad credentials and
+/// unknown clients get 401, disabled clients 403. Returns `None` for other
+/// failures, which the handlers keep reporting as 502.
+fn ofrep_client_auth_failure(
+    status: &tonic::Status,
+) -> Option<(actix_web::http::StatusCode, &'static str)> {
+    use actix_web::http::StatusCode;
+    use tonic::Code;
+    match status.code() {
+        Code::Unauthenticated | Code::InvalidArgument | Code::NotFound => Some((
+            StatusCode::UNAUTHORIZED,
+            "Client credentials are missing or invalid",
+        )),
+        Code::PermissionDenied => Some((
+            StatusCode::FORBIDDEN,
+            "Client is not permitted to evaluate flags",
+        )),
+        _ => None,
+    }
+}
+
 fn normalize_ofrep_context_environment(
     mut context: OFREPContext,
     environment_id: &str,
@@ -1160,6 +1183,7 @@ fn if_none_match_contains(if_none_match: &str, etag: &str) -> bool {
         (status = 400, description = "Invalid request", body = OFREPErrorResponse),
         (status = 404, description = "Flag not found", body = OFREPErrorResponse),
         (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
         (status = 500, description = "Server error", body = OFREPErrorResponse)
     ),
     tag = "ofrep"
@@ -1190,9 +1214,16 @@ pub async fn ofrep_evaluate_flag(
     }
 
     // Fetch client information for origin validation
-    let client_info = match get_or_fetch_client_info(&app, &client_id, &client_secret).await {
-        Some(info) => info,
-        None => {
+    let client_info = match try_get_or_fetch_client_info(&app, &client_id, &client_secret).await {
+        Ok(info) => info,
+        Err(status) => {
+            if let Some((http_status, details)) = ofrep_client_auth_failure(&status) {
+                return Ok(HttpResponse::build(http_status).json(ofrep_error(
+                    feature_key,
+                    "GENERAL",
+                    Some(details.to_string()),
+                )));
+            }
             return Err(actix_web::error::ErrorBadGateway(
                 "Failed to fetch client info",
             ));
@@ -1299,9 +1330,17 @@ pub async fn ofrep_evaluate_flags_bulk(
         }));
     }
 
-    let client_info = match get_or_fetch_client_info(&app, &client_id, &client_secret).await {
-        Some(info) => info,
-        None => {
+    let client_info = match try_get_or_fetch_client_info(&app, &client_id, &client_secret).await {
+        Ok(info) => info,
+        Err(status) => {
+            if let Some((http_status, details)) = ofrep_client_auth_failure(&status) {
+                return Ok(
+                    HttpResponse::build(http_status).json(OFREPBulkEvaluationFailure {
+                        error_code: "GENERAL".to_string(),
+                        error_details: Some(details.to_string()),
+                    }),
+                );
+            }
             return Err(actix_web::error::ErrorBadGateway(
                 "Failed to fetch client info",
             ));
@@ -1543,6 +1582,8 @@ mod tests {
         seen_secrets: Arc<std::sync::Mutex<Vec<String>>>,
         /// Keys for which `GetFeatureByKey` answers `NotFound`.
         missing_keys: Arc<std::sync::Mutex<Vec<String>>>,
+        /// When set, `GetClientInfo` always fails with this code.
+        client_info_error: Arc<std::sync::Mutex<Option<tonic::Code>>>,
     }
 
     impl OfrepMockBackend {
@@ -1621,6 +1662,9 @@ mod tests {
             request: tonic::Request<backend_pb::GetClientInfoRequest>,
         ) -> Result<tonic::Response<backend_pb::GetClientInfoResponse>, tonic::Status> {
             let req = request.into_inner();
+            if let Some(code) = *self.client_info_error.lock().unwrap() {
+                return Err(tonic::Status::new(code, "forced client info failure"));
+            }
             if let Some(status) = self.reject_credentials(&req.client_id, &req.client_secret) {
                 return Err(status);
             }
@@ -1757,6 +1801,119 @@ mod tests {
         assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
         let seen = backend.seen_secrets.lock().unwrap().clone();
         assert_eq!(seen, vec!["secret".to_string()]);
+    }
+
+    /// Send one OFREP request (single flag or bulk) as `client_id` and return
+    /// the response status and body.
+    async fn ofrep_call(
+        app_state: crate::AppState,
+        bulk: bool,
+        client_id: &str,
+    ) -> (actix_web::http::StatusCode, serde_json::Value) {
+        let service = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(app_state))
+                .route(
+                    "/ofrep/v1/evaluate/flags/{key}",
+                    web::post().to(ofrep_evaluate_flag),
+                )
+                .route(
+                    "/ofrep/v1/evaluate/flags",
+                    web::post().to(ofrep_evaluate_flags_bulk),
+                ),
+        )
+        .await;
+        let uri = if bulk {
+            "/ofrep/v1/evaluate/flags"
+        } else {
+            "/ofrep/v1/evaluate/flags/my-flag"
+        };
+        let req = actix_test::TestRequest::post()
+            .uri(uri)
+            .insert_header(("authorization", format!("Bearer {client_id}")))
+            .set_json(serde_json::json!({ "context": { "targetingKey": "u1" } }))
+            .to_request();
+        let resp = actix_test::call_service(&service, req).await;
+        let status = resp.status();
+        let body = actix_test::read_body(resp).await;
+        let body = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+        (status, body)
+    }
+
+    #[actix_web::test]
+    async fn ofrep_maps_client_info_failures_to_auth_statuses() {
+        use actix_web::http::StatusCode;
+        let cases = [
+            (tonic::Code::Unauthenticated, StatusCode::UNAUTHORIZED),
+            (tonic::Code::InvalidArgument, StatusCode::UNAUTHORIZED),
+            (tonic::Code::NotFound, StatusCode::UNAUTHORIZED),
+            (tonic::Code::PermissionDenied, StatusCode::FORBIDDEN),
+            (tonic::Code::Unavailable, StatusCode::BAD_GATEWAY),
+            (tonic::Code::Internal, StatusCode::BAD_GATEWAY),
+        ];
+        for bulk in [false, true] {
+            for (code, expected) in cases {
+                let (app_state, backend) = ofrep_app_with_mock_backend().await;
+                *backend.client_info_error.lock().unwrap() = Some(code);
+
+                let (status, body) = ofrep_call(app_state, bulk, "client").await;
+
+                assert_eq!(status, expected, "bulk={bulk} code={code:?}");
+                if expected != StatusCode::BAD_GATEWAY {
+                    assert_eq!(
+                        body["errorCode"],
+                        serde_json::json!("GENERAL"),
+                        "bulk={bulk} code={code:?}"
+                    );
+                }
+                if !bulk && expected != StatusCode::BAD_GATEWAY {
+                    assert_eq!(body["key"], serde_json::json!("my-flag"));
+                }
+            }
+        }
+    }
+
+    #[actix_web::test]
+    async fn ofrep_unknown_client_without_secret_returns_unauthorized() {
+        // Another client ID with no secret: the backend rejects it with
+        // InvalidArgument("client_secret is required").
+        for bulk in [false, true] {
+            let (app_state, _backend) = ofrep_app_with_mock_backend().await;
+            let (status, _) = ofrep_call(app_state, bulk, "other-client").await;
+            assert_eq!(
+                status,
+                actix_web::http::StatusCode::UNAUTHORIZED,
+                "bulk={bulk}"
+            );
+        }
+    }
+
+    #[actix_web::test]
+    async fn evaluate_keeps_bad_gateway_for_client_info_auth_failures() {
+        for code in [tonic::Code::Unauthenticated, tonic::Code::PermissionDenied] {
+            let (app_state, backend) = ofrep_app_with_mock_backend().await;
+            *backend.client_info_error.lock().unwrap() = Some(code);
+            let service = actix_test::init_service(
+                App::new()
+                    .app_data(web::Data::new(app_state))
+                    .route("/evaluate", web::post().to(evaluate_handler)),
+            )
+            .await;
+            let req = actix_test::TestRequest::post()
+                .uri("/evaluate")
+                .set_json(serde_json::json!({
+                    "flagKey": "my-flag",
+                    "context": { "bucketingKey": "u1" }
+                }))
+                .to_request();
+            let resp = actix_test::call_service(&service, req).await;
+
+            assert_eq!(
+                resp.status(),
+                actix_web::http::StatusCode::BAD_GATEWAY,
+                "code={code:?}"
+            );
+        }
     }
 
     /// A Simple feature owned by `team_id` with one stage in `env-1`.

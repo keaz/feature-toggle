@@ -4,7 +4,7 @@
 |---|---|
 | Type | Bug (spec compliance) |
 | Severity | Low |
-| Status | Confirmed (code traced) |
+| Status | Fixed on branch `fix/b06-ofrep-auth-status` |
 | Crate | `feature-edge-server` |
 | Behavior change | Yes, OFREP only: 502 becomes 401/403 for auth failures |
 | Depends on | [B05](B05-ofrep-empty-client-secret.md) |

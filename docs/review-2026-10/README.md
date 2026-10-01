@@ -43,9 +43,9 @@ Review of `feature-toggle-backend/`, `feature-edge-server/` and `evaluation-engi
 | [x] | [B03](issues/B03-stream-updates-cross-team.md) | Stream updates are not filtered by team | Critical | backend | Yes (intended) | — |
 | [x] | [B04](issues/B04-stream-snapshot-deadlock-and-lost-updates.md) | Stream snapshot hangs above 64 features and loses updates | Critical | backend | Minor | — |
 | [x] | [B05](issues/B05-ofrep-empty-client-secret.md) | OFREP sends an empty client secret, so OFREP never works | Critical | edge | Yes (intended) | — |
-| [ ] | [B06](issues/B06-ofrep-auth-error-status.md) | OFREP returns 502 for bad credentials instead of 401/403 | Low | edge | Yes (OFREP only) | B05 |
+| [x] | [B06](issues/B06-ofrep-auth-error-status.md) | OFREP returns 502 for bad credentials instead of 401/403 | Low | edge | Yes (OFREP only) | B05 |
 | [x] | [B07](issues/B07-retry-backoff-math.md) | Retry backoff is base^n (500 ms, 250 s, 34.7 h) | High | edge | Waits only | — |
-| [ ] | [B08](issues/B08-retry-permanent-grpc-errors.md) | Edge retries permanent gRPC errors | Medium | edge | Fail fast | — |
+| [x] | [B08](issues/B08-retry-permanent-grpc-errors.md) | Edge retries permanent gRPC errors | Medium | edge | Fail fast | — |
 | [ ] | [B09](issues/B09-heartbeat-task-leak.md) | Heartbeat task leaks on every reconnect | Medium | edge | No | — |
 | [x] | [B10](issues/B10-edge-env-overrides-ignored.md) | `EDGE_*` env overrides are silently ignored | High | edge | Yes (env starts applying) | — |
 | [ ] | [B11](issues/B11-assignment-push-missing-team-check.md) | `push_user_assignments` writes other teams' assignments | High | backend | Yes (intended) | — |
@@ -65,7 +65,7 @@ Review of `feature-toggle-backend/`, `feature-edge-server/` and `evaluation-engi
 | [ ] | [P01](issues/P01-purge-assignments-hot-path.md) | `purge_assignments_for_feature` is O(all assignments) on hot paths | High | edge | No (steps 1–2) | B18 (step 3 only) |
 | [ ] | [P02](issues/P02-snapshot-n-plus-one-queries.md) | N+1 queries (3–5 per stage) on snapshot and Evaluate | High | backend | No | — |
 | [ ] | [P03](issues/P03-batched-assignment-upsert.md) | One DB upsert per assignment row | Medium | backend | Minor | B11 |
-| [ ] | [P04](issues/P04-cache-client-auth-failures.md) | Failed client-info lookups not cached | Low | edge | No | B06, B08 |
+| [x] | [P04](issues/P04-cache-client-auth-failures.md) | Failed client-info lookups not cached | Low | edge | No | B06, B08 |
 
 ### Security
 

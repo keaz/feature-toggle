@@ -4,7 +4,7 @@
 |---|---|
 | Type | Performance (backend load, abuse resistance) |
 | Severity | Low |
-| Status | Confirmed (code traced) |
+| Status | Fixed on branch `perf/p04-cache-auth-failures` |
 | Crate | `feature-edge-server` |
 | Behavior change | No for valid clients. Bad credentials are rejected from cache for a short TTL. |
 | Depends on | [B06](B06-ofrep-auth-error-status.md), [B08](B08-retry-permanent-grpc-errors.md) |
