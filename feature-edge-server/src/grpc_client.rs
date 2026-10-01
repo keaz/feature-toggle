@@ -102,11 +102,12 @@ pub async fn fetch_feature_via_grpc(
 
 /// Fetch client information from the backend via gRPC with retry logic
 /// This is the low-level function that always fetches from backend
+#[allow(clippy::result_large_err)]
 async fn fetch_client_info_via_grpc_uncached(
     app: &AppState,
     client_id: &str,
     client_secret: &str,
-) -> Option<pb::GetClientInfoResponse> {
+) -> Result<pb::GetClientInfoResponse, tonic::Status> {
     // Retry with doubling, capped backoff using config values
     let retry_strategy = backoff(&app.retry_config);
     let action = || async {
@@ -126,14 +127,14 @@ async fn fetch_client_info_via_grpc_uncached(
         Ok(resp) => {
             let client_info = resp.into_inner();
             info!("Successfully fetched client info for: {}", client_id);
-            Some(client_info)
+            Ok(client_info)
         }
         Err(e) => {
             error!(
                 "gRPC GetClientInfo error after retries for client '{}': {}",
                 client_id, e
             );
-            None
+            Err(e)
         }
     }
 }
@@ -145,13 +146,26 @@ pub async fn get_or_fetch_client_info(
     client_id: &str,
     client_secret: &str,
 ) -> Option<pb::GetClientInfoResponse> {
+    try_get_or_fetch_client_info(app, client_id, client_secret)
+        .await
+        .ok()
+}
+
+/// Like [`get_or_fetch_client_info`], but returns the backend status on
+/// failure so callers can tell bad credentials from an unavailable backend.
+#[allow(clippy::result_large_err)]
+pub async fn try_get_or_fetch_client_info(
+    app: &AppState,
+    client_id: &str,
+    client_secret: &str,
+) -> Result<pb::GetClientInfoResponse, tonic::Status> {
     // Cache entries are scoped by both ID and secret so rotated credentials
     // cannot reuse stale authorization results.
     let cache_key = format!("{client_id}:{client_secret}");
 
     // Check cache first
     if let Some(cached) = app.client_info_cache.get(&cache_key).await {
-        return Some(cached);
+        return Ok(cached);
     }
 
     // Cache miss - fetch from backend
@@ -162,7 +176,7 @@ pub async fn get_or_fetch_client_info(
         .insert(cache_key, client_info.clone())
         .await;
 
-    Some(client_info)
+    Ok(client_info)
 }
 
 /// Load user assignments from backend on startup
