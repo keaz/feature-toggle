@@ -2,7 +2,8 @@
 set -e
 
 echo "Starting feature-toggle-backend..."
-echo "DATABASE_URL: $DATABASE_URL"
+# Never print DATABASE_URL itself: it contains the database password.
+echo "DATABASE_URL: $(echo "$DATABASE_URL" | sed 's#://[^@]*@#://***@#')"
 
 # Handle configuration file mounting
 if [ -f "/app/config/config.toml" ]; then
@@ -13,11 +14,8 @@ else
     cp /app/config.toml.default /app/config.toml
 fi
 
-# Extract password from DATABASE_URL
-DB_PASSWORD=$(echo "$DATABASE_URL" | sed -n 's/.*:\/\/.*:\(.*\)@.*/\1/p')
-echo "Extracted password: '$DB_PASSWORD'"
-
 # Wait for PostgreSQL to be ready
+# DB_PASSWORD=$(echo "$DATABASE_URL" | sed -n 's/.*:\/\/.*:\(.*\)@.*/\1/p')
 # echo "Waiting for PostgreSQL to be ready..."
 # until PGPASSWORD="$DB_PASSWORD" psql -h postgres_server -U postgres -d feature_toggle -c '\q'; do
 #   echo "PostgreSQL is unavailable - sleeping"
