@@ -805,6 +805,109 @@ mod tests {
         assert!(mapped_cache.get_by_id("gone-id").await.is_none());
     }
 
+    fn delete_update(feature_key: &str) -> crate::pb::FeatureUpdate {
+        crate::pb::FeatureUpdate {
+            action: crate::pb::feature_update::Action::Delete as i32,
+            feature: None,
+            feature_key: feature_key.to_string(),
+            error: String::new(),
+            message_id: String::new(),
+        }
+    }
+
+    fn cached_assignment() -> crate::CachedAssignment {
+        crate::CachedAssignment {
+            value: Some(serde_json::json!(true)),
+            variant: None,
+            reason: evaluation_engine::EvaluationReason::Static,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_delete_of_old_key_after_rename_keeps_renamed_feature() {
+        use crate::pb::feature_update::Action;
+        let mapped_cache = Arc::new(crate::MappedFeatureCache::new(100));
+        let app_state = test_app_state(mapped_cache.clone());
+
+        let mut old = team_feature_full("renamed-id", "old-key", "team-1");
+        old.dependencies = vec![crate::pb::FeatureDependencyFull {
+            depends_on_id: "dep-id".to_string(),
+            ..Default::default()
+        }];
+        let mut new = old.clone();
+        new.key = "new-key".to_string();
+
+        handle_feature_update(&app_state, feature_update(Action::Upsert, old)).await;
+        // The renamed feature's Upsert arrives before the old key's Delete.
+        handle_feature_update(&app_state, feature_update(Action::Upsert, new)).await;
+        app_state
+            .assigned_cache
+            .insert("user-1", "renamed-id", "env-1", cached_assignment());
+
+        assert!(!handle_feature_update(&app_state, delete_update("old-key")).await);
+        mapped_cache.run_pending_tasks().await;
+
+        assert!(mapped_cache.get("old-key").await.is_none());
+        assert_eq!(
+            mapped_cache
+                .get("new-key")
+                .await
+                .expect("renamed feature")
+                .id,
+            "renamed-id"
+        );
+        assert_eq!(
+            mapped_cache
+                .get_by_id("renamed-id")
+                .await
+                .expect("id index of the renamed feature")
+                .key,
+            "new-key"
+        );
+        assert_eq!(
+            mapped_cache.get_dependency_ids("renamed-id").await,
+            vec!["dep-id".to_string()]
+        );
+        // The renamed feature's own Upsert already purged its assignments;
+        // the stale Delete must not drop ones recorded after it.
+        assert!(
+            app_state
+                .assigned_cache
+                .get("user-1", "renamed-id", "env-1")
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_plain_delete_removes_id_index_dependencies_and_assignments() {
+        use crate::pb::feature_update::Action;
+        let mapped_cache = Arc::new(crate::MappedFeatureCache::new(100));
+        let app_state = test_app_state(mapped_cache.clone());
+
+        let mut feature = team_feature_full("plain-id", "plain-key", "team-1");
+        feature.dependencies = vec![crate::pb::FeatureDependencyFull {
+            depends_on_id: "dep-id".to_string(),
+            ..Default::default()
+        }];
+        handle_feature_update(&app_state, feature_update(Action::Upsert, feature)).await;
+        app_state
+            .assigned_cache
+            .insert("user-1", "plain-id", "env-1", cached_assignment());
+
+        assert!(!handle_feature_update(&app_state, delete_update("plain-key")).await);
+        mapped_cache.run_pending_tasks().await;
+
+        assert!(mapped_cache.get("plain-key").await.is_none());
+        assert!(mapped_cache.get_by_id("plain-id").await.is_none());
+        assert!(mapped_cache.get_dependency_ids("plain-id").await.is_empty());
+        assert!(
+            app_state
+                .assigned_cache
+                .get("user-1", "plain-id", "env-1")
+                .is_none()
+        );
+    }
+
     fn team_feature_full(id: &str, key: &str, team_id: &str) -> crate::pb::FeatureFull {
         crate::pb::FeatureFull {
             id: id.to_string(),

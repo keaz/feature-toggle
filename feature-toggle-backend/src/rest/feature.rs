@@ -1678,7 +1678,7 @@ pub(crate) async fn update_feature(
 
     if updated.key != existing_feature.key {
         // Edges cache by key, so a rename must drop the old key. Send it before
-        // the Upsert: the edge's Delete also drops the shared feature id index.
+        // the Upsert: older edges' Delete also drops the shared feature id index.
         let _ = updates_tx.send(crate::grpc::team_scoped_delete(
             team_uuid,
             &existing_feature.key,

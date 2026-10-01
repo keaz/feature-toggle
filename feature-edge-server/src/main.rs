@@ -431,20 +431,25 @@ impl MappedFeatureCache {
 
     /// Invalidate feature by key
     pub async fn invalidate(&self, key: &str) {
-        // Get the feature to find its ID before invalidating
-        if let Some(entry) = self.by_key.get(key).await {
-            self.by_id.invalidate(&entry.feature.id).await;
-            self.dependency_ids.invalidate(&entry.feature.id).await;
-        }
-        self.by_key.invalidate(key).await;
+        let _ = self.delete_by_key(key).await;
     }
 
-    /// Delete feature by key and return its ID
+    /// Delete the entry cached under `key`. Returns the feature id when the
+    /// feature left the cache, i.e. its id index still pointed at `key`.
+    ///
+    /// A rename keeps the feature id, so the id index may already point at the
+    /// new key (its Upsert arrived first). Then only the old key entry is
+    /// dropped, the id and dependency indices stay with the live entry, and
+    /// `None` is returned.
     pub async fn delete_by_key(&self, key: &str) -> Option<String> {
         let entry = self.by_key.get(key).await?;
         let id = entry.feature.id.clone();
 
         self.by_key.invalidate(key).await;
+        let id_owner = self.by_id.get(&id).await;
+        if id_owner.is_some_and(|owner| owner != key) {
+            return None;
+        }
         self.by_id.invalidate(&id).await;
         self.dependency_ids.invalidate(&id).await;
 

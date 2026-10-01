@@ -147,6 +147,9 @@ pub(crate) async fn handle_feature_update(app: &AppState, update: pb::FeatureUpd
             }
         }
         x if x == Action::Delete as i32 => {
+            // `delete_by_key` returns no id when the key was renamed and the
+            // feature lives on under its new key. That Upsert already purged
+            // the feature's assignments; later ones are still valid.
             if !update.feature_key.is_empty()
                 && let Some(feature_id) = app.mapped_cache.delete_by_key(&update.feature_key).await
             {

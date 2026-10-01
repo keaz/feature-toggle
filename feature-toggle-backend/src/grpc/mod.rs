@@ -1011,7 +1011,8 @@ impl FeatureEvaluationSvc {
         );
 
         // Deletes go before Snapshots: after a rename, the old and new keys
-        // share a feature id, and the edge drops that id's index on Delete.
+        // share a feature id, and older edges drop that id's index on any
+        // Delete. Current edges keep it when it already points at the new key.
         for feature_key in missing_keys {
             let _ = out_tx
                 .send(Ok(pb::FeatureUpdate {
