@@ -14,7 +14,10 @@ grpc_addr = "0.0.0.0:50051"
 # (optional). SSO callbacks go to <public_base_url>/api/v1/auth/sso/<slug>/callback,
 # which must be registered as a redirect URI at the identity provider. When unset,
 # it is derived from each request (scheme and host, including Forwarded /
-# X-Forwarded-* headers); set it explicitly in production behind a proxy.
+# X-Forwarded-* headers); set it explicitly in production behind a proxy. The
+# backend logs a warning at startup when it is unset. SSO secrets are not set
+# here: use env FLUXGATE_ENCRYPTION_KEY (base64 of 32 bytes) and optionally
+# FLUXGATE_SSO_<SLUG>_CLIENT_SECRET. See docs/sso.md.
 #public_base_url = "https://fluxgate.example.com"
 
 # Session token lifetimes (optional section; these are the defaults).
