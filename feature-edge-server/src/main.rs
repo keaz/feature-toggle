@@ -4,8 +4,6 @@ use std::{
     sync::{Arc, atomic::AtomicU64},
     time::Duration,
 };
-use tonic::codec::CompressionEncoding;
-use tonic::transport::Endpoint;
 use tracing::{error, info};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
@@ -585,22 +583,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("invalid HTTP address in configuration");
 
     // Prepare gRPC client for direct calls (configured endpoint)
-    let endpoint = Endpoint::from_shared(cfg.backend_grpc.clone())
-        .expect("invalid gRPC address")
-        .connect_timeout(cfg.grpc.connect_timeout())
-        .timeout(cfg.grpc.timeout())
-        .tcp_keepalive(cfg.grpc.tcp_keepalive())
-        .http2_keep_alive_interval(cfg.grpc.http2_keepalive())
-        .keep_alive_while_idle(cfg.grpc.keep_alive_while_idle)
-        .concurrency_limit(cfg.grpc.concurrency_limit)
-        .tcp_nodelay(cfg.grpc.tcp_nodelay);
-    let channel = endpoint.connect().await?;
-    let mut grpc_client = pb::feature_evaluation_client::FeatureEvaluationClient::new(channel);
-    if matches!(cfg.grpc.compression, config::GrpcCompression::Gzip) {
-        grpc_client = grpc_client
-            .send_compressed(CompressionEncoding::Gzip)
-            .accept_compressed(CompressionEncoding::Gzip);
-    }
+    let channel = grpc_client::build_endpoint(&cfg.backend_grpc, &cfg.grpc)
+        .connect()
+        .await?;
+    let grpc_client = grpc_client::backend_client(channel, &cfg.grpc);
 
     // Create bounded channel for evaluation events
     let evaluation_event_queue_capacity = cfg.flush.evaluation_event_queue_capacity.max(1);
@@ -635,7 +621,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Start stream sync task
     let stream_state = state.clone();
     let grpc_addr_clone = cfg.backend_grpc.clone();
-    tokio::spawn(async move { grpc_client::run_stream_task(stream_state, grpc_addr_clone).await });
+    let stream_grpc_config = cfg.grpc.clone();
+    tokio::spawn(async move {
+        grpc_client::run_stream_task(stream_state, grpc_addr_clone, stream_grpc_config).await
+    });
 
     // Start periodic flush task
     let flush_state = state.clone();
@@ -681,6 +670,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tonic::transport::Endpoint;
 
     fn test_state() -> AppState {
         let mapped_cache = Arc::new(MappedFeatureCache::new(1000));
