@@ -4,7 +4,7 @@
 |---|---|
 | Type | Bug (latent, evaluation correctness) |
 | Severity | Medium. Hidden today because the startup snapshot purges these entries. It becomes active once P01 or any change stops purging on snapshot. |
-| Status | Verified (code traced) |
+| Status | Fixed on branch `fix/b18-assignment-warmup-variants` |
 | Crate | `feature-edge-server` |
 | Behavior change | No today (masked). Prevents wrong results later. |
 | Related | [P01](P01-purge-assignments-hot-path.md) (fix B18 before or together with P01) |

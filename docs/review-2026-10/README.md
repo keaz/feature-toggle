@@ -55,7 +55,7 @@ Review of `feature-toggle-backend/`, `feature-edge-server/` and `evaluation-engi
 | [x] | [B15](issues/B15-stale-flags-after-reconnect-or-rename.md) | Stale flags after reconnect or rename; new flags missed | High | backend + edge | Yes (intended) | B01, B03, B04 |
 | [x] | [B16](issues/B16-edge-cache-not-team-scoped.md) | Edge cache not team-scoped; bulk lists other teams' flags | High | edge | Yes (intended) | B03 |
 | [ ] | [B17](issues/B17-assignment-list-missing-environment-filter.md) | Assignment list by environment returns all environments | Medium | backend | Yes (intended) | — |
-| [ ] | [B18](issues/B18-assignment-warmup-caches-true-for-all-variants.md) | Assignment warm-up caches `true` for every variant (masked) | Medium | edge | No (latent) | — |
+| [x] | [B18](issues/B18-assignment-warmup-caches-true-for-all-variants.md) | Assignment warm-up caches `true` for every variant (masked) | Medium | edge | No (latent) | — |
 | [ ] | [B19](issues/B19-non-boolean-dependency-blocks-dependents.md) | Non-boolean dependency blocks dependents | Medium | engine | **Needs decision** | — |
 
 ### Performance
