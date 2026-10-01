@@ -1338,6 +1338,70 @@ async fn email_linking_never_links_a_system_admin() {
 }
 
 #[actix_web::test]
+async fn email_linking_refuses_a_second_provider_when_role_sync_is_on() {
+    let pool = init_pg_pool().await;
+    let app = build_app(&pool).await;
+    let idp = start_idp().await;
+    let linking = || ProviderOpts {
+        linking: true,
+        ..Default::default()
+    };
+    let first_off = create_provider(&pool, &idp, linking()).await;
+    let second_off = create_provider(&pool, &idp, linking()).await;
+    let syncing = create_provider(&pool, &idp, linking()).await;
+    for (provider, mode) in [
+        (&first_off, "off"),
+        (&second_off, "off"),
+        (&syncing, "additive"),
+    ] {
+        sqlx::query("UPDATE sso_providers SET role_sync_mode = $2 WHERE id = $1")
+            .bind(provider.id)
+            .bind(mode)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    let link = |provider: &TestProvider, email: &str| {
+        let (slug, email, sub) = (provider.slug.clone(), email.to_string(), unique("sub"));
+        let (app, idp) = (&app, &idp);
+        async move {
+            let location = login_with(app, idp, &slug, None, |a| {
+                sign(&claims(idp, &a.nonce, &sub, &email))
+            })
+            .await;
+            (sso_error(&location), sub)
+        }
+    };
+
+    // Linked at a provider without role sync: another provider without role
+    // sync may link too, one with role sync may not.
+    let email = format!("{}@example.com", unique("multi"));
+    let (user_id, _) = insert_user(&pool, &email, Some(PASSWORD), false, "local").await;
+    let (error, sub) = link(&first_off, &email).await;
+    assert_eq!(error, None);
+    assert_eq!(identity_user(&pool, &first_off, &sub).await, Some(user_id));
+    let (error, sub) = link(&syncing, &email).await;
+    assert_eq!(error.as_deref(), Some("sso_linking_not_allowed"));
+    assert_eq!(identity_user(&pool, &syncing, &sub).await, None);
+    let (error, sub) = link(&second_off, &email).await;
+    assert_eq!(error, None);
+    assert_eq!(identity_user(&pool, &second_off, &sub).await, Some(user_id));
+
+    // Linked at a provider with role sync: no other provider may link.
+    let email = format!("{}@example.com", unique("multi-sync"));
+    let (user_id, _) = insert_user(&pool, &email, Some(PASSWORD), false, "local").await;
+    let (error, sub) = link(&syncing, &email).await;
+    assert_eq!(error, None);
+    assert_eq!(identity_user(&pool, &syncing, &sub).await, Some(user_id));
+    let (error, sub) = link(&first_off, &email).await;
+    assert_eq!(error.as_deref(), Some("sso_linking_not_allowed"));
+    assert_eq!(identity_user(&pool, &first_off, &sub).await, None);
+
+    cleanup(&pool, &idp).await;
+}
+
+#[actix_web::test]
 async fn several_audiences_require_azp_of_this_client() {
     let pool = init_pg_pool().await;
     let app = build_app(&pool).await;
@@ -1612,7 +1676,7 @@ async fn client_secret_post_is_used_when_basic_is_not_offered() {
 
 #[actix_web::test]
 #[serial(sso_settings)]
-async fn enforce_sso_blocks_password_login_for_non_admins_only() {
+async fn enforce_sso_blocks_password_login_for_all_but_break_glass_admins() {
     let pool = init_pg_pool().await;
     let app = build_app(&pool).await;
     let (user_id, user) = insert_user(
@@ -1639,6 +1703,32 @@ async fn enforce_sso_blocks_password_login_for_non_admins_only() {
         "sso",
     )
     .await;
+    // A manual admin, and a local user (keeps its password, e.g. linked by
+    // email) that got admin from an SSO `admin` mapping.
+    let (manual_admin_id, manual_admin) = insert_user(
+        &pool,
+        &format!("{}@example.com", unique("enf-manual-admin")),
+        Some(PASSWORD),
+        true,
+        "local",
+    )
+    .await;
+    let (sso_admin_id, sso_admin) = insert_user(
+        &pool,
+        &format!("{}@example.com", unique("enf-sso-admin")),
+        Some(PASSWORD),
+        true,
+        "local",
+    )
+    .await;
+    for (id, source) in [(manual_admin_id, "manual"), (sso_admin_id, "sso")] {
+        sqlx::query("UPDATE users SET admin_source = $2 WHERE id = $1")
+            .bind(id)
+            .bind(source)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
 
     let set = |on: bool| {
         let pool = pool.clone();
@@ -1684,9 +1774,16 @@ async fn enforce_sso_blocks_password_login_for_non_admins_only() {
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         let (status, _) = password_login(&app, &sso_only, PASSWORD).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
-        // System admins keep password login (break-glass).
+        // Admins not granted by SSO keep password login (break-glass): NULL
+        // and 'manual' admin_source.
         let (status, body) = password_login(&app, &admin, PASSWORD).await;
         assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, body) = password_login(&app, &manual_admin, PASSWORD).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        // An admin granted by SSO must use SSO.
+        let (status, body) = password_login(&app, &sso_admin, PASSWORD).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["error"], "sso_required");
     };
     // Restore the global setting even if an assertion fails.
     let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(outcome)).await;

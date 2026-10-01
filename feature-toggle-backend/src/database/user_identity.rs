@@ -65,6 +65,23 @@ pub trait UserIdentityRepositoryTx: UserIdentityRepository {
         email: Option<String>,
         when: DateTime<Utc>,
     ) -> Result<(), Error>;
+    /// Whether the user already has an identity at a provider other than
+    /// `provider_id` such that two providers would sync the user's roles:
+    /// `true` if `role_sync_on` (the linking provider syncs) and any other
+    /// identity exists, or if any other identity's provider has role sync on.
+    async fn has_conflicting_sync_identity_tx(
+        &self,
+        conn: &mut PgConnection,
+        user_id: Uuid,
+        provider_id: Uuid,
+        role_sync_on: bool,
+    ) -> Result<bool, Error>;
+    /// Deletes every identity of one provider. Returns the number deleted.
+    async fn delete_identities_for_provider_tx(
+        &self,
+        conn: &mut PgConnection,
+        provider_id: Uuid,
+    ) -> Result<u64, Error>;
 }
 
 pub fn user_identity_repository(pool: PgPool) -> Box<dyn UserIdentityRepository> {
@@ -222,5 +239,48 @@ impl UserIdentityRepositoryTx for UserIdentityRepositoryImpl {
             return Err(Error::NotFound(id));
         }
         Ok(())
+    }
+
+    async fn has_conflicting_sync_identity_tx(
+        &self,
+        conn: &mut PgConnection,
+        user_id: Uuid,
+        provider_id: Uuid,
+        role_sync_on: bool,
+    ) -> Result<bool, Error> {
+        let row = sqlx::query!(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM user_identities ui
+                JOIN sso_providers p ON p.id = ui.provider_id
+                WHERE ui.user_id = $1
+                  AND ui.provider_id <> $2
+                  AND ($3 OR p.role_sync_mode <> 'off')
+            ) AS "conflict!"
+            "#,
+            user_id,
+            provider_id,
+            role_sync_on
+        )
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(map_error)?;
+        Ok(row.conflict)
+    }
+
+    async fn delete_identities_for_provider_tx(
+        &self,
+        conn: &mut PgConnection,
+        provider_id: Uuid,
+    ) -> Result<u64, Error> {
+        let result = sqlx::query!(
+            "DELETE FROM user_identities WHERE provider_id = $1",
+            provider_id
+        )
+        .execute(&mut *conn)
+        .await
+        .map_err(map_error)?;
+        Ok(result.rows_affected())
     }
 }

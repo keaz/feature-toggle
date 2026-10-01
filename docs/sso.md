@@ -16,7 +16,8 @@ Design points:
 - The IdP tokens never reach the browser. The one-time code is 32 random bytes, only its SHA-256 hash is stored, it is bound to the user and the provider, it is valid 60 seconds and single use. FluxGate session tokens are issued at exchange and are not stored in the one-time code.
 - id_token checks: signature through the provider JWKS (RS256, ES256 or PS256 only; `none` and HS* are rejected), `iss` equal to the discovery issuer, `aud` contains the client ID (a multi-value `aud` needs `azp` equal to the client ID), `exp` and `iat` with 60 s leeway, and `nonce`. Discovery and JWKS are cached for 10 minutes. An unknown `kid` triggers at most one JWKS refetch per issuer per 60 seconds.
 - Users are matched by `(provider, sub)` only.
-- Discovery, JWKS, token and userinfo responses are limited to 1 MiB, with a 10 s timeout and no redirects.
+- Discovery, JWKS, token and userinfo responses are limited to 1 MiB, with a 10 s timeout and no redirects. The provider connection test (`/test`) uses a 5 s timeout.
+- If the same new user finishes two first logins in parallel (for example two tabs), one creates the user and the other fails with `sso_provider_error`. Retrying that login works and signs in the created user.
 
 ### State cookie
 
@@ -24,6 +25,7 @@ Design points:
 
 - A reverse proxy must forward cookies on `/api/v1/auth/sso/`. A proxy or CDN that strips them makes every login fail with `sso_state_invalid`.
 - The cookie name is fixed. If a user starts SSO in two tabs, the later tab overwrites the cookie and the earlier tab fails with `sso_state_invalid`. The user starts again.
+- Any request to the callback clears the cookie, also a forged cross-site callback GET. Such a request aborts a login that is in flight in that browser (the user starts again) but never issues a session.
 
 ## Configuration
 
@@ -36,7 +38,7 @@ Design points:
 | `FLUXGATE_ENCRYPTION_KEY` (env) | Key that encrypts stored client secrets. |
 | `FLUXGATE_SSO_<SLUG>_CLIENT_SECRET` (env, optional) | Client secret override per provider. |
 
-**`public_base_url`.** Set it in production. The redirect URI sent to the IdP is `<public_base_url>/api/v1/auth/sso/<slug>/callback`. When it is unset, the backend logs a warning at startup and derives the URL from each request (scheme and host, honouring `Forwarded` and `X-Forwarded-*` headers). If a proxy changes the host between `/authorize` and the callback, the IdP rejects the flow. A trailing slash is removed.
+**`public_base_url`.** Set it in production. The redirect URI sent to the IdP is `<public_base_url>/api/v1/auth/sso/<slug>/callback`. When it is unset, the backend logs a warning at startup and derives the URL from each request (scheme and host, honouring `Forwarded` and `X-Forwarded-*` headers). Those headers then decide both the `redirect_uri` and whether the state cookie is `Secure`, so the proxy in front of the backend must set them and strip any values sent by clients. If a proxy changes the host between `/authorize` and the callback, the IdP rejects the flow. A trailing slash is removed.
 
 **`FLUXGATE_ENCRYPTION_KEY`.** It must be the standard base64 encoding of exactly 32 bytes (not base64url, no other length). Generate it with:
 
@@ -50,7 +52,7 @@ Client secrets are encrypted with AES-256-GCM, with a random 96-bit nonce per va
 
 ### Managing providers
 
-Admins manage providers in the admin UI SSO page or with the API under `/api/v1/sso/*`. All of these routes are system-admin only. The OpenAPI document lists them under the `SSO` tag.
+Admins manage providers in the admin UI under **Settings → Single Sign-On** (`/settings/sso`) or with the API under `/api/v1/sso/*`. All of these routes are system-admin only. The OpenAPI document lists them under the `SSO` tag.
 
 | Field | Default | Notes |
 | --- | --- | --- |
@@ -66,7 +68,9 @@ Admins manage providers in the admin UI SSO page or with the API under `/api/v1/
 | `roleSyncMode` | `authoritative` | `authoritative`, `additive` or `off`. |
 | `enabled` | `false` | Only enabled providers appear on the login page and accept logins. |
 
-`POST /api/v1/sso/providers/{id}/test` fetches the discovery document and the JWKS and returns `{"ok", "issuer", "authorizationEndpoint", "error"}`. Use it before you enable a provider. The test is admin-only and requests the issuer URL from the backend host, so it can reach internal hosts. We accept this server-side request forgery risk because only administrators, who are trusted, can call it. Deleting a provider deletes its identities and mappings. Users remain.
+`POST /api/v1/sso/providers/{id}/test` fetches the discovery document and the JWKS (5 s timeout) and returns `{"ok", "issuer", "authorizationEndpoint", "error"}`. Use it before you enable a provider. The test is admin-only and requests the issuer URL from the backend host, so it can reach internal hosts. We accept this server-side request forgery risk because only administrators, who are trusted, can call it. Deleting a provider deletes its identities and mappings. Users remain.
+
+Changing `issuerUrl` deletes the provider's identities in the same transaction, because a `sub` is only unique per issuer. Users keep their accounts. On their next login they are linked again (email linking) or created (JIT), subject to the usual rules. The `sso_provider_updated` activity records `issuer_changed` and `identities_cleared`.
 
 Client authentication is `client_secret_basic`. FluxGate uses `client_secret_post` only when the provider does not advertise basic.
 
@@ -85,8 +89,10 @@ Checks run in this order after the id_token is valid:
 1. **Email.** The IdP must send an `email` claim (from the id_token or userinfo). Otherwise the login fails with `sso_email_missing`.
 2. **Allowed domains.** If `allowedEmailDomains` is not empty, the email domain must be in the list and the IdP must send `email_verified: true`. An unverified or missing `email_verified` never satisfies a non-empty list (`sso_email_domain_not_allowed`). With an empty list, unverified emails are accepted.
 3. **Identity.** A known `(provider, sub)` signs in the linked user.
-4. **Linking.** For an unknown identity with an email that matches an existing user (case-insensitive), FluxGate links the identity only if `allowEmailLinking` is on and `email_verified` is `true`. It never links to a system admin account or to a system-client user. Otherwise the login fails with `sso_linking_not_allowed`.
+4. **Linking.** For an unknown identity with an email that matches an existing user (case-insensitive), FluxGate links the identity only if `allowEmailLinking` is on and `email_verified` is `true`. It never links to a system admin account or to a system-client user. It also refuses to link a user who already has an identity at another provider when either provider has `roleSyncMode` other than `off` (see "One provider with role sync per user"). Otherwise the login fails with `sso_linking_not_allowed`.
 5. **JIT.** Otherwise, if `jitProvisioning` is on, FluxGate creates a user without a password, with `authSource: "sso"`, not admin. If it is off, the login fails with `sso_user_not_provisioned`.
+
+   With a public or multi-tenant issuer (for example Google, or Entra `https://login.microsoftonline.com/common/v2.0`), anyone with an account at that IdP can pass the id_token checks, so JIT lets any such account create a FluxGate user. With these issuers, set `allowedEmailDomains` or turn `jitProvisioning` off.
 6. A disabled user fails with `sso_account_disabled`.
 
 Error codes sent as `ssoError`: `sso_state_invalid`, `sso_provider_error`, `sso_token_invalid`, `sso_email_missing`, `sso_email_domain_not_allowed`, `sso_user_not_provisioned`, `sso_linking_not_allowed`, `sso_account_disabled`. Details go to the backend log without secrets, codes or tokens.
@@ -124,10 +130,20 @@ Rules:
 - **Audit.** A login that changes anything writes an activity `sso_role_sync` with the added and removed role and team IDs and the admin change. Other activities: `sso_user_provisioned`, `sso_identity_linked`, `sso_login`, `sso_provider_created|updated|deleted`, `sso_mappings_updated`, `sso_settings_updated`.
 - The users API shows `authSource`, `ssoManagedRoleIds`, `ssoManagedTeamIds` and `identities`.
 - If sync is `authoritative` and the groups cannot be read (for example userinfo fails), the user logs in with SSO-managed roles removed. This fails closed.
+- **Stuck SSO rows.** Sync runs only at login through a provider with sync on. After a provider is deleted, or its sync is set to `off`, the SSO-managed roles and teams it granted stay and cannot be removed by hand (`409 sso_managed`). Workaround: assign the role or team manually (this converts the row to manual), then remove it.
+
+### One provider with role sync per user
+
+Role sync is per user, not per provider: two providers that sync the same user would revoke each other's roles at every login. Link a user to at most one provider with role sync on. FluxGate enforces this for email linking (`sso_linking_not_allowed`). Users linked to several providers before this check existed are not changed.
 
 ## Enforce SSO and break-glass admin
 
-`PUT /api/v1/sso/settings` with `{"enforceSso": true}` blocks password login for everyone who is not a system admin: `POST /api/v1/auth/login` returns `403 {"error":"sso_required"}` after the password check. System admins can always use a password. This is the break-glass path when the IdP is down or misconfigured, so keep at least one local admin with a strong password and do not let SSO manage every admin.
+`PUT /api/v1/sso/settings` with `{"enforceSso": true}` blocks password login for everyone except break-glass admins: `POST /api/v1/auth/login` returns `403 {"error":"sso_required"}` after the password check.
+
+- **Break-glass admins** are system admins whose admin flag was not granted by SSO group sync (made manually, or admins that existed before SSO). Only they can still use a password. This is the way in when the IdP is down or misconfigured.
+- An admin granted by an SSO `admin` mapping must sign in through SSO, even if the account has a local password (for example a local user linked by email). Otherwise the password would bypass the IdP and an authoritative revoke.
+- `PUT /api/v1/sso/settings` with `{"enforceSso": true}` returns `409 {"error":"enforce_sso_requires_local_admin"}` unless at least one enabled break-glass admin with a password exists (system-client shadow users do not count). Keep at least one such admin with a strong password.
+- Enforcing SSO does not end existing sessions, and neither does deprovisioning a user at the IdP: FluxGate sessions stay valid until they expire. To cut a user off at once, disable the user in FluxGate, which revokes their tokens.
 
 ## Security notes
 

@@ -59,6 +59,8 @@ pub enum RestError {
     SsoManaged { message: String },
     #[error("SSO user has no local password")]
     SsoUserNoLocalPassword { message: String },
+    #[error("Enforce SSO requires a local admin")]
+    EnforceSsoRequiresLocalAdmin { message: String },
     #[error("Encryption key missing")]
     EncryptionKeyMissing { message: String },
     #[error("Invalid refresh token")]
@@ -145,6 +147,14 @@ impl RestError {
         }
     }
 
+    /// 409 `enforce_sso_requires_local_admin`: SSO cannot be enforced while no
+    /// enabled break-glass admin (not granted by SSO, with a password) exists.
+    pub fn enforce_sso_requires_local_admin() -> Self {
+        Self::EnforceSsoRequiresLocalAdmin {
+            message: "Enforcing SSO requires at least one enabled administrator who was not granted admin by SSO and has a password".to_string(),
+        }
+    }
+
     /// 400 `sso_user_no_local_password`: SSO users have no local password to reset.
     pub fn sso_user_no_local_password() -> Self {
         Self::SsoUserNoLocalPassword {
@@ -177,8 +187,8 @@ impl RestError {
         }
     }
 
-    /// 403 `sso_required`: password login is disabled for non-admin users while
-    /// SSO is enforced.
+    /// 403 `sso_required`: while SSO is enforced, password login is disabled for
+    /// everyone except break-glass admins (admins not granted by SSO).
     pub fn sso_required() -> Self {
         Self::SsoRequired {
             message: "Sign in with single sign-on".to_string(),
@@ -228,6 +238,7 @@ impl RestError {
             Self::LastAdminRequired { .. } => "last_admin_required",
             Self::EncryptionKeyMissing { .. } => "encryption_key_missing",
             Self::SsoManaged { .. } => "sso_managed",
+            Self::EnforceSsoRequiresLocalAdmin { .. } => "enforce_sso_requires_local_admin",
             Self::SsoUserNoLocalPassword { .. } => "sso_user_no_local_password",
             Self::InvalidRefreshToken { .. } => "invalid_refresh_token",
             Self::RefreshTokenReused { .. } => "refresh_token_reused",
@@ -250,6 +261,7 @@ impl RestError {
             | Self::SelfApprovalNotAllowed { message }
             | Self::LastAdminRequired { message }
             | Self::SsoManaged { message }
+            | Self::EnforceSsoRequiresLocalAdmin { message }
             | Self::EncryptionKeyMissing { message }
             | Self::SsoUserNoLocalPassword { message }
             | Self::InvalidRefreshToken { message }
@@ -271,6 +283,7 @@ impl RestError {
             | Self::SelfApprovalNotAllowed { .. }
             | Self::LastAdminRequired { .. }
             | Self::SsoManaged { .. }
+            | Self::EnforceSsoRequiresLocalAdmin { .. }
             | Self::SsoUserNoLocalPassword { .. }
             | Self::EncryptionKeyMissing { .. }
             | Self::InvalidRefreshToken { .. }
@@ -292,6 +305,7 @@ impl RestError {
             | Self::SelfApprovalNotAllowed { .. }
             | Self::LastAdminRequired { .. }
             | Self::SsoManaged { .. }
+            | Self::EnforceSsoRequiresLocalAdmin { .. }
             | Self::SsoUserNoLocalPassword { .. }
             | Self::EncryptionKeyMissing { .. }
             | Self::InvalidRefreshToken { .. }
@@ -315,9 +329,10 @@ impl ResponseError for RestError {
     fn status_code(&self) -> StatusCode {
         match self {
             Self::NotFound { .. } => StatusCode::NOT_FOUND,
-            Self::Conflict { .. } | Self::LastAdminRequired { .. } | Self::SsoManaged { .. } => {
-                StatusCode::CONFLICT
-            }
+            Self::Conflict { .. }
+            | Self::LastAdminRequired { .. }
+            | Self::SsoManaged { .. }
+            | Self::EnforceSsoRequiresLocalAdmin { .. } => StatusCode::CONFLICT,
             Self::InvalidInput { .. }
             | Self::SsoUserNoLocalPassword { .. }
             | Self::EncryptionKeyMissing { .. } => StatusCode::BAD_REQUEST,
@@ -353,6 +368,9 @@ impl From<crate::Error> for RestError {
             crate::Error::LastAdminRequired => RestError::last_admin_required(),
             crate::Error::SsoManaged => RestError::sso_managed(),
             crate::Error::SsoUserNoLocalPassword => RestError::sso_user_no_local_password(),
+            crate::Error::EnforceSsoRequiresLocalAdmin => {
+                RestError::enforce_sso_requires_local_admin()
+            }
         }
     }
 }
@@ -488,6 +506,11 @@ mod tests {
                 RestError::from(crate::Error::SsoUserNoLocalPassword),
                 StatusCode::BAD_REQUEST,
                 "sso_user_no_local_password",
+            ),
+            (
+                RestError::from(crate::Error::EnforceSsoRequiresLocalAdmin),
+                StatusCode::CONFLICT,
+                "enforce_sso_requires_local_admin",
             ),
             (
                 RestError::from(SsoAdminError::EncryptionKeyMissing),

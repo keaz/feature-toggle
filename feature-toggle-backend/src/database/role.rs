@@ -224,10 +224,6 @@ impl RoleRepository for RoleRepositoryImpl {
         role_ids: Vec<Uuid>,
         assigned_by: Option<Uuid>,
     ) -> Result<(), Error> {
-        if role_ids.is_empty() {
-            return Ok(());
-        }
-
         let mut tx = self
             .pool
             .begin()
@@ -419,11 +415,8 @@ impl RoleRepositoryImpl {
         role_ids: Vec<Uuid>,
         assigned_by: Option<Uuid>,
     ) -> Result<(), Error> {
-        if role_ids.is_empty() {
-            return Ok(());
-        }
-
-        // Remove existing manual role assignments; SSO-sourced rows are left alone
+        // Remove existing manual role assignments; SSO-sourced rows are left alone.
+        // Always runs, so an empty list removes the last manual role.
         handle_error(
             Some(user_id),
             sqlx::query("DELETE FROM user_roles WHERE user_id = $1 AND source = 'manual'")

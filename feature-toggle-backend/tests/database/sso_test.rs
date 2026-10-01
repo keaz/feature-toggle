@@ -991,6 +991,85 @@ async fn test_settings_enforce_sso_round_trip() {
     assert_eq!(singleton, 1);
 }
 
+/// Rolled back: hides every committed break-glass admin inside the transaction.
+#[tokio::test]
+async fn test_enforce_sso_requires_a_break_glass_admin() {
+    use feature_toggle_backend::logic::sso_provider_tx::set_settings_in_tx;
+    let pool = init_pg_pool().await;
+    let repo = sso_settings_repository_tx(pool.clone());
+    let activity = activity_log_repository(pool.clone());
+
+    let mut tx = pool.begin().await.unwrap();
+    // Block concurrent writers so no admin appears between the update and the check.
+    sqlx::query("LOCK TABLE users IN EXCLUSIVE MODE")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE users SET password_hash = NULL WHERE is_admin")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    // Admins that do not count: SSO-granted (with a password), disabled, and
+    // passwordless manual.
+    for (source, enabled, password) in [
+        (Some("sso"), true, Some("hash")),
+        (Some("manual"), false, Some("hash")),
+        (None, false, Some("hash")),
+        (Some("manual"), true, None),
+    ] {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, first_name, last_name, email,
+                                is_admin, admin_source, enabled)
+             VALUES ($1, $2, $3, 'Bg', 'Admin', $4, TRUE, $5, $6)",
+        )
+        .bind(id)
+        .bind(format!("sso-bg-{id}"))
+        .bind(password)
+        .bind(format!("sso-bg-{id}@example.com"))
+        .bind(source)
+        .bind(enabled)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    }
+    assert!(!repo.has_break_glass_admin_tx(&mut tx).await.unwrap());
+    let err = set_settings_in_tx(&mut tx, &repo, activity.as_ref(), true, None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, Error::EnforceSsoRequiresLocalAdmin),
+        "{err:?}"
+    );
+    // Turning enforcement off is always allowed.
+    assert!(
+        !set_settings_in_tx(&mut tx, &repo, activity.as_ref(), false, None)
+            .await
+            .unwrap()
+    );
+
+    // An enabled admin with a password and NULL admin_source counts.
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO users (id, username, password_hash, first_name, last_name, email,
+                            is_admin, admin_source)
+         VALUES ($1, $2, 'hash', 'Bg', 'Admin', $3, TRUE, NULL)",
+    )
+    .bind(id)
+    .bind(format!("sso-bg-{id}"))
+    .bind(format!("sso-bg-{id}@example.com"))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    assert!(repo.has_break_glass_admin_tx(&mut tx).await.unwrap());
+    assert!(
+        set_settings_in_tx(&mut tx, &repo, activity.as_ref(), true, None)
+            .await
+            .unwrap()
+    );
+    tx.rollback().await.unwrap();
+}
+
 // -------------------------------------------- manual versus SSO sources
 
 #[tokio::test]
@@ -1115,6 +1194,48 @@ async fn test_manual_role_replace_keeps_other_sso_roles_and_converts_selected() 
         roles.list_sso_role_ids(user_id).await.unwrap(),
         vec![role(TEAM_ADMIN_ROLE_ID)]
     );
+
+    delete_user(&pool, user_id).await;
+}
+
+#[tokio::test]
+async fn test_manual_role_replace_with_empty_list_removes_manual_rows_only() {
+    let pool = init_pg_pool().await;
+    let user_id = create_user(&pool, Some("x"), "local").await;
+    let roles_tx = role_repository_tx(pool.clone());
+    let roles = role_repository(pool.clone());
+
+    let mut tx = pool.begin().await.unwrap();
+    roles_tx
+        .add_sso_user_roles_tx(&mut tx, user_id, vec![role(TEAM_ADMIN_ROLE_ID)])
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let sso_only = vec![(role(TEAM_ADMIN_ROLE_ID), "sso".to_string())];
+
+    // Pool path: `[]` removes the last manual role, the SSO row stays.
+    roles
+        .assign_user_roles(user_id, vec![role(APPROVER_ROLE_ID)], None)
+        .await
+        .unwrap();
+    roles
+        .assign_user_roles(user_id, vec![], None)
+        .await
+        .unwrap();
+    assert_eq!(role_sources(&pool, user_id).await, sso_only);
+
+    // Tx path: same.
+    roles
+        .assign_user_roles(user_id, vec![role(REQUESTER_ROLE_ID)], None)
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    roles_tx
+        .assign_user_roles_tx(&mut tx, user_id, vec![], None)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(role_sources(&pool, user_id).await, sso_only);
 
     delete_user(&pool, user_id).await;
 }

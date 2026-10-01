@@ -325,6 +325,7 @@ fn rest_error_message(err: &RestError) -> String {
         | RestError::SelfApprovalNotAllowed { message }
         | RestError::LastAdminRequired { message }
         | RestError::SsoManaged { message }
+        | RestError::EnforceSsoRequiresLocalAdmin { message }
         | RestError::EncryptionKeyMissing { message }
         | RestError::SsoUserNoLocalPassword { message }
         | RestError::InvalidRefreshToken { message }

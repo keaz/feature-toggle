@@ -17,6 +17,7 @@ use crate::database::sso_group_mapping::sso_group_mapping_repository_tx;
 use crate::database::sso_provider::{sso_provider_repository, sso_provider_repository_tx};
 use crate::database::sso_settings::{sso_settings_repository, sso_settings_repository_tx};
 use crate::database::team::team_repository_tx;
+use crate::database::user_identity::user_identity_repository_tx;
 use crate::logic::ActorContext;
 use crate::logic::sso_provider::{
     ProviderFields, SsoSecrets, client_secret_from_env, test_discovery,
@@ -352,10 +353,12 @@ pub(crate) async fn update_sso_provider(
     let id = parse_provider_id(&id)?;
     let (fields, client_secret) = payload.into_inner().into_parts();
     let repo = sso_provider_repository_tx(db_pool.get_ref().clone());
+    let identities = user_identity_repository_tx(db_pool.get_ref().clone());
     let mut tx = begin(&db_pool).await?;
     let result = update_provider_in_tx(
         &mut tx,
         &repo,
+        &identities,
         activity_repo.as_ref().as_ref(),
         &secrets,
         id,
@@ -596,7 +599,8 @@ pub(crate) async fn get_sso_settings(
     responses(
         (status = 200, description = "SSO settings updated", body = SsoSettingsBody),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 403, description = "Forbidden", body = ErrorResponse)
+        (status = 403, description = "Forbidden", body = ErrorResponse),
+        (status = 409, description = "enforce_sso_requires_local_admin: no enabled admin that was not granted by SSO and has a password", body = ErrorResponse)
     ),
     tag = "SSO"
 )]

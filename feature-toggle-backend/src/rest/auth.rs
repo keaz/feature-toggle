@@ -9,11 +9,11 @@ use crate::config::AuthConfig;
 use crate::database::activity_log::ActivityLogRepository;
 use crate::database::role::role_repository_tx;
 use crate::database::sso_settings::sso_settings_repository;
-use crate::database::user::user_repository_tx;
+use crate::database::user::{UserRepositoryTx, user_repository_tx};
 use crate::logic::ActorContext;
 use crate::logic::jwt_token::JwtTokenLogic;
 use crate::logic::jwt_token_tx::{RefreshOutcome, RefreshRejection, refresh_session_in_tx};
-use crate::logic::user::UserLogic;
+use crate::logic::user::{ApiUser, UserLogic};
 use crate::logic::user_tx;
 use crate::rest::error::RestError;
 use crate::rest::user::{UserResponse, attach_sso_details};
@@ -106,7 +106,7 @@ fn jwt_user(req: &HttpRequest) -> Result<JwtUser, RestError> {
         (status = 200, description = "Login successful", body = LoginResponse),
         (status = 400, description = "Invalid input", body = crate::rest::error::ErrorResponse),
         (status = 401, description = "Unauthorized (also for SSO-only users, who have no password)", body = crate::rest::error::ErrorResponse),
-        (status = 403, description = "sso_required: SSO is enforced and the user is not a system admin", body = crate::rest::error::ErrorResponse)
+        (status = 403, description = "sso_required: SSO is enforced and the user is not a break-glass admin (system admin not granted by SSO)", body = crate::rest::error::ErrorResponse)
     ),
     security(()),
     tag = "Auth"
@@ -124,16 +124,38 @@ pub(crate) async fn login(
 
     // Checked only after the password matched: a wrong password still gets the
     // normal 401, so the 403 never reveals that an account exists.
-    if !user.is_admin
-        && sso_settings_repository(db_pool.get_ref().clone())
-            .get_enforce_sso()
-            .await?
+    if sso_settings_repository(db_pool.get_ref().clone())
+        .get_enforce_sso()
+        .await?
+        && !password_login_exempt(db_pool.get_ref(), &user).await?
     {
         return Err(RestError::sso_required());
     }
 
     let result = logic.issue_session(user).await.map_err(RestError::from)?;
     Ok(HttpResponse::Ok().json(login_response(db_pool.get_ref(), result).await?))
+}
+
+/// Whether a user may still log in with a password while SSO is enforced.
+///
+/// Only break-glass admins are exempt: system admins whose admin flag was not
+/// granted by SSO group sync (`admin_source` is `'manual'` or NULL). An admin
+/// granted by an SSO mapping must log in through SSO like everyone else, or a
+/// local password would let them skip the IdP and its revocation.
+async fn password_login_exempt(pool: &sqlx::PgPool, user: &ApiUser) -> Result<bool, RestError> {
+    if !user.is_admin {
+        return Ok(false);
+    }
+    let user_id = Uuid::try_from(user.id.clone())
+        .map_err(|e| RestError::internal(format!("Invalid user ID: {e}")))?;
+    let mut conn = pool
+        .acquire()
+        .await
+        .map_err(|e| RestError::internal(format!("Failed to acquire connection: {e}")))?;
+    let (is_admin, admin_source) = user_repository_tx(pool.clone())
+        .get_admin_state_tx(&mut conn, user_id)
+        .await?;
+    Ok(is_admin && admin_source.as_deref() != Some("sso"))
 }
 
 /// The login response body, shared by password login and the SSO exchange.

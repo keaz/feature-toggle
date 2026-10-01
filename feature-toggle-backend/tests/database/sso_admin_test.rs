@@ -736,6 +736,92 @@ async fn deleting_a_provider_removes_identities_and_mappings_but_keeps_users() {
         .unwrap();
 }
 
+#[actix_web::test]
+async fn changing_the_issuer_clears_the_providers_identities() {
+    let pool = init_pg_pool().await;
+    let app = build_app(&pool, secrets_with_key()).await;
+    let created = create_provider(&app, &unique_slug("iss"), json!({})).await;
+    let id = created["id"].as_str().unwrap().to_string();
+    let user_id = insert_user_row(&pool, "sso", None).await;
+    sqlx::query(
+        "INSERT INTO user_identities (id, user_id, provider_id, subject, email) VALUES ($1, $2, $3::uuid, 'sub-iss', 'x@example.com')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(user_id)
+    .bind(&id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let identities = || {
+        let pool = pool.clone();
+        let id = id.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM user_identities WHERE provider_id = $1::uuid",
+            )
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let last_metadata = || {
+        let pool = pool.clone();
+        let id = id.clone();
+        async move {
+            sqlx::query_scalar::<_, Value>(
+                "SELECT metadata FROM activity_log WHERE activity_type = 'sso_provider_updated'
+                 AND entity_id = $1 ORDER BY created_at DESC LIMIT 1",
+            )
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let patch = |body: Value| {
+        let (app, id) = (&app, id.clone());
+        async move {
+            let (status, _, text) = call(
+                app,
+                Method::PATCH,
+                &format!("/api/v1/sso/providers/{id}"),
+                Some(body),
+                Some(admin_user()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{text}");
+        }
+    };
+
+    // Same issuer (or another field): identities stay.
+    patch(json!({"issuerUrl": "https://idp.example.com", "displayName": "Renamed"})).await;
+    assert_eq!(identities().await, 1);
+    let metadata = last_metadata().await;
+    assert_eq!(metadata["issuer_changed"], false);
+    assert_eq!(metadata["identities_cleared"], 0);
+
+    // New issuer: identities go, the user stays.
+    patch(json!({"issuerUrl": "https://other-idp.example.com"})).await;
+    assert_eq!(identities().await, 0);
+    let metadata = last_metadata().await;
+    assert_eq!(metadata["issuer_changed"], true);
+    assert_eq!(metadata["identities_cleared"], 1);
+    let users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(users, 1);
+
+    delete_provider(&app, &id).await;
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
 // ------------------------------------------------------------------ mappings
 
 #[actix_web::test]
@@ -874,6 +960,13 @@ async fn mapping_validation_and_replace_semantics() {
 async fn settings_round_trip() {
     let pool = init_pg_pool().await;
     let app = build_app(&pool, secrets_with_key()).await;
+    // Enforcing SSO needs a break-glass admin (enabled, manual, with a password).
+    let break_glass = insert_user_row(&pool, "local", Some("hash")).await;
+    sqlx::query("UPDATE users SET is_admin = TRUE, admin_source = 'manual' WHERE id = $1")
+        .bind(break_glass)
+        .execute(&pool)
+        .await
+        .unwrap();
     let (status, original, _) = call(
         &app,
         Method::GET,
@@ -913,6 +1006,11 @@ async fn settings_round_trip() {
     .await
     .unwrap();
     assert!(logged >= 2);
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(break_glass)
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 // ------------------------------------------------------------------ public list

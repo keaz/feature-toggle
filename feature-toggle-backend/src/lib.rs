@@ -46,6 +46,8 @@ pub enum Error {
     SsoManaged,
     #[error("SSO user has no local password")]
     SsoUserNoLocalPassword,
+    #[error("Enforcing SSO requires an enabled local administrator with a password")]
+    EnforceSsoRequiresLocalAdmin,
 }
 
 pub async fn run() -> std::io::Result<()> {

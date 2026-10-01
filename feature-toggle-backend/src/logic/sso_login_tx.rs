@@ -58,7 +58,8 @@ pub struct SsoLoginRepos<'a, U, I, C, R, M> {
 /// Order: email present, email domain allowed (a non-empty domain list also needs
 /// `email_verified: true`), then identity by `(provider, sub)`; else link by email
 /// (only with `allowEmailLinking`, `email_verified: true`, and a user that is
-/// neither a system admin nor a system-client user); else JIT provisioning (if
+/// neither a system admin nor a system-client user, and that is not linked to
+/// another provider when either provider has role sync on); else JIT provisioning (if
 /// enabled). A disabled user is rejected after resolution. The user's `last_login`
 /// is set later, when the exchange issues a session. Any error leaves the
 /// transaction to be rolled back.
@@ -120,6 +121,22 @@ where
                         && existing.auth_source != "system"
                         && !repos.users.is_system_client_tx(conn, existing.id).await?;
                     if !linkable {
+                        return Err(SsoLoginError::LinkingNotAllowed);
+                    }
+                    // Role sync is per user, not per provider: two providers
+                    // syncing the same user would revoke each other's roles.
+                    // Refuse the link when the user is already linked to another
+                    // provider and either side has role sync on.
+                    if repos
+                        .identities
+                        .has_conflicting_sync_identity_tx(
+                            conn,
+                            existing.id,
+                            provider.id,
+                            provider.role_sync_mode != "off",
+                        )
+                        .await?
+                    {
                         return Err(SsoLoginError::LinkingNotAllowed);
                     }
                     linked = true;

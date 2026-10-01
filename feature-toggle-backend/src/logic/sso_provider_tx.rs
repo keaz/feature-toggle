@@ -11,6 +11,7 @@ use crate::database::sso_provider::{
 };
 use crate::database::sso_settings::SsoSettingsRepositoryTx;
 use crate::database::team::TeamRepositoryTx;
+use crate::database::user_identity::UserIdentityRepositoryTx;
 use crate::logic::ActorContext;
 use crate::logic::sso_provider::{
     ProviderFields, SsoAdminError, SsoSecrets, validate_create, validate_patch,
@@ -141,9 +142,15 @@ where
 
 /// Partial update. `client_secret`: `None` leaves the stored secret, `Some("")` clears
 /// it, any other value replaces it.
-pub async fn update_provider_in_tx<P>(
+///
+/// A changed issuer URL deletes the provider's user identities: a subject is only
+/// unique per issuer, so links made against the old issuer must not match accounts
+/// at the new one. Users keep their accounts and are linked again (or provisioned)
+/// on their next SSO login.
+pub async fn update_provider_in_tx<P, I>(
     conn: &mut PgConnection,
     repo: &P,
+    identities: &I,
     activity_repo: &dyn ActivityLogRepository,
     secrets: &SsoSecrets,
     id: Uuid,
@@ -153,6 +160,7 @@ pub async fn update_provider_in_tx<P>(
 ) -> Result<SsoProvider, SsoAdminError>
 where
     P: SsoProviderRepositoryTx,
+    I: UserIdentityRepositoryTx,
 {
     let patch = validate_patch(fields)?;
     // Existence check first so an unknown id is 404 even for an invalid body.
@@ -205,6 +213,15 @@ where
         )
         .await?;
 
+    let issuer_changed = provider.issuer_url != before.issuer_url;
+    let identities_cleared = if issuer_changed {
+        identities
+            .delete_identities_for_provider_tx(conn, provider.id)
+            .await?
+    } else {
+        0
+    };
+
     log_activity(
         conn,
         activity_repo,
@@ -217,6 +234,8 @@ where
             "slug": provider.slug,
             "previous_slug": before.slug,
             "changed_fields": changed_fields,
+            "issuer_changed": issuer_changed,
+            "identities_cleared": identities_cleared,
         }),
         &actor,
     )
@@ -386,7 +405,8 @@ where
     Ok(mappings)
 }
 
-/// Sets the enforce-SSO flag.
+/// Sets the enforce-SSO flag. Turning it on fails with
+/// `EnforceSsoRequiresLocalAdmin` unless a break-glass admin exists.
 pub async fn set_settings_in_tx<S>(
     conn: &mut PgConnection,
     repo: &S,
@@ -397,6 +417,11 @@ pub async fn set_settings_in_tx<S>(
 where
     S: SsoSettingsRepositoryTx,
 {
+    // Refuse to lock everyone out: with SSO enforced, only break-glass admins
+    // can still use a password, so at least one must exist.
+    if enforce_sso && !repo.has_break_glass_admin_tx(conn).await? {
+        return Err(Error::EnforceSsoRequiresLocalAdmin);
+    }
     let previous = repo.get_enforce_sso_tx(conn).await?;
     let current = repo.set_enforce_sso_tx(conn, enforce_sso).await?;
     log_activity(
