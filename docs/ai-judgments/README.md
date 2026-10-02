@@ -17,7 +17,7 @@ Features:
 2. **Check "Depends on"** in the task header. Do not start until every dependency is merged. If a dependency is only on a branch, stop and ask.
 3. **Re-check the code first.** Line numbers come from backend `fc50086` and UI `bae1962` and will drift. Find code by symbol name (`grep -n "fn <name>"`). If the code no longer matches the task, stop and report in the handoff log.
 4. **Stay in scope.** Change only what the task lists. If you need a visible behavior change that the task does not list, stop and ask.
-5. **Tasks marked "needs sign-off"** (AI-11, AI-31) need a maintainer's yes before you merge. You may write the code and the PR, but say in the PR that it is waiting for sign-off.
+5. **Tasks marked "needs sign-off"** (AI-31; AI-11 signed off 2026-10-02) need a maintainer's yes before you merge. You may write the code and the PR, but say in the PR that it is waiting for sign-off.
 6. **Write the failing test first**, then the change. Each task lists its tests.
 7. **Run before you finish:**
    - Backend:
@@ -68,7 +68,7 @@ Features:
 | [x] | [AI-01](tasks/AI-01-judgment-store-and-team-settings.md) | `ai_judgments`, `team_ai_settings`, settings API, `JudgmentService`, retry sweep | backend | No (all off) | AI-00 |
 | [x] | [AI-02](tasks/AI-02-ui-ai-foundation-and-settings.md) | UI: `api/ai.ts`, `useAiFeatures`, AI settings page | UI | New page | AI-01 |
 | [x] | [AI-10](tasks/AI-10-approval-risk-assessment.md) | Approval risk assessment (advisory) | backend | Additive fields | AI-01 |
-| [ ] | [AI-11](tasks/AI-11-approval-risk-enforcement.md) | Risk enforcement: gate auto-approve, extra approver | backend | **Yes, needs sign-off** | AI-10 |
+| [x] | [AI-11](tasks/AI-11-approval-risk-enforcement.md) | Risk enforcement: gate auto-approve, extra approver | backend | **Yes, needs sign-off** | AI-10 |
 | [x] | [AI-12](tasks/AI-12-ui-approval-risk.md) | UI: risk panel, badge, policy mode | UI | New UI | AI-10, AI-02 (AI-11 for the extra-approver count) |
 | [x] | [AI-20](tasks/AI-20-justification-check-backend.md) | Justification check: sync endpoint and post-submit recording | backend | Additive | AI-01 |
 | [x] | [AI-21](tasks/AI-21-ui-justification-hint.md) | UI: `ReasonQualityHint` on 5 forms | UI | Warning only | AI-20, AI-02 |

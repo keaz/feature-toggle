@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Type | Feature |
-| Status | Not started. **Needs maintainer sign-off before merge.** |
+| Status | Done in 8cde72c. Maintainer sign-off given 2026-10-02. |
 | Repo | backend (`feature-toggle/`) |
 | Crate | `feature-toggle-backend` |
 | Depends on | AI-10 |
@@ -72,4 +72,34 @@ UI display of the effective approval count (AI-12).
 
 ## Handoff log
 
-_No entries yet._
+### 2026-10-02: done in `8cde72c`
+
+Maintainer sign-off: the maintainer approved implementing and committing this task on `main` on 2026-10-02.
+
+**What changed:**
+
+- Migration `20261002060000_approval_request_required_approvers_override.sql` adds `approval_requests.required_approvers_override INT NULL`. `ApprovalRequest` and `map_request_row` carry it; every request `SELECT`/`RETURNING` list in `database/approval.rs` includes it.
+- `list_requests_due_for_auto_approval` excludes a request when its policy is `gate_auto_approve` and a `done` approval-risk judgment has `level = high` and the team's `approval_risk` setting is on. Pending, failed, missing, medium or low judgments, setting off, and other modes do not exclude.
+- `ApprovalRepository::set_required_approvers_override(request_id, n) -> bool` runs `UPDATE ... WHERE id = $1 AND status = 'pending' AND required_approvers_override IS NULL`. It returns whether a row changed.
+- `ApprovalRiskHandler::apply`: for `level = high` on a `pending` request it loads the policy; under `require_extra_approver` it sets the override to `policy.required_approvers + 1`. A request that already has an override is left alone. The `approval_risk_assessed` metadata gains `required_approvers_override` when the request carries one (set by this apply, or already set).
+- `apply_vote` and `apply_vote_tx` pass `request.required_approvers_override.unwrap_or(policy.required_approvers)` to the vote repository. The vote SQL is unchanged.
+- `required_approvals_effective` in `rest/approval.rs` prefers the override, then the policy, then the payload snapshot. It is used by `map_request_with_policy`, so the list, approve/reject/cancel responses, and the WebSocket stream all show it.
+- The `apply` activity is still written for a closed request (history). Only the override write is guarded by `status = 'pending'`; the guard is in SQL, so a request closed between the read and the write is not changed.
+- Admin override is unchanged: `ensure_user_can_vote` only widens who may vote. An admin vote still counts as one approval against the overridden requirement (unit test `admin_override_does_not_lower_the_overridden_requirement`).
+
+**Verified:**
+
+- Unit tests (mocks): handler sets the override only for `require_extra_approver` + `high` + pending; not for other modes or levels, not for approved/rejected/cancelled, not changed by a second apply, no metadata when the update loses a race. Vote tests: `add_vote` receives the override, or the policy value without one, also with admin override. REST mapping prefers the override.
+- DB tests in `tests/database/approval_risk_enforcement_test.rs`: the 9-case auto-approval matrix, gate lifted when the policy leaves gate mode, override set once and only on a pending request, and an override of 3 keeps a request pending after two approvals on both the pool (tx) and non-pool vote paths.
+- `tests/auto_approval_scheduler_test.rs` passes. Full `cargo test -p feature-toggle-backend` on `feture_toggle_test`: all pass (716 lib, 265 integration). Clippy has no new warnings.
+- Contract: no DTO or schema change (`requiredApprovalsEffective` already existed), so the baseline is unchanged and `contract_compatibility_test` passes.
+- Fail open: with no judgment (TypeSafe down, no key) the due query and vote counts behave as before.
+
+**Open questions and notes:**
+
+- The override is `required_approvers + 1` without checking eligible approvers. If a policy has exactly `required_approvers` eligible approvers, a high-risk request cannot reach the override by votes alone. An admin override voter, a policy edit, or cancel still works. A cap at the eligible count was not added because the brief fixes the value; raise it if this matters.
+- The override is read at apply time from the policy's current mode. Changing a policy to `require_extra_approver` later does not affect requests already assessed.
+- `gate_auto_approve` re-evaluates on every scheduler run, so switching the policy mode makes the held request eligible again.
+- The test DB must have the new migration applied (`sqlx migrate run`); `init_pg_pool` does not migrate.
+
+**For later tasks:** AI-12 UI needs no change; it already shows the hint once `requiredApprovalsEffective` exceeds the policy's `requiredApprovers`.
