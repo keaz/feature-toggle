@@ -3,6 +3,7 @@ pub mod cluster;
 pub mod config;
 pub mod database;
 pub mod grpc;
+pub mod judgment;
 pub mod logic;
 mod middleware;
 pub mod model;
