@@ -111,6 +111,9 @@ fn test_feature(
         evaluation_count_30d: 0,
         evaluation_count_90d: 0,
         dependencies,
+        flag_kind: None,
+        flag_kind_confidence: None,
+        flag_kind_source: None,
     }
 }
 
@@ -313,6 +316,9 @@ async fn evaluate_validation_errors() {
                     evaluation_count_30d: 0,
                     evaluation_count_90d: 0,
                     dependencies: vec![],
+                    flag_kind: None,
+                    flag_kind_confidence: None,
+                    flag_kind_source: None,
                 }]),
                 _ => Ok(vec![]),
             };
@@ -537,6 +543,9 @@ async fn evaluate_auth_and_success() {
                     evaluation_count_30d: 0,
                     evaluation_count_90d: 0,
                     dependencies: vec![],
+                    flag_kind: None,
+                    flag_kind_confidence: None,
+                    flag_kind_source: None,
                 }]),
                 _ => Ok(vec![]),
             };
@@ -930,6 +939,9 @@ async fn get_feature_by_key_and_stream_branches() {
                     evaluation_count_30d: 0,
                     evaluation_count_90d: 0,
                     dependencies: vec![],
+                    flag_kind: None,
+                    flag_kind_confidence: None,
+                    flag_kind_source: None,
                 }]),
                 _ => Ok(vec![]),
             };
@@ -1401,6 +1413,9 @@ async fn stream_empty_subscription_sends_full_snapshot() {
                 evaluation_count_30d: 0,
                 evaluation_count_90d: 0,
                 dependencies: vec![],
+                flag_kind: None,
+                flag_kind_confidence: None,
+                flag_kind_source: None,
             };
 
             match key.as_deref() {
@@ -1536,6 +1551,9 @@ async fn stream_subscriptions_are_connection_scoped() {
                 evaluation_count_30d: 0,
                 evaluation_count_90d: 0,
                 dependencies: vec![],
+                flag_kind: None,
+                flag_kind_confidence: None,
+                flag_kind_source: None,
             }]),
             Some("feature-B") => Ok(vec![db::Feature {
                 id: feature_b_id,
@@ -1567,6 +1585,9 @@ async fn stream_subscriptions_are_connection_scoped() {
                 evaluation_count_30d: 0,
                 evaluation_count_90d: 0,
                 dependencies: vec![],
+                flag_kind: None,
+                flag_kind_confidence: None,
+                flag_kind_source: None,
             }]),
             _ => Ok(vec![]),
         };
@@ -1789,6 +1810,9 @@ async fn requested_keys_are_cleared_when_last_stream_disconnects() {
                 evaluation_count_30d: 0,
                 evaluation_count_90d: 0,
                 dependencies: vec![],
+                flag_kind: None,
+                flag_kind_confidence: None,
+                flag_kind_source: None,
             }]),
             Some("feature-B") => Ok(vec![db::Feature {
                 id: feature_b_id,
@@ -1820,6 +1844,9 @@ async fn requested_keys_are_cleared_when_last_stream_disconnects() {
                 evaluation_count_30d: 0,
                 evaluation_count_90d: 0,
                 dependencies: vec![],
+                flag_kind: None,
+                flag_kind_confidence: None,
+                flag_kind_source: None,
             }]),
             _ => Ok(vec![]),
         };

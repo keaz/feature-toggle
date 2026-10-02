@@ -102,6 +102,7 @@ pub trait FeatureCrudLogic: Send + Sync {
         tag: Option<String>,
         dependency_status: Option<String>,
         approval_status: Option<String>,
+        flag_kind: Option<crate::model::FlagKindFilter>,
         offset: i64,
         limit: i64,
     ) -> Result<(Vec<Feature>, i64), Error>;
@@ -287,6 +288,7 @@ mockall::mock! {
             tag: Option<String>,
             dependency_status: Option<String>,
             approval_status: Option<String>,
+            flag_kind: Option<crate::model::FlagKindFilter>,
             offset: i64,
             limit: i64,
         ) -> Result<(Vec<Feature>, i64), Error>;
@@ -564,6 +566,7 @@ impl FeatureLogicImpl {
             stages,
             dependencies,
             variants,
+            flag_kind: input.flag_kind,
         })
     }
 
@@ -658,6 +661,7 @@ impl FeatureLogicImpl {
             stages,
             dependencies,
             variants,
+            flag_kind: input.flag_kind,
         })
     }
 
@@ -735,6 +739,9 @@ impl FeatureLogicImpl {
                 .map(|d| d.depends_on_id.into())
                 .collect(),
             pending_approval_request_id: None,
+            flag_kind: feature.flag_kind,
+            flag_kind_source: feature.flag_kind_source,
+            flag_kind_confidence: feature.flag_kind_confidence,
         }
     }
 
@@ -927,6 +934,7 @@ impl FeatureCrudLogic for FeatureLogicImpl {
             None,
             None,
             None,
+            None,
             offset,
             limit,
         )
@@ -946,6 +954,7 @@ impl FeatureCrudLogic for FeatureLogicImpl {
         tag: Option<String>,
         dependency_status: Option<String>,
         approval_status: Option<String>,
+        flag_kind: Option<crate::model::FlagKindFilter>,
         offset: i64,
         limit: i64,
     ) -> Result<(Vec<Feature>, i64), Error> {
@@ -966,6 +975,7 @@ impl FeatureCrudLogic for FeatureLogicImpl {
                 tag,
                 dependency_status,
                 approval_status,
+                flag_kind,
                 offset,
                 limit,
             )
@@ -2385,6 +2395,9 @@ mod test {
                     evaluation_count_30d: 0,
                     evaluation_count_90d: 0,
                     dependencies: vec![],
+                    flag_kind: None,
+                    flag_kind_confidence: None,
+                    flag_kind_source: None,
                 })
             });
 
@@ -2450,6 +2463,7 @@ mod test {
             relationships: vec![],
             stages: vec![],
             variants: Some(vec![]),
+            flag_kind: None,
         };
 
         const ID: &str = "3eef17bc-9e06-411d-b5f4-7a786e68bb96";
@@ -2504,6 +2518,7 @@ mod test {
             relationships: vec![],
             stages: vec![],
             variants: Some(vec![]),
+            flag_kind: None,
         };
 
         repository
@@ -2543,6 +2558,9 @@ mod test {
                     evaluation_count_30d: 0,
                     evaluation_count_90d: 0,
                     dependencies: vec![],
+                    flag_kind: None,
+                    flag_kind_confidence: None,
+                    flag_kind_source: None,
                 })
             });
 
@@ -2648,6 +2666,9 @@ mod test {
                         evaluation_count_30d: 0,
                         evaluation_count_90d: 0,
                         dependencies: vec![],
+                        flag_kind: None,
+                        flag_kind_confidence: None,
+                        flag_kind_source: None,
                     },
                     EntityFeature {
                         id: Uuid::new_v4(),
@@ -2679,6 +2700,9 @@ mod test {
                         evaluation_count_30d: 0,
                         evaluation_count_90d: 0,
                         dependencies: vec![],
+                        flag_kind: None,
+                        flag_kind_confidence: None,
+                        flag_kind_source: None,
                     },
                 ])
             });
@@ -3610,6 +3634,9 @@ mod test {
             evaluation_count_30d: 0,
             evaluation_count_90d: 0,
             dependencies: vec![],
+            flag_kind: None,
+            flag_kind_confidence: None,
+            flag_kind_source: None,
         }
     }
 
@@ -3669,6 +3696,9 @@ mod test {
                 evaluation_count_30d: 0,
                 evaluation_count_90d: 0,
                 dependencies: vec![],
+                flag_kind: None,
+                flag_kind_confidence: None,
+                flag_kind_source: None,
             },
             crate::database::entity::Feature {
                 id: feature2_id,
@@ -3700,6 +3730,9 @@ mod test {
                 evaluation_count_30d: 0,
                 evaluation_count_90d: 0,
                 dependencies: vec![],
+                flag_kind: None,
+                flag_kind_confidence: None,
+                flag_kind_source: None,
             },
         ];
 

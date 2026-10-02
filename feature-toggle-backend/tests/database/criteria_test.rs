@@ -73,6 +73,7 @@ async fn test_set_stage_criteria_replaces_existing() {
             }],
             dependencies: vec![],
             variants: None,
+            flag_kind: None,
         })
         .await
         .expect("feature to be created for criteria test");
@@ -173,6 +174,7 @@ async fn test_set_stage_criteria_rejects_variant_from_other_feature() {
                 feature_toggle_backend::database::entity::VariantValueType::Json,
                 Some("primary control variant".to_string()),
             )]),
+            flag_kind: None,
         })
         .await
         .expect("primary feature should be created");
@@ -198,6 +200,7 @@ async fn test_set_stage_criteria_rejects_variant_from_other_feature() {
                 feature_toggle_backend::database::entity::VariantValueType::Json,
                 Some("foreign control variant".to_string()),
             )]),
+            flag_kind: None,
         })
         .await
         .expect("foreign feature should be created");

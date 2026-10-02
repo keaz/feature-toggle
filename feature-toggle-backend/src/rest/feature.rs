@@ -265,6 +265,19 @@ async fn ensure_feature_key_unique_for_update(
     Ok(feature)
 }
 
+/// `flagKind` accepts the five kinds or `unclassified`; anything else is a 400.
+fn parse_flag_kind_filter(
+    raw: Option<&str>,
+) -> Result<Option<crate::model::FlagKindFilter>, RestError> {
+    raw.map(|value| {
+        value
+            .trim()
+            .parse::<crate::model::FlagKindFilter>()
+            .map_err(RestError::invalid_input)
+    })
+    .transpose()
+}
+
 fn feature_base_response(feature: &ModelFeature) -> FeatureResponse {
     FeatureResponse {
         id: feature.id.to_string(),
@@ -309,6 +322,9 @@ fn feature_base_response(feature: &ModelFeature) -> FeatureResponse {
             .pending_approval_request_id
             .as_ref()
             .map(|id| id.to_string()),
+        flag_kind: feature.flag_kind,
+        flag_kind_source: feature.flag_kind_source,
+        flag_kind_confidence: feature.flag_kind_confidence,
         relationships: None,
         stages: None,
         variants: None,
@@ -591,6 +607,7 @@ fn detect_cycles_for_impact(adjacency: &HashMap<Uuid, Vec<Uuid>>) -> Vec<Vec<Uui
         ("team_id" = String, Path, description = "Team ID"),
         ("name" = Option<String>, Query, description = "Filter by feature name"),
         ("featureType" = Option<FeatureType>, Query, description = "Filter by feature type"),
+        ("flagKind" = Option<String>, Query, description = "Filter by flag kind: release, experiment, ops, permission, config, or unclassified"),
         ("offset" = Option<i64>, Query, description = "Pagination offset"),
         ("limit" = Option<i64>, Query, description = "Pagination limit")
     ),
@@ -613,6 +630,8 @@ pub(crate) async fn list_features(
         limit: query.limit,
     });
 
+    let flag_kind = parse_flag_kind_filter(query.flag_kind.as_deref())?;
+
     let (features, total) = logic
         .get_features_with_offset_filtered(
             ID::from(team_uuid),
@@ -626,6 +645,7 @@ pub(crate) async fn list_features(
             query.tag.clone(),
             query.dependency_status.clone(),
             query.approval_status.clone(),
+            flag_kind,
             offset,
             limit,
         )
@@ -1459,6 +1479,7 @@ pub(crate) async fn rollback_feature_version(
 pub(crate) async fn create_feature(
     db_pool: web::Data<sqlx::PgPool>,
     activity_repo: web::Data<Box<dyn ActivityLogRepository>>,
+    ai: Option<web::Data<crate::judgment::AiRuntime>>,
     req: HttpRequest,
     feature_logic: web::Data<Box<dyn FeatureLogic>>,
     feature_repo: web::Data<Box<dyn FeatureRepository>>,
@@ -1510,6 +1531,7 @@ pub(crate) async fn create_feature(
         expires_at: payload.expires_at,
         cleanup_reason: payload.cleanup_reason.clone(),
         tags: payload.tags.clone(),
+        flag_kind: payload.flag_kind,
         dependencies,
         relationships,
         stages,
@@ -1550,6 +1572,8 @@ pub(crate) async fn create_feature(
         .get_feature_by_id(feature_id)
         .await
         .map_err(RestError::from)?;
+
+    crate::rest::ai::record_flag_kind(&ai, team_uuid, &feature).await;
 
     let response = build_feature_response(
         &feature,
@@ -1668,6 +1692,7 @@ pub(crate) async fn update_feature(
         expires_at: payload.expires_at.map(Some),
         cleanup_reason: payload.cleanup_reason.clone().map(Some),
         tags: payload.tags.clone(),
+        flag_kind: payload.flag_kind,
         archive_confirmation: payload.archive_confirmation.unwrap_or(false),
         dependencies,
         relationships,
@@ -1727,6 +1752,9 @@ pub(crate) async fn update_feature(
     if let Ok(fid) = Uuid::try_from(existing_feature.id.clone()) {
         broadcast_feature_update(feature_repo.as_ref().as_ref(), updates_tx.get_ref(), fid).await;
     }
+
+    // After the broadcast so edge propagation is not delayed.
+    crate::rest::ai::record_flag_kind(&ai, team_uuid, &updated).await;
 
     let response = build_feature_response(
         &updated,
@@ -2242,6 +2270,9 @@ mod tests {
             dependencies: vec![],
             team_id: ID::from(team_id),
             pending_approval_request_id: None,
+            flag_kind: None,
+            flag_kind_confidence: None,
+            flag_kind_source: None,
         }
     }
 
@@ -2340,6 +2371,7 @@ mod tests {
                       tag,
                       dependency_status,
                       approval_status,
+                      flag_kind,
                       offset,
                       limit| {
                     id.to_string() == team_id.to_string()
@@ -2353,12 +2385,15 @@ mod tests {
                         && tag.is_none()
                         && dependency_status.is_none()
                         && approval_status.is_none()
+                        && flag_kind.is_none()
                         && *offset == 10
                         && *limit == 5
                 },
             )
             .times(1)
-            .returning(move |_, _, _, _, _, _, _, _, _, _, _, _, _| Ok((vec![feature.clone()], 1)));
+            .returning(move |_, _, _, _, _, _, _, _, _, _, _, _, _, _| {
+                Ok((vec![feature.clone()], 1))
+            });
 
         let app = test::init_service(
             App::new()
@@ -2380,6 +2415,59 @@ mod tests {
         assert_eq!(json["meta"]["offset"], 10);
         assert_eq!(json["meta"]["limit"], 5);
         assert_eq!(json["meta"]["total"], 1);
+    }
+
+    async fn list_with_flag_kind(
+        query: &str,
+    ) -> (StatusCode, Option<crate::model::FlagKindFilter>) {
+        let team_id = Uuid::new_v4();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let seen_by_mock = seen.clone();
+        let mut mock_logic = MockFeatureLogic::new();
+        mock_logic
+            .expect_get_features_with_offset_filtered()
+            .returning(move |_, _, _, _, _, _, _, _, _, _, _, flag_kind, _, _| {
+                *seen_by_mock.lock().unwrap() = Some(flag_kind);
+                Ok((vec![], 0))
+            });
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(Box::new(mock_logic) as Box<dyn FeatureLogic>))
+                .service(web::scope("/api/v1").configure(super::configure)),
+        )
+        .await;
+        let req = test::TestRequest::get()
+            .uri(&format!("/api/v1/teams/{team_id}/features{query}"))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        let forwarded = seen.lock().unwrap().take().flatten();
+        (resp.status(), forwarded)
+    }
+
+    #[actix_web::test]
+    async fn list_features_forwards_each_flag_kind_filter() {
+        use crate::model::{FlagKind, FlagKindFilter};
+        for kind in FlagKind::ALL {
+            let (status, forwarded) =
+                list_with_flag_kind(&format!("?flagKind={}", kind.as_str())).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(forwarded, Some(FlagKindFilter::Kind(kind)));
+        }
+        let (status, forwarded) = list_with_flag_kind("?flagKind=unclassified").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(forwarded, Some(FlagKindFilter::Unclassified));
+        let (status, forwarded) = list_with_flag_kind("").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(forwarded, None);
+    }
+
+    #[actix_web::test]
+    async fn list_features_rejects_an_invalid_flag_kind() {
+        for bad in ["?flagKind=bogus", "?flagKind=", "?flagKind=OPS"] {
+            let (status, forwarded) = list_with_flag_kind(bad).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+            assert_eq!(forwarded, None, "{bad} must not reach the logic");
+        }
     }
 
     #[actix_web::test]
@@ -2451,6 +2539,7 @@ mod tests {
                     bucketing_key: None,
                 }],
                 variants: None,
+                flag_kind: None,
             })
             .to_request();
         let resp = test::call_service(&app, req).await;
@@ -2527,6 +2616,7 @@ mod tests {
                     bucketing_key: None,
                 }],
                 variants: None,
+                flag_kind: None,
             })
             .to_request();
         let status = test::call_service(&app, req).await.status();
@@ -2569,6 +2659,7 @@ mod tests {
                     crate::database::entity::VariantValueType::String,
                     None,
                 )]),
+                flag_kind: None,
             })
             .await
             .expect("Failed to create dependency");
@@ -2627,6 +2718,7 @@ mod tests {
                     bucketing_key: None,
                 }],
                 variants: None,
+                flag_kind: None,
             })
             .to_request();
         let resp = test::call_service(&app, req).await;
@@ -2714,6 +2806,7 @@ mod tests {
                         bucketing_key: None,
                     }],
                     variants: None,
+                    flag_kind: None,
                 })
                 .to_request()
         };
@@ -2814,6 +2907,7 @@ mod tests {
                 }],
                 variants: None,
                 freeze_override_reason: None,
+                flag_kind: None,
             })
             .to_request();
         let resp = test::call_service(&app, req).await;
@@ -2915,6 +3009,7 @@ mod tests {
                 relationships: vec![],
                 stages: stages.clone(),
                 variants: None,
+                flag_kind: None,
             })
             .to_request();
         req.extensions_mut().insert(jwt_user.clone());
@@ -2945,6 +3040,7 @@ mod tests {
                 stages,
                 variants: None,
                 freeze_override_reason: None,
+                flag_kind: None,
             })
             .to_request();
         req.extensions_mut().insert(jwt_user);
@@ -3062,15 +3158,15 @@ mod tests {
             recording_runtime(on, fail_store, recorded)
         }
 
-        struct Fixture {
-            pool: sqlx::PgPool,
-            team_id: Uuid,
-            feature_id: Uuid,
-            user_id: Uuid,
+        pub(super) struct Fixture {
+            pub(super) pool: sqlx::PgPool,
+            pub(super) team_id: Uuid,
+            pub(super) feature_id: Uuid,
+            pub(super) user_id: Uuid,
         }
 
         impl Fixture {
-            async fn new() -> Self {
+            pub(super) async fn new() -> Self {
                 let pool = test_pool().await;
                 let team_id = insert_team(&pool).await;
                 let user_id = Uuid::new_v4();
@@ -3100,6 +3196,7 @@ mod tests {
                         stages: vec![],
                         dependencies: vec![],
                         variants: None,
+                        flag_kind: None,
                     })
                     .await
                     .expect("seed feature");
@@ -3135,7 +3232,7 @@ mod tests {
                 self.send(req, ai).await
             }
 
-            async fn patch_feature(
+            pub(super) async fn patch_feature(
                 &self,
                 body: serde_json::Value,
                 ai: Option<AiRuntime>,
@@ -3148,7 +3245,7 @@ mod tests {
             }
 
             /// Runs one request as an admin and returns the status and body.
-            async fn send(
+            pub(super) async fn send(
                 &self,
                 req: actix_http::Request,
                 ai: Option<AiRuntime>,
@@ -3199,7 +3296,7 @@ mod tests {
                 (status, serde_json::from_slice(&bytes).unwrap_or_default())
             }
 
-            async fn cleanup(self) {
+            pub(super) async fn cleanup(self) {
                 sqlx::query("DELETE FROM teams WHERE id = $1")
                     .bind(self.team_id)
                     .execute(&self.pool)
@@ -3374,6 +3471,166 @@ mod tests {
             assert_eq!(status, StatusCode::OK);
             assert_eq!(body["id"], fixture.feature_id.to_string());
             assert_eq!(recorded.lock().unwrap().len(), 1, "submit was attempted");
+            fixture.cleanup().await;
+        }
+    }
+
+    /// AI-30: create and update hand the feature to the flag kind classifier
+    /// after the change has committed, and never depend on its outcome.
+    mod flag_kind_trigger {
+        use super::justification_recording::Fixture;
+        use super::*;
+        use crate::judgment::flag_kind::{
+            build_input,
+            test_support::{Upserts, judgment, recording_service},
+        };
+        use crate::judgment::{AiRuntime, JudgmentClient};
+        use serde_json::json;
+        use std::sync::Arc;
+
+        fn runtime(stored: Vec<crate::database::ai::AiJudgment>) -> (AiRuntime, Upserts) {
+            let (service, upserts) = recording_service(true, stored);
+            let client: Arc<dyn JudgmentClient> =
+                Arc::new(crate::judgment::client::MockJudgmentClient::new());
+            (
+                AiRuntime::new(Some(client), "jev-1.13.0").with_judgments(Some(service)),
+                upserts,
+            )
+        }
+
+        async fn body(fixture: &Fixture, extra: serde_json::Value) -> serde_json::Value {
+            let env_id = insert_environment(&fixture.pool, fixture.team_id).await;
+            let mut body = json!({
+                "key": "ai20-kill",
+                "featureType": "SIMPLE",
+                "dependencies": [],
+                "relationships": [],
+                "stages": [{
+                    "environmentId": env_id.to_string(),
+                    "orderIndex": 0,
+                    "position": "{\"x\":0,\"y\":0}",
+                }],
+            });
+            body.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            body
+        }
+
+        async fn create(
+            fixture: &Fixture,
+            extra: serde_json::Value,
+            ai: Option<AiRuntime>,
+        ) -> (StatusCode, serde_json::Value) {
+            let mut payload = body(fixture, extra).await;
+            payload["key"] = json!("ai30-created");
+            let req = test::TestRequest::post()
+                .uri(&format!("/api/v1/teams/{}/features", fixture.team_id))
+                .set_json(payload)
+                .to_request();
+            fixture.send(req, ai).await
+        }
+
+        #[actix_web::test]
+        async fn create_queues_a_classification() {
+            let fixture = Fixture::new().await;
+            let (runtime, upserts) = runtime(vec![]);
+            let (status, response) = create(
+                &fixture,
+                json!({ "description": "Kill switch for checkout", "tags": ["Payments"] }),
+                Some(runtime),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{response}");
+            assert_eq!(response["flagKind"], serde_json::Value::Null);
+
+            let upserts = upserts.lock().unwrap().clone();
+            assert_eq!(upserts.len(), 1);
+            assert_eq!(upserts[0].0.to_string(), response["id"].as_str().unwrap());
+            assert_eq!(
+                upserts[0].1["feature"]["tags"],
+                json!(["payments"]),
+                "tags are normalized before they are judged"
+            );
+            fixture.cleanup().await;
+        }
+
+        #[actix_web::test]
+        async fn create_with_a_chosen_kind_stores_it_and_queues_nothing() {
+            let fixture = Fixture::new().await;
+            let (runtime, upserts) = runtime(vec![]);
+            let (status, response) = create(
+                &fixture,
+                json!({ "description": "Kill switch for checkout", "flagKind": "ops" }),
+                Some(runtime),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{response}");
+            assert_eq!(response["flagKind"], "ops");
+            assert_eq!(response["flagKindSource"], "user");
+            assert!(upserts.lock().unwrap().is_empty());
+            fixture.cleanup().await;
+        }
+
+        #[actix_web::test]
+        async fn create_without_an_ai_runtime_behaves_as_before() {
+            let fixture = Fixture::new().await;
+            let (status, response) =
+                create(&fixture, json!({ "description": "Kill switch" }), None).await;
+            assert_eq!(status, StatusCode::CREATED, "{response}");
+            assert_eq!(response["flagKind"], serde_json::Value::Null);
+            fixture.cleanup().await;
+        }
+
+        #[actix_web::test]
+        async fn editing_the_description_queues_a_classification() {
+            let fixture = Fixture::new().await;
+            let (runtime, upserts) = runtime(vec![]);
+            let payload = body(&fixture, json!({ "description": "Kill switch" })).await;
+            let (status, response) = fixture.patch_feature(payload, Some(runtime)).await;
+            assert_eq!(status, StatusCode::OK, "{response}");
+            let upserts = upserts.lock().unwrap().clone();
+            assert_eq!(upserts.len(), 1);
+            assert_eq!(upserts[0].0, fixture.feature_id);
+            fixture.cleanup().await;
+        }
+
+        #[actix_web::test]
+        async fn changing_only_the_owner_queues_nothing() {
+            let fixture = Fixture::new().await;
+            let judged = judgment(
+                fixture.feature_id,
+                "done",
+                build_input("ai20-kill", Some("Kill switch"), None, &[], "simple"),
+                json!({ "kind": "ops", "confidence": 0.9, "probabilities": {} }),
+            );
+            let (runtime, upserts) = runtime(vec![judged]);
+            let payload = body(
+                &fixture,
+                json!({ "description": "Kill switch", "owner": "bob" }),
+            )
+            .await;
+            let (status, response) = fixture.patch_feature(payload, Some(runtime)).await;
+            assert_eq!(status, StatusCode::OK, "{response}");
+            assert_eq!(response["owner"], "bob");
+            assert!(upserts.lock().unwrap().is_empty());
+            fixture.cleanup().await;
+        }
+
+        #[actix_web::test]
+        async fn choosing_a_kind_while_editing_stops_ai_changes() {
+            let fixture = Fixture::new().await;
+            let (runtime, upserts) = runtime(vec![]);
+            let payload = body(
+                &fixture,
+                json!({ "description": "Kill switch", "flagKind": "release" }),
+            )
+            .await;
+            let (status, response) = fixture.patch_feature(payload, Some(runtime)).await;
+            assert_eq!(status, StatusCode::OK, "{response}");
+            assert_eq!(response["flagKind"], "release");
+            assert_eq!(response["flagKindSource"], "user");
+            assert!(upserts.lock().unwrap().is_empty());
             fixture.cleanup().await;
         }
     }

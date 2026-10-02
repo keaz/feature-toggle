@@ -64,6 +64,7 @@ async fn test_variant_value_types() {
         stages: vec![stage],
         dependencies: vec![],
         variants: Some(variants),
+        flag_kind: None,
     };
 
     let feature_id = repository

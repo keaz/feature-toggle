@@ -1172,6 +1172,7 @@ mod tests {
                         None,
                     ),
                 ]),
+                flag_kind: None,
             })
             .await
             .expect("create feature");

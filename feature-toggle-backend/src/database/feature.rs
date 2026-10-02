@@ -1,5 +1,6 @@
 use crate::database::entity::{Feature, FeatureDependency, FeaturePipelineStage, FeatureType};
 use crate::database::{Error, handle_error};
+use crate::model::{FlagKind, FlagKindFilter, FlagKindSource};
 use chrono::{DateTime, Utc};
 use mockall::automock;
 use serde::{Deserialize, Serialize};
@@ -172,6 +173,8 @@ pub struct CreateFeature {
     pub expires_at: Option<DateTime<Utc>>,
     pub cleanup_reason: Option<String>,
     pub tags: Vec<String>,
+    /// A kind chosen by the user at create time. Stored with source `user`.
+    pub flag_kind: Option<FlagKind>,
     pub stages: Vec<CreateFeatureStage>,
     pub dependencies: Vec<Uuid>,
     pub variants: Option<
@@ -235,6 +238,9 @@ pub struct UpdateFeature {
     pub expires_at: Option<Option<DateTime<Utc>>>,
     pub cleanup_reason: Option<Option<String>>,
     pub tags: Option<Vec<String>>,
+    /// Absent: unchanged. A value equal to the stored one: unchanged. Otherwise
+    /// the kind is set (or cleared for `Some(None)`) with source `user`.
+    pub flag_kind: Option<Option<FlagKind>>,
     pub archive_confirmation: bool,
     pub stages: Vec<CreateFeatureStage>,
     pub dependencies: Vec<Uuid>,
@@ -279,6 +285,9 @@ struct Features {
     evaluation_count_7d: i64,
     evaluation_count_30d: i64,
     evaluation_count_90d: i64,
+    flag_kind: Option<String>,
+    flag_kind_source: Option<String>,
+    flag_kind_confidence: Option<f32>,
 }
 
 #[derive(Debug, sqlx::FromRow, Clone)]
@@ -311,6 +320,9 @@ struct FeatureWithStageRow {
     evaluation_count_7d: i64,
     evaluation_count_30d: i64,
     evaluation_count_90d: i64,
+    flag_kind: Option<String>,
+    flag_kind_source: Option<String>,
+    flag_kind_confidence: Option<f32>,
 }
 
 #[derive(Debug, sqlx::FromRow, Clone)]
@@ -331,12 +343,26 @@ struct FeaturePipelineStageRow {
     pub enabled: bool,
 }
 
+/// The stored `(kind, source, confidence)` after a user's `flag_kind` input.
+/// Only a value that differs from the stored kind counts as a choice: the UI
+/// resends the current value on every full-body update.
+pub fn resolve_flag_kind_update(
+    stored: (Option<FlagKind>, Option<FlagKindSource>, Option<f32>),
+    requested: Option<Option<FlagKind>>,
+) -> (Option<FlagKind>, Option<FlagKindSource>, Option<f32>) {
+    match requested {
+        Some(kind) if kind != stored.0 => (kind, Some(FlagKindSource::User), None),
+        _ => stored,
+    }
+}
+
 const FEATURE_SELECT: &str = r#"SELECT f.id as feature_id, f.key as feature_key, f.description, f.feature_type, f.team_id, f.created_at, 
             f.kill_switch_enabled, f.kill_switch_activated_at, f.rollback_scheduled_at, f.active as feature_enabled,
             f.emergency_override_reason, f.emergency_override_expires_at, f.emergency_override_actor_id, f.emergency_override_applied_at,
             f.lifecycle_stage, f.owner, f.purpose, f.reference_url, f.expires_at, f.cleanup_reason, f.tags, f.archived_at,
             f.deprecated_at, f.deprecation_notice, f.last_evaluated_at,
-            f.evaluation_count_7d, f.evaluation_count_30d, f.evaluation_count_90d
+            f.evaluation_count_7d, f.evaluation_count_30d, f.evaluation_count_90d,
+               f.flag_kind, f.flag_kind_source, f.flag_kind_confidence
 			FROM features f"#;
 
 pub fn diff_feature_snapshots(
@@ -597,9 +623,32 @@ pub trait FeatureRepository: Send + Sync {
         tag: Option<String>,
         dependency_status: Option<String>,
         approval_status: Option<String>,
+        flag_kind: Option<FlagKindFilter>,
         offset: i64,
         limit: i64,
     ) -> Result<(Vec<Feature>, i64), Error>;
+    /// Unarchived features in a team with no kind and no user decision, oldest
+    /// first, up to `limit`. Used by the flag kind backfill. Dependencies are not loaded.
+    async fn get_features_needing_flag_kind(
+        &self,
+        team_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<Feature>, Error>;
+    /// The team's most used tags on unarchived features, skipping `exclude`.
+    async fn get_team_tag_candidates(
+        &self,
+        team_id: Uuid,
+        exclude: Vec<String>,
+        limit: i64,
+    ) -> Result<Vec<String>, Error>;
+    /// Stores an AI-chosen kind. False when a user chose one (or cleared it) in
+    /// the meantime, or the feature is gone.
+    async fn set_ai_flag_kind(
+        &self,
+        id: Uuid,
+        kind: FlagKind,
+        confidence: f32,
+    ) -> Result<bool, Error>;
     async fn create_feature(&self, input: CreateFeature) -> Result<Uuid, Error>;
     async fn update_feature(&self, input: UpdateFeature) -> Result<Feature, Error>;
     async fn delete_feature(&self, id: Uuid) -> Result<(), Error>;
@@ -1396,6 +1445,15 @@ impl FeatureRepositoryImpl {
             evaluation_count_7d: feature.evaluation_count_7d,
             evaluation_count_30d: feature.evaluation_count_30d,
             evaluation_count_90d: feature.evaluation_count_90d,
+            flag_kind: feature
+                .flag_kind
+                .as_deref()
+                .and_then(|kind| kind.parse().ok()),
+            flag_kind_source: feature
+                .flag_kind_source
+                .as_deref()
+                .and_then(|source| source.parse().ok()),
+            flag_kind_confidence: feature.flag_kind_confidence,
             dependencies: vec![], // Dependencies will be loaded separately
         }
     }
@@ -1664,6 +1722,7 @@ impl FeatureRepositoryImpl {
         tag: Option<&str>,
         dependency_status: Option<&str>,
         approval_status: Option<&str>,
+        flag_kind: Option<FlagKindFilter>,
     ) {
         if let Some(key) = key {
             query_builder.push(" AND f.key ILIKE ");
@@ -1745,6 +1804,17 @@ impl FeatureRepositoryImpl {
             query_builder.push_bind(approval_status.to_lowercase());
             query_builder.push(")");
         }
+        match flag_kind {
+            Some(FlagKindFilter::Kind(kind)) => {
+                query_builder
+                    .push(" AND f.flag_kind = ")
+                    .push_bind(kind.as_str());
+            }
+            Some(FlagKindFilter::Unclassified) => {
+                query_builder.push(" AND f.flag_kind IS NULL");
+            }
+            None => {}
+        }
     }
 
     async fn archive_blockers_conn(
@@ -1798,6 +1868,7 @@ impl FeatureRepositoryImpl {
         tag: Option<String>,
         dependency_status: Option<String>,
         approval_status: Option<String>,
+        flag_kind: Option<FlagKindFilter>,
         limit: i64,
         offset: i64,
     ) -> Result<(Vec<FeatureWithStageRow>, i64), Error> {
@@ -1815,6 +1886,7 @@ impl FeatureRepositoryImpl {
                     tag.clone(),
                     dependency_status.clone(),
                     approval_status.clone(),
+                    flag_kind,
                 )
                 .await?;
             return Ok((Vec::new(), total_count));
@@ -1830,6 +1902,7 @@ impl FeatureRepositoryImpl {
                f.lifecycle_stage, f.owner, f.purpose, f.reference_url, f.expires_at, f.cleanup_reason, f.tags, f.archived_at,
                f.deprecated_at, f.deprecation_notice, f.last_evaluated_at,
                f.evaluation_count_7d, f.evaluation_count_30d, f.evaluation_count_90d,
+               f.flag_kind, f.flag_kind_source, f.flag_kind_confidence,
                COUNT(*) OVER() as total_count
                FROM features f"#,
         );
@@ -1846,6 +1919,7 @@ impl FeatureRepositoryImpl {
             tag.as_deref(),
             dependency_status.as_deref(),
             approval_status.as_deref(),
+            flag_kind,
         );
         query_builder.push(" ORDER BY f.key");
         query_builder.push(" LIMIT ").push_bind(limit);
@@ -1869,6 +1943,7 @@ impl FeatureRepositoryImpl {
                 tag.clone(),
                 dependency_status.clone(),
                 approval_status.clone(),
+                flag_kind,
             )
             .await?
         };
@@ -1894,6 +1969,7 @@ impl FeatureRepositoryImpl {
         tag: Option<String>,
         dependency_status: Option<String>,
         approval_status: Option<String>,
+        flag_kind: Option<FlagKindFilter>,
     ) -> Result<i64, Error> {
         let mut count_query = sqlx::QueryBuilder::new("SELECT COUNT(*) FROM features f");
         count_query.push(" WHERE f.team_id = ").push_bind(team_id);
@@ -1909,6 +1985,7 @@ impl FeatureRepositoryImpl {
             tag.as_deref(),
             dependency_status.as_deref(),
             approval_status.as_deref(),
+            flag_kind,
         );
 
         let total_count: i64 = count_query
@@ -1942,9 +2019,10 @@ impl FeatureRepositoryImpl {
         let result = sqlx::query(
             r#"INSERT INTO features (
                    id, key, description, feature_type, team_id, lifecycle_stage, owner,
-                   purpose, reference_url, expires_at, cleanup_reason, tags, deprecated_at, archived_at
+                   purpose, reference_url, expires_at, cleanup_reason, tags, deprecated_at, archived_at,
+                   flag_kind, flag_kind_source
                )
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
                RETURNING id"#,
         )
         .bind(id)
@@ -1961,6 +2039,8 @@ impl FeatureRepositoryImpl {
         .bind(&input.tags)
         .bind(deprecated_at)
         .bind(archived_at)
+        .bind(input.flag_kind.map(FlagKind::as_str))
+        .bind(input.flag_kind.map(|_| FlagKindSource::User.as_str()))
         .fetch_one(&mut *tx)
         .await;
 
@@ -2054,6 +2134,14 @@ impl FeatureRepositoryImpl {
             None => existing_feature.cleanup_reason,
         };
         let tags = input.tags.clone().unwrap_or(existing_feature.tags);
+        let (flag_kind, flag_kind_source, flag_kind_confidence) = resolve_flag_kind_update(
+            (
+                existing_feature.flag_kind,
+                existing_feature.flag_kind_source,
+                existing_feature.flag_kind_confidence,
+            ),
+            input.flag_kind,
+        );
         let deprecated_at = if lifecycle_stage == "deprecated" {
             existing_feature.deprecated_at.or_else(|| Some(Utc::now()))
         } else {
@@ -2078,8 +2166,11 @@ impl FeatureRepositoryImpl {
                    cleanup_reason = $9,
                    tags = $10,
                    deprecated_at = $11,
-                   archived_at = $12
-               WHERE id = $13"#,
+                   archived_at = $12,
+                   flag_kind = $13,
+                   flag_kind_source = $14,
+                   flag_kind_confidence = $15
+               WHERE id = $16"#,
         )
         .bind(key)
         .bind(description)
@@ -2093,6 +2184,9 @@ impl FeatureRepositoryImpl {
         .bind(tags)
         .bind(deprecated_at)
         .bind(archived_at)
+        .bind(flag_kind.map(FlagKind::as_str))
+        .bind(flag_kind_source.map(FlagKindSource::as_str))
+        .bind(flag_kind_confidence)
         .bind(id)
         .execute(&mut *tx)
         .await;
@@ -2419,6 +2513,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
             tag.as_deref(),
             dependency_status.as_deref(),
             approval_status.as_deref(),
+            None,
         );
         query_builder.push(" ORDER BY f.key");
 
@@ -2456,6 +2551,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
                 None,
                 None,
                 None,
+                None,
                 page_size as i64,
                 offset as i64,
             )
@@ -2487,6 +2583,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
                 None,
                 None,
                 None,
+                None,
                 limit,
                 offset,
             )
@@ -2510,6 +2607,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
         tag: Option<String>,
         dependency_status: Option<String>,
         approval_status: Option<String>,
+        flag_kind: Option<FlagKindFilter>,
         offset: i64,
         limit: i64,
     ) -> Result<(Vec<Feature>, i64), Error> {
@@ -2526,6 +2624,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
                 tag,
                 dependency_status,
                 approval_status,
+                flag_kind,
                 limit,
                 offset,
             )
@@ -2534,6 +2633,71 @@ impl FeatureRepository for FeatureRepositoryImpl {
         self.hydrate_feature_dependencies(&mut features).await?;
 
         Ok((features, total_count))
+    }
+
+    async fn get_features_needing_flag_kind(
+        &self,
+        team_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<Feature>, Error> {
+        let mut query_builder = sqlx::QueryBuilder::new(FEATURE_SELECT);
+        query_builder
+            .push(" WHERE f.team_id = ")
+            .push_bind(team_id)
+            .push(
+                " AND f.flag_kind IS NULL AND f.archived_at IS NULL \
+                 AND (f.flag_kind_source IS NULL OR f.flag_kind_source <> 'user') \
+                 ORDER BY f.created_at, f.id LIMIT ",
+            )
+            .push_bind(limit);
+        let rows = query_builder
+            .build_query_as::<FeatureWithStageRow>()
+            .fetch_all(&self.pool)
+            .await;
+        Ok(Self::map_rows_to_feature_list(handle_error(None, rows)?))
+    }
+
+    async fn get_team_tag_candidates(
+        &self,
+        team_id: Uuid,
+        exclude: Vec<String>,
+        limit: i64,
+    ) -> Result<Vec<String>, Error> {
+        let result = sqlx::query_scalar::<_, String>(
+            r#"SELECT tag
+               FROM features f, unnest(f.tags) AS tag
+               WHERE f.team_id = $1
+                 AND f.archived_at IS NULL
+                 AND NOT (tag = ANY($2))
+               GROUP BY tag
+               ORDER BY COUNT(*) DESC, tag
+               LIMIT $3"#,
+        )
+        .bind(team_id)
+        .bind(exclude)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await;
+        handle_error(None, result)
+    }
+
+    async fn set_ai_flag_kind(
+        &self,
+        id: Uuid,
+        kind: FlagKind,
+        confidence: f32,
+    ) -> Result<bool, Error> {
+        let result = sqlx::query(
+            r#"UPDATE features
+               SET flag_kind = $2, flag_kind_source = 'ai', flag_kind_confidence = $3
+               WHERE id = $1 AND (flag_kind_source IS NULL OR flag_kind_source = 'ai')"#,
+        )
+        .bind(id)
+        .bind(kind.as_str())
+        .bind(confidence)
+        .execute(&self.pool)
+        .await;
+        Ok(handle_error(None, result)?.rows_affected() > 0)
     }
 
     async fn create_feature(&self, input: CreateFeature) -> Result<Uuid, Error> {
@@ -3433,6 +3597,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
                f.lifecycle_stage, f.owner, f.purpose, f.reference_url, f.expires_at, f.cleanup_reason, f.tags, f.archived_at,
                f.deprecated_at, f.deprecation_notice, f.last_evaluated_at,
                f.evaluation_count_7d, f.evaluation_count_30d, f.evaluation_count_90d,
+               f.flag_kind, f.flag_kind_source, f.flag_kind_confidence,
                s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
                s.parent_stage_id, s.position, s.status, s.enabled
                FROM features f
@@ -3490,6 +3655,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
                f.lifecycle_stage, f.owner, f.purpose, f.reference_url, f.expires_at, f.cleanup_reason, f.tags, f.archived_at,
                f.deprecated_at, f.deprecation_notice, f.last_evaluated_at,
                f.evaluation_count_7d, f.evaluation_count_30d, f.evaluation_count_90d,
+               f.flag_kind, f.flag_kind_source, f.flag_kind_confidence,
                s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
                s.parent_stage_id, s.position, s.status, s.enabled
                FROM features f
@@ -3556,6 +3722,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
                f.lifecycle_stage, f.owner, f.purpose, f.reference_url, f.expires_at, f.cleanup_reason, f.tags, f.archived_at,
                f.deprecated_at, f.deprecation_notice, f.last_evaluated_at,
                f.evaluation_count_7d, f.evaluation_count_30d, f.evaluation_count_90d,
+               f.flag_kind, f.flag_kind_source, f.flag_kind_confidence,
                s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
                s.parent_stage_id, s.position, s.status, s.enabled
                FROM features f
@@ -3612,6 +3779,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
                f.lifecycle_stage, f.owner, f.purpose, f.reference_url, f.expires_at, f.cleanup_reason, f.tags, f.archived_at,
                f.deprecated_at, f.deprecation_notice, f.last_evaluated_at,
                f.evaluation_count_7d, f.evaluation_count_30d, f.evaluation_count_90d,
+               f.flag_kind, f.flag_kind_source, f.flag_kind_confidence,
                s.id as stage_id, s.feature_id as feature_id_stage, s.environment_id, s.order_index,
                s.parent_stage_id, s.position, s.status, s.enabled
                FROM features f
@@ -3676,9 +3844,10 @@ impl FeatureRepositoryTx for FeatureRepositoryImpl {
         let result = sqlx::query(
             r#"INSERT INTO features (
                    id, key, description, feature_type, team_id, lifecycle_stage, owner,
-                   purpose, reference_url, expires_at, cleanup_reason, tags, deprecated_at, archived_at
+                   purpose, reference_url, expires_at, cleanup_reason, tags, deprecated_at, archived_at,
+                   flag_kind, flag_kind_source
                )
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)"#,
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)"#,
         )
         .bind(id)
         .bind(&input.key)
@@ -3694,6 +3863,8 @@ impl FeatureRepositoryTx for FeatureRepositoryImpl {
         .bind(&input.tags)
         .bind(deprecated_at)
         .bind(archived_at)
+        .bind(input.flag_kind.map(FlagKind::as_str))
+        .bind(input.flag_kind.map(|_| FlagKindSource::User.as_str()))
         .execute(&mut *conn)
         .await;
         handle_error(None, result)?;
@@ -5002,6 +5173,38 @@ mod tests {
     use chrono::{Duration, Utc};
     use sqlx::PgPool;
     use uuid::Uuid;
+
+    #[test]
+    fn flag_kind_update_follows_the_user_choice_rules() {
+        use FlagKind::{Config, Ops};
+        use FlagKindSource::{Ai, User};
+        let ai_ops = (Some(Ops), Some(Ai), Some(0.8));
+
+        // Absent: nothing changes.
+        assert_eq!(resolve_flag_kind_update(ai_ops, None), ai_ops);
+        // The same value keeps the AI source and its confidence.
+        assert_eq!(resolve_flag_kind_update(ai_ops, Some(Some(Ops))), ai_ops);
+        // A different value is a user choice with no confidence.
+        assert_eq!(
+            resolve_flag_kind_update(ai_ops, Some(Some(Config))),
+            (Some(Config), Some(User), None)
+        );
+        // `null` clears the kind and still counts as a user choice.
+        assert_eq!(
+            resolve_flag_kind_update(ai_ops, Some(None)),
+            (None, Some(User), None)
+        );
+        // Nothing to clear: unchanged, so the source stays empty.
+        assert_eq!(
+            resolve_flag_kind_update((None, None, None), Some(None)),
+            (None, None, None)
+        );
+        // A first choice on an unclassified feature.
+        assert_eq!(
+            resolve_flag_kind_update((None, None, None), Some(Some(Ops))),
+            (Some(Ops), Some(User), None)
+        );
+    }
 
     async fn setup_test_feature(pool: &PgPool, team_id: Uuid) -> Uuid {
         let feature_id = Uuid::new_v4();

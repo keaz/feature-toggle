@@ -82,6 +82,7 @@ async fn test_lifecycle_metadata_filters_and_archive_guard() {
             stages: vec![],
             dependencies: vec![],
             variants: None,
+            flag_kind: None,
         })
         .await
         .unwrap();
@@ -103,6 +104,7 @@ async fn test_lifecycle_metadata_filters_and_archive_guard() {
             None,
             Some(true),
             false,
+            None,
             None,
             None,
             None,
@@ -133,6 +135,7 @@ async fn test_lifecycle_metadata_filters_and_archive_guard() {
             stages: vec![],
             dependencies: vec![],
             variants: None,
+            flag_kind: None,
         })
         .await
         .unwrap();
@@ -145,6 +148,7 @@ async fn test_lifecycle_metadata_filters_and_archive_guard() {
             None,
             None,
             false,
+            None,
             None,
             None,
             None,
@@ -165,6 +169,7 @@ async fn test_lifecycle_metadata_filters_and_archive_guard() {
             Some("archived".to_string()),
             None,
             false,
+            None,
             None,
             None,
             None,
@@ -203,6 +208,7 @@ async fn test_lifecycle_metadata_filters_and_archive_guard() {
             }],
             dependencies: vec![],
             variants: None,
+            flag_kind: None,
         })
         .await
         .unwrap();
@@ -231,6 +237,7 @@ async fn test_lifecycle_metadata_filters_and_archive_guard() {
             }],
             dependencies: vec![],
             variants: None,
+            flag_kind: None,
         })
         .await;
     assert!(matches!(
@@ -262,6 +269,7 @@ async fn test_lifecycle_metadata_filters_and_archive_guard() {
             }],
             dependencies: vec![],
             variants: None,
+            flag_kind: None,
         })
         .await
         .unwrap();
@@ -305,6 +313,7 @@ async fn test_create_feature_without_stages() {
         stages: vec![],
         dependencies: vec![],
         variants: None,
+        flag_kind: None,
     };
     let result = repository.create_feature(input).await;
 
@@ -351,6 +360,7 @@ async fn test_create_feature_with_stages() {
         ],
         dependencies: vec![],
         variants: None,
+        flag_kind: None,
     };
     let result = repository.create_feature(input).await;
 
@@ -380,6 +390,7 @@ async fn test_create_feature_with_dependencies() {
         stages: vec![],
         dependencies: vec![],
         variants: None,
+        flag_kind: None,
     };
     let dependency_result = repository.create_feature(dependency_input).await;
     assert!(dependency_result.is_ok());
@@ -402,6 +413,7 @@ async fn test_create_feature_with_dependencies() {
         stages: vec![],
         dependencies: vec![dependency_id],
         variants: None,
+        flag_kind: None,
     };
     let result = repository.create_feature(input).await;
 
@@ -434,6 +446,7 @@ async fn test_create_existing_feature() {
         stages: vec![],
         dependencies: vec![],
         variants: None,
+        flag_kind: None,
     };
     let result = repository.create_feature(input).await;
 
@@ -466,6 +479,7 @@ async fn test_update_feature() {
         stages: vec![],
         dependencies: vec![],
         variants: None,
+        flag_kind: None,
     };
     let result = repository.update_feature(input).await;
 
@@ -509,6 +523,7 @@ async fn test_update_feature_with_existing_stages() {
         }],
         dependencies: vec![],
         variants: None,
+        flag_kind: None,
     };
     let result = repository.update_feature(input).await;
 
@@ -557,6 +572,7 @@ async fn test_update_non_existing_feature() {
         stages: vec![],
         dependencies: vec![],
         variants: None,
+        flag_kind: None,
     };
     let result = repository.update_feature(input).await;
 
@@ -587,6 +603,7 @@ async fn test_delete_feature() {
             stages: vec![],
             dependencies: vec![],
             variants: None,
+            flag_kind: None,
         })
         .await
         .expect("feature to be created for delete");
@@ -724,6 +741,7 @@ async fn test_create_feature_with_stages_verification() {
         stages: vec![parent.clone(), child],
         dependencies: vec![],
         variants: None,
+        flag_kind: None,
     };
 
     // Create the feature
@@ -819,6 +837,7 @@ async fn test_update_feature_with_stages() {
         stages: vec![stage1.clone(), stage2.clone()],
         dependencies: vec![],
         variants: None,
+        flag_kind: None,
     };
 
     // Create the feature
@@ -877,6 +896,7 @@ async fn test_update_feature_with_stages() {
         stages: vec![updated_stage1, new_stage3],
         dependencies: vec![],
         variants: None,
+        flag_kind: None,
     };
 
     let update_result = repository.update_feature(update_input).await;
@@ -950,6 +970,7 @@ async fn test_emergency_disable_feature_integration() {
             stages: vec![],
             dependencies: vec![],
             variants: None,
+            flag_kind: None,
         })
         .await
         .expect("feature to create");
@@ -1024,6 +1045,7 @@ async fn test_active_kill_switch_listing_maps_feature_metadata() {
             stages: vec![],
             dependencies: vec![],
             variants: None,
+            flag_kind: None,
         })
         .await
         .expect("feature to create");
@@ -1093,6 +1115,7 @@ async fn test_pending_approval_listing_maps_feature_metadata() {
             )],
             dependencies: vec![],
             variants: None,
+            flag_kind: None,
         })
         .await
         .expect("feature to create");
@@ -1258,6 +1281,7 @@ async fn test_get_features_pending_rollback_integration() {
         dependencies: vec![],
         variants: None,
         stages: vec![],
+        flag_kind: None,
     };
     let feature_id = repository.create_feature(create_feature).await.unwrap();
 
@@ -1579,6 +1603,7 @@ async fn test_get_feature_by_key_matches_exact_key_only() {
                     stages: vec![],
                     dependencies: vec![],
                     variants: None,
+                    flag_kind: None,
                 })
                 .await,
         );
@@ -1777,6 +1802,7 @@ fn simple_create_feature(team_id: Uuid, key: &str) -> CreateFeature {
         stages: vec![],
         dependencies: vec![],
         variants: None,
+        flag_kind: None,
     }
 }
 
@@ -1896,6 +1922,7 @@ fn rename_feature(id: Uuid, key: &str) -> UpdateFeature {
         stages: vec![],
         dependencies: vec![],
         variants: None,
+        flag_kind: None,
     }
 }
 

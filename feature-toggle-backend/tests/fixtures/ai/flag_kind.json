@@ -1,0 +1,305 @@
+[
+  {
+    "name": "new-checkout-flow",
+    "key": "new-checkout-flow",
+    "description": "Rollout of the redesigned checkout page to all customers",
+    "purpose": "Gradually enable the new checkout, then delete the flag",
+    "tags": [
+      "checkout",
+      "rollout"
+    ],
+    "feature_type": "simple",
+    "expected": "release"
+  },
+  {
+    "name": "search-v2-launch",
+    "key": "search-v2-launch",
+    "description": "Enable the rewritten search results page",
+    "purpose": "Ship search v2 behind a flag, remove after 100% rollout",
+    "tags": [
+      "search"
+    ],
+    "feature_type": "contextual",
+    "expected": "release"
+  },
+  {
+    "name": "dark-mode-beta-rollout",
+    "key": "dark-mode-beta-rollout",
+    "description": "Staged rollout of dark mode in the web app",
+    "purpose": "Roll out dark mode by percentage and clean up the flag afterwards",
+    "tags": [
+      "ui"
+    ],
+    "feature_type": "contextual",
+    "expected": "release"
+  },
+  {
+    "name": "onboarding-redesign",
+    "key": "onboarding-redesign",
+    "description": "Show the new onboarding screens to new users",
+    "purpose": "Temporary flag until the redesign is fully launched",
+    "tags": [
+      "onboarding",
+      "ui"
+    ],
+    "feature_type": "simple",
+    "expected": "release"
+  },
+  {
+    "name": "payments-api-v3-migration",
+    "key": "payments-api-v3-migration",
+    "description": "Switch to the new payments provider API",
+    "purpose": "Gradual migration to the v3 API, remove when complete",
+    "tags": [
+      "payments"
+    ],
+    "feature_type": "contextual",
+    "expected": "release"
+  },
+  {
+    "name": "pricing-page-ab-test",
+    "key": "pricing-page-ab-test",
+    "description": "A/B test of two pricing page layouts",
+    "purpose": "Measure conversion between variant A and B",
+    "tags": [
+      "pricing",
+      "experiment"
+    ],
+    "feature_type": "contextual",
+    "expected": "experiment"
+  },
+  {
+    "name": "cta-button-color-test",
+    "key": "cta-button-color-test",
+    "description": "Experiment comparing green and blue call-to-action buttons",
+    "purpose": "Pick the variant with the higher click-through rate",
+    "tags": [
+      "experiment",
+      "ui"
+    ],
+    "feature_type": "contextual",
+    "expected": "experiment"
+  },
+  {
+    "name": "recommendation-algo-experiment",
+    "key": "recommendation-algo-experiment",
+    "description": "Compare the new recommendation model against the baseline",
+    "purpose": "Run a two-week experiment and measure watch time",
+    "tags": [
+      "ml",
+      "experiment"
+    ],
+    "feature_type": "contextual",
+    "expected": "experiment"
+  },
+  {
+    "name": "signup-form-variants",
+    "key": "signup-form-variants",
+    "description": "Test a short signup form against the long one",
+    "purpose": "Experiment to see which form gets more signups",
+    "tags": [
+      "signup"
+    ],
+    "feature_type": "contextual",
+    "expected": "experiment"
+  },
+  {
+    "name": "kill-switch-payments",
+    "key": "kill-switch-payments",
+    "description": "Emergency kill switch that stops all payment processing",
+    "purpose": "Turn off payments quickly during an incident",
+    "tags": [
+      "payments",
+      "incident"
+    ],
+    "feature_type": "simple",
+    "expected": "ops"
+  },
+  {
+    "name": "maintenance-mode",
+    "key": "maintenance-mode",
+    "description": "Puts the whole site into read-only maintenance mode",
+    "purpose": "Enable during database maintenance windows",
+    "tags": [
+      "ops"
+    ],
+    "feature_type": "simple",
+    "expected": "ops"
+  },
+  {
+    "name": "circuit-breaker-recommendations",
+    "key": "circuit-breaker-recommendations",
+    "description": "Circuit breaker for the recommendation service",
+    "purpose": "Bypass the service when it is failing",
+    "tags": [
+      "resilience"
+    ],
+    "feature_type": "simple",
+    "expected": "ops"
+  },
+  {
+    "name": "load-shedding-search",
+    "key": "load-shedding-search",
+    "description": "Sheds non-essential search traffic under heavy load",
+    "purpose": "Protect the cluster during traffic spikes",
+    "tags": [
+      "ops",
+      "search"
+    ],
+    "feature_type": "simple",
+    "expected": "ops"
+  },
+  {
+    "name": "fallback-to-cached-prices",
+    "key": "fallback-to-cached-prices",
+    "description": "Fallback toggle that serves cached prices when the pricing service is down",
+    "purpose": "Operational fallback",
+    "tags": [
+      "pricing",
+      "resilience"
+    ],
+    "feature_type": "simple",
+    "expected": "ops"
+  },
+  {
+    "name": "enterprise-sso-access",
+    "key": "enterprise-sso-access",
+    "description": "Enables SAML single sign-on for customers on the enterprise plan",
+    "purpose": "Entitlement for enterprise customers",
+    "tags": [
+      "enterprise",
+      "entitlement"
+    ],
+    "feature_type": "contextual",
+    "expected": "permission"
+  },
+  {
+    "name": "beta-program-reports",
+    "key": "beta-program-reports",
+    "description": "Gives members of the beta program access to advanced reports",
+    "purpose": "Early access for beta testers",
+    "tags": [
+      "beta"
+    ],
+    "feature_type": "contextual",
+    "expected": "permission"
+  },
+  {
+    "name": "pro-plan-export",
+    "key": "pro-plan-export",
+    "description": "Allows exporting data to CSV for Pro plan customers",
+    "purpose": "Plan-based feature access",
+    "tags": [
+      "billing",
+      "plans"
+    ],
+    "feature_type": "contextual",
+    "expected": "permission"
+  },
+  {
+    "name": "admin-audit-log-access",
+    "key": "admin-audit-log-access",
+    "description": "Only admin roles can see the audit log page",
+    "purpose": "Role-based access to a sensitive page",
+    "tags": [
+      "security",
+      "roles"
+    ],
+    "feature_type": "contextual",
+    "expected": "permission"
+  },
+  {
+    "name": "max-upload-size-mb",
+    "key": "max-upload-size-mb",
+    "description": "Maximum upload size in megabytes",
+    "purpose": "Tunable limit, value changes per environment",
+    "tags": [
+      "limits"
+    ],
+    "feature_type": "contextual",
+    "expected": "config"
+  },
+  {
+    "name": "api-request-timeout-ms",
+    "key": "api-request-timeout-ms",
+    "description": "Timeout for calls to the upstream API",
+    "purpose": "Configuration value for request timeout",
+    "tags": [
+      "config",
+      "timeouts"
+    ],
+    "feature_type": "contextual",
+    "expected": "config"
+  },
+  {
+    "name": "welcome-banner-text",
+    "key": "welcome-banner-text",
+    "description": "Text shown in the welcome banner",
+    "purpose": "Marketing can change the banner copy without a deploy",
+    "tags": [
+      "content"
+    ],
+    "feature_type": "contextual",
+    "expected": "config"
+  },
+  {
+    "name": "items-per-page",
+    "key": "items-per-page",
+    "description": "Number of items shown per page in lists",
+    "purpose": "Tunable page size",
+    "tags": [
+      "ui",
+      "limits"
+    ],
+    "feature_type": "contextual",
+    "expected": "config"
+  },
+  {
+    "name": "retry-backoff-seconds",
+    "key": "retry-backoff-seconds",
+    "description": "Seconds to wait between retries for the email sender",
+    "purpose": "Configurable retry delay",
+    "tags": [
+      "email",
+      "config"
+    ],
+    "feature_type": "contextual",
+    "expected": "config"
+  },
+  {
+    "name": "x1",
+    "key": "x1",
+    "description": null,
+    "purpose": null,
+    "tags": [],
+    "feature_type": "simple",
+    "expected": "unknown"
+  },
+  {
+    "name": "flag-123",
+    "key": "flag-123",
+    "description": null,
+    "purpose": null,
+    "tags": [],
+    "feature_type": "simple",
+    "expected": "unknown"
+  },
+  {
+    "name": "temp",
+    "key": "temp",
+    "description": null,
+    "purpose": "",
+    "tags": [],
+    "feature_type": "simple",
+    "expected": "unknown"
+  },
+  {
+    "name": "new-thing",
+    "key": "new-thing",
+    "description": "Stuff",
+    "purpose": null,
+    "tags": [],
+    "feature_type": "simple",
+    "expected": "unknown"
+  }
+]

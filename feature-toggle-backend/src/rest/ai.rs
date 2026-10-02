@@ -4,6 +4,7 @@ use actix_web::{HttpMessage, HttpRequest, HttpResponse, Responder, get, post, pu
 use log::warn;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::BTreeMap;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -11,8 +12,11 @@ use crate::JwtUser;
 use crate::database::activity_log::ActivityLogRepository;
 use crate::database::ai::AiFeature;
 use crate::database::ai::{StoredTeamAiSettings, TeamAiSettings, TeamAiSettingsRepository};
+use crate::database::feature::FeatureRepository;
+use crate::judgment::flag_kind;
 use crate::judgment::justification::{self, MAX_REASON_CHARS, ReasonKind};
-use crate::judgment::{AiRuntime, SubjectType};
+use crate::judgment::{AiRuntime, JudgmentKind, SubjectType};
+use crate::model::FlagKind;
 use crate::rest::error::RestError;
 use crate::utils::activity_logger::{activity_types, log_team_activity};
 
@@ -307,6 +311,211 @@ pub(crate) async fn check_justification(
     Ok(HttpResponse::Ok().json(response))
 }
 
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FeatureSuggestionsRequest {
+    pub key: String,
+    pub description: Option<String>,
+    pub purpose: Option<String>,
+    pub tags: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct KindSuggestionResponse {
+    /// `release`, `experiment`, `ops`, `permission`, or `config`.
+    pub value: FlagKind,
+    /// Probability per option, including `unknown`.
+    pub probabilities: BTreeMap<String, f64>,
+    pub confidence: f64,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TagSuggestionResponse {
+    pub tag: String,
+    pub probability: f64,
+}
+
+/// `{ "available": false }` when suggestions cannot run. `kind` and `tags` are
+/// present only when `available` is true; `kind` is null when the model is not
+/// sure.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FeatureSuggestionsResponse {
+    pub available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<KindSuggestionResponse>, nullable = true)]
+    pub kind: Option<Option<KindSuggestionResponse>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<TagSuggestionResponse>>,
+}
+
+impl FeatureSuggestionsResponse {
+    fn unavailable() -> Self {
+        Self {
+            available: false,
+            kind: None,
+            tags: None,
+        }
+    }
+}
+
+const MAX_SUGGESTION_KEY_CHARS: usize = 255;
+const MAX_SUGGESTION_BODY_TAGS: usize = 50;
+
+fn normalized_tags(tags: &[String]) -> Vec<String> {
+    let mut normalized: Vec<String> = tags
+        .iter()
+        .map(|tag| tag.trim().to_lowercase())
+        .filter(|tag| !tag.is_empty())
+        .collect();
+    normalized.sort();
+    normalized.dedup();
+    normalized
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/teams/{team_id}/ai/feature-suggestions",
+    request_body = FeatureSuggestionsRequest,
+    params(("team_id" = String, Path, description = "Team ID")),
+    responses(
+        (status = 200, description = "Kind and tag suggestions, or `available: false` when they cannot run", body = FeatureSuggestionsResponse),
+        (status = 400, description = "Invalid input", body = crate::rest::error::ErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::rest::error::ErrorResponse)
+    ),
+    tag = "AI"
+)]
+#[post("/teams/{team_id}/ai/feature-suggestions")]
+pub(crate) async fn suggest_feature_details(
+    runtime: web::Data<AiRuntime>,
+    settings: web::Data<Box<dyn TeamAiSettingsRepository>>,
+    features: web::Data<Box<dyn FeatureRepository>>,
+    team_id: web::Path<String>,
+    payload: web::Json<FeatureSuggestionsRequest>,
+) -> Result<impl Responder, RestError> {
+    let team_id = parse_team_id(&team_id)?;
+    let key = payload.key.trim();
+    if key.is_empty() || key.chars().count() > MAX_SUGGESTION_KEY_CHARS {
+        return Err(RestError::invalid_input(format!(
+            "key must be 1 to {MAX_SUGGESTION_KEY_CHARS} characters"
+        )));
+    }
+    let tags = normalized_tags(payload.tags.as_deref().unwrap_or_default());
+    if tags.len() > MAX_SUGGESTION_BODY_TAGS {
+        return Err(RestError::invalid_input(format!(
+            "at most {MAX_SUGGESTION_BODY_TAGS} tags are accepted"
+        )));
+    }
+
+    let Some(client) = runtime.client.as_ref() else {
+        return Ok(HttpResponse::Ok().json(FeatureSuggestionsResponse::unavailable()));
+    };
+    let enabled = match settings.get(team_id).await {
+        Ok(stored) => stored.settings.is_enabled(AiFeature::FlagKind),
+        Err(err) => {
+            warn!("Could not read AI settings for team {team_id}: {err}");
+            false
+        }
+    };
+    if !enabled {
+        return Ok(HttpResponse::Ok().json(FeatureSuggestionsResponse::unavailable()));
+    }
+
+    let candidates = match features
+        .get_team_tag_candidates(team_id, tags.clone(), flag_kind::MAX_TAG_CANDIDATES)
+        .await
+    {
+        Ok(candidates) => candidates,
+        Err(err) => {
+            warn!("Could not read tag candidates for team {team_id}: {err}");
+            return Ok(HttpResponse::Ok().json(FeatureSuggestionsResponse::unavailable()));
+        }
+    };
+
+    let input = flag_kind::SuggestionInput {
+        key: key.to_string(),
+        description: payload.description.clone(),
+        purpose: payload.purpose.clone(),
+        tags,
+    };
+    let parts = flag_kind::suggestion_parts(&input, &candidates);
+    let response = match client.evaluate(parts.state, parts.questions).await {
+        Ok(response) => FeatureSuggestionsResponse {
+            available: true,
+            kind: Some(flag_kind::classify(&response.answers).map(|answer| {
+                KindSuggestionResponse {
+                    value: answer.value,
+                    probabilities: answer.probabilities,
+                    confidence: answer.confidence,
+                }
+            })),
+            tags: Some(
+                flag_kind::suggested_tags(&response.answers, &candidates)
+                    .into_iter()
+                    .map(|item| TagSuggestionResponse {
+                        tag: item.tag,
+                        probability: item.probability,
+                    })
+                    .collect(),
+            ),
+        },
+        Err(err) => {
+            warn!("Feature suggestions failed: {}", err.log_label());
+            FeatureSuggestionsResponse::unavailable()
+        }
+    };
+    Ok(HttpResponse::Ok().json(response))
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FlagKindBackfillResponse {
+    /// Judgments queued by this call.
+    pub queued: u64,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/teams/{team_id}/ai/flag-kind/backfill",
+    params(("team_id" = String, Path, description = "Team ID")),
+    responses(
+        (status = 200, description = "Judgments queued; 0 when AI is off for the team", body = FlagKindBackfillResponse),
+        (status = 400, description = "Invalid input", body = crate::rest::error::ErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::rest::error::ErrorResponse),
+        (status = 403, description = "Forbidden", body = crate::rest::error::ErrorResponse)
+    ),
+    tag = "AI"
+)]
+#[post("/teams/{team_id}/ai/flag-kind/backfill")]
+pub(crate) async fn backfill_flag_kind(
+    runtime: web::Data<AiRuntime>,
+    features: web::Data<Box<dyn FeatureRepository>>,
+    req: HttpRequest,
+    team_id: web::Path<String>,
+) -> Result<impl Responder, RestError> {
+    ensure_admin(&req)?;
+    let team_id = parse_team_id(&team_id)?;
+    let Some(service) = runtime.judgments.as_ref() else {
+        return Ok(HttpResponse::Ok().json(FlagKindBackfillResponse { queued: 0 }));
+    };
+    if !service
+        .team_enabled(team_id, JudgmentKind::FlagKind.feature())
+        .await
+    {
+        return Ok(HttpResponse::Ok().json(FlagKindBackfillResponse { queued: 0 }));
+    }
+    let pending = features
+        .get_features_needing_flag_kind(team_id, flag_kind::BACKFILL_LIMIT)
+        .await
+        .map_err(RestError::from)?;
+    let queued = flag_kind::backfill(service, team_id, &pending).await;
+    Ok(HttpResponse::Ok().json(FlagKindBackfillResponse {
+        queued: queued as u64,
+    }))
+}
+
 /// Hands a free-text reason to the justification check after the user's change
 /// committed. A no-op without an AI runtime (some apps and tests register none);
 /// never fails the request.
@@ -331,11 +540,29 @@ pub(crate) async fn record_reason(
     .await;
 }
 
+/// Queues a flag kind classification after a feature was created or edited. A
+/// no-op without an AI runtime (some apps and tests register none); never fails
+/// the request.
+pub(crate) async fn record_flag_kind(
+    ai: &Option<web::Data<AiRuntime>>,
+    team_id: Uuid,
+    feature: &crate::model::Feature,
+) {
+    flag_kind::record_flag_kind(
+        ai.as_ref().and_then(|ai| ai.judgments.as_ref()),
+        team_id,
+        feature,
+    )
+    .await;
+}
+
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(get_ai_status)
         .service(get_team_ai_settings)
         .service(update_team_ai_settings)
-        .service(check_justification);
+        .service(check_justification)
+        .service(suggest_feature_details)
+        .service(backfill_flag_kind);
 }
 
 #[cfg(test)]
@@ -764,6 +991,316 @@ mod tests {
                 .to_request();
             let resp = test::call_service(&app, req).await;
             assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        }
+    }
+
+    mod flag_kind_endpoints {
+        use std::collections::BTreeMap;
+        use std::sync::Mutex;
+
+        use super::*;
+        use crate::database::feature::{FeatureRepository, MockFeatureRepository};
+        use crate::judgment::flag_kind::test_support::recording_service;
+        use crate::judgment::types::{Answer, Answers, ChoiceAnswer, SystemOneResponse, Usage};
+
+        fn settings(flag_kind: bool) -> MockTeamAiSettingsRepository {
+            let mut settings = MockTeamAiSettingsRepository::new();
+            settings.expect_get().returning(move |_| {
+                Ok(StoredTeamAiSettings {
+                    settings: TeamAiSettings {
+                        flag_kind,
+                        ..TeamAiSettings::default()
+                    },
+                    ..StoredTeamAiSettings::default()
+                })
+            });
+            settings
+        }
+
+        fn response(kind: &str, confidence: f64, tags: &[f64]) -> SystemOneResponse {
+            let mut answers = BTreeMap::from([(
+                "kind".to_string(),
+                Answer::Choice(ChoiceAnswer {
+                    choice: kind.to_string(),
+                    probabilities: BTreeMap::from([(kind.to_string(), confidence)]),
+                    confidence,
+                }),
+            )]);
+            for (index, probability) in tags.iter().enumerate() {
+                answers.insert(format!("t{index}"), Answer::Noul { noul: *probability });
+            }
+            SystemOneResponse {
+                model: "jev-1.13.0".to_string(),
+                answers: Answers(answers),
+                usage: Usage::default(),
+            }
+        }
+
+        async fn suggest(
+            client: Option<MockJudgmentClient>,
+            settings: MockTeamAiSettingsRepository,
+            features: MockFeatureRepository,
+            body: Value,
+        ) -> (StatusCode, Value) {
+            let client = client.map(|client| Arc::new(client) as Arc<dyn JudgmentClient>);
+            let app = test::init_service(
+                App::new()
+                    .app_data(web::Data::new(AiRuntime::new(client, "jev-1.13.0")))
+                    .app_data(web::Data::new(
+                        Box::new(settings) as Box<dyn TeamAiSettingsRepository>
+                    ))
+                    .app_data(web::Data::new(
+                        Box::new(features) as Box<dyn FeatureRepository>
+                    ))
+                    .service(web::scope("/api/v1").configure(super::super::configure)),
+            )
+            .await;
+            let req = test::TestRequest::post()
+                .uri(&format!(
+                    "/api/v1/teams/{}/ai/feature-suggestions",
+                    Uuid::new_v4()
+                ))
+                .set_json(body)
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            let status = resp.status();
+            let bytes = test::read_body(resp).await;
+            (
+                status,
+                serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+            )
+        }
+
+        fn untouched_client() -> MockJudgmentClient {
+            let mut client = MockJudgmentClient::new();
+            client.expect_evaluate().times(0);
+            client
+        }
+
+        #[actix_web::test]
+        async fn off_returns_available_false_without_reading_or_calling() {
+            let mut features = MockFeatureRepository::new();
+            features.expect_get_team_tag_candidates().times(0);
+            let (status, body) = suggest(
+                Some(untouched_client()),
+                settings(false),
+                features,
+                json!({ "key": "kill-checkout" }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body, json!({ "available": false }));
+        }
+
+        #[actix_web::test]
+        async fn no_client_returns_available_false() {
+            let (status, body) = suggest(
+                None,
+                settings(true),
+                MockFeatureRepository::new(),
+                json!({ "key": "kill-checkout" }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body, json!({ "available": false }));
+        }
+
+        #[actix_web::test]
+        async fn client_failure_returns_available_false() {
+            let mut client = MockJudgmentClient::new();
+            client
+                .expect_evaluate()
+                .returning(|_, _| Err(crate::judgment::client::JudgmentError::Timeout));
+            let mut features = MockFeatureRepository::new();
+            features
+                .expect_get_team_tag_candidates()
+                .returning(|_, _, _| Ok(vec![]));
+            let (status, body) = suggest(
+                Some(client),
+                settings(true),
+                features,
+                json!({ "key": "kill-checkout" }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body, json!({ "available": false }));
+        }
+
+        #[actix_web::test]
+        async fn maps_answers_and_excludes_the_tags_already_on_the_feature() {
+            let asked = Arc::new(Mutex::new(None));
+            let asked_by_repo = asked.clone();
+            let mut features = MockFeatureRepository::new();
+            features
+                .expect_get_team_tag_candidates()
+                .returning(move |_, exclude, limit| {
+                    *asked_by_repo.lock().unwrap() = Some((exclude, limit));
+                    Ok(vec!["billing".into(), "beta".into(), "ops".into()])
+                });
+            let mut client = MockJudgmentClient::new();
+            client
+                .expect_evaluate()
+                .withf(|state, questions| {
+                    questions.len() == 4
+                        && state["feature"]["key"] == "kill-checkout"
+                        && state["feature"]["tags"] == json!(["payments"])
+                })
+                .times(1)
+                .returning(|_, _| Ok(response("ops", 0.9, &[0.95, 0.3, 0.6])));
+
+            let (status, body) = suggest(
+                Some(client),
+                settings(true),
+                features,
+                json!({
+                    "key": " kill-checkout ",
+                    "description": "Kill switch",
+                    "tags": ["Payments", " payments "]
+                }),
+            )
+            .await;
+
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(
+                body,
+                json!({
+                    "available": true,
+                    "kind": {
+                        "value": "ops",
+                        "probabilities": { "ops": 0.9 },
+                        "confidence": 0.9,
+                    },
+                    "tags": [
+                        { "tag": "billing", "probability": 0.95 },
+                        { "tag": "ops", "probability": 0.6 },
+                    ],
+                })
+            );
+            assert_eq!(
+                asked.lock().unwrap().clone(),
+                Some((vec!["payments".to_string()], 50))
+            );
+        }
+
+        #[actix_web::test]
+        async fn an_unsure_kind_is_null_but_tags_still_come_back() {
+            let mut features = MockFeatureRepository::new();
+            features
+                .expect_get_team_tag_candidates()
+                .returning(|_, _, _| Ok(vec!["billing".into()]));
+            let mut client = MockJudgmentClient::new();
+            client
+                .expect_evaluate()
+                .returning(|_, _| Ok(response("unknown", 0.95, &[0.8])));
+            let (_, body) = suggest(
+                Some(client),
+                settings(true),
+                features,
+                json!({ "key": "x1" }),
+            )
+            .await;
+            assert_eq!(body["available"], true);
+            assert_eq!(body["kind"], Value::Null);
+            assert_eq!(
+                body["tags"],
+                json!([{ "tag": "billing", "probability": 0.8 }])
+            );
+        }
+
+        #[actix_web::test]
+        async fn a_blank_key_is_rejected() {
+            let (status, _) = suggest(
+                None,
+                settings(true),
+                MockFeatureRepository::new(),
+                json!({ "key": "   " }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+        }
+
+        async fn backfill(
+            admin: bool,
+            runtime: AiRuntime,
+            features: MockFeatureRepository,
+        ) -> (StatusCode, Value) {
+            let app = test::init_service(
+                App::new()
+                    .app_data(web::Data::new(runtime))
+                    .app_data(web::Data::new(
+                        Box::new(features) as Box<dyn FeatureRepository>
+                    ))
+                    .service(web::scope("/api/v1").configure(super::super::configure)),
+            )
+            .await;
+            let req = test::TestRequest::post()
+                .uri(&format!(
+                    "/api/v1/teams/{}/ai/flag-kind/backfill",
+                    Uuid::new_v4()
+                ))
+                .to_request();
+            req.extensions_mut().insert(jwt(admin));
+            let resp = test::call_service(&app, req).await;
+            let status = resp.status();
+            let bytes = test::read_body(resp).await;
+            (
+                status,
+                serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+            )
+        }
+
+        fn runtime(on: bool) -> (AiRuntime, crate::judgment::flag_kind::test_support::Upserts) {
+            let (service, upserts) = recording_service(on, vec![]);
+            let client: Arc<dyn JudgmentClient> = Arc::new(MockJudgmentClient::new());
+            (
+                AiRuntime::new(Some(client), "jev-1.13.0").with_judgments(Some(service)),
+                upserts,
+            )
+        }
+
+        fn feature(key: &str) -> crate::database::entity::Feature {
+            crate::judgment::flag_kind::test_support::entity_feature(key)
+        }
+
+        #[actix_web::test]
+        async fn backfill_requires_an_admin() {
+            let (runtime, upserts) = runtime(true);
+            let mut features = MockFeatureRepository::new();
+            features.expect_get_features_needing_flag_kind().times(0);
+            let (status, _) = backfill(false, runtime, features).await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+            assert!(upserts.lock().unwrap().is_empty());
+        }
+
+        #[actix_web::test]
+        async fn backfill_queues_each_unclassified_feature() {
+            let (runtime, upserts) = runtime(true);
+            let mut features = MockFeatureRepository::new();
+            features
+                .expect_get_features_needing_flag_kind()
+                .withf(|_, limit| *limit == 500)
+                .times(1)
+                .returning(|_, _| Ok(vec![feature("a"), feature("b"), feature("c")]));
+            let (status, body) = backfill(true, runtime, features).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body, json!({ "queued": 3 }));
+            assert_eq!(upserts.lock().unwrap().len(), 3);
+        }
+
+        #[actix_web::test]
+        async fn backfill_is_a_no_op_with_the_team_toggle_off_or_no_service() {
+            let (runtime_off, upserts) = runtime(false);
+            let mut features = MockFeatureRepository::new();
+            features.expect_get_features_needing_flag_kind().times(0);
+            let (status, body) = backfill(true, runtime_off, features).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body, json!({ "queued": 0 }));
+            assert!(upserts.lock().unwrap().is_empty());
+
+            let mut features = MockFeatureRepository::new();
+            features.expect_get_features_needing_flag_kind().times(0);
+            let (_, body) = backfill(true, AiRuntime::new(None, "jev-1.13.0"), features).await;
+            assert_eq!(body, json!({ "queued": 0 }));
         }
     }
 

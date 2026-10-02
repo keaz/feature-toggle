@@ -145,6 +145,9 @@ fn map_entity_to_api_feature(feature_entity: crate::database::entity::Feature) -
             .map(|d| d.depends_on_id.into())
             .collect(),
         pending_approval_request_id: None,
+        flag_kind: feature_entity.flag_kind,
+        flag_kind_source: feature_entity.flag_kind_source,
+        flag_kind_confidence: feature_entity.flag_kind_confidence,
     }
 }
 
@@ -484,6 +487,7 @@ where
         expires_at: input.expires_at,
         cleanup_reason: normalize_optional_text(input.cleanup_reason),
         tags: normalize_tags(input.tags.unwrap_or_default()),
+        flag_kind: input.flag_kind,
         stages,
         dependencies,
         variants,
@@ -667,6 +671,7 @@ where
             .cleanup_reason
             .map(|reason| reason.and_then(|value| normalize_optional_text(Some(value)))),
         tags: input.tags.map(normalize_tags),
+        flag_kind: input.flag_kind,
         archive_confirmation: input.archive_confirmation,
         stages,
         dependencies,

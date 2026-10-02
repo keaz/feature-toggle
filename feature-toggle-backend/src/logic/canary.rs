@@ -820,6 +820,9 @@ mod tests {
             evaluation_count_30d: 0,
             evaluation_count_90d: 0,
             dependencies: vec![],
+            flag_kind: None,
+            flag_kind_confidence: None,
+            flag_kind_source: None,
         }
     }
 
@@ -1028,6 +1031,9 @@ mod tests {
                     dependencies: vec![],
                     team_id: ID::from(Uuid::new_v4()),
                     pending_approval_request_id: None,
+                    flag_kind: None,
+                    flag_kind_confidence: None,
+                    flag_kind_source: None,
                 })
             });
 

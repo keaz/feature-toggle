@@ -218,6 +218,9 @@ mod tests {
             dependencies: vec![],
             team_id: ID::from("22222222-2222-2222-2222-222222222222"),
             pending_approval_request_id: None,
+            flag_kind: None,
+            flag_kind_confidence: None,
+            flag_kind_source: None,
         }
     }
 
@@ -255,6 +258,9 @@ mod tests {
             dependencies: vec![],
             team_id: ID::from("22222222-2222-2222-2222-222222222222"),
             pending_approval_request_id: None,
+            flag_kind: None,
+            flag_kind_confidence: None,
+            flag_kind_source: None,
         }
     }
 

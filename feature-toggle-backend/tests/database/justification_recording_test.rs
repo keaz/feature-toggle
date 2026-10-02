@@ -57,6 +57,7 @@ async fn seed_feature(pool: &PgPool, team_id: Uuid, key: &str) -> Uuid {
             stages: vec![],
             dependencies: vec![],
             variants: None,
+            flag_kind: None,
         })
         .await
         .expect("seed feature")
@@ -84,6 +85,7 @@ fn update_input(
         relationships: vec![],
         stages: vec![],
         variants: None,
+        flag_kind: None,
     }
 }
 

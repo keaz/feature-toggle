@@ -148,7 +148,7 @@ pub fn build_input(
             "description": feature.description.as_deref().map(|text| truncate_chars(text, MAX_TEXT_CHARS)),
             "purpose": feature.purpose.as_deref().map(|text| truncate_chars(text, MAX_TEXT_CHARS)),
             "tags": feature.tags,
-            "flag_kind": null,
+            "flag_kind": feature.flag_kind,
         },
         "change": {
             "type": "stage_change",
@@ -382,6 +382,9 @@ mod tests {
             evaluation_count_30d: 0,
             evaluation_count_90d: 0,
             dependencies: vec![],
+            flag_kind: None,
+            flag_kind_confidence: None,
+            flag_kind_source: None,
         }
     }
 
@@ -440,8 +443,10 @@ mod tests {
 
     #[test]
     fn build_input_has_the_designed_shape() {
+        let mut classified = feature();
+        classified.flag_kind = Some(crate::model::FlagKind::Ops);
         let input = build_input(
-            &feature(),
+            &classified,
             &stage(),
             &environment(),
             &payload(
@@ -459,7 +464,7 @@ mod tests {
                     "description": "New checkout flow",
                     "purpose": "Roll out the new checkout",
                     "tags": ["payments"],
-                    "flag_kind": null,
+                    "flag_kind": "ops",
                 },
                 "change": {
                     "type": "stage_change",
@@ -582,6 +587,12 @@ mod tests {
         assert!(!text.contains("owner"));
         assert!(!text.contains("user-id-123"));
         assert!(!text.contains("eligible_approver_ids"));
+    }
+
+    #[test]
+    fn an_unclassified_feature_sends_a_null_flag_kind() {
+        let input = input_for(0, 0, 0);
+        assert_eq!(input["feature"]["flag_kind"], Value::Null);
     }
 
     #[test]

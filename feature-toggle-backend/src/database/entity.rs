@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use uuid::Uuid;
 
+use crate::model::{FlagKind, FlagKindSource};
+
 pub const SENTINEL_UUID: Uuid = Uuid::nil();
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
@@ -63,6 +65,9 @@ pub struct Feature {
     pub evaluation_count_7d: i64,
     pub evaluation_count_30d: i64,
     pub evaluation_count_90d: i64,
+    pub flag_kind: Option<FlagKind>,
+    pub flag_kind_source: Option<FlagKindSource>,
+    pub flag_kind_confidence: Option<f32>,
     pub dependencies: Vec<FeatureDependency>,
 }
 

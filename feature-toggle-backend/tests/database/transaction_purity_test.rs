@@ -171,6 +171,7 @@ async fn feature_tx_methods_read_uncommitted_writes_and_rollback_cleanly() {
                     VariantValueType::String,
                     Some("control variant".into()),
                 )]),
+                flag_kind: None,
             },
         )
         .await
@@ -195,6 +196,7 @@ async fn feature_tx_methods_read_uncommitted_writes_and_rollback_cleanly() {
                 stages: vec![],
                 dependencies: vec![],
                 variants: Some(vec![]),
+                flag_kind: None,
             },
         )
         .await

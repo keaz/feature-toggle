@@ -93,6 +93,31 @@ impl JudgmentService {
         }
     }
 
+    /// The stored judgment for a subject, if any. Callers use it to skip a
+    /// submission when the input has not changed.
+    pub async fn judgment_for(
+        &self,
+        subject_type: SubjectType,
+        subject_id: Uuid,
+        kind: JudgmentKind,
+    ) -> Result<Option<AiJudgment>, crate::Error> {
+        self.judgments
+            .get_for_subject(subject_type, subject_id, kind)
+            .await
+    }
+
+    /// Stored judgments for many subjects of one kind, in one read.
+    pub async fn judgments_for(
+        &self,
+        subject_type: SubjectType,
+        subject_ids: Vec<Uuid>,
+        kind: JudgmentKind,
+    ) -> Result<Vec<AiJudgment>, crate::Error> {
+        self.judgments
+            .get_for_subjects(subject_type, subject_ids, kind)
+            .await
+    }
+
     /// Persists a pending judgment and runs it in the background. Returns the
     /// row id right after the write; never waits for the API.
     pub async fn submit(

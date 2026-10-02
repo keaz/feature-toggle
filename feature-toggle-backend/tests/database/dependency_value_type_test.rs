@@ -110,6 +110,7 @@ async fn seed_feature(
                     .collect(),
             )
         },
+        flag_kind: None,
     })
     .await
     .expect("seed feature")
@@ -151,6 +152,7 @@ fn update_input(
         relationships: vec![],
         stages: vec![],
         variants: variants.map(variant_inputs),
+        flag_kind: None,
     }
 }
 
@@ -206,6 +208,7 @@ async fn run_create(
             relationships: vec![],
             stages: vec![],
             variants: None,
+            flag_kind: None,
         },
         None,
     )

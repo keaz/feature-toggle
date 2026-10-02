@@ -86,6 +86,9 @@ fn feature(fixture: &FeatureFixture) -> Feature {
         evaluation_count_30d: 0,
         evaluation_count_90d: 0,
         dependencies: vec![],
+        flag_kind: None,
+        flag_kind_confidence: None,
+        flag_kind_source: None,
     }
 }
 
@@ -298,6 +301,7 @@ async fn live_stage_change_request_gets_a_done_assessment() {
             }],
             dependencies: vec![],
             variants: None,
+            flag_kind: None,
         })
         .await
         .expect("feature setup");

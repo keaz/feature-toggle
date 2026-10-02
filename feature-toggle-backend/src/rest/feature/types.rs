@@ -1,8 +1,8 @@
 use crate::database::entity::VariantValueType as DbVariantValueType;
 use crate::logic::feature::StageChangeRequestType;
 use crate::model::{
-    FeatureType as ModelFeatureType, LifecycleStage as ModelLifecycleStage,
-    VariantValueType as ModelVariantValueType,
+    FeatureType as ModelFeatureType, FlagKind, FlagKindSource,
+    LifecycleStage as ModelLifecycleStage, VariantValueType as ModelVariantValueType,
 };
 use crate::rest::environment::EnvironmentResponse;
 use crate::rest::pagination::PageMeta;
@@ -122,6 +122,8 @@ pub struct FeatureListQuery {
     pub tag: Option<String>,
     pub dependency_status: Option<String>,
     pub approval_status: Option<String>,
+    /// `release`, `experiment`, `ops`, `permission`, `config`, or `unclassified`.
+    pub flag_kind: Option<String>,
     pub offset: Option<i64>,
     pub limit: Option<i64>,
 }
@@ -208,6 +210,10 @@ pub struct FeatureResponse {
     pub team_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_approval_request_id: Option<String>,
+    pub flag_kind: Option<FlagKind>,
+    pub flag_kind_source: Option<FlagKindSource>,
+    /// Set only when the source is `ai`.
+    pub flag_kind_confidence: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relationships: Option<Vec<FeatureRelationshipResponse>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -298,10 +304,20 @@ pub struct CreateFeatureRequest {
     pub expires_at: Option<DateTime<Utc>>,
     pub cleanup_reason: Option<String>,
     pub tags: Option<Vec<String>>,
+    pub flag_kind: Option<FlagKind>,
     pub dependencies: Vec<String>,
     pub relationships: Vec<CreateRelationshipRequest>,
     pub stages: Vec<CreateFeatureStageRequest>,
     pub variants: Option<Vec<CreateFeatureVariantRequest>>,
+}
+
+/// Tells an absent field (`None`) from an explicit `null` (`Some(None)`).
+fn deserialize_present<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
@@ -318,6 +334,15 @@ pub struct UpdateFeatureRequest {
     pub expires_at: Option<DateTime<Utc>>,
     pub cleanup_reason: Option<String>,
     pub tags: Option<Vec<String>>,
+    /// Absent or equal to the stored kind: unchanged. A different value, or
+    /// `null` to clear it, counts as the user's choice and stops AI changes.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schema(value_type = Option<FlagKind>, nullable = true)]
+    pub flag_kind: Option<Option<FlagKind>>,
     pub archive_confirmation: Option<bool>,
     pub dependencies: Vec<String>,
     pub relationships: Vec<CreateRelationshipRequest>,
@@ -532,4 +557,43 @@ pub struct AuditAnalyticsResponse {
     pub actor_breakdown: Vec<AuditAnalyticsBreakdownRow>,
     pub recent_events: Vec<AuditAnalyticsEvent>,
     pub generated_at: DateTime<Utc>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn update_body(extra: &str) -> UpdateFeatureRequest {
+        let json = format!(
+            r#"{{"key":"k","featureType":"SIMPLE","dependencies":[],"relationships":[],"stages":[]{extra}}}"#
+        );
+        serde_json::from_str(&json).expect("valid update body")
+    }
+
+    #[test]
+    fn update_request_tells_absent_null_and_a_value_apart() {
+        assert_eq!(update_body("").flag_kind, None);
+        assert_eq!(update_body(r#","flagKind":null"#).flag_kind, Some(None));
+        assert_eq!(
+            update_body(r#","flagKind":"ops""#).flag_kind,
+            Some(Some(FlagKind::Ops))
+        );
+    }
+
+    #[test]
+    fn update_request_rejects_an_unknown_kind() {
+        let json = r#"{"key":"k","featureType":"SIMPLE","dependencies":[],"relationships":[],"stages":[],"flagKind":"bogus"}"#;
+        assert!(serde_json::from_str::<UpdateFeatureRequest>(json).is_err());
+    }
+
+    #[test]
+    fn create_request_takes_an_optional_kind() {
+        let base =
+            r#"{"key":"k","featureType":"SIMPLE","dependencies":[],"relationships":[],"stages":[]"#;
+        let without: CreateFeatureRequest = serde_json::from_str(&format!("{base}}}")).unwrap();
+        assert_eq!(without.flag_kind, None);
+        let with: CreateFeatureRequest =
+            serde_json::from_str(&format!(r#"{base},"flagKind":"release"}}"#)).unwrap();
+        assert_eq!(with.flag_kind, Some(FlagKind::Release));
+    }
 }

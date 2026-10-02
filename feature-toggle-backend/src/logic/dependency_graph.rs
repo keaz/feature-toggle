@@ -433,6 +433,9 @@ mod tests {
                     depends_on_id,
                 })
                 .collect(),
+            flag_kind: None,
+            flag_kind_confidence: None,
+            flag_kind_source: None,
         }
     }
 

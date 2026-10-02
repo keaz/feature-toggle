@@ -37,8 +37,10 @@ use utoipa::{Modify, OpenApi};
 use utoipa_swagger_ui::SwaggerUi;
 
 use crate::rest::ai::{
-    AiStatusResponse, JustificationCheckRequest, JustificationCheckResponse,
-    TeamAiSettingsResponse, UpdateTeamAiSettingsRequest,
+    AiStatusResponse, FeatureSuggestionsRequest, FeatureSuggestionsResponse,
+    FlagKindBackfillResponse, JustificationCheckRequest, JustificationCheckResponse,
+    KindSuggestionResponse, TagSuggestionResponse, TeamAiSettingsResponse,
+    UpdateTeamAiSettingsRequest,
 };
 use crate::rest::approval::{
     AiRiskStatus, AiRiskSummary, AppliesTo, ApprovalActionRequest,
@@ -163,6 +165,8 @@ async fn health() -> impl Responder {
         ai::get_team_ai_settings,
         ai::update_team_ai_settings,
         ai::check_justification,
+        ai::suggest_feature_details,
+        ai::backfill_flag_kind,
         environment::list_environments,
         environment::get_environment,
         environment::create_environment,
@@ -299,6 +303,13 @@ async fn health() -> impl Responder {
         JustificationCheckRequest,
         JustificationCheckResponse,
         crate::judgment::justification::ReasonKind,
+        FeatureSuggestionsRequest,
+        FeatureSuggestionsResponse,
+        KindSuggestionResponse,
+        TagSuggestionResponse,
+        FlagKindBackfillResponse,
+        crate::model::FlagKind,
+        crate::model::FlagKindSource,
         PaginationQuery,
         PageMeta,
         EnvironmentListQuery,

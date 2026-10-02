@@ -43,6 +43,7 @@ async fn create_isolated_feature_stage(
             }],
             dependencies: vec![],
             variants: None,
+            flag_kind: None,
         })
         .await
         .expect("feature setup should succeed");

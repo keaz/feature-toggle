@@ -1721,6 +1721,7 @@ mod authorization_tests {
                     }],
                     dependencies: vec![],
                     variants: None,
+                    flag_kind: None,
                 })
                 .await
                 .expect("create feature");

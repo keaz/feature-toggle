@@ -137,6 +137,99 @@ pub enum LifecycleStage {
     Archived,
 }
 
+/// What a feature flag is for. Chosen by a user or classified by AI (AI-30).
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FlagKind {
+    Release,
+    Experiment,
+    Ops,
+    Permission,
+    Config,
+}
+
+impl FlagKind {
+    pub const ALL: [FlagKind; 5] = [
+        FlagKind::Release,
+        FlagKind::Experiment,
+        FlagKind::Ops,
+        FlagKind::Permission,
+        FlagKind::Config,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FlagKind::Release => "release",
+            FlagKind::Experiment => "experiment",
+            FlagKind::Ops => "ops",
+            FlagKind::Permission => "permission",
+            FlagKind::Config => "config",
+        }
+    }
+}
+
+impl std::str::FromStr for FlagKind {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        FlagKind::ALL
+            .into_iter()
+            .find(|kind| kind.as_str() == value)
+            .ok_or_else(|| format!("unknown flag kind: {value}"))
+    }
+}
+
+/// List filter on the flag kind: one kind, or the features with none.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum FlagKindFilter {
+    Kind(FlagKind),
+    Unclassified,
+}
+
+impl std::str::FromStr for FlagKindFilter {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value == "unclassified" {
+            return Ok(FlagKindFilter::Unclassified);
+        }
+        value.parse().map(FlagKindFilter::Kind).map_err(|_| {
+            format!(
+                "Invalid flagKind '{value}': expected release, experiment, ops, permission, config, or unclassified"
+            )
+        })
+    }
+}
+
+/// Who set the stored flag kind. A `user` kind is never changed by AI.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FlagKindSource {
+    Ai,
+    User,
+}
+
+impl FlagKindSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FlagKindSource::Ai => "ai",
+            FlagKindSource::User => "user",
+        }
+    }
+}
+
+impl std::str::FromStr for FlagKindSource {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "ai" => Ok(FlagKindSource::Ai),
+            "user" => Ok(FlagKindSource::User),
+            other => Err(format!("unknown flag kind source: {other}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Feature {
     pub id: ID,
@@ -171,6 +264,9 @@ pub struct Feature {
     pub dependencies: Vec<ID>,
     pub team_id: ID,
     pub pending_approval_request_id: Option<ID>,
+    pub flag_kind: Option<FlagKind>,
+    pub flag_kind_source: Option<FlagKindSource>,
+    pub flag_kind_confidence: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Copy)]
@@ -385,6 +481,7 @@ pub struct CreateFeatureInput {
     pub expires_at: Option<DateTime<Utc>>,
     pub cleanup_reason: Option<String>,
     pub tags: Option<Vec<String>>,
+    pub flag_kind: Option<FlagKind>,
     pub dependencies: Vec<ID>,
     pub relationships: Vec<CreateRelationshipInput>,
     pub stages: Vec<CreateFeatureStageInput>,
@@ -404,6 +501,8 @@ pub struct UpdateFeatureInput {
     pub expires_at: Option<Option<DateTime<Utc>>>,
     pub cleanup_reason: Option<Option<String>>,
     pub tags: Option<Vec<String>>,
+    /// Absent: unchanged. `Some(None)`: clear. `Some(Some(kind))`: set.
+    pub flag_kind: Option<Option<FlagKind>>,
     pub archive_confirmation: bool,
     pub dependencies: Vec<ID>,
     pub relationships: Vec<CreateRelationshipInput>,

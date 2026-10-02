@@ -118,7 +118,10 @@ pub async fn run() -> std::io::Result<()> {
                 judgment::justification::JustificationHandler::new(
                     activity_log_repository.clone_box(),
                 ),
-            )),
+            ))
+            .with_handler(Arc::new(judgment::flag_kind::FlagKindHandler::new(
+                feature_repository.clone_box(),
+            ))),
         )
     });
     if let Some(service) = judgment_service.clone() {

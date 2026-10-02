@@ -482,6 +482,9 @@ mod tests {
                     evaluation_count_30d: 0,
                     evaluation_count_90d: 0,
                     dependencies: vec![],
+                    flag_kind: None,
+                    flag_kind_confidence: None,
+                    flag_kind_source: None,
                 }])
             });
 

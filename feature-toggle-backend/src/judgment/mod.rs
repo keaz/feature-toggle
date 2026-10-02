@@ -3,6 +3,7 @@
 
 pub mod approval_risk;
 pub mod client;
+pub mod flag_kind;
 pub mod justification;
 pub mod service;
 pub mod types;
