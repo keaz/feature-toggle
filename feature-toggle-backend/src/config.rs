@@ -2,7 +2,7 @@ use std::fs;
 use std::net::SocketAddr;
 use std::path::Path;
 
-use log::{info, warn};
+use log::{error, info, warn};
 use serde::Deserialize;
 
 use crate::cluster::ClusterConfig;
@@ -27,6 +27,10 @@ pub struct Config {
     /// `X-Forwarded-*` headers); set it in production behind a proxy.
     #[serde(default)]
     pub public_base_url: Option<String>,
+    /// TypeSafe Jev judgments. The subsystem is on only when env
+    /// `TYPESAFE_API_KEY` is set; the key is never read from this file.
+    #[serde(default)]
+    pub typesafe: TypesafeConfig,
 }
 
 /// Lifetimes of user session tokens (`[auth]` section).
@@ -81,6 +85,62 @@ impl AuthConfig {
     }
 }
 
+pub const DEFAULT_TYPESAFE_BASE_URL: &str = "https://api.typesafe.ai";
+/// Pinned on purpose: aliases such as `jev-latest` move and change answers.
+pub const DEFAULT_TYPESAFE_MODEL: &str = "jev-1.13.0";
+const DEFAULT_TYPESAFE_TIMEOUT_MS: u64 = 3000;
+const DEFAULT_TYPESAFE_MAX_IN_FLIGHT: usize = 16;
+
+/// TypeSafe System One client settings (`[typesafe]` section).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct TypesafeConfig {
+    pub base_url: String,
+    pub model: String,
+    /// Timeout per HTTP attempt.
+    pub timeout_ms: u64,
+    /// Concurrent requests allowed across all callers.
+    pub max_in_flight: usize,
+}
+
+impl Default for TypesafeConfig {
+    fn default() -> Self {
+        Self {
+            base_url: DEFAULT_TYPESAFE_BASE_URL.to_string(),
+            model: DEFAULT_TYPESAFE_MODEL.to_string(),
+            timeout_ms: DEFAULT_TYPESAFE_TIMEOUT_MS,
+            max_in_flight: DEFAULT_TYPESAFE_MAX_IN_FLIGHT,
+        }
+    }
+}
+
+impl TypesafeConfig {
+    /// Trims the base URL and replaces values that would break every call
+    /// (empty URL or model, zero timeout, zero permits) with the defaults.
+    pub fn sanitized(self) -> Self {
+        let mut cfg = self;
+        cfg.base_url = cfg.base_url.trim().trim_end_matches('/').to_string();
+        if cfg.base_url.is_empty() {
+            warn!("typesafe.base_url is empty; using {DEFAULT_TYPESAFE_BASE_URL}");
+            cfg.base_url = DEFAULT_TYPESAFE_BASE_URL.to_string();
+        }
+        cfg.model = cfg.model.trim().to_string();
+        if cfg.model.is_empty() {
+            warn!("typesafe.model is empty; using {DEFAULT_TYPESAFE_MODEL}");
+            cfg.model = DEFAULT_TYPESAFE_MODEL.to_string();
+        }
+        if cfg.timeout_ms == 0 {
+            warn!("typesafe.timeout_ms = 0; using {DEFAULT_TYPESAFE_TIMEOUT_MS}");
+            cfg.timeout_ms = DEFAULT_TYPESAFE_TIMEOUT_MS;
+        }
+        if cfg.max_in_flight == 0 {
+            warn!("typesafe.max_in_flight = 0; using {DEFAULT_TYPESAFE_MAX_IN_FLIGHT}");
+            cfg.max_in_flight = DEFAULT_TYPESAFE_MAX_IN_FLIGHT;
+        }
+        cfg
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -90,6 +150,7 @@ impl Default for Config {
             cluster: ClusterConfig::default(),
             auth: AuthConfig::default(),
             public_base_url: None,
+            typesafe: TypesafeConfig::default(),
         }
     }
 }
@@ -119,7 +180,7 @@ impl Config {
                             return cfg;
                         }
                         Err(e) => {
-                            warn!(
+                            error!(
                                 "Failed to parse TOML configuration at {}: {}. Falling back to defaults.",
                                 path_str, e
                             );
@@ -143,6 +204,7 @@ impl Config {
     pub fn from_toml(content: &str) -> Result<Self, toml::de::Error> {
         let mut cfg: Config = toml::from_str(content)?;
         cfg.auth = cfg.auth.sanitized();
+        cfg.typesafe = cfg.typesafe.sanitized();
         cfg.public_base_url = cfg
             .public_base_url
             .map(|url| url.trim().trim_end_matches('/').to_string())
@@ -230,5 +292,43 @@ grpc_addr = "0.0.0.0:50051"
         let content = include_str!("../config.toml");
         let cfg = Config::from_toml(content).unwrap();
         assert_eq!(cfg.auth, AuthConfig::default());
+    }
+
+    #[test]
+    fn missing_typesafe_section_uses_defaults() {
+        let cfg = Config::from_toml(BASE).unwrap();
+        assert_eq!(cfg.typesafe, TypesafeConfig::default());
+        assert_eq!(cfg.typesafe.base_url, "https://api.typesafe.ai");
+        assert_eq!(cfg.typesafe.model, "jev-1.13.0");
+        assert_eq!(cfg.typesafe.timeout_ms, 3000);
+        assert_eq!(cfg.typesafe.max_in_flight, 16);
+    }
+
+    #[test]
+    fn typesafe_section_overrides_defaults_per_key() {
+        let cfg = Config::from_toml(&format!(
+            "{BASE}\n[typesafe]\nbase_url = \"https://example.test/\"\ntimeout_ms = 1500\n"
+        ))
+        .unwrap();
+        assert_eq!(cfg.typesafe.base_url, "https://example.test");
+        assert_eq!(cfg.typesafe.timeout_ms, 1500);
+        assert_eq!(cfg.typesafe.model, "jev-1.13.0");
+        assert_eq!(cfg.typesafe.max_in_flight, 16);
+    }
+
+    #[test]
+    fn typesafe_zero_values_use_defaults() {
+        let cfg = Config::from_toml(&format!(
+            "{BASE}\n[typesafe]\nbase_url = \"  \"\ntimeout_ms = 0\nmax_in_flight = 0\n"
+        ))
+        .unwrap();
+        assert_eq!(cfg.typesafe, TypesafeConfig::default());
+    }
+
+    #[test]
+    fn shipped_config_file_has_default_typesafe_values() {
+        let content = include_str!("../config.toml");
+        let cfg = Config::from_toml(content).unwrap();
+        assert_eq!(cfg.typesafe, TypesafeConfig::default());
     }
 }

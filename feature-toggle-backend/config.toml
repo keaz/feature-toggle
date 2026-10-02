@@ -46,3 +46,14 @@ refresh_token_ttl_days = 7
 #heartbeat_interval_secs = 30   # How often to update node's heartbeat (default: 30)
 #stale_threshold_secs = 90      # When to consider a node dead (default: 90)
 #cleanup_interval_secs = 60     # How often to clean up stale nodes (default: 60)
+
+# TypeSafe AI judgments (optional section; these are the defaults).
+# The subsystem turns on only when env TYPESAFE_API_KEY is set. Never put the key
+# in this file. Keep the model pinned to a versioned id: aliases such as
+# jev-latest move and change answers. A value of 0 for timeout_ms or
+# max_in_flight falls back to the default.
+#[typesafe]
+#base_url = "https://api.typesafe.ai"
+#model = "jev-1.13.0"
+#timeout_ms = 3000          # per HTTP attempt
+#max_in_flight = 16         # concurrent requests across the server
