@@ -90,3 +90,5 @@ Backend. Bulk "set kind" actions.
 
 **Verified:** `pnpm lint`, `pnpm build`, `pnpm test:run` (80 files, 616 tests, includes the design-token guard). New tests: `api/ai.test.ts`, `hooks/useFeatureSuggestions.test.tsx`, `FlagKindField.test.tsx`, `FeatureDetail.test.tsx`, plus new cases in `FeatureCreate.test.tsx` (the Select mock now forwards `onValueChange`), `FeatureTable.test.tsx` (memory router, because the test setup stubs `window.history`), `AiSettingsPage.test.tsx`. The unrelated 2-line local change in `FeatureDetail.tsx` was not committed.
 
+
+- 2026-10-02 (final-review fix): the feature key input now calls `suggestions.refreshNow` on blur (commit 2396a9b); the suggested-kind Use button has `aria-label` "Use suggested kind <label>" (commit f094d1c).

@@ -81,3 +81,5 @@ Backend. Displaying stored verdicts in the activity UI.
 - No dedicated test for the `FeatureCreate` and `FreezeWindowsPage` wiring (the `FeatureCreate` test mounts a heavy page); the component and the modal are tested.
 
 **Verified:** `pnpm lint`, `pnpm build`, `pnpm test:run`: 76 files, 572 tests pass (includes the design-token guard). New: 11 tests in `components/ai/__tests__/ReasonQualityHint.test.tsx`, 3 in the modal test (weak hint still submits for disable and enable, no call when off).
+
+- 2026-10-02 (final-review fix): `ReasonQualityHint` keeps an always-mounted empty `role=status` region (only when the feature is on) and takes an `id` so each reason input links to it with `aria-describedby`. UI commit 627620e.

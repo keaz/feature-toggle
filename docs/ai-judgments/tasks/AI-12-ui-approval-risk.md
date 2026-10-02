@@ -90,3 +90,5 @@ Backend logic. Any change to vote buttons or flows.
 
 **Verified:** `pnpm lint`, `pnpm build` (tsc -b plus vite), `pnpm test:run` (82 files, 642 tests) pass, including the design-token guard. New tests: `AiRiskPanel.test.tsx` (12), `ApprovalsAiRisk.test.tsx` (7, fake-timer poll 5 s then back to 30 s), 5 policy modal tests, 2 policy table tests.
 
+
+- 2026-10-02 (final-review fix): an assessment pending for 10 minutes or more no longer keeps the 5 s poll (constant `AI_ASSESSMENT_PENDING_MAX_AGE_MS` in `ApprovalsPage`) and the panel shows the unavailable text; `AiRiskPanel` keeps an always-mounted `role=status` region; `AiRiskSummary` nullable fields typed `T | null`. UI commits c22376d, 627620e, dc16a2f.
