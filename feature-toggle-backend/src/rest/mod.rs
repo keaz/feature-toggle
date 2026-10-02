@@ -36,7 +36,7 @@ use utoipa::openapi::{
 use utoipa::{Modify, OpenApi};
 use utoipa_swagger_ui::SwaggerUi;
 
-use crate::rest::ai::AiStatusResponse;
+use crate::rest::ai::{AiStatusResponse, TeamAiSettingsResponse, UpdateTeamAiSettingsRequest};
 use crate::rest::approval::{
     AppliesTo, ApprovalActionRequest, ApprovalPolicyPreviewOutcomeResponse,
     ApprovalPolicyPreviewRequest, ApprovalPolicyPreviewResponse, ApprovalPolicyResponse,
@@ -157,6 +157,8 @@ async fn health() -> impl Responder {
     paths(
         health,
         ai::get_ai_status,
+        ai::get_team_ai_settings,
+        ai::update_team_ai_settings,
         environment::list_environments,
         environment::get_environment,
         environment::create_environment,
@@ -288,6 +290,8 @@ async fn health() -> impl Responder {
         HealthResponse,
         ErrorResponse,
         AiStatusResponse,
+        TeamAiSettingsResponse,
+        UpdateTeamAiSettingsRequest,
         PaginationQuery,
         PageMeta,
         EnvironmentListQuery,

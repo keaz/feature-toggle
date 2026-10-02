@@ -30,6 +30,7 @@ pub mod activity_types {
     // Team activities
     pub const TEAM_CREATED: &str = "team_created";
     pub const TEAM_UPDATED: &str = "team_updated";
+    pub const AI_SETTINGS_UPDATED: &str = "ai_settings_updated";
     pub const TEAM_DELETED: &str = "team_deleted";
     pub const USER_ADDED_TO_TEAM: &str = "user_added_to_team";
     pub const USER_REMOVED_FROM_TEAM: &str = "user_removed_from_team";
