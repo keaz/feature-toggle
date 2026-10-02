@@ -304,9 +304,10 @@ impl ApprovalLogicImpl {
         }
     }
 
-    /// Queues the background AI risk assessment of a new request. Advisory:
-    /// it never fails or delays the request. Every policy mode except `off`
-    /// assesses; enforcement is a separate task.
+    /// Queues the background AI risk assessment of a new request. It never
+    /// fails or delays the request. Every policy mode except `off` assesses;
+    /// `gate_auto_approve` and `require_extra_approver` act on a finished
+    /// assessment (see `database::approval` and `ApprovalRiskHandler::apply`).
     async fn submit_risk_assessment(
         &self,
         feature: &DbFeature,
@@ -1121,7 +1122,9 @@ impl ApprovalLogicImpl {
                     vote,
                     comment,
                 },
-                policy.required_approvers,
+                request
+                    .required_approvers_override
+                    .unwrap_or(policy.required_approvers),
             )
             .await?;
 
@@ -1223,7 +1226,9 @@ impl ApprovalLogicImpl {
                     vote,
                     comment,
                 },
-                policy.required_approvers,
+                request
+                    .required_approvers_override
+                    .unwrap_or(policy.required_approvers),
             )
             .await?;
 
@@ -2009,6 +2014,7 @@ mod tests {
             executed_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            required_approvers_override: None,
         };
 
         // Mock the policy - requires "Senior Engineer" role
@@ -2201,6 +2207,7 @@ mod tests {
             executed_at: Some(Utc::now()),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            required_approvers_override: None,
         };
 
         logic
@@ -2252,6 +2259,7 @@ mod tests {
             executed_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            required_approvers_override: None,
         };
 
         // Policy requires "Senior Engineer" role
@@ -2371,6 +2379,7 @@ mod tests {
             executed_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            required_approvers_override: None,
         };
 
         let policy = ApprovalPolicy {
@@ -2533,6 +2542,7 @@ mod tests {
             executed_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            required_approvers_override: None,
         };
 
         env_logic
@@ -2664,6 +2674,7 @@ mod tests {
             executed_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            required_approvers_override: None,
         };
 
         let policy = ApprovalPolicy {
@@ -3012,6 +3023,7 @@ mod ai_risk_trigger_tests {
             executed_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            required_approvers_override: None,
         };
 
         env_logic
@@ -3128,5 +3140,121 @@ mod ai_risk_trigger_tests {
 
         assert!(created.is_some());
         assert_eq!(submits.load(Ordering::SeqCst), 1);
+    }
+
+    /// Casts one approve vote with a policy needing `policy_required` approvals
+    /// and checks that `add_vote` receives `expected_required`. The vote leaves
+    /// the request pending, so no change is executed.
+    async fn vote_passes_required(
+        policy_required: i32,
+        request_override: Option<i32>,
+        admin_override: bool,
+        expected_required: i32,
+    ) {
+        let request_id = Uuid::new_v4();
+        let policy_id = Uuid::new_v4();
+        let approver_id = Uuid::new_v4();
+        let pending = ApprovalRequest {
+            id: request_id,
+            policy_id,
+            feature_id: Uuid::new_v4(),
+            environment_id: Some(Uuid::new_v4()),
+            change_type: "stage_change".into(),
+            change_payload: serde_json::json!({}),
+            change_description: None,
+            requested_by: Uuid::new_v4(),
+            eligible_approver_ids: vec![approver_id],
+            routing_reason: None,
+            admin_override_enabled: admin_override,
+            status: ApprovalStatus::Pending,
+            approved_count: 0,
+            rejected_count: 0,
+            executed_at: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            required_approvers_override: request_override,
+        };
+        let policy = ApprovalPolicy {
+            id: policy_id,
+            team_id: Uuid::new_v4(),
+            name: "Prod approvals".into(),
+            description: None,
+            applies_to: "all".into(),
+            environment_ids: None,
+            required_approvers: policy_required,
+            approver_role_ids: vec![],
+            approver_user_ids: vec![approver_id],
+            allow_admin_override: admin_override,
+            fallback_to_roles: false,
+            auto_approve_after_hours: None,
+            enabled: true,
+            created_at: Utc::now(),
+            ai_risk_mode: "require_extra_approver".into(),
+        };
+
+        let mut approval_repo = MockApprovalRepository::new();
+        let stored = pending.clone();
+        approval_repo
+            .expect_get_request_by_id()
+            .returning(move |_| Ok(Some(stored.clone())));
+        approval_repo
+            .expect_get_policy_by_id()
+            .returning(move |_| Ok(Some(policy.clone())));
+        let after_vote = ApprovalRequest {
+            approved_count: 1,
+            ..pending.clone()
+        };
+        approval_repo
+            .expect_add_vote()
+            .withf(move |_, required| *required == expected_required)
+            .times(1)
+            .returning(move |_, _| Ok(after_vote.clone()));
+        approval_repo
+            .expect_list_votes_for_request()
+            .returning(|_| Ok(vec![]));
+
+        let mut role_repo = MockRoleRepository::new();
+        // An admin override lets the approver skip the Approver role and routing checks.
+        role_repo.expect_user_has_role().returning(move |_, role| {
+            Ok(admin_override && role == "Team Admin" || role == "Approver")
+        });
+        role_repo.expect_clone_box().returning(|| {
+            let mut mock = MockRoleRepository::new();
+            mock.expect_clone_box()
+                .returning(|| Box::new(MockRoleRepository::new()));
+            Box::new(mock)
+        });
+
+        let (tx, _rx) = tokio::sync::broadcast::channel(8);
+        let (updates_tx, _updates_rx) = tokio::sync::broadcast::channel(8);
+        let logic = approval_logic(
+            Box::new(approval_repo),
+            Box::new(MockFeatureRepository::new()),
+            Box::new(MockEnvironmentLogic::new()),
+            Box::new(role_repo),
+            tx,
+            updates_tx,
+        );
+
+        let updated = logic
+            .approve_request(request_id, approver_id, None)
+            .await
+            .unwrap();
+        assert_eq!(updated.status, ApprovalStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn vote_counts_against_the_request_override_when_set() {
+        vote_passes_required(1, Some(2), false, 2).await;
+    }
+
+    #[tokio::test]
+    async fn vote_counts_against_the_policy_without_an_override() {
+        vote_passes_required(1, None, false, 1).await;
+    }
+
+    #[tokio::test]
+    async fn admin_override_does_not_lower_the_overridden_requirement() {
+        vote_passes_required(1, Some(2), true, 2).await;
     }
 }

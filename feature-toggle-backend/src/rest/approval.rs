@@ -733,14 +733,16 @@ pub(crate) async fn load_ai_risk(
     }
 }
 
-/// Approvals needed. Falls back to the policy snapshot in the request payload
-/// when the policy row is gone.
+/// Approvals needed. The request's AI risk override wins. Otherwise the policy
+/// applies, falling back to the snapshot in the request payload when the policy
+/// row is gone.
 fn required_approvals_effective(
+    required_approvers_override: Option<i32>,
     policy: Option<&ApprovalPolicy>,
     change_payload: &serde_json::Value,
 ) -> i32 {
-    policy
-        .map(|policy| policy.required_approvers)
+    required_approvers_override
+        .or_else(|| policy.map(|policy| policy.required_approvers))
         .or_else(|| {
             change_payload
                 .get("policy")
@@ -759,8 +761,11 @@ pub(crate) fn map_request_with_policy(
 ) -> ApprovalRequestResponse {
     let reviewed_snapshot_id = snapshot_id_from_payload(&request.change_payload, request.id);
     let change_diff = build_change_diff(request.id, &request.change_payload, policy);
-    let required_approvals_effective =
-        required_approvals_effective(policy, &request.change_payload);
+    let required_approvals_effective = required_approvals_effective(
+        request.required_approvers_override,
+        policy,
+        &request.change_payload,
+    );
     let policy = policy.map(map_policy_summary);
 
     ApprovalRequestResponse {
@@ -1485,6 +1490,7 @@ mod tests {
             executed_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            required_approvers_override: None,
         }
     }
 
@@ -1853,12 +1859,27 @@ mod tests {
         let policy = sample_policy(Uuid::new_v4());
         let payload = serde_json::json!({ "policy": { "required_approvers": 4 } });
 
-        assert_eq!(required_approvals_effective(Some(&policy), &payload), 2);
-        assert_eq!(required_approvals_effective(None, &payload), 4);
         assert_eq!(
-            required_approvals_effective(None, &serde_json::json!({})),
+            required_approvals_effective(None, Some(&policy), &payload),
+            2
+        );
+        assert_eq!(required_approvals_effective(None, None, &payload), 4);
+        assert_eq!(
+            required_approvals_effective(None, None, &serde_json::json!({})),
             1
         );
+    }
+
+    #[actix_web::test]
+    async fn required_approvals_effective_prefers_the_request_override() {
+        let policy = sample_policy(Uuid::new_v4());
+        let payload = serde_json::json!({ "policy": { "required_approvers": 4 } });
+
+        assert_eq!(
+            required_approvals_effective(Some(3), Some(&policy), &payload),
+            3
+        );
+        assert_eq!(required_approvals_effective(Some(3), None, &payload), 3);
     }
 
     #[actix_web::test]

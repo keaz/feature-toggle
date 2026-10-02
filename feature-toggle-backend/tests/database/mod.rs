@@ -1,4 +1,5 @@
 mod ai_test;
+mod approval_risk_enforcement_test;
 mod approval_workflow_test;
 mod assignment_list_test;
 mod client_integration;

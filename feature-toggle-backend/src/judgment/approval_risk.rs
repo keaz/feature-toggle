@@ -1,5 +1,6 @@
 //! Approval risk triage (AI-10): rates how risky a stage-change approval
-//! request is. Advisory only; see `docs/ai-judgments/design.md` §5.1.
+//! request is. Advisory, unless the policy mode enforces (AI-11); see
+//! `docs/ai-judgments/design.md` §5.1.
 
 use std::collections::BTreeMap;
 
@@ -12,7 +13,8 @@ use super::types::{Answers, Question, RequestParts};
 use crate::database::activity_log::{ActivityLogRepository, CreateActivityLog};
 use crate::database::ai::AiJudgment;
 use crate::database::approval::ApprovalRepository;
-use crate::database::entity::{Feature, FeaturePipelineStage};
+use crate::database::entity::ApprovalRequest;
+use crate::database::entity::{ApprovalStatus, Feature, FeaturePipelineStage};
 use crate::model::Environment;
 use crate::utils::activity_logger::{activity_types, entity_types};
 
@@ -260,6 +262,36 @@ impl ApprovalRiskHandler {
     }
 }
 
+impl ApprovalRiskHandler {
+    /// The approvals needed now that `level` is known, when that differs from
+    /// the policy: `Some(n)` if this request carries the `require_extra_approver`
+    /// override, `None` otherwise.
+    async fn enforce_extra_approver(
+        &self,
+        request: &ApprovalRequest,
+        level: &str,
+    ) -> Result<Option<i32>, crate::Error> {
+        if level != "high" || !matches!(request.status, ApprovalStatus::Pending) {
+            return Ok(None);
+        }
+        if let Some(existing) = request.required_approvers_override {
+            return Ok(Some(existing));
+        }
+        let Some(policy) = self.approvals.get_policy_by_id(request.policy_id).await? else {
+            return Ok(None);
+        };
+        if policy.ai_risk_mode != "require_extra_approver" {
+            return Ok(None);
+        }
+        let required = policy.required_approvers.saturating_add(1);
+        let changed = self
+            .approvals
+            .set_required_approvers_override(request.id, required)
+            .await?;
+        Ok(changed.then_some(required))
+    }
+}
+
 #[async_trait]
 impl JudgmentHandler for ApprovalRiskHandler {
     fn kind(&self) -> JudgmentKind {
@@ -296,9 +328,15 @@ impl JudgmentHandler for ApprovalRiskHandler {
         })
     }
 
-    /// Advisory only: records the assessment in the activity log. Skips when
-    /// the request no longer exists. A closed request still gets its entry,
-    /// because the assessment is history, not a decision.
+    /// Records the assessment in the activity log. Skips when the request no
+    /// longer exists. A closed request still gets its entry, because the
+    /// assessment is history, not a decision.
+    ///
+    /// Enforcement (AI-11): for a `high` level on a still-pending request under
+    /// a `require_extra_approver` policy, raises the approvals needed by one.
+    /// The update is guarded in SQL by `status = 'pending'`, so a closed request
+    /// is never changed, and by `required_approvers_override IS NULL`, so a
+    /// repeated apply keeps the first value.
     async fn apply(&self, judgment: &AiJudgment) -> Result<(), crate::Error> {
         let Some(request) = self
             .approvals
@@ -313,6 +351,18 @@ impl JudgmentHandler for ApprovalRiskHandler {
             .and_then(Value::as_str)
             .unwrap_or("unknown");
         let reasons = derived.get("reasons").cloned().unwrap_or_else(|| json!([]));
+        let required_approvers_override = self.enforce_extra_approver(&request, level).await?;
+
+        let mut metadata = json!({
+            "approval_request_id": request.id.to_string(),
+            "feature_id": request.feature_id.to_string(),
+            "level": level,
+            "reasons": reasons,
+            "model": judgment.model,
+        });
+        if let Some(required) = required_approvers_override {
+            metadata["required_approvers_override"] = json!(required);
+        }
 
         self.activity
             .create_activity(CreateActivityLog {
@@ -322,13 +372,7 @@ impl JudgmentHandler for ApprovalRiskHandler {
                 actor_id: None,
                 actor_name: Some("AI risk assessment".to_string()),
                 description: format!("AI risk assessment of approval request: {level}"),
-                metadata: Some(json!({
-                    "approval_request_id": request.id.to_string(),
-                    "feature_id": request.feature_id.to_string(),
-                    "level": level,
-                    "reasons": reasons,
-                    "model": judgment.model,
-                })),
+                metadata: Some(metadata),
             })
             .await
             .map_err(crate::Error::DatabaseError)?;
@@ -347,7 +391,7 @@ mod tests {
     use super::*;
     use crate::database::activity_log::{ActivityLogRow, MockActivityLogRepository};
     use crate::database::approval::MockApprovalRepository;
-    use crate::database::entity::{ApprovalRequest, ApprovalStatus, FeatureType};
+    use crate::database::entity::{ApprovalPolicy, ApprovalRequest, ApprovalStatus, FeatureType};
     use crate::judgment::types::{Answer, Question, ScoreAnswer};
     use crate::model::ID;
 
@@ -898,6 +942,7 @@ mod tests {
             executed_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            required_approvers_override: None,
         }
     }
 
@@ -911,6 +956,9 @@ mod tests {
             .withf(move |id| *id == request_id)
             .times(1)
             .returning(move |id| Ok(Some(request(id, feature_id))));
+        approvals
+            .expect_get_policy_by_id()
+            .returning(|_| Ok(Some(policy("advisory", 1))));
         let mut activity = MockActivityLogRepository::new();
         activity
             .expect_create_activity()
@@ -949,6 +997,164 @@ mod tests {
             .apply(&judgment(request_id, Some(derived)))
             .await
             .unwrap();
+    }
+
+    fn policy(mode: &str, required_approvers: i32) -> ApprovalPolicy {
+        ApprovalPolicy {
+            id: Uuid::new_v4(),
+            team_id: Uuid::new_v4(),
+            name: "Production approval".into(),
+            description: None,
+            applies_to: "all".into(),
+            environment_ids: None,
+            required_approvers,
+            approver_role_ids: vec![],
+            approver_user_ids: vec![],
+            allow_admin_override: false,
+            fallback_to_roles: true,
+            auto_approve_after_hours: None,
+            enabled: true,
+            created_at: Utc::now(),
+            ai_risk_mode: mode.into(),
+        }
+    }
+
+    fn activity_row(entry: CreateActivityLog) -> ActivityLogRow {
+        ActivityLogRow {
+            id: Uuid::new_v4(),
+            activity_type: entry.activity_type,
+            entity_type: entry.entity_type,
+            entity_id: entry.entity_id,
+            actor_id: entry.actor_id,
+            actor_name: entry.actor_name,
+            description: entry.description,
+            metadata: entry.metadata,
+            created_at: Utc::now(),
+        }
+    }
+
+    /// Runs `apply` for `level` against a request in `status` under a policy
+    /// with `mode` and 2 required approvers. `override_calls` is how often the
+    /// override update is expected. Returns the activity metadata written.
+    async fn apply_enforcement(
+        mode: &str,
+        level: &str,
+        status: ApprovalStatus,
+        existing_override: Option<i32>,
+        override_calls: usize,
+        update_changes_row: bool,
+    ) -> Value {
+        let request_id = Uuid::new_v4();
+        let feature_id = Uuid::new_v4();
+        let mut stored = request(request_id, feature_id);
+        stored.status = status;
+        stored.required_approvers_override = existing_override;
+        let policy = policy(mode, 2);
+
+        let mut approvals = MockApprovalRepository::new();
+        approvals
+            .expect_get_request_by_id()
+            .returning(move |_| Ok(Some(stored.clone())));
+        approvals
+            .expect_get_policy_by_id()
+            .returning(move |_| Ok(Some(policy.clone())));
+        approvals
+            .expect_set_required_approvers_override()
+            .withf(move |id, required| *id == request_id && *required == 3)
+            .times(override_calls)
+            .returning(move |_, _| Ok(update_changes_row));
+
+        let written = std::sync::Arc::new(std::sync::Mutex::new(Value::Null));
+        let sink = written.clone();
+        let mut activity = MockActivityLogRepository::new();
+        activity
+            .expect_create_activity()
+            .times(1)
+            .returning(move |entry| {
+                *sink.lock().unwrap() = entry.metadata.clone().unwrap();
+                Ok(activity_row(entry))
+            });
+
+        let handler = ApprovalRiskHandler::new(Box::new(activity), Box::new(approvals));
+        let derived = json!({ "level": level, "reasons": [], "signals": {} });
+        handler
+            .apply(&judgment(request_id, Some(derived)))
+            .await
+            .unwrap();
+        written.lock().unwrap().clone()
+    }
+
+    #[tokio::test]
+    async fn high_risk_under_require_extra_approver_raises_the_requirement() {
+        let metadata = apply_enforcement(
+            "require_extra_approver",
+            "high",
+            ApprovalStatus::Pending,
+            None,
+            1,
+            true,
+        )
+        .await;
+        assert_eq!(metadata["required_approvers_override"], 3);
+    }
+
+    #[tokio::test]
+    async fn other_modes_and_levels_leave_the_requirement_alone() {
+        for (mode, level) in [
+            ("advisory", "high"),
+            ("gate_auto_approve", "high"),
+            ("off", "high"),
+            ("require_extra_approver", "medium"),
+            ("require_extra_approver", "low"),
+        ] {
+            let metadata =
+                apply_enforcement(mode, level, ApprovalStatus::Pending, None, 0, false).await;
+            assert!(
+                metadata.get("required_approvers_override").is_none(),
+                "{mode} {level}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_closed_request_is_never_given_an_override() {
+        for status in [
+            ApprovalStatus::Approved,
+            ApprovalStatus::Rejected,
+            ApprovalStatus::Cancelled,
+        ] {
+            let metadata =
+                apply_enforcement("require_extra_approver", "high", status, None, 0, false).await;
+            assert!(metadata.get("required_approvers_override").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_second_apply_keeps_the_first_override() {
+        let metadata = apply_enforcement(
+            "require_extra_approver",
+            "high",
+            ApprovalStatus::Pending,
+            Some(3),
+            0,
+            false,
+        )
+        .await;
+        assert_eq!(metadata["required_approvers_override"], 3);
+    }
+
+    #[tokio::test]
+    async fn a_lost_update_race_records_no_override() {
+        let metadata = apply_enforcement(
+            "require_extra_approver",
+            "high",
+            ApprovalStatus::Pending,
+            None,
+            1,
+            false,
+        )
+        .await;
+        assert!(metadata.get("required_approvers_override").is_none());
     }
 
     #[tokio::test]

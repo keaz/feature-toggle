@@ -115,6 +115,13 @@ pub trait ApprovalRepository: Send + Sync {
         limit: i64,
     ) -> Result<(Vec<ApprovalRequest>, i64), Error>;
     async fn list_requests_due_for_auto_approval(&self) -> Result<Vec<ApprovalRequest>, Error>;
+    /// Raises the approvals needed for one request (AI-11). Only a pending
+    /// request with no override yet is changed. Returns whether a row changed.
+    async fn set_required_approvers_override(
+        &self,
+        request_id: Uuid,
+        required_approvers: i32,
+    ) -> Result<bool, Error>;
 
     fn clone_box(&self) -> Box<dyn ApprovalRepository>;
 }
@@ -204,6 +211,7 @@ impl ApprovalRepositoryImpl {
             executed_at: row.get("executed_at"),
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
+            required_approvers_override: row.get("required_approvers_override"),
         }
     }
 }
@@ -398,7 +406,7 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
             RETURNING id, policy_id, feature_id, environment_id, change_type, change_payload,
                       change_description, requested_by, eligible_approver_ids, routing_reason,
                       admin_override_enabled, status, approved_count, rejected_count, executed_at,
-                      created_at, updated_at
+                      created_at, updated_at, required_approvers_override
             "#,
         )
         .bind(input.policy_id)
@@ -424,7 +432,7 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
             SELECT id, policy_id, feature_id, environment_id, change_type, change_payload,
                    change_description, requested_by, eligible_approver_ids, routing_reason,
                    admin_override_enabled, status, approved_count, rejected_count, executed_at,
-                   created_at, updated_at
+                   created_at, updated_at, required_approvers_override
             FROM approval_requests WHERE id = $1
             "#,
         )
@@ -485,7 +493,7 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
             RETURNING id, policy_id, feature_id, environment_id, change_type, change_payload,
                       change_description, requested_by, eligible_approver_ids, routing_reason,
                       admin_override_enabled, status, approved_count, rejected_count, executed_at,
-                      created_at, updated_at
+                      created_at, updated_at, required_approvers_override
             "#,
         )
         .bind(input.request_id)
@@ -516,7 +524,7 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
             RETURNING id, policy_id, feature_id, environment_id, change_type, change_payload,
                       change_description, requested_by, eligible_approver_ids, routing_reason,
                       admin_override_enabled, status, approved_count, rejected_count, executed_at,
-                      created_at, updated_at
+                      created_at, updated_at, required_approvers_override
             "#,
         )
         .bind(request_id)
@@ -746,6 +754,14 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
                 WHERE r.status = 'pending'
                   AND p.auto_approve_after_hours IS NOT NULL
                   AND r.created_at + make_interval(hours => p.auto_approve_after_hours) <= NOW()
+                  AND NOT (
+                    p.ai_risk_mode = 'gate_auto_approve'
+                    AND EXISTS (
+                      SELECT 1 FROM ai_judgments j
+                      JOIN team_ai_settings s ON s.team_id = j.team_id AND s.approval_risk
+                      WHERE j.subject_type = 'approval_request' AND j.subject_id = r.id
+                        AND j.kind = 'approval_risk' AND j.status = 'done'
+                        AND j.derived->>'level' = 'high'))
                 ORDER BY r.created_at ASC
                 "#,
             )
@@ -753,6 +769,26 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
             .fetch_all(&self.pool)
             .await,
         )
+    }
+
+    async fn set_required_approvers_override(
+        &self,
+        request_id: Uuid,
+        required_approvers: i32,
+    ) -> Result<bool, Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE approval_requests
+            SET required_approvers_override = $2, updated_at = NOW()
+            WHERE id = $1 AND status = 'pending' AND required_approvers_override IS NULL
+            "#,
+        )
+        .bind(request_id)
+        .bind(required_approvers)
+        .execute(&self.pool)
+        .await
+        .map_err(Error::DatabaseError)?;
+        Ok(result.rows_affected() > 0)
     }
 
     async fn cancel_request(
@@ -831,7 +867,7 @@ impl ApprovalRepositoryImpl {
             RETURNING id, policy_id, feature_id, environment_id, change_type, change_payload,
                       change_description, requested_by, eligible_approver_ids, routing_reason,
                       admin_override_enabled, status, approved_count, rejected_count, executed_at,
-                      created_at, updated_at
+                      created_at, updated_at, required_approvers_override
             "#,
         )
         .bind(input.policy_id)
@@ -867,7 +903,7 @@ impl ApprovalRepositoryImpl {
             RETURNING id, policy_id, feature_id, environment_id, change_type, change_payload,
                       change_description, requested_by, eligible_approver_ids, routing_reason,
                       admin_override_enabled, status, approved_count, rejected_count, executed_at,
-                      created_at, updated_at
+                      created_at, updated_at, required_approvers_override
             "#,
         )
         .bind(request_id)
@@ -1060,7 +1096,7 @@ impl ApprovalRepositoryTx for ApprovalRepositoryImpl {
             RETURNING id, policy_id, feature_id, environment_id, change_type, change_payload,
                       change_description, requested_by, eligible_approver_ids, routing_reason,
                       admin_override_enabled, status, approved_count, rejected_count, executed_at,
-                      created_at, updated_at
+                      created_at, updated_at, required_approvers_override
             "#,
         )
         .bind(input.request_id)

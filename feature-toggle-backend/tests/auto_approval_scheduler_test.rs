@@ -33,6 +33,7 @@ async fn auto_approval_scheduler_processes_pending_requests() {
         executed_at: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
+        required_approvers_override: None,
     };
 
     let pending_clone = pending_request.clone();

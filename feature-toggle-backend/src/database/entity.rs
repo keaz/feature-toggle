@@ -420,6 +420,9 @@ pub struct ApprovalRequest {
     pub executed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Approvals needed when AI risk enforcement raised the policy's
+    /// `required_approvers` for this request. `None` means the policy applies.
+    pub required_approvers_override: Option<i32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
