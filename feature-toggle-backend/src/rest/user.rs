@@ -37,6 +37,9 @@ pub struct UserResponse {
     pub email: String,
     pub mobile_number: Option<String>,
     pub is_admin: bool,
+    /// How admin was granted: `manual` or `sso`. Null when the user is not an admin.
+    #[schema(nullable = true, value_type = Option<String>, example = "manual")]
+    pub admin_source: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub last_login: Option<String>,
@@ -114,6 +117,7 @@ impl UserResponse {
             email: user.email,
             mobile_number: user.mobile_number,
             is_admin: user.is_admin,
+            admin_source: None,
             created_at: user.created_at.to_rfc3339(),
             updated_at: user.updated_at.to_rfc3339(),
             last_login: user.last_login.map(|value| value.to_rfc3339()),
@@ -134,8 +138,8 @@ impl UserResponse {
     }
 }
 
-/// Fills `ssoManagedRoleIds`, `ssoManagedTeamIds` and `identities` for `users` with
-/// three batched queries.
+/// Fills `adminSource`, `ssoManagedRoleIds`, `ssoManagedTeamIds` and `identities` for
+/// `users` with batched queries.
 pub(crate) async fn attach_sso_details(
     pool: &sqlx::PgPool,
     users: &mut [UserResponse],
@@ -154,6 +158,9 @@ pub(crate) async fn attach_sso_details(
     let team_pairs = crate::database::user::user_repository(pool.clone())
         .list_sso_team_ids_for_users(ids.clone())
         .await?;
+    let admin_sources = crate::database::user::user_repository(pool.clone())
+        .list_admin_sources_for_users(ids.clone())
+        .await?;
     let identities = crate::database::user_identity::user_identity_repository(pool.clone())
         .list_identities_for_users(ids)
         .await?;
@@ -161,6 +168,14 @@ pub(crate) async fn attach_sso_details(
     for user in users.iter_mut() {
         let Ok(user_id) = Uuid::parse_str(&user.id) else {
             continue;
+        };
+        user.admin_source = if user.is_admin {
+            admin_sources
+                .iter()
+                .find(|(u, _)| *u == user_id)
+                .map(|(_, source)| source.clone())
+        } else {
+            None
         };
         user.sso_managed_role_ids = role_pairs
             .iter()

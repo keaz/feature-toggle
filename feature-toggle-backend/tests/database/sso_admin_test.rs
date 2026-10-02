@@ -1372,6 +1372,56 @@ async fn users_api_exposes_auth_source_sso_assignments_and_identities() {
         assert_eq!(found["identities"].as_array().unwrap().len(), 1);
     }
 
+    // adminSource: null for non-admins, stored value for admins.
+    assert!(user["adminSource"].is_null());
+    assert!(local["adminSource"].is_null());
+    let manual_admin = insert_user_row(&pool, "local", Some("x")).await;
+    let sso_admin = insert_user_row(&pool, "sso", None).await;
+    for (id, source) in [(manual_admin, "manual"), (sso_admin, "sso")] {
+        sqlx::query("UPDATE users SET is_admin = TRUE, admin_source = $2 WHERE id = $1")
+            .bind(id)
+            .bind(source)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (status, body, text) = call(
+            &app,
+            Method::GET,
+            &format!("/api/v1/users/{id}"),
+            None,
+            Some(admin_user()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        assert_eq!(body["adminSource"], source);
+    }
+    let (status, patched_admin, text) = call(
+        &app,
+        Method::PATCH,
+        &format!("/api/v1/users/{sso_admin}"),
+        Some(json!({"firstName": "Still"})),
+        Some(admin_user()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    assert_eq!(patched_admin["adminSource"], "sso");
+    let (_, list, _) = call(
+        &app,
+        Method::GET,
+        "/api/v1/users?limit=1000",
+        None,
+        Some(admin_user()),
+    )
+    .await;
+    if let Some(found) = list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["id"] == json!(manual_admin.to_string()))
+    {
+        assert_eq!(found["adminSource"], "manual");
+    }
+
     // PATCH keeps the new fields in its response.
     let (status, patched, text) = call(
         &app,

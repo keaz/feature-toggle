@@ -116,6 +116,11 @@ pub trait UserRepository: Send + Sync {
         &self,
         user_ids: Vec<Uuid>,
     ) -> Result<Vec<(Uuid, Uuid)>, Error>;
+    /// `(user_id, admin_source)` for admins with a recorded source, for list endpoints.
+    async fn list_admin_sources_for_users(
+        &self,
+        user_ids: Vec<Uuid>,
+    ) -> Result<Vec<(Uuid, String)>, Error>;
     async fn admin_exists(&self) -> Result<bool, Error>;
     fn clone_box(&self) -> Box<dyn UserRepository>;
 }
@@ -630,6 +635,24 @@ impl UserRepository for UserRepositoryImpl {
         .await
         .map_err(Error::DatabaseError)?;
         Ok(rows.into_iter().map(|r| (r.user_id, r.team_id)).collect())
+    }
+
+    async fn list_admin_sources_for_users(
+        &self,
+        user_ids: Vec<Uuid>,
+    ) -> Result<Vec<(Uuid, String)>, Error> {
+        let rows = sqlx::query(
+            "SELECT id, admin_source FROM users \
+             WHERE is_admin = TRUE AND admin_source IS NOT NULL AND id = ANY($1)",
+        )
+        .bind(&user_ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Error::DatabaseError)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.get::<Uuid, _>("id"), r.get::<String, _>("admin_source")))
+            .collect())
     }
 
     async fn admin_exists(&self) -> Result<bool, Error> {
