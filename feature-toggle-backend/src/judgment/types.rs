@@ -216,8 +216,11 @@ mod tests {
         );
         questions.insert(
             "frustration".to_string(),
-            Question::score("How frustrated is the customer?", ["Calm", "Frustrated", "Very angry"])
-                .unwrap(),
+            Question::score(
+                "How frustrated is the customer?",
+                ["Calm", "Frustrated", "Very angry"],
+            )
+            .unwrap(),
         );
         questions.insert("plain".to_string(), Question::noul("Is it plain?"));
         let request = SystemOneRequest {

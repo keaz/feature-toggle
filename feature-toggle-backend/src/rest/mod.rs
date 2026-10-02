@@ -1,3 +1,4 @@
+pub mod ai;
 pub mod approval;
 pub mod auth;
 pub mod client;
@@ -35,6 +36,7 @@ use utoipa::openapi::{
 use utoipa::{Modify, OpenApi};
 use utoipa_swagger_ui::SwaggerUi;
 
+use crate::rest::ai::AiStatusResponse;
 use crate::rest::approval::{
     AppliesTo, ApprovalActionRequest, ApprovalPolicyPreviewOutcomeResponse,
     ApprovalPolicyPreviewRequest, ApprovalPolicyPreviewResponse, ApprovalPolicyResponse,
@@ -154,6 +156,7 @@ async fn health() -> impl Responder {
 #[openapi(
     paths(
         health,
+        ai::get_ai_status,
         environment::list_environments,
         environment::get_environment,
         environment::create_environment,
@@ -284,6 +287,7 @@ async fn health() -> impl Responder {
     components(schemas(
         HealthResponse,
         ErrorResponse,
+        AiStatusResponse,
         PaginationQuery,
         PageMeta,
         EnvironmentListQuery,
@@ -509,6 +513,7 @@ async fn health() -> impl Responder {
         (name = "Metrics", description = "Metrics and analytics"),
         (name = "Activity", description = "Activity logs"),
         (name = "Notifications", description = "Notification settings and delivery preferences"),
+        (name = "AI", description = "TypeSafe AI judgments: status and per-team settings"),
         (name = "Operational Safety", description = "Freeze windows, blast radius previews, and scheduled changes")
     )
 )]
@@ -646,6 +651,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .configure(jwt_secret::configure)
             .configure(notification::configure)
             .configure(operational_safety::configure)
+            .configure(ai::configure)
             .configure(stream::configure),
     );
 }

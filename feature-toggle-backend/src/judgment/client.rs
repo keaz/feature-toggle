@@ -157,7 +157,10 @@ impl HttpJudgmentClient {
         );
         let body = response.text().await.unwrap_or_default();
         if should_retry_status(status) {
-            Err(AttemptError::Retryable(JudgmentError::RateLimited, retry_after))
+            Err(AttemptError::Retryable(
+                JudgmentError::RateLimited,
+                retry_after,
+            ))
         } else {
             Err(AttemptError::Fatal(JudgmentError::Http(
                 status,
@@ -253,15 +256,24 @@ mod tests {
 
     #[test]
     fn backoff_honors_retry_after_with_cap() {
-        assert_eq!(backoff(0, Some(Duration::from_secs(2))), Duration::from_secs(2));
-        assert_eq!(backoff(0, Some(Duration::from_secs(60))), Duration::from_secs(5));
+        assert_eq!(
+            backoff(0, Some(Duration::from_secs(2))),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            backoff(0, Some(Duration::from_secs(60))),
+            Duration::from_secs(5)
+        );
     }
 
     #[test]
     fn parses_retry_after_seconds_only() {
         assert_eq!(parse_retry_after(Some("3")), Some(Duration::from_secs(3)));
         assert_eq!(parse_retry_after(Some(" 1 ")), Some(Duration::from_secs(1)));
-        assert_eq!(parse_retry_after(Some("Wed, 21 Oct 2026 07:28:00 GMT")), None);
+        assert_eq!(
+            parse_retry_after(Some("Wed, 21 Oct 2026 07:28:00 GMT")),
+            None
+        );
         assert_eq!(parse_retry_after(None), None);
     }
 
@@ -280,7 +292,10 @@ mod tests {
         assert_eq!(error.log_label(), "http_422");
         assert!(error.to_string().contains("my secret text"));
         assert_eq!(JudgmentError::Timeout.log_label(), "timeout");
-        assert_eq!(JudgmentError::Transport("x".into()).log_label(), "transport");
+        assert_eq!(
+            JudgmentError::Transport("x".into()).log_label(),
+            "transport"
+        );
     }
 
     #[test]

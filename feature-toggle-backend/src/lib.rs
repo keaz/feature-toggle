@@ -57,6 +57,15 @@ pub async fn run() -> std::io::Result<()> {
     // Load configuration (from TOML or defaults)
     let cfg = crate::config::Config::load();
 
+    // TypeSafe judgments: on only when TYPESAFE_API_KEY is set.
+    let ai_client = judgment::build_client(&cfg.typesafe);
+    if ai_client.is_some() {
+        log::info!("TypeSafe judgments enabled (model {})", cfg.typesafe.model);
+    } else {
+        log::info!("TypeSafe judgments disabled (no TYPESAFE_API_KEY)");
+    }
+    let ai_runtime = judgment::AiRuntime::new(ai_client.clone(), cfg.typesafe.model.clone());
+
     let db_pool = init_pg_pool().await;
     database::run_migrations(&db_pool)
         .await
@@ -341,6 +350,7 @@ pub async fn run() -> std::io::Result<()> {
             .app_data(web::Data::new(variant_allocations_repository.clone()))
             .app_data(web::Data::new(compound_rules_repository.clone()))
             .app_data(web::Data::new(updates_tx.clone()))
+            .app_data(web::Data::new(ai_runtime.clone()))
             .service(
                 web::resource("/metrics/track")
                     .guard(guard::Post())
