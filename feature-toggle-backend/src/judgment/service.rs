@@ -51,6 +51,8 @@ pub fn input_hash(input: &Value) -> String {
         .collect()
 }
 
+/// `model` stored for a result decided by a rule instead of the API.
+pub const RULE_MODEL: &str = "rule";
 const TEAM_FEATURE_OFF: &str = "skipped: AI feature turned off for this team";
 
 pub struct JudgmentService {
@@ -119,6 +121,81 @@ impl JudgmentService {
             service.run(row).await;
         });
         Ok(id)
+    }
+
+    /// Stores a result decided by a rule, with no API call: upserts the row,
+    /// then (in the background, like `submit`) marks it done with `derived`
+    /// and runs the handler's `apply`. Like `submit`, it does not check the
+    /// team toggle; callers do. Returns the row id right after the write.
+    pub async fn record_rule_result(
+        self: &Arc<Self>,
+        team_id: Uuid,
+        kind: JudgmentKind,
+        subject_type: SubjectType,
+        subject_id: Uuid,
+        input: Value,
+        derived: Value,
+    ) -> Result<Uuid, crate::Error> {
+        let input_hash = input_hash(&input);
+        let row = self
+            .judgments
+            .upsert_pending(NewJudgment {
+                team_id,
+                kind,
+                subject_type,
+                subject_id,
+                input,
+                input_hash,
+            })
+            .await?;
+        let id = row.id;
+        let service = Arc::clone(self);
+        tokio::spawn(async move {
+            service.finish_rule_result(row, derived).await;
+        });
+        Ok(id)
+    }
+
+    async fn finish_rule_result(&self, row: AiJudgment, derived: Value) {
+        let result = JudgmentResult {
+            model: RULE_MODEL.to_string(),
+            raw_answers: Value::Object(Default::default()),
+            derived: derived.clone(),
+            input_tokens: None,
+        };
+        match self
+            .judgments
+            .mark_done(row.id, row.input_hash.clone(), result)
+            .await
+        {
+            Ok(true) => {
+                let done = AiJudgment {
+                    status: "done".to_string(),
+                    model: Some(RULE_MODEL.to_string()),
+                    raw_answers: Some(Value::Object(Default::default())),
+                    derived: Some(derived),
+                    error: None,
+                    completed_at: Some(Utc::now()),
+                    ..row
+                };
+                let handler = done
+                    .kind
+                    .parse::<JudgmentKind>()
+                    .ok()
+                    .and_then(|kind| self.handlers.get(&kind).cloned());
+                if let Some(handler) = handler
+                    && let Err(err) = handler.apply(&done).await
+                {
+                    error!(
+                        "AI judgment {} ({}) apply step failed: {err}",
+                        done.id, done.kind
+                    );
+                }
+            }
+            // A newer submission replaced the input: nothing to store or apply.
+            Ok(false) => {}
+            Err(err) => error!("Could not store AI judgment {} result: {err}", row.id),
+        }
     }
 
     pub async fn run(&self, row: AiJudgment) -> RunOutcome {

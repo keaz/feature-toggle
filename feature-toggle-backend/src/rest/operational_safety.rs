@@ -7,8 +7,11 @@ use uuid::Uuid;
 
 use crate::JwtUser;
 use crate::database::activity_log::{ActivityLogRepository, CreateActivityLog};
+use crate::judgment::justification::ReasonKind;
+use crate::judgment::{AiRuntime, SubjectType};
 use crate::logic::authorization::RoleAuthorizer;
 use crate::logic::policy::{PolicyActor, PolicyError};
+use crate::rest::ai::record_reason;
 use crate::rest::error::RestError;
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -530,8 +533,8 @@ async fn log_freeze_attempt(
     jwt: &JwtUser,
     window: &FreezeWindowRow,
     override_reason: Option<&str>,
-) -> Result<(), RestError> {
-    activity_repo
+) -> Result<Uuid, RestError> {
+    let activity = activity_repo
         .create_activity(CreateActivityLog {
             activity_type: activity_type.to_string(),
             entity_type: "feature".to_string(),
@@ -561,9 +564,36 @@ async fn log_freeze_attempt(
         })
         .await
         .map_err(RestError::from)?;
-    Ok(())
+    Ok(activity.id)
 }
 
+/// A freeze was overridden with a reason. The activity row is already written;
+/// the caller hands `reason` to the justification check.
+#[derive(Debug, Clone)]
+pub(crate) struct FreezeOverride {
+    pub activity_id: Uuid,
+    pub team_id: Uuid,
+    pub feature_key: String,
+    pub reason: String,
+}
+
+impl FreezeOverride {
+    pub(crate) async fn record(&self, ai: &Option<web::Data<AiRuntime>>) {
+        record_reason(
+            ai,
+            self.team_id,
+            SubjectType::Activity,
+            self.activity_id,
+            ReasonKind::FreezeOverride,
+            &self.reason,
+            Some(self.feature_key.as_str()),
+        )
+        .await;
+    }
+}
+
+/// Blocks a change during an active freeze unless the caller may override it.
+/// Returns the override that was used, if any.
 pub(crate) async fn enforce_freeze_for_feature_environment(
     pool: &PgPool,
     activity_repo: &dyn ActivityLogRepository,
@@ -573,12 +603,12 @@ pub(crate) async fn enforce_freeze_for_feature_environment(
     environment_id: Uuid,
     jwt: &JwtUser,
     override_reason: Option<&str>,
-) -> Result<(), RestError> {
+) -> Result<Option<FreezeOverride>, RestError> {
     let Some(window) = active_freeze_for_environment(pool, team_id, environment_id, Utc::now())
         .await
         .map_err(RestError::from)?
     else {
-        return Ok(());
+        return Ok(None);
     };
 
     if can_operate_safety(jwt) {
@@ -586,7 +616,7 @@ pub(crate) async fn enforce_freeze_for_feature_environment(
             override_reason.unwrap_or_default(),
             "freeze override reason",
         )?;
-        log_freeze_attempt(
+        let activity_id = log_freeze_attempt(
             activity_repo,
             "freeze_override",
             team_id,
@@ -598,7 +628,12 @@ pub(crate) async fn enforce_freeze_for_feature_environment(
             Some(&reason),
         )
         .await?;
-        return Ok(());
+        return Ok(Some(FreezeOverride {
+            activity_id,
+            team_id,
+            feature_key: feature_key.to_string(),
+            reason,
+        }));
     }
 
     log_freeze_attempt(
@@ -626,7 +661,7 @@ pub(crate) async fn enforce_freeze_for_stage(
     stage_id: Uuid,
     jwt: &JwtUser,
     override_reason: Option<&str>,
-) -> Result<(), RestError> {
+) -> Result<Option<FreezeOverride>, RestError> {
     let row = sqlx::query(
         r#"
         SELECT f.id AS feature_id, f.key AS feature_key, f.team_id, fs.environment_id
@@ -1031,6 +1066,7 @@ pub(crate) async fn active_freeze_window(
 #[post("/teams/{team_id}/freeze-windows")]
 pub(crate) async fn create_freeze_window(
     pool: web::Data<PgPool>,
+    ai: Option<web::Data<AiRuntime>>,
     req: HttpRequest,
     team_id: web::Path<String>,
     payload: web::Json<CreateFreezeWindowRequest>,
@@ -1086,6 +1122,19 @@ pub(crate) async fn create_freeze_window(
     .await
     .map_err(RestError::from)?;
 
+    if let Some(reason) = row.reason.as_deref() {
+        record_reason(
+            &ai,
+            row.team_id,
+            SubjectType::FreezeWindow,
+            row.id,
+            ReasonKind::FreezeWindow,
+            reason,
+            None,
+        )
+        .await;
+    }
+
     Ok(HttpResponse::Created().json(map_freeze_window(row)))
 }
 
@@ -1100,6 +1149,7 @@ pub(crate) async fn create_freeze_window(
 #[patch("/freeze-windows/{id}")]
 pub(crate) async fn update_freeze_window(
     pool: web::Data<PgPool>,
+    ai: Option<web::Data<AiRuntime>>,
     req: HttpRequest,
     id: web::Path<String>,
     payload: web::Json<UpdateFreezeWindowRequest>,
@@ -1152,6 +1202,20 @@ pub(crate) async fn update_freeze_window(
 
     if row.ends_at <= row.starts_at {
         return Err(RestError::invalid_input("endsAt must be after startsAt"));
+    }
+
+    // Only a reason sent with this change is checked, not one kept from before.
+    if let Some(reason) = payload.reason.as_deref() {
+        record_reason(
+            &ai,
+            row.team_id,
+            SubjectType::FreezeWindow,
+            row.id,
+            ReasonKind::FreezeWindow,
+            reason,
+            None,
+        )
+        .await;
     }
 
     Ok(HttpResponse::Ok().json(map_freeze_window(row)))
@@ -1248,6 +1312,7 @@ pub(crate) async fn list_scheduled_changes(
 pub(crate) async fn create_scheduled_change(
     pool: web::Data<PgPool>,
     activity_repo: web::Data<Box<dyn ActivityLogRepository>>,
+    ai: Option<web::Data<AiRuntime>>,
     req: HttpRequest,
     id: web::Path<String>,
     payload: web::Json<CreateScheduledChangeRequest>,
@@ -1348,7 +1413,8 @@ pub(crate) async fn create_scheduled_change(
     .await
     .map_err(RestError::from)?;
 
-    let _ = activity_repo
+    let feature_key: String = feature.get("key");
+    let activity = activity_repo
         .create_activity(CreateActivityLog {
             activity_type: "scheduled_change_created".to_string(),
             entity_type: "feature".to_string(),
@@ -1358,7 +1424,7 @@ pub(crate) async fn create_scheduled_change(
             description: format!(
                 "Scheduled {} for feature '{}'",
                 payload.action.as_str(),
-                feature.get::<String, _>("key")
+                feature_key
             ),
             metadata: Some(serde_json::json!({
                 "scheduled_change_id": row.id.to_string(),
@@ -1370,6 +1436,19 @@ pub(crate) async fn create_scheduled_change(
             })),
         })
         .await;
+    // Without an activity row there is nothing to attach the verdict to.
+    if let Ok(activity) = activity {
+        record_reason(
+            &ai,
+            team_id,
+            SubjectType::Activity,
+            activity.id,
+            ReasonKind::ScheduledChange,
+            &reason,
+            Some(feature_key.as_str()),
+        )
+        .await;
+    }
 
     Ok(HttpResponse::Created().json(map_scheduled_change(row)))
 }
@@ -1436,6 +1515,7 @@ pub(crate) async fn cancel_scheduled_change(
 #[patch("/scheduled-changes/{id}/reschedule")]
 pub(crate) async fn reschedule_scheduled_change(
     pool: web::Data<PgPool>,
+    ai: Option<web::Data<AiRuntime>>,
     req: HttpRequest,
     id: web::Path<String>,
     payload: web::Json<RescheduleScheduledChangeRequest>,
@@ -1472,6 +1552,21 @@ pub(crate) async fn reschedule_scheduled_change(
     .await
     .map_err(RestError::from)?
     .ok_or_else(|| RestError::not_found("pending scheduled change not found or not editable"))?;
+
+    // A reschedule writes no activity row, so the scheduled change is the subject.
+    if let Some(reason) = payload.reason.as_deref() {
+        record_reason(
+            &ai,
+            row.team_id,
+            SubjectType::ScheduledChange,
+            row.id,
+            ReasonKind::ScheduledChange,
+            reason,
+            None,
+        )
+        .await;
+    }
+
     Ok(HttpResponse::Ok().json(map_scheduled_change(row)))
 }
 
@@ -2148,5 +2243,306 @@ mod authorization_tests {
             )
         );
         assert_ne!(stage_status, "DEPLOYMENT_REQUESTED");
+    }
+    // --- AI-20: reasons are handed to the justification check after the write ---
+
+    use crate::judgment::SubjectType;
+    use crate::judgment::justification::test_support::{Recorded, recording_runtime};
+
+    /// Sends one request through the router with an AI runtime registered.
+    async fn send_with_ai(
+        world: &World,
+        method: actix_web::http::Method,
+        uri: &str,
+        jwt: JwtUser,
+        body: serde_json::Value,
+        ai: crate::judgment::AiRuntime,
+    ) -> (StatusCode, serde_json::Value) {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(world.pool.clone()))
+                .app_data(web::Data::new(activity_log_repository(world.pool.clone())))
+                .app_data(web::Data::new(ai))
+                .service(web::scope("/api/v1").configure(super::configure)),
+        )
+        .await;
+        let req = test::TestRequest::default()
+            .method(method)
+            .uri(uri)
+            .set_json(body)
+            .to_request();
+        req.extensions_mut().insert(jwt);
+        let resp = test::call_service(&app, req).await;
+        let status = resp.status();
+        let body = test::read_body(resp).await;
+        (
+            status,
+            serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    fn recorded_entries(recorded: &Recorded) -> Vec<(SubjectType, Uuid, serde_json::Value)> {
+        recorded.lock().unwrap().clone()
+    }
+
+    impl World {
+        async fn scheduled_change_activity_id(&self) -> Uuid {
+            sqlx::query_scalar(
+                "SELECT id FROM activity_log WHERE activity_type = 'scheduled_change_created' AND entity_id = $1",
+            )
+            .bind(self.feature_id.to_string())
+            .fetch_one(&self.pool)
+            .await
+            .expect("scheduled change activity")
+        }
+
+        async fn delete_freeze_windows(&self) {
+            let _ = sqlx::query("DELETE FROM change_freeze_windows WHERE team_id = $1")
+                .bind(self.team_id)
+                .execute(&self.pool)
+                .await;
+        }
+    }
+
+    #[actix_web::test]
+    async fn scheduled_change_reason_is_recorded_against_its_activity_row() {
+        let mut world = World::new().await;
+        let admin = world.user(None, true, &[]).await;
+        let recorded: Recorded = Default::default();
+
+        let (status, body) = send_with_ai(
+            &world,
+            actix_web::http::Method::POST,
+            &format!("/api/v1/features/{}/scheduled-changes", world.feature_id),
+            admin,
+            schedule_body("DISABLE_FEATURE"),
+            recording_runtime(true, false, recorded.clone()),
+        )
+        .await;
+        let activity_id = world.scheduled_change_activity_id().await;
+        let entries = recorded_entries(&recorded);
+        world.cleanup().await;
+
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            (entries[0].0, entries[0].1),
+            (SubjectType::Activity, activity_id)
+        );
+        assert_eq!(entries[0].2["reason_kind"], "scheduled_change");
+        assert_eq!(entries[0].2["reason"], "scheduled for test");
+    }
+
+    #[actix_web::test]
+    async fn nothing_is_recorded_for_a_schedule_when_the_team_setting_is_off() {
+        let mut world = World::new().await;
+        let admin = world.user(None, true, &[]).await;
+        let recorded: Recorded = Default::default();
+
+        let (status, _) = send_with_ai(
+            &world,
+            actix_web::http::Method::POST,
+            &format!("/api/v1/features/{}/scheduled-changes", world.feature_id),
+            admin,
+            schedule_body("DISABLE_FEATURE"),
+            recording_runtime(false, false, recorded.clone()),
+        )
+        .await;
+        let entries = recorded_entries(&recorded);
+        world.cleanup().await;
+
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(entries.is_empty());
+    }
+
+    #[actix_web::test]
+    async fn reschedule_with_a_reason_records_against_the_scheduled_change() {
+        let mut world = World::new().await;
+        let admin = world.user(None, true, &[]).await;
+        let change = world
+            .insert_due_change(Some(admin.id), "DISABLE_FEATURE")
+            .await;
+        let recorded: Recorded = Default::default();
+        let when = (Utc::now() + ChronoDuration::hours(2)).to_rfc3339();
+
+        let (with_reason, body) = send_with_ai(
+            &world,
+            actix_web::http::Method::PATCH,
+            &format!("/api/v1/scheduled-changes/{change}/reschedule"),
+            admin.clone(),
+            serde_json::json!({ "scheduledAt": when, "reason": "Moved after the release freeze" }),
+            recording_runtime(true, false, recorded.clone()),
+        )
+        .await;
+        let after_first = recorded_entries(&recorded);
+        let (without_reason, _) = send_with_ai(
+            &world,
+            actix_web::http::Method::PATCH,
+            &format!("/api/v1/scheduled-changes/{change}/reschedule"),
+            admin,
+            serde_json::json!({ "scheduledAt": when }),
+            recording_runtime(true, false, recorded.clone()),
+        )
+        .await;
+        let after_second = recorded_entries(&recorded);
+        world.cleanup().await;
+
+        assert_eq!(with_reason, StatusCode::OK, "{body}");
+        assert_eq!(after_first.len(), 1);
+        assert_eq!(
+            (after_first[0].0, after_first[0].1),
+            (SubjectType::ScheduledChange, change)
+        );
+        assert_eq!(after_first[0].2["reason_kind"], "scheduled_change");
+        assert_eq!(without_reason, StatusCode::OK);
+        assert_eq!(
+            after_second.len(),
+            1,
+            "no reason sent, nothing new recorded"
+        );
+    }
+
+    #[actix_web::test]
+    async fn freeze_window_reason_is_recorded_on_create_and_update() {
+        let mut world = World::new().await;
+        let admin = world.user(None, true, &[]).await;
+        let recorded: Recorded = Default::default();
+        let starts = Utc::now() + ChronoDuration::days(1);
+
+        let (created, body) = send_with_ai(
+            &world,
+            actix_web::http::Method::POST,
+            &format!("/api/v1/teams/{}/freeze-windows", world.team_id),
+            admin.clone(),
+            serde_json::json!({
+                "name": "Holiday freeze",
+                "environmentType": "Production",
+                "startsAt": starts.to_rfc3339(),
+                "endsAt": (starts + ChronoDuration::hours(4)).to_rfc3339(),
+                "reason": "Holiday traffic peak",
+            }),
+            recording_runtime(true, false, recorded.clone()),
+        )
+        .await;
+        let window_id =
+            Uuid::parse_str(body["id"].as_str().unwrap_or_default()).unwrap_or_default();
+        let after_create = recorded_entries(&recorded);
+
+        let (updated, _) = send_with_ai(
+            &world,
+            actix_web::http::Method::PATCH,
+            &format!("/api/v1/freeze-windows/{window_id}"),
+            admin.clone(),
+            serde_json::json!({ "reason": "Extended through the weekend" }),
+            recording_runtime(true, false, recorded.clone()),
+        )
+        .await;
+        let after_update = recorded_entries(&recorded);
+
+        let (renamed, _) = send_with_ai(
+            &world,
+            actix_web::http::Method::PATCH,
+            &format!("/api/v1/freeze-windows/{window_id}"),
+            admin,
+            serde_json::json!({ "name": "Holiday freeze 2" }),
+            recording_runtime(true, false, recorded.clone()),
+        )
+        .await;
+        let after_rename = recorded_entries(&recorded);
+        world.delete_freeze_windows().await;
+        world.cleanup().await;
+
+        assert_eq!(created, StatusCode::CREATED, "{body}");
+        assert_eq!(after_create.len(), 1);
+        assert_eq!(
+            (after_create[0].0, after_create[0].1),
+            (SubjectType::FreezeWindow, window_id)
+        );
+        assert_eq!(after_create[0].2["reason_kind"], "freeze_window");
+        assert_eq!(after_create[0].2["reason"], "Holiday traffic peak");
+        assert_eq!(updated, StatusCode::OK);
+        assert_eq!(after_update.len(), 2);
+        assert_eq!(after_update[1].2["reason"], "Extended through the weekend");
+        assert_eq!(renamed, StatusCode::OK);
+        assert_eq!(
+            after_rename.len(),
+            2,
+            "no reason in the patch, nothing recorded"
+        );
+    }
+
+    #[actix_web::test]
+    async fn freeze_override_returns_the_activity_row_it_wrote() {
+        let mut world = World::new().await;
+        let admin = world.user(None, true, &[]).await;
+        let environment_id: Uuid =
+            sqlx::query_scalar("SELECT environment_id FROM features_pipeline_stages WHERE id = $1")
+                .bind(world.stage_id)
+                .fetch_one(&world.pool)
+                .await
+                .unwrap();
+        sqlx::query(
+            "INSERT INTO change_freeze_windows (team_id, name, environment_id, starts_at, ends_at, timezone, recurrence, active) \
+             VALUES ($1, 'Active freeze', $2, NOW() - INTERVAL '1 hour', NOW() + INTERVAL '1 hour', 'UTC', 'NONE', true)",
+        )
+        .bind(world.team_id)
+        .bind(environment_id)
+        .execute(&world.pool)
+        .await
+        .unwrap();
+        let activity = activity_log_repository(world.pool.clone());
+
+        let overridden = enforce_freeze_for_feature_environment(
+            &world.pool,
+            activity.as_ref(),
+            world.team_id,
+            world.feature_id,
+            "checkout-v2",
+            environment_id,
+            &admin,
+            Some("Customer outage, hotfix needed"),
+        )
+        .await
+        .expect("admin may override")
+        .expect("an override was used");
+        let row: (String, Option<serde_json::Value>) =
+            sqlx::query_as("SELECT activity_type, metadata FROM activity_log WHERE id = $1")
+                .bind(overridden.activity_id)
+                .fetch_one(&world.pool)
+                .await
+                .unwrap();
+        world.delete_freeze_windows().await;
+        let team_id = world.team_id;
+        world.cleanup().await;
+
+        assert_eq!(overridden.team_id, team_id);
+        assert_eq!(overridden.feature_key, "checkout-v2");
+        assert_eq!(overridden.reason, "Customer outage, hotfix needed");
+        assert_eq!(row.0, "freeze_override");
+        assert_eq!(
+            row.1.unwrap()["override_reason"],
+            "Customer outage, hotfix needed"
+        );
+    }
+
+    #[actix_web::test]
+    async fn no_freeze_means_no_override() {
+        let mut world = World::new().await;
+        let admin = world.user(None, true, &[]).await;
+        let activity = activity_log_repository(world.pool.clone());
+        let outcome = enforce_freeze_for_feature_environment(
+            &world.pool,
+            activity.as_ref(),
+            world.team_id,
+            world.feature_id,
+            "checkout-v2",
+            Uuid::new_v4(),
+            &admin,
+            None,
+        )
+        .await
+        .expect("no freeze, no error");
+        world.cleanup().await;
+        assert!(outcome.is_none());
     }
 }

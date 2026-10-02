@@ -1,0 +1,236 @@
+[
+  {
+    "reason_kind": "emergency_disable",
+    "reason": "test",
+    "expected": "weak",
+    "feature_key": "checkout-v2",
+    "name": "test"
+  },
+  {
+    "reason_kind": "emergency_disable",
+    "reason": "asdf",
+    "expected": "weak",
+    "feature_key": "checkout-v2",
+    "name": "asdf"
+  },
+  {
+    "reason_kind": "emergency_disable",
+    "reason": "urgent",
+    "expected": "weak",
+    "feature_key": "payments-gateway",
+    "name": "urgent"
+  },
+  {
+    "reason_kind": "emergency_disable",
+    "reason": "per Bob",
+    "expected": "weak",
+    "feature_key": "search-rerank",
+    "name": "per Bob"
+  },
+  {
+    "reason_kind": "emergency_disable",
+    "reason": "fix",
+    "expected": "weak",
+    "feature_key": "checkout-v2",
+    "name": "fix"
+  },
+  {
+    "reason_kind": "emergency_disable",
+    "reason": "n/a",
+    "expected": "weak",
+    "feature_key": "profile-photos",
+    "name": "n/a"
+  },
+  {
+    "reason_kind": "emergency_enable",
+    "reason": "as requested",
+    "expected": "weak",
+    "feature_key": "checkout-v2",
+    "name": "as requested"
+  },
+  {
+    "reason_kind": "emergency_enable",
+    "reason": "turning it back on",
+    "expected": "weak",
+    "feature_key": "search-rerank",
+    "name": "turning it back on"
+  },
+  {
+    "reason_kind": "freeze_override",
+    "reason": "need to ship",
+    "expected": "weak",
+    "feature_key": "billing-invoices",
+    "name": "need to ship"
+  },
+  {
+    "reason_kind": "freeze_override",
+    "reason": "because I said so",
+    "expected": "weak",
+    "feature_key": "onboarding-flow",
+    "name": "because I said so"
+  },
+  {
+    "reason_kind": "scheduled_change",
+    "reason": "later",
+    "expected": "weak",
+    "feature_key": "new-dashboard",
+    "name": "later"
+  },
+  {
+    "reason_kind": "scheduled_change",
+    "reason": "temp",
+    "expected": "weak",
+    "feature_key": "new-dashboard",
+    "name": "temp"
+  },
+  {
+    "reason_kind": "archive_cleanup",
+    "reason": "cleanup",
+    "expected": "weak",
+    "feature_key": "old-checkout",
+    "name": "cleanup"
+  },
+  {
+    "reason_kind": "archive_cleanup",
+    "reason": "not needed",
+    "expected": "weak",
+    "feature_key": "legacy-search",
+    "name": "not needed"
+  },
+  {
+    "reason_kind": "freeze_window",
+    "reason": "freeze",
+    "expected": "weak",
+    "name": "freeze"
+  },
+  {
+    "reason_kind": "freeze_window",
+    "reason": "testing 123",
+    "expected": "weak",
+    "name": "testing 123"
+  },
+  {
+    "reason_kind": "emergency_disable",
+    "reason": "Disabling: checkout 500s since 14:00, see incident channel",
+    "expected": "ok",
+    "feature_key": "checkout-v2",
+    "name": "Disabling: checkout 500s since 14:00, see incident channel"
+  },
+  {
+    "reason_kind": "emergency_disable",
+    "reason": "Payment provider is down, routing everything to the fallback processor",
+    "expected": "ok",
+    "feature_key": "payments-gateway",
+    "name": "Payment provider is down, routing everything to the fallb..."
+  },
+  {
+    "reason_kind": "emergency_disable",
+    "reason": "Memory leak in the v3.4 ranking worker, disabling until the patch ships",
+    "expected": "ok",
+    "feature_key": "search-rerank",
+    "name": "Memory leak in the v3.4 ranking worker, disabling until t..."
+  },
+  {
+    "reason_kind": "emergency_disable",
+    "reason": "Customer Acme reported other users' photos showing on their profile",
+    "expected": "ok",
+    "feature_key": "profile-photos",
+    "name": "Customer Acme reported other users' photos showing on the..."
+  },
+  {
+    "reason_kind": "emergency_enable",
+    "reason": "Fix for the 500s deployed in release 4.2.1, error rate is back to normal",
+    "expected": "ok",
+    "feature_key": "checkout-v2",
+    "name": "Fix for the 500s deployed in release 4.2.1, error rate is..."
+  },
+  {
+    "reason_kind": "emergency_enable",
+    "reason": "Provider outage ended at 15:40, restoring normal routing",
+    "expected": "ok",
+    "feature_key": "payments-gateway",
+    "name": "Provider outage ended at 15:40, restoring normal routing"
+  },
+  {
+    "reason_kind": "freeze_override",
+    "reason": "Fixing a bug that double-charges customers, must go out before the billing run tonight",
+    "expected": "ok",
+    "feature_key": "billing-invoices",
+    "name": "Fixing a bug that double-charges customers, must go out b..."
+  },
+  {
+    "reason_kind": "freeze_override",
+    "reason": "Security patch for the signup form, approved by the security lead",
+    "expected": "ok",
+    "feature_key": "onboarding-flow",
+    "name": "Security patch for the signup form, approved by the secur..."
+  },
+  {
+    "reason_kind": "scheduled_change",
+    "reason": "Launch is planned for Monday 09:00 UTC with the marketing announcement",
+    "expected": "ok",
+    "feature_key": "new-dashboard",
+    "name": "Launch is planned for Monday 09:00 UTC with the marketing..."
+  },
+  {
+    "reason_kind": "scheduled_change",
+    "reason": "Show the banner during the database migration window on Saturday night",
+    "expected": "ok",
+    "feature_key": "maintenance-banner",
+    "name": "Show the banner during the database migration window on S..."
+  },
+  {
+    "reason_kind": "archive_cleanup",
+    "reason": "Experiment finished, variant B shipped in release 4.2, all call sites removed",
+    "expected": "ok",
+    "feature_key": "old-checkout",
+    "name": "Experiment finished, variant B shipped in release 4.2, al..."
+  },
+  {
+    "reason_kind": "archive_cleanup",
+    "reason": "Replaced by search-v2 and the old code path was deleted in the last release",
+    "expected": "ok",
+    "feature_key": "legacy-search",
+    "name": "Replaced by search-v2 and the old code path was deleted i..."
+  },
+  {
+    "reason_kind": "freeze_window",
+    "reason": "Holiday traffic peak: no changes from Dec 20 to Dec 26",
+    "expected": "ok",
+    "name": "Holiday traffic peak: no changes from Dec 20 to Dec 26"
+  },
+  {
+    "reason_kind": "freeze_window",
+    "reason": "Quarter-end financial close, billing code must stay stable",
+    "expected": "ok",
+    "name": "Quarter-end financial close, billing code must stay stable"
+  },
+  {
+    "reason_kind": "emergency_disable",
+    "reason": "See JIRA-4521",
+    "expected": "ok",
+    "feature_key": "checkout-v2",
+    "name": "See JIRA-4521"
+  },
+  {
+    "reason_kind": "freeze_override",
+    "reason": "Hotfix, details in https://wiki.example.com/incidents/2026-10-01",
+    "expected": "ok",
+    "feature_key": "billing-invoices",
+    "name": "Hotfix, details in https://wiki.example.com/incidents/202..."
+  },
+  {
+    "reason_kind": "emergency_disable",
+    "reason": "INC20481",
+    "expected": "ok",
+    "feature_key": "payments-gateway",
+    "name": "INC20481"
+  },
+  {
+    "reason_kind": "scheduled_change",
+    "reason": "Release train, fixes #1873",
+    "expected": "ok",
+    "feature_key": "new-dashboard",
+    "name": "Release train, fixes #1873"
+  }
+]

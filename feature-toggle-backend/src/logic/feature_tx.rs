@@ -519,6 +519,15 @@ where
     Ok(ID::from(feature_uuid))
 }
 
+/// Result of `update_feature_in_tx`: the feature, the activity entry it wrote,
+/// and the cleanup reason recorded on that entry when the update archived the
+/// feature (so the caller can have the reason checked after commit).
+pub struct FeatureUpdateOutcome {
+    pub feature: ModelFeature,
+    pub activity_id: Uuid,
+    pub cleanup_reason: Option<String>,
+}
+
 pub async fn update_feature_in_tx<R, A>(
     conn: &mut PgConnection,
     feature_repo: &R,
@@ -526,7 +535,7 @@ pub async fn update_feature_in_tx<R, A>(
     id: ID,
     input: UpdateFeatureInput,
     actor: Option<ActorContext>,
-) -> Result<ModelFeature, Error>
+) -> Result<FeatureUpdateOutcome, Error>
 where
     R: FeatureRepositoryTx + ?Sized,
     A: ActivityLogRepository + ?Sized,
@@ -671,8 +680,35 @@ where
         .map(|a| a.as_option())
         .unwrap_or((None, None));
 
+    let stage_changed = existing_feature.lifecycle_stage != updated_feature.lifecycle_stage;
+    // The cleanup reason explains an archive, so it is recorded only on the
+    // entry for the change that archives the feature.
+    let archive_cleanup_reason = if stage_changed
+        && updated_feature
+            .lifecycle_stage
+            .eq_ignore_ascii_case("archived")
+    {
+        updated_feature
+            .cleanup_reason
+            .as_deref()
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty())
+            .map(str::to_string)
+    } else {
+        None
+    };
+    let mut metadata = serde_json::json!({
+         "feature_id": feature_uuid.to_string(),
+         "feature_key": updated_feature.key,
+         "old_lifecycle_stage": existing_feature.lifecycle_stage,
+         "new_lifecycle_stage": updated_feature.lifecycle_stage,
+    });
+    if let Some(reason) = &archive_cleanup_reason {
+        metadata["cleanup_reason"] = serde_json::Value::String(reason.clone());
+    }
+
     let activity = CreateActivityLog {
-        activity_type: if existing_feature.lifecycle_stage != updated_feature.lifecycle_stage {
+        activity_type: if stage_changed {
             crate::utils::activity_logger::activity_types::FEATURE_LIFECYCLE_UPDATED.to_string()
         } else {
             crate::utils::activity_logger::activity_types::FEATURE_UPDATED.to_string()
@@ -682,15 +718,10 @@ where
         actor_id,
         actor_name: actor_name.clone(),
         description: format!("Updated feature '{}'", updated_feature.key),
-        metadata: Some(serde_json::json!({
-             "feature_id": feature_uuid.to_string(),
-             "feature_key": updated_feature.key,
-             "old_lifecycle_stage": existing_feature.lifecycle_stage,
-             "new_lifecycle_stage": updated_feature.lifecycle_stage,
-        })),
+        metadata: Some(metadata),
     };
 
-    activity_repo
+    let activity_row = activity_repo
         .create_activity_tx(conn, activity)
         .await
         .map_err(Error::DatabaseError)?;
@@ -712,7 +743,11 @@ where
         )
         .await?;
 
-    Ok(map_entity_to_api_feature(updated_feature))
+    Ok(FeatureUpdateOutcome {
+        feature: map_entity_to_api_feature(updated_feature),
+        activity_id: activity_row.id,
+        cleanup_reason: archive_cleanup_reason,
+    })
 }
 
 pub async fn rollback_feature_to_version_in_tx<R, A>(
@@ -888,7 +923,7 @@ pub async fn emergency_disable_feature_in_tx<R, A>(
     reason: String,
     expires_at: Option<chrono::DateTime<Utc>>,
     actor: Option<ActorContext>,
-) -> Result<ModelFeature, Error>
+) -> Result<(ModelFeature, Uuid), Error>
 where
     R: FeatureRepositoryTx + ?Sized,
     A: ActivityLogRepository + ?Sized,
@@ -957,7 +992,7 @@ where
         })),
     };
 
-    activity_repo
+    let activity_row = activity_repo
         .create_activity_tx(conn, activity)
         .await
         .map_err(Error::DatabaseError)?;
@@ -979,7 +1014,7 @@ where
         )
         .await?;
 
-    Ok(map_entity_to_api_feature(feature))
+    Ok((map_entity_to_api_feature(feature), activity_row.id))
 }
 
 pub async fn emergency_enable_feature_in_tx<R, A>(
@@ -989,7 +1024,7 @@ pub async fn emergency_enable_feature_in_tx<R, A>(
     id: ID,
     reason: String,
     actor: Option<ActorContext>,
-) -> Result<ModelFeature, Error>
+) -> Result<(ModelFeature, Uuid), Error>
 where
     R: FeatureRepositoryTx + ?Sized,
     A: ActivityLogRepository + ?Sized,
@@ -1039,7 +1074,7 @@ where
         })),
     };
 
-    activity_repo
+    let activity_row = activity_repo
         .create_activity_tx(conn, activity)
         .await
         .map_err(Error::DatabaseError)?;
@@ -1061,5 +1096,5 @@ where
         )
         .await?;
 
-    Ok(map_entity_to_api_feature(feature))
+    Ok((map_entity_to_api_feature(feature), activity_row.id))
 }

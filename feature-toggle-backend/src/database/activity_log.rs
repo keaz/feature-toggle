@@ -75,6 +75,15 @@ pub trait ActivityLogRepository: Send + Sync {
         activity: CreateActivityLog,
     ) -> Result<ActivityLogRow, sqlx::Error>;
 
+    /// Sets one top-level key of the entry's metadata, keeping the other keys.
+    /// Updates nothing when the entry does not exist.
+    async fn merge_activity_metadata(
+        &self,
+        id: Uuid,
+        key: &str,
+        value: serde_json::Value,
+    ) -> Result<(), sqlx::Error>;
+
     fn clone_box(&self) -> Box<dyn ActivityLogRepository>;
 }
 
@@ -291,6 +300,27 @@ impl ActivityLogRepository for PgActivityLogRepository {
 
         let count = sql_query.fetch_one(&self.pool).await?;
         Ok(count)
+    }
+
+    async fn merge_activity_metadata(
+        &self,
+        id: Uuid,
+        key: &str,
+        value: serde_json::Value,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"
+            UPDATE activity_log
+            SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), ARRAY[$2]::text[], $3, true)
+            WHERE id = $1
+            "#,
+        )
+        .bind(id)
+        .bind(key)
+        .bind(value)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     fn clone_box(&self) -> Box<dyn ActivityLogRepository> {

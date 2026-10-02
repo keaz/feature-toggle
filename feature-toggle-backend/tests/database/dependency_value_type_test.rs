@@ -165,9 +165,9 @@ async fn run_update(
     let result =
         update_feature_in_tx(&mut tx, &repo, &activity, ID::from(feature_id), input, None).await;
     match result {
-        Ok(feature) => {
+        Ok(outcome) => {
             tx.commit().await.expect("commit");
-            Ok(feature)
+            Ok(outcome.feature)
         }
         Err(err) => {
             tx.rollback().await.expect("rollback");

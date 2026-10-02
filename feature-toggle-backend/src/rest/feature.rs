@@ -37,6 +37,30 @@ fn parse_uuid(value: &str, field: &str) -> Result<Uuid, RestError> {
     Uuid::parse_str(value).map_err(|_| RestError::invalid_input(format!("invalid {field}")))
 }
 
+/// Records an emergency reason for the justification check once the change has
+/// committed. `activity_id` is the kill switch activity row it was written to.
+async fn record_feature_reason(
+    ai: &Option<web::Data<crate::judgment::AiRuntime>>,
+    feature: &ModelFeature,
+    activity_id: Uuid,
+    kind: crate::judgment::justification::ReasonKind,
+    reason: &str,
+) {
+    let Ok(team_id) = Uuid::try_from(feature.team_id.clone()) else {
+        return;
+    };
+    crate::rest::ai::record_reason(
+        ai,
+        team_id,
+        crate::judgment::SubjectType::Activity,
+        activity_id,
+        kind,
+        reason,
+        Some(feature.key.as_str()),
+    )
+    .await;
+}
+
 fn actor_from_request(req: &HttpRequest) -> Option<ActorContext> {
     req.extensions()
         .get::<JwtUser>()
@@ -1560,6 +1584,7 @@ pub(crate) async fn create_feature(
 pub(crate) async fn update_feature(
     db_pool: web::Data<sqlx::PgPool>,
     activity_repo: web::Data<Box<dyn ActivityLogRepository>>,
+    ai: Option<web::Data<crate::judgment::AiRuntime>>,
     req: HttpRequest,
     feature_logic: web::Data<Box<dyn FeatureLogic>>,
     feature_repo: web::Data<Box<dyn FeatureRepository>>,
@@ -1614,17 +1639,21 @@ pub(crate) async fn update_feature(
         .map_err(|_| RestError::invalid_input("invalid feature team id"))?;
     for stage in &payload.stages {
         let environment_uuid = parse_uuid(&stage.environment_id, "environment_id")?;
-        crate::rest::operational_safety::enforce_freeze_for_feature_environment(
-            db_pool.get_ref(),
-            activity_repo.as_ref().as_ref(),
-            team_uuid,
-            feature_uuid,
-            existing_feature.key.as_str(),
-            environment_uuid,
-            &jwt_user,
-            payload.freeze_override_reason.as_deref(),
-        )
-        .await?;
+        let freeze_override =
+            crate::rest::operational_safety::enforce_freeze_for_feature_environment(
+                db_pool.get_ref(),
+                activity_repo.as_ref().as_ref(),
+                team_uuid,
+                feature_uuid,
+                existing_feature.key.as_str(),
+                environment_uuid,
+                &jwt_user,
+                payload.freeze_override_reason.as_deref(),
+            )
+            .await?;
+        if let Some(freeze_override) = freeze_override {
+            freeze_override.record(&ai).await;
+        }
     }
 
     let input = UpdateFeatureInput {
@@ -1663,18 +1692,29 @@ pub(crate) async fn update_feature(
     )
     .await;
 
-    let updated = match result {
-        Ok(feature) => {
+    let outcome = match result {
+        Ok(outcome) => {
             tx.commit()
                 .await
                 .map_err(|e| RestError::internal(format!("Failed to commit transaction: {e}")))?;
-            feature
+            outcome
         }
         Err(err) => {
             let _ = tx.rollback().await;
             return Err(RestError::from(err));
         }
     };
+    let updated = outcome.feature;
+    if let Some(cleanup_reason) = outcome.cleanup_reason.as_deref() {
+        record_feature_reason(
+            &ai,
+            &updated,
+            outcome.activity_id,
+            crate::judgment::justification::ReasonKind::ArchiveCleanup,
+            cleanup_reason,
+        )
+        .await;
+    }
 
     if updated.key != existing_feature.key {
         // Edges cache by key, so a rename must drop the old key. Send it before
@@ -1720,6 +1760,7 @@ pub(crate) async fn update_feature(
 pub(crate) async fn emergency_disable_feature(
     db_pool: web::Data<sqlx::PgPool>,
     activity_repo: web::Data<Box<dyn ActivityLogRepository>>,
+    ai: Option<web::Data<crate::judgment::AiRuntime>>,
     req: HttpRequest,
     feature_repo: web::Data<Box<dyn FeatureRepository>>,
     env_logic: web::Data<Box<dyn EnvironmentLogic>>,
@@ -1750,24 +1791,33 @@ pub(crate) async fn emergency_disable_feature(
         activity_repo.as_ref().as_ref(),
         ID::from(feature_uuid),
         payload.rollback_in_minutes,
-        reason,
+        reason.clone(),
         payload.expires_at,
         actor,
     )
     .await;
 
-    let feature = match result {
-        Ok(feature) => {
+    let (feature, activity_id) = match result {
+        Ok(done) => {
             tx.commit()
                 .await
                 .map_err(|e| RestError::internal(format!("Failed to commit transaction: {e}")))?;
-            feature
+            done
         }
         Err(e) => {
             let _ = tx.rollback().await;
             return Err(RestError::from(e));
         }
     };
+
+    record_feature_reason(
+        &ai,
+        &feature,
+        activity_id,
+        crate::judgment::justification::ReasonKind::EmergencyDisable,
+        &reason,
+    )
+    .await;
 
     broadcast_feature_update(
         feature_repo.as_ref().as_ref(),
@@ -1808,6 +1858,7 @@ pub(crate) async fn emergency_disable_feature(
 pub(crate) async fn emergency_enable_feature(
     db_pool: web::Data<sqlx::PgPool>,
     activity_repo: web::Data<Box<dyn ActivityLogRepository>>,
+    ai: Option<web::Data<crate::judgment::AiRuntime>>,
     req: HttpRequest,
     feature_repo: web::Data<Box<dyn FeatureRepository>>,
     env_logic: web::Data<Box<dyn EnvironmentLogic>>,
@@ -1836,23 +1887,32 @@ pub(crate) async fn emergency_enable_feature(
         &repo_tx,
         activity_repo.as_ref().as_ref(),
         ID::from(feature_uuid),
-        reason,
+        reason.clone(),
         actor,
     )
     .await;
 
-    let feature = match result {
-        Ok(feature) => {
+    let (feature, activity_id) = match result {
+        Ok(done) => {
             tx.commit()
                 .await
                 .map_err(|e| RestError::internal(format!("Failed to commit transaction: {e}")))?;
-            feature
+            done
         }
         Err(e) => {
             let _ = tx.rollback().await;
             return Err(RestError::from(e));
         }
     };
+
+    record_feature_reason(
+        &ai,
+        &feature,
+        activity_id,
+        crate::judgment::justification::ReasonKind::EmergencyEnable,
+        &reason,
+    )
+    .await;
 
     broadcast_feature_update(
         feature_repo.as_ref().as_ref(),
@@ -1894,6 +1954,7 @@ pub(crate) async fn emergency_enable_feature(
 pub(crate) async fn request_stage_change(
     db_pool: web::Data<sqlx::PgPool>,
     activity_repo: web::Data<Box<dyn ActivityLogRepository>>,
+    ai: Option<web::Data<crate::judgment::AiRuntime>>,
     req: HttpRequest,
     feature_logic: web::Data<Box<dyn FeatureLogic>>,
     feature_repo: web::Data<Box<dyn FeatureRepository>>,
@@ -1912,7 +1973,7 @@ pub(crate) async fn request_stage_change(
     RoleAuthorizer::authorize_stage_change_request(&jwt_user.roles, payload.request.as_str())
         .map_err(|e| RestError::forbidden(e.to_string()))?;
 
-    crate::rest::operational_safety::enforce_freeze_for_stage(
+    let freeze_override = crate::rest::operational_safety::enforce_freeze_for_stage(
         db_pool.get_ref(),
         activity_repo.as_ref().as_ref(),
         stage_uuid,
@@ -1920,6 +1981,9 @@ pub(crate) async fn request_stage_change(
         payload.freeze_override_reason.as_deref(),
     )
     .await?;
+    if let Some(freeze_override) = freeze_override {
+        freeze_override.record(&ai).await;
+    }
 
     let request_type = StageChangeRequestType::from(payload.request);
     let feature = feature_logic
@@ -2983,5 +3047,334 @@ mod tests {
         )
         .await;
         assert!(result.is_ok(), "the feature itself is not a conflict");
+    }
+    /// AI-20: emergency endpoints hand their reason to the justification check
+    /// after the change has committed, and never depend on its outcome.
+    mod justification_recording {
+        use super::*;
+        use crate::database::feature::CreateFeature;
+        use crate::judgment::justification::test_support::{Recorded, recording_runtime};
+        use crate::judgment::{AiRuntime, SubjectType};
+        use serde_json::json;
+        use std::sync::Arc;
+
+        fn runtime(on: bool, fail_store: bool, recorded: Recorded) -> AiRuntime {
+            recording_runtime(on, fail_store, recorded)
+        }
+
+        struct Fixture {
+            pool: sqlx::PgPool,
+            team_id: Uuid,
+            feature_id: Uuid,
+            user_id: Uuid,
+        }
+
+        impl Fixture {
+            async fn new() -> Self {
+                let pool = test_pool().await;
+                let team_id = insert_team(&pool).await;
+                let user_id = Uuid::new_v4();
+                sqlx::query(
+                    "INSERT INTO users (id, username, password_hash, first_name, last_name, email, enabled) \
+                     VALUES ($1, $2, 'x', 'Ai', 'Twenty', $3, true)",
+                )
+                .bind(user_id)
+                .bind(format!("ai20_{user_id}"))
+                .bind(format!("ai20_{user_id}@example.com"))
+                .execute(&pool)
+                .await
+                .expect("insert user");
+                let feature_id = feature_repository(pool.clone())
+                    .create_feature(CreateFeature {
+                        team_id,
+                        key: "ai20-kill".to_string(),
+                        description: None,
+                        feature_type: crate::database::entity::FeatureType::Simple,
+                        lifecycle_stage: "active".to_string(),
+                        owner: None,
+                        purpose: None,
+                        reference_url: None,
+                        expires_at: None,
+                        cleanup_reason: None,
+                        tags: vec![],
+                        stages: vec![],
+                        dependencies: vec![],
+                        variants: None,
+                    })
+                    .await
+                    .expect("seed feature");
+                Self {
+                    pool,
+                    team_id,
+                    feature_id,
+                    user_id,
+                }
+            }
+
+            async fn activity_id(&self, activity_type: &str) -> Uuid {
+                sqlx::query_scalar(
+                    "SELECT id FROM activity_log WHERE activity_type = $1 AND entity_id = $2",
+                )
+                .bind(activity_type)
+                .bind(self.feature_id.to_string())
+                .fetch_one(&self.pool)
+                .await
+                .expect("activity row")
+            }
+
+            async fn post(
+                &self,
+                action: &str,
+                body: serde_json::Value,
+                ai: Option<AiRuntime>,
+            ) -> (StatusCode, serde_json::Value) {
+                let req = test::TestRequest::post()
+                    .uri(&format!("/api/v1/features/{}/{action}", self.feature_id))
+                    .set_json(body)
+                    .to_request();
+                self.send(req, ai).await
+            }
+
+            async fn patch_feature(
+                &self,
+                body: serde_json::Value,
+                ai: Option<AiRuntime>,
+            ) -> (StatusCode, serde_json::Value) {
+                let req = test::TestRequest::patch()
+                    .uri(&format!("/api/v1/features/{}", self.feature_id))
+                    .set_json(body)
+                    .to_request();
+                self.send(req, ai).await
+            }
+
+            /// Runs one request as an admin and returns the status and body.
+            async fn send(
+                &self,
+                req: actix_http::Request,
+                ai: Option<AiRuntime>,
+            ) -> (StatusCode, serde_json::Value) {
+                let pool = self.pool.clone();
+                let new_env_logic = || {
+                    environment_logic(
+                        environment_repository(pool.clone()),
+                        Box::new(PgActivityLogRepository::new(pool.clone())),
+                    )
+                };
+                let feature_logic = feature_logic(
+                    feature_repository(pool.clone()),
+                    new_env_logic(),
+                    Box::new(PgActivityLogRepository::new(pool.clone())),
+                    user_repository(pool.clone()),
+                );
+                let (updates_tx, _updates_rx) =
+                    tokio::sync::broadcast::channel::<crate::grpc::pb::FeatureUpdate>(8);
+                let mut app = App::new()
+                    .app_data(web::Data::new(pool.clone()))
+                    .app_data(web::Data::new(
+                        Box::new(PgActivityLogRepository::new(pool.clone()))
+                            as Box<dyn ActivityLogRepository>,
+                    ))
+                    .app_data(web::Data::new(feature_logic))
+                    .app_data(web::Data::new(feature_repository(pool.clone())))
+                    .app_data(web::Data::new(new_env_logic()))
+                    .app_data(web::Data::new(updates_tx));
+                if let Some(ai) = ai {
+                    app = app.app_data(web::Data::new(ai));
+                }
+                let app = test::init_service(
+                    app.service(web::scope("/api/v1").configure(super::super::configure)),
+                )
+                .await;
+                req.extensions_mut().insert(JwtUser {
+                    id: self.user_id,
+                    username: "ops".to_string(),
+                    is_admin: true,
+                    roles: vec![],
+                    team_id: None,
+                    token_hash: "hash".to_string(),
+                });
+                let resp = test::call_service(&app, req).await;
+                let status = resp.status();
+                let bytes = test::read_body(resp).await;
+                (status, serde_json::from_slice(&bytes).unwrap_or_default())
+            }
+
+            async fn cleanup(self) {
+                sqlx::query("DELETE FROM teams WHERE id = $1")
+                    .bind(self.team_id)
+                    .execute(&self.pool)
+                    .await
+                    .expect("delete team");
+                sqlx::query("DELETE FROM users WHERE id = $1")
+                    .bind(self.user_id)
+                    .execute(&self.pool)
+                    .await
+                    .expect("delete user");
+            }
+        }
+
+        #[actix_web::test]
+        async fn emergency_disable_records_the_reason_against_its_activity_row() {
+            let fixture = Fixture::new().await;
+            let recorded: Recorded = Arc::default();
+            let (status, body) = fixture
+                .post(
+                    "emergency-disable",
+                    json!({ "reason": "Service degraded since 14:00" }),
+                    Some(runtime(true, false, recorded.clone())),
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["id"], fixture.feature_id.to_string());
+
+            let activity_id = fixture.activity_id("kill_switch_activated").await;
+            let recorded = recorded.lock().unwrap().clone();
+            assert_eq!(recorded.len(), 1);
+            assert_eq!(recorded[0].0, SubjectType::Activity);
+            assert_eq!(recorded[0].1, activity_id);
+            assert_eq!(
+                recorded[0].2,
+                json!({
+                    "reason_kind": "emergency_disable",
+                    "reason": "Service degraded since 14:00",
+                    "feature_key": "ai20-kill",
+                })
+            );
+            fixture.cleanup().await;
+        }
+
+        #[actix_web::test]
+        async fn emergency_enable_records_its_reason_too() {
+            let fixture = Fixture::new().await;
+            let recorded: Recorded = Arc::default();
+            let (status, _) = fixture
+                .post(
+                    "emergency-enable",
+                    json!({ "reason": "Fix shipped in release 4.2" }),
+                    Some(runtime(true, false, recorded.clone())),
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK);
+
+            let activity_id = fixture.activity_id("kill_switch_deactivated").await;
+            let recorded = recorded.lock().unwrap().clone();
+            assert_eq!(recorded.len(), 1);
+            assert_eq!(
+                (recorded[0].0, recorded[0].1),
+                (SubjectType::Activity, activity_id)
+            );
+            assert_eq!(recorded[0].2["reason_kind"], "emergency_enable");
+            fixture.cleanup().await;
+        }
+
+        #[actix_web::test]
+        async fn nothing_is_recorded_when_the_team_setting_is_off_or_ai_is_absent() {
+            let fixture = Fixture::new().await;
+            let recorded: Recorded = Arc::default();
+            let (status, _) = fixture
+                .post(
+                    "emergency-disable",
+                    json!({ "reason": "Service degraded since 14:00" }),
+                    Some(runtime(false, false, recorded.clone())),
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(recorded.lock().unwrap().is_empty());
+
+            // No AiRuntime in the app at all: the endpoint still works.
+            let (status, _) = fixture
+                .post(
+                    "emergency-enable",
+                    json!({ "reason": "Fix shipped in release 4.2" }),
+                    None,
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK);
+            fixture.cleanup().await;
+        }
+
+        async fn archive_body(
+            fixture: &Fixture,
+            cleanup_reason: Option<&str>,
+        ) -> serde_json::Value {
+            let env_id = insert_environment(&fixture.pool, fixture.team_id).await;
+            json!({
+                "key": "ai20-kill",
+                "featureType": "SIMPLE",
+                "lifecycleStage": "ARCHIVED",
+                "cleanupReason": cleanup_reason,
+                "archiveConfirmation": true,
+                "dependencies": [],
+                "relationships": [],
+                "stages": [{
+                    "environmentId": env_id.to_string(),
+                    "orderIndex": 0,
+                    "position": "{\"x\":0,\"y\":0}",
+                }],
+            })
+        }
+
+        #[actix_web::test]
+        async fn archiving_records_the_cleanup_reason_against_its_activity_row() {
+            let fixture = Fixture::new().await;
+            let recorded: Recorded = Arc::default();
+            let (status, body) = fixture
+                .patch_feature(
+                    archive_body(
+                        &fixture,
+                        Some("Replaced by checkout-v3, call sites removed"),
+                    )
+                    .await,
+                    Some(runtime(true, false, recorded.clone())),
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+
+            let activity_id = fixture.activity_id("feature_lifecycle_updated").await;
+            let recorded = recorded.lock().unwrap().clone();
+            assert_eq!(recorded.len(), 1);
+            assert_eq!(
+                (recorded[0].0, recorded[0].1),
+                (SubjectType::Activity, activity_id)
+            );
+            assert_eq!(recorded[0].2["reason_kind"], "archive_cleanup");
+            assert_eq!(
+                recorded[0].2["reason"],
+                "Replaced by checkout-v3, call sites removed"
+            );
+            fixture.cleanup().await;
+        }
+
+        #[actix_web::test]
+        async fn archiving_without_a_cleanup_reason_records_nothing() {
+            let fixture = Fixture::new().await;
+            let recorded: Recorded = Arc::default();
+            let (status, body) = fixture
+                .patch_feature(
+                    archive_body(&fixture, None).await,
+                    Some(runtime(true, false, recorded.clone())),
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert!(recorded.lock().unwrap().is_empty());
+            fixture.cleanup().await;
+        }
+
+        #[actix_web::test]
+        async fn a_failing_submit_does_not_change_the_response() {
+            let fixture = Fixture::new().await;
+            let recorded: Recorded = Arc::default();
+            let (status, body) = fixture
+                .post(
+                    "emergency-disable",
+                    json!({ "reason": "Service degraded since 14:00" }),
+                    Some(runtime(true, true, recorded.clone())),
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["id"], fixture.feature_id.to_string());
+            assert_eq!(recorded.lock().unwrap().len(), 1, "submit was attempted");
+            fixture.cleanup().await;
+        }
     }
 }

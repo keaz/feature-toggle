@@ -113,7 +113,12 @@ pub async fn run() -> std::io::Result<()> {
             .with_handler(Arc::new(judgment::approval_risk::ApprovalRiskHandler::new(
                 activity_log_repository.clone_box(),
                 approval_repository.clone_box(),
-            ))),
+            )))
+            .with_handler(Arc::new(
+                judgment::justification::JustificationHandler::new(
+                    activity_log_repository.clone_box(),
+                ),
+            )),
         )
     });
     if let Some(service) = judgment_service.clone() {
