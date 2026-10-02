@@ -305,3 +305,111 @@ async fn test_quorum_approvals_execute_stage_change() {
         .execute(&pool)
         .await;
 }
+
+#[tokio::test]
+async fn test_policy_ai_risk_mode_round_trips_and_is_kept_when_absent_on_update() {
+    use feature_toggle_backend::database::approval::{
+        CreateApprovalPolicyInput, UpdateApprovalPolicyInput,
+    };
+
+    let pool = init_pg_pool().await;
+    let repository = approval::approval_repository(pool.clone());
+    let team_id = Uuid::parse_str(TEAM_ID).unwrap();
+
+    let created = repository
+        .create_policy(CreateApprovalPolicyInput {
+            team_id,
+            name: format!("ai-risk-mode-{}", Uuid::new_v4()),
+            description: None,
+            applies_to: "all".to_string(),
+            environment_ids: None,
+            required_approvers: 1,
+            approver_role_ids: vec![],
+            approver_user_ids: vec![Uuid::new_v4()],
+            allow_admin_override: false,
+            fallback_to_roles: true,
+            auto_approve_after_hours: None,
+            enabled: false,
+            ai_risk_mode: "advisory".to_string(),
+        })
+        .await
+        .expect("policy creation should succeed");
+    assert_eq!(created.ai_risk_mode, "advisory");
+
+    let renamed = repository
+        .update_policy(
+            created.id,
+            UpdateApprovalPolicyInput {
+                name: Some("renamed".to_string()),
+                description: None,
+                applies_to: None,
+                environment_ids: None,
+                required_approvers: None,
+                approver_role_ids: None,
+                approver_user_ids: None,
+                allow_admin_override: None,
+                fallback_to_roles: None,
+                auto_approve_after_hours: None,
+                enabled: None,
+                ai_risk_mode: None,
+            },
+        )
+        .await
+        .expect("update without a mode should succeed");
+    assert_eq!(renamed.ai_risk_mode, "advisory");
+
+    let changed = repository
+        .update_policy(
+            created.id,
+            UpdateApprovalPolicyInput {
+                name: None,
+                description: None,
+                applies_to: None,
+                environment_ids: None,
+                required_approvers: None,
+                approver_role_ids: None,
+                approver_user_ids: None,
+                allow_admin_override: None,
+                fallback_to_roles: None,
+                auto_approve_after_hours: None,
+                enabled: None,
+                ai_risk_mode: Some("off".to_string()),
+            },
+        )
+        .await
+        .expect("update with a mode should succeed");
+    assert_eq!(changed.ai_risk_mode, "off");
+    assert!(
+        repository
+            .get_policy_by_id(created.id)
+            .await
+            .unwrap()
+            .is_some_and(|policy| policy.ai_risk_mode == "off")
+    );
+
+    let invalid = repository
+        .update_policy(
+            created.id,
+            UpdateApprovalPolicyInput {
+                name: None,
+                description: None,
+                applies_to: None,
+                environment_ids: None,
+                required_approvers: None,
+                approver_role_ids: None,
+                approver_user_ids: None,
+                allow_admin_override: None,
+                fallback_to_roles: None,
+                auto_approve_after_hours: None,
+                enabled: None,
+                ai_risk_mode: Some("bogus".to_string()),
+            },
+        )
+        .await;
+    assert!(
+        invalid.is_err(),
+        "the CHECK constraint rejects unknown modes"
+    );
+
+    repository.delete_policy(created.id).await.unwrap();
+}

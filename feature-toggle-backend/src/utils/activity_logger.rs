@@ -78,6 +78,7 @@ pub mod activity_types {
     pub const APPROVAL_POLICY_CREATED: &str = "approval_policy_created";
     pub const APPROVAL_POLICY_UPDATED: &str = "approval_policy_updated";
     pub const APPROVAL_POLICY_DELETED: &str = "approval_policy_deleted";
+    pub const APPROVAL_RISK_ASSESSED: &str = "approval_risk_assessed";
 }
 
 /// Common entity types in the system

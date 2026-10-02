@@ -38,11 +38,11 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use crate::rest::ai::{AiStatusResponse, TeamAiSettingsResponse, UpdateTeamAiSettingsRequest};
 use crate::rest::approval::{
-    AppliesTo, ApprovalActionRequest, ApprovalPolicyPreviewOutcomeResponse,
-    ApprovalPolicyPreviewRequest, ApprovalPolicyPreviewResponse, ApprovalPolicyResponse,
-    ApprovalRequestListQuery, ApprovalRequestResponse, ApprovalRequestStatus,
-    ApprovalRequestsResponse, ApprovalVoteResponse, CreateApprovalPolicyRequest,
-    UpdateApprovalPolicyRequest,
+    AiRiskStatus, AiRiskSummary, AppliesTo, ApprovalActionRequest,
+    ApprovalPolicyPreviewOutcomeResponse, ApprovalPolicyPreviewRequest,
+    ApprovalPolicyPreviewResponse, ApprovalPolicyResponse, ApprovalRequestListQuery,
+    ApprovalRequestResponse, ApprovalRequestStatus, ApprovalRequestsResponse, ApprovalVoteResponse,
+    CreateApprovalPolicyRequest, UpdateApprovalPolicyRequest,
 };
 use crate::rest::auth::{
     AuthStatusResponse, LoginRequest, LoginResponse, LogoutRequest, RefreshRequest,
@@ -380,6 +380,8 @@ async fn health() -> impl Responder {
         AuditAnalyticsResponse,
         ApprovalRequestListQuery,
         ApprovalRequestStatus,
+        AiRiskStatus,
+        AiRiskSummary,
         ApprovalVoteResponse,
         ApprovalRequestResponse,
         ApprovalRequestsResponse,

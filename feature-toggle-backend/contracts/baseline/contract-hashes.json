@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "openapi": {
     "file": "openapi.json",
-    "sha256": "247b991f383638513d03272821fc826ac9e8cb8f164db0b583d68f482406bdb1"
+    "sha256": "dd2c06bbc60d0d1ae584e1519199c895de4548e95f7008efc199580d2f35ace8"
   },
   "protobuf": {
     "proto_file": "proto/evaluation.proto",

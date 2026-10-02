@@ -1,17 +1,21 @@
 use actix_web::{HttpMessage, HttpRequest, HttpResponse, Responder, delete, get, patch, post, web};
 use chrono::{DateTime, Utc};
+use log::warn;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::JwtUser;
 use crate::database::activity_log::ActivityLogRepository;
+use crate::database::ai::{AiJudgment, AiJudgmentRepository};
 use crate::database::approval::{
     ApprovalRepository, CreateApprovalPolicyInput, UpdateApprovalPolicyInput,
     approval_repository_tx,
 };
 use crate::database::entity::{ApprovalPolicy, ApprovalRequest, ApprovalStatus, ApprovalVote};
 use crate::database::feature::{FeatureVersionDiffEntry, diff_feature_snapshots};
+use crate::judgment::{JudgmentKind, SubjectType};
 use crate::logic::ActorContext;
 use crate::logic::approval::{ApprovalLogic, ApprovalPolicyPreview, ApprovalPolicyPreviewOutcome};
 use crate::rest::error::RestError;
@@ -155,6 +159,28 @@ pub struct ApprovalPolicyPreviewResponse {
     pub reason: String,
 }
 
+#[derive(Debug, Serialize, ToSchema, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AiRiskStatus {
+    Pending,
+    Done,
+    Failed,
+}
+
+/// The AI risk assessment of an approval request. Advisory: `level`, `reasons`
+/// and `signals` are set only when `status` is `done`.
+#[derive(Debug, Serialize, ToSchema, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiRiskSummary {
+    pub status: AiRiskStatus,
+    /// `low`, `medium`, or `high`.
+    pub level: Option<String>,
+    pub reasons: Vec<String>,
+    pub signals: Option<serde_json::Value>,
+    pub model: Option<String>,
+    pub assessed_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ApprovalRequestResponse {
@@ -178,6 +204,11 @@ pub struct ApprovalRequestResponse {
     pub votes: Vec<ApprovalVoteResponse>,
     pub change_diff: ApprovalChangeDiffResponse,
     pub policy: Option<ApprovalPolicySummaryResponse>,
+    /// `null` when no AI assessment exists (feature off, no key, or not yet queued).
+    pub ai_risk: Option<AiRiskSummary>,
+    /// Approvals needed to approve the request. The policy's `requiredApprovers`
+    /// until AI risk enforcement raises it.
+    pub required_approvals_effective: i32,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -209,6 +240,8 @@ pub struct ApprovalPolicyResponse {
     pub auto_approve_after_hours: Option<i32>,
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
+    /// One of `off`, `advisory`, `gate_auto_approve`, `require_extra_approver`.
+    pub ai_risk_mode: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
@@ -225,6 +258,8 @@ pub struct CreateApprovalPolicyRequest {
     pub fallback_to_roles: Option<bool>,
     pub auto_approve_after_hours: Option<i32>,
     pub enabled: Option<bool>,
+    /// One of `off`, `advisory` (default), `gate_auto_approve`, `require_extra_approver`.
+    pub ai_risk_mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
@@ -241,6 +276,28 @@ pub struct UpdateApprovalPolicyRequest {
     pub fallback_to_roles: Option<bool>,
     pub auto_approve_after_hours: Option<i32>,
     pub enabled: Option<bool>,
+    /// One of `off`, `advisory`, `gate_auto_approve`, `require_extra_approver`. Unchanged when absent.
+    pub ai_risk_mode: Option<String>,
+}
+
+/// Allowed values of `approval_policies.ai_risk_mode`.
+pub const AI_RISK_MODES: [&str; 4] = [
+    "off",
+    "advisory",
+    "gate_auto_approve",
+    "require_extra_approver",
+];
+
+pub const DEFAULT_AI_RISK_MODE: &str = "advisory";
+
+fn validate_ai_risk_mode(mode: &str) -> Result<(), RestError> {
+    if AI_RISK_MODES.contains(&mode) {
+        return Ok(());
+    }
+    Err(RestError::invalid_input(format!(
+        "aiRiskMode must be one of: {}",
+        AI_RISK_MODES.join(", ")
+    )))
 }
 
 fn parse_uuid(value: &str, field: &str) -> Result<Uuid, RestError> {
@@ -604,13 +661,106 @@ fn build_change_diff(
     }
 }
 
+/// Maps a stored judgment row to the response summary. No row, or a status
+/// this code does not know, means no assessment.
+pub(crate) fn map_ai_risk(judgment: Option<&AiJudgment>) -> Option<AiRiskSummary> {
+    let judgment = judgment?;
+    let status = match judgment.status.as_str() {
+        "pending" => AiRiskStatus::Pending,
+        "done" => AiRiskStatus::Done,
+        "failed" => AiRiskStatus::Failed,
+        _ => return None,
+    };
+    if status != AiRiskStatus::Done {
+        return Some(AiRiskSummary {
+            status,
+            level: None,
+            reasons: Vec::new(),
+            signals: None,
+            model: None,
+            assessed_at: None,
+        });
+    }
+
+    let derived = judgment.derived.as_ref();
+    Some(AiRiskSummary {
+        status,
+        level: derived
+            .and_then(|value| value.get("level"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        reasons: derived
+            .and_then(|value| value.get("reasons"))
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        signals: derived.and_then(|value| value.get("signals")).cloned(),
+        model: judgment.model.clone(),
+        assessed_at: judgment.completed_at,
+    })
+}
+
+/// Loads the AI risk summaries of many requests with one query. Fails open: a
+/// read error is logged and every request shows no assessment.
+pub(crate) async fn load_ai_risk(
+    repo: &dyn AiJudgmentRepository,
+    request_ids: Vec<Uuid>,
+) -> HashMap<Uuid, AiRiskSummary> {
+    if request_ids.is_empty() {
+        return HashMap::new();
+    }
+    match repo
+        .get_for_subjects(
+            SubjectType::ApprovalRequest,
+            request_ids,
+            JudgmentKind::ApprovalRisk,
+        )
+        .await
+    {
+        Ok(rows) => rows
+            .iter()
+            .filter_map(|row| map_ai_risk(Some(row)).map(|summary| (row.subject_id, summary)))
+            .collect(),
+        Err(err) => {
+            warn!("Could not load AI risk assessments: {err}");
+            HashMap::new()
+        }
+    }
+}
+
+/// Approvals needed. Falls back to the policy snapshot in the request payload
+/// when the policy row is gone.
+fn required_approvals_effective(
+    policy: Option<&ApprovalPolicy>,
+    change_payload: &serde_json::Value,
+) -> i32 {
+    policy
+        .map(|policy| policy.required_approvers)
+        .or_else(|| {
+            change_payload
+                .get("policy")
+                .and_then(|policy| policy.get("required_approvers"))
+                .and_then(|value| value.as_i64())
+                .and_then(|value| i32::try_from(value).ok())
+        })
+        .unwrap_or(1)
+}
+
 pub(crate) fn map_request_with_policy(
     request: ApprovalRequest,
     votes: Vec<ApprovalVote>,
     policy: Option<&ApprovalPolicy>,
+    ai_risk: Option<AiRiskSummary>,
 ) -> ApprovalRequestResponse {
     let reviewed_snapshot_id = snapshot_id_from_payload(&request.change_payload, request.id);
     let change_diff = build_change_diff(request.id, &request.change_payload, policy);
+    let required_approvals_effective =
+        required_approvals_effective(policy, &request.change_payload);
     let policy = policy.map(map_policy_summary);
 
     ApprovalRequestResponse {
@@ -641,6 +791,8 @@ pub(crate) fn map_request_with_policy(
             .collect(),
         change_diff,
         policy,
+        ai_risk,
+        required_approvals_effective,
     }
 }
 
@@ -671,6 +823,7 @@ fn map_policy(policy: ApprovalPolicy) -> ApprovalPolicyResponse {
         auto_approve_after_hours: policy.auto_approve_after_hours,
         enabled: policy.enabled,
         created_at: policy.created_at,
+        ai_risk_mode: policy.ai_risk_mode,
     }
 }
 
@@ -760,6 +913,7 @@ pub(crate) async fn preview_approval_policy(
 #[get("/teams/{team_id}/approval-requests")]
 pub(crate) async fn list_approval_requests(
     repo: web::Data<Box<dyn ApprovalRepository>>,
+    ai_judgments: web::Data<Box<dyn AiJudgmentRepository>>,
     team_id: web::Path<String>,
     query: web::Query<ApprovalRequestListQuery>,
 ) -> Result<impl Responder, RestError> {
@@ -776,6 +930,12 @@ pub(crate) async fn list_approval_requests(
         .await
         .map_err(RestError::from)?;
 
+    let mut ai_risk = load_ai_risk(
+        ai_judgments.get_ref().as_ref(),
+        requests.iter().map(|request| request.id).collect(),
+    )
+    .await;
+
     let mut items = Vec::with_capacity(requests.len());
     for request in requests {
         let policy = repo
@@ -786,7 +946,13 @@ pub(crate) async fn list_approval_requests(
             .list_votes_for_request(request.id)
             .await
             .map_err(RestError::from)?;
-        items.push(map_request_with_policy(request, votes, policy.as_ref()));
+        let summary = ai_risk.remove(&request.id);
+        items.push(map_request_with_policy(
+            request,
+            votes,
+            policy.as_ref(),
+            summary,
+        ));
     }
 
     Ok(HttpResponse::Ok().json(ApprovalRequestsResponse {
@@ -817,6 +983,7 @@ pub(crate) async fn list_approval_requests(
 pub(crate) async fn approve_request(
     logic: web::Data<Box<dyn ApprovalLogic>>,
     repo: web::Data<Box<dyn ApprovalRepository>>,
+    ai_judgments: web::Data<Box<dyn AiJudgmentRepository>>,
     req: HttpRequest,
     request_id: web::Path<String>,
     payload: web::Json<ApprovalActionRequest>,
@@ -838,7 +1005,16 @@ pub(crate) async fn approve_request(
         .await
         .map_err(RestError::from)?;
 
-    Ok(HttpResponse::Ok().json(map_request_with_policy(updated, votes, policy.as_ref())))
+    let ai_risk = load_ai_risk(ai_judgments.get_ref().as_ref(), vec![updated.id])
+        .await
+        .remove(&updated.id);
+
+    Ok(HttpResponse::Ok().json(map_request_with_policy(
+        updated,
+        votes,
+        policy.as_ref(),
+        ai_risk,
+    )))
 }
 
 #[utoipa::path(
@@ -859,6 +1035,7 @@ pub(crate) async fn approve_request(
 pub(crate) async fn reject_request(
     logic: web::Data<Box<dyn ApprovalLogic>>,
     repo: web::Data<Box<dyn ApprovalRepository>>,
+    ai_judgments: web::Data<Box<dyn AiJudgmentRepository>>,
     req: HttpRequest,
     request_id: web::Path<String>,
     payload: web::Json<ApprovalActionRequest>,
@@ -880,7 +1057,16 @@ pub(crate) async fn reject_request(
         .await
         .map_err(RestError::from)?;
 
-    Ok(HttpResponse::Ok().json(map_request_with_policy(updated, votes, policy.as_ref())))
+    let ai_risk = load_ai_risk(ai_judgments.get_ref().as_ref(), vec![updated.id])
+        .await
+        .remove(&updated.id);
+
+    Ok(HttpResponse::Ok().json(map_request_with_policy(
+        updated,
+        votes,
+        policy.as_ref(),
+        ai_risk,
+    )))
 }
 
 #[utoipa::path(
@@ -900,6 +1086,7 @@ pub(crate) async fn reject_request(
 pub(crate) async fn cancel_request(
     logic: web::Data<Box<dyn ApprovalLogic>>,
     repo: web::Data<Box<dyn ApprovalRepository>>,
+    ai_judgments: web::Data<Box<dyn AiJudgmentRepository>>,
     req: HttpRequest,
     request_id: web::Path<String>,
 ) -> Result<impl Responder, RestError> {
@@ -920,7 +1107,16 @@ pub(crate) async fn cancel_request(
         .await
         .map_err(RestError::from)?;
 
-    Ok(HttpResponse::Ok().json(map_request_with_policy(updated, votes, policy.as_ref())))
+    let ai_risk = load_ai_risk(ai_judgments.get_ref().as_ref(), vec![updated.id])
+        .await
+        .remove(&updated.id);
+
+    Ok(HttpResponse::Ok().json(map_request_with_policy(
+        updated,
+        votes,
+        policy.as_ref(),
+        ai_risk,
+    )))
 }
 
 #[utoipa::path(
@@ -1004,6 +1200,9 @@ pub(crate) async fn create_approval_policy(
     validate_required_approvers(payload.required_approvers)?;
     validate_approver_routing(&payload.approver_role_ids, &payload.approver_user_ids)?;
     validate_auto_approve(payload.auto_approve_after_hours)?;
+    if let Some(mode) = payload.ai_risk_mode.as_deref() {
+        validate_ai_risk_mode(mode)?;
+    }
 
     let team_uuid = parse_uuid(&team_id, "team_id")?;
     let env_ids = normalize_environment_ids(payload.applies_to, payload.environment_ids.clone())?;
@@ -1034,6 +1233,10 @@ pub(crate) async fn create_approval_policy(
             fallback_to_roles: payload.fallback_to_roles.unwrap_or(true),
             auto_approve_after_hours: payload.auto_approve_after_hours,
             enabled: payload.enabled.unwrap_or(true),
+            ai_risk_mode: payload
+                .ai_risk_mode
+                .clone()
+                .unwrap_or_else(|| DEFAULT_AI_RISK_MODE.to_string()),
         },
         actor,
     )
@@ -1086,6 +1289,9 @@ pub(crate) async fn update_approval_policy(
         validate_approver_routing(roles, users)?;
     }
     validate_auto_approve(payload.auto_approve_after_hours)?;
+    if let Some(mode) = payload.ai_risk_mode.as_deref() {
+        validate_ai_risk_mode(mode)?;
+    }
 
     if let Some(AppliesTo::SpecificEnvironments) = payload.applies_to {
         let ids = payload.environment_ids.clone().unwrap_or_default();
@@ -1137,6 +1343,7 @@ pub(crate) async fn update_approval_policy(
             fallback_to_roles: payload.fallback_to_roles,
             auto_approve_after_hours: payload.auto_approve_after_hours,
             enabled: payload.enabled,
+            ai_risk_mode: payload.ai_risk_mode.clone(),
         },
         actor,
     )
@@ -1234,6 +1441,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
 mod tests {
     use super::*;
     use crate::database::activity_log::MockActivityLogRepository;
+    use crate::database::ai::MockAiJudgmentRepository;
     use crate::database::approval::MockApprovalRepository;
     use crate::database::entity::{ApprovalStatus, ApprovalVoteValue};
     use crate::logic::approval::MockApprovalLogic;
@@ -1296,6 +1504,7 @@ mod tests {
             auto_approve_after_hours: None,
             enabled: true,
             created_at: Utc::now(),
+            ai_risk_mode: "advisory".to_string(),
         }
     }
 
@@ -1394,10 +1603,19 @@ mod tests {
             .times(1)
             .returning(move |_| Ok(vec![sample_vote(request_id)]));
 
+        let mut ai_repo = MockAiJudgmentRepository::new();
+        ai_repo
+            .expect_get_for_subjects()
+            .times(1)
+            .returning(|_, _, _| Ok(vec![]));
+
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(
                     Box::new(mock_repo) as Box<dyn ApprovalRepository>
+                ))
+                .app_data(web::Data::new(
+                    Box::new(ai_repo) as Box<dyn AiJudgmentRepository>
                 ))
                 .service(web::scope("/api/v1").configure(super::configure)),
         )
@@ -1424,6 +1642,8 @@ mod tests {
         assert_eq!(json["meta"]["offset"], 10);
         assert_eq!(json["meta"]["limit"], 5);
         assert_eq!(json["meta"]["total"], 1);
+        assert_eq!(json["items"][0]["aiRisk"], serde_json::Value::Null);
+        assert_eq!(json["items"][0]["requiredApprovalsEffective"], 2);
     }
 
     #[actix_web::test]
@@ -1435,7 +1655,7 @@ mod tests {
         };
         let policy = sample_policy(request.policy_id);
 
-        let response = map_request_with_policy(request, vec![], Some(&policy));
+        let response = map_request_with_policy(request, vec![], Some(&policy), None);
 
         assert!(response.change_diff.malformed);
         assert!(response.change_diff.entries.is_empty());
@@ -1466,6 +1686,12 @@ mod tests {
             .times(1)
             .returning(move |_| Ok(Some(policy.clone())));
 
+        let mut ai_repo = MockAiJudgmentRepository::new();
+        ai_repo
+            .expect_get_for_subjects()
+            .times(1)
+            .returning(|_, _, _| Ok(vec![]));
+
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(
@@ -1473,6 +1699,9 @@ mod tests {
                 ))
                 .app_data(web::Data::new(
                     Box::new(mock_repo) as Box<dyn ApprovalRepository>
+                ))
+                .app_data(web::Data::new(
+                    Box::new(ai_repo) as Box<dyn AiJudgmentRepository>
                 ))
                 .service(web::scope("/api/v1").configure(super::configure)),
         )
@@ -1530,10 +1759,293 @@ mod tests {
                 fallback_to_roles: Some(true),
                 auto_approve_after_hours: None,
                 enabled: Some(true),
+                ai_risk_mode: None,
             })
             .to_request();
         let resp = test::call_service(&app, req).await;
 
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+    fn judgment_row(
+        request_id: Uuid,
+        status: &str,
+        derived: Option<serde_json::Value>,
+    ) -> AiJudgment {
+        AiJudgment {
+            id: Uuid::new_v4(),
+            team_id: Uuid::new_v4(),
+            subject_type: "approval_request".to_string(),
+            subject_id: request_id,
+            kind: "approval_risk".to_string(),
+            status: status.to_string(),
+            attempts: 1,
+            input: serde_json::json!({}),
+            input_hash: "h".to_string(),
+            model: Some("jev-1.13.0".to_string()),
+            raw_answers: None,
+            derived,
+            input_tokens: None,
+            error: Some("boom".to_string()),
+            created_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+        }
+    }
+
+    fn done_derived() -> serde_json::Value {
+        serde_json::json!({
+            "level": "high",
+            "reasons": ["Weakens a safety control"],
+            "signals": { "overall_risk": 2.5 },
+        })
+    }
+
+    #[actix_web::test]
+    async fn ai_risk_is_none_without_a_judgment() {
+        assert_eq!(map_ai_risk(None), None);
+    }
+
+    #[actix_web::test]
+    async fn ai_risk_pending_and_failed_pass_through_without_a_result() {
+        for (status, expected) in [
+            ("pending", AiRiskStatus::Pending),
+            ("failed", AiRiskStatus::Failed),
+        ] {
+            // Even when a stale derived value is stored, only `done` exposes it.
+            let row = judgment_row(Uuid::new_v4(), status, Some(done_derived()));
+            let summary = map_ai_risk(Some(&row)).unwrap();
+
+            assert_eq!(summary.status, expected);
+            assert_eq!(summary.level, None);
+            assert!(summary.reasons.is_empty());
+            assert_eq!(summary.signals, None);
+            assert_eq!(summary.model, None);
+            assert_eq!(summary.assessed_at, None);
+        }
+    }
+
+    #[actix_web::test]
+    async fn ai_risk_done_exposes_level_reasons_and_signals() {
+        let row = judgment_row(Uuid::new_v4(), "done", Some(done_derived()));
+        let summary = map_ai_risk(Some(&row)).unwrap();
+
+        assert_eq!(summary.status, AiRiskStatus::Done);
+        assert_eq!(summary.level.as_deref(), Some("high"));
+        assert_eq!(
+            summary.reasons,
+            vec!["Weakens a safety control".to_string()]
+        );
+        assert_eq!(
+            summary.signals,
+            Some(serde_json::json!({ "overall_risk": 2.5 }))
+        );
+        assert_eq!(summary.model.as_deref(), Some("jev-1.13.0"));
+        assert_eq!(summary.assessed_at, row.completed_at);
+    }
+
+    #[actix_web::test]
+    async fn ai_risk_unknown_status_means_no_assessment() {
+        let row = judgment_row(Uuid::new_v4(), "weird", None);
+        assert_eq!(map_ai_risk(Some(&row)), None);
+    }
+
+    #[actix_web::test]
+    async fn required_approvals_effective_uses_policy_then_payload_snapshot() {
+        let policy = sample_policy(Uuid::new_v4());
+        let payload = serde_json::json!({ "policy": { "required_approvers": 4 } });
+
+        assert_eq!(required_approvals_effective(Some(&policy), &payload), 2);
+        assert_eq!(required_approvals_effective(None, &payload), 4);
+        assert_eq!(
+            required_approvals_effective(None, &serde_json::json!({})),
+            1
+        );
+    }
+
+    #[actix_web::test]
+    async fn list_loads_ai_risk_in_one_query_and_maps_each_status() {
+        let team_id = Uuid::new_v4();
+        let ids: Vec<Uuid> = (0..4).map(|_| Uuid::new_v4()).collect();
+        let policy_id = Uuid::new_v4();
+        let requests: Vec<ApprovalRequest> = ids
+            .iter()
+            .map(|id| ApprovalRequest {
+                policy_id,
+                ..sample_request(*id)
+            })
+            .collect();
+        let policy = sample_policy(policy_id);
+
+        let mut mock_repo = MockApprovalRepository::new();
+        let listed = requests.clone();
+        mock_repo
+            .expect_list_requests_for_team_with_offset()
+            .returning(move |_, _, _, _| Ok((listed.clone(), 4)));
+        mock_repo
+            .expect_get_policy_by_id()
+            .returning(move |_| Ok(Some(policy.clone())));
+        mock_repo
+            .expect_list_votes_for_request()
+            .returning(|_| Ok(vec![]));
+
+        // ids[0] has no row; ids[1..] are pending, done, failed.
+        let rows = vec![
+            judgment_row(ids[1], "pending", None),
+            judgment_row(ids[2], "done", Some(done_derived())),
+            judgment_row(ids[3], "failed", None),
+        ];
+        let expected_ids = ids.clone();
+        let mut ai_repo = MockAiJudgmentRepository::new();
+        ai_repo
+            .expect_get_for_subjects()
+            .withf(move |subject_type, subject_ids, kind| {
+                *subject_type == SubjectType::ApprovalRequest
+                    && *kind == JudgmentKind::ApprovalRisk
+                    && subject_ids == &expected_ids
+            })
+            .times(1)
+            .returning(move |_, _, _| Ok(rows.clone()));
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(
+                    Box::new(mock_repo) as Box<dyn ApprovalRepository>
+                ))
+                .app_data(web::Data::new(
+                    Box::new(ai_repo) as Box<dyn AiJudgmentRepository>
+                ))
+                .service(web::scope("/api/v1").configure(super::configure)),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri(&format!("/api/v1/teams/{team_id}/approval-requests"))
+            .to_request();
+        let json: serde_json::Value = test::call_and_read_body_json(&app, req).await;
+        let items = &json["items"];
+
+        assert_eq!(items[0]["aiRisk"], serde_json::Value::Null);
+        assert_eq!(items[1]["aiRisk"]["status"], "pending");
+        assert_eq!(items[1]["aiRisk"]["level"], serde_json::Value::Null);
+        assert_eq!(items[1]["aiRisk"]["reasons"], serde_json::json!([]));
+        assert_eq!(items[2]["aiRisk"]["status"], "done");
+        assert_eq!(items[2]["aiRisk"]["level"], "high");
+        assert_eq!(
+            items[2]["aiRisk"]["reasons"],
+            serde_json::json!(["Weakens a safety control"])
+        );
+        assert_eq!(items[2]["aiRisk"]["model"], "jev-1.13.0");
+        assert!(items[2]["aiRisk"]["assessedAt"].is_string());
+        assert_eq!(items[3]["aiRisk"]["status"], "failed");
+        assert_eq!(items[3]["requiredApprovalsEffective"], 2);
+    }
+
+    #[actix_web::test]
+    async fn list_fails_open_when_judgments_cannot_be_read() {
+        let request_id = Uuid::new_v4();
+        let request = sample_request(request_id);
+        let policy = sample_policy(request.policy_id);
+
+        let mut mock_repo = MockApprovalRepository::new();
+        mock_repo
+            .expect_list_requests_for_team_with_offset()
+            .returning(move |_, _, _, _| Ok((vec![request.clone()], 1)));
+        mock_repo
+            .expect_get_policy_by_id()
+            .returning(move |_| Ok(Some(policy.clone())));
+        mock_repo
+            .expect_list_votes_for_request()
+            .returning(|_| Ok(vec![]));
+        let mut ai_repo = MockAiJudgmentRepository::new();
+        ai_repo
+            .expect_get_for_subjects()
+            .returning(|_, _, _| Err(crate::Error::InvalidInput("db down".to_string())));
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(
+                    Box::new(mock_repo) as Box<dyn ApprovalRepository>
+                ))
+                .app_data(web::Data::new(
+                    Box::new(ai_repo) as Box<dyn AiJudgmentRepository>
+                ))
+                .service(web::scope("/api/v1").configure(super::configure)),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri(&format!(
+                "/api/v1/teams/{}/approval-requests",
+                Uuid::new_v4()
+            ))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
+        assert_eq!(json["items"][0]["aiRisk"], serde_json::Value::Null);
+    }
+
+    #[actix_web::test]
+    async fn ai_risk_mode_accepts_only_the_four_modes() {
+        for mode in AI_RISK_MODES {
+            assert!(validate_ai_risk_mode(mode).is_ok(), "{mode}");
+        }
+        for mode in ["", "ADVISORY", "enforce", "gate"] {
+            assert!(validate_ai_risk_mode(mode).is_err(), "{mode}");
+        }
+    }
+
+    #[actix_web::test]
+    async fn policy_response_exposes_ai_risk_mode_in_camel_case() {
+        let mut policy = sample_policy(Uuid::new_v4());
+        policy.ai_risk_mode = "gate_auto_approve".to_string();
+
+        let json = serde_json::to_value(map_policy(policy)).unwrap();
+
+        assert_eq!(json["aiRiskMode"], "gate_auto_approve");
+    }
+
+    #[actix_web::test]
+    async fn create_and_update_policy_reject_unknown_ai_risk_mode() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/feature_toggle")
+            .unwrap();
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(pool))
+                .app_data(web::Data::new(
+                    Box::new(MockActivityLogRepository::new()) as Box<dyn ActivityLogRepository>
+                ))
+                .service(web::scope("/api/v1").configure(super::configure)),
+        )
+        .await;
+
+        let create = test::TestRequest::post()
+            .uri(&format!(
+                "/api/v1/teams/{}/approval-policies",
+                Uuid::new_v4()
+            ))
+            .set_json(serde_json::json!({
+                "name": "Prod",
+                "appliesTo": "all",
+                "requiredApprovers": 1,
+                "approverRoleIds": [Uuid::new_v4().to_string()],
+                "approverUserIds": [],
+                "aiRiskMode": "bogus",
+            }))
+            .to_request();
+        assert_eq!(
+            test::call_service(&app, create).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+
+        let update = test::TestRequest::patch()
+            .uri(&format!("/api/v1/approval-policies/{}", Uuid::new_v4()))
+            .set_json(serde_json::json!({ "aiRiskMode": "bogus" }))
+            .to_request();
+        assert_eq!(
+            test::call_service(&app, update).await.status(),
+            StatusCode::BAD_REQUEST
+        );
     }
 }

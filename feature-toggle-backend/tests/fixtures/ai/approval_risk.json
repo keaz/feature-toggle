@@ -1,0 +1,1067 @@
+[
+  {
+    "name": "payments flag enabled in production for 100% of users",
+    "expected": "high",
+    "feature": {
+      "key": "new_payment_processor",
+      "description": "Routes card payments through the new payment processor",
+      "purpose": "Replace the legacy card processor",
+      "tags": [
+        "payments",
+        "checkout"
+      ]
+    },
+    "environment": {
+      "name": "prod-eu",
+      "type": "production"
+    },
+    "change": {
+      "from_status": "NOT_DEPLOYED",
+      "to_status": "DEPLOYMENT_REQUESTED",
+      "diff": [
+        {
+          "path": "stages[0].status",
+          "change_type": "changed",
+          "before": "NOT_DEPLOYED",
+          "after": "DEPLOYMENT_APPROVED"
+        },
+        {
+          "path": "stages[0].criteria[0].rollout_percentage",
+          "change_type": "changed",
+          "before": 0,
+          "after": 100
+        }
+      ]
+    },
+    "blast_radius": {
+      "riskLevel": "high",
+      "riskMarkers": [
+        "production-impact",
+        "high-traffic"
+      ],
+      "affectedClients": 14,
+      "evaluationVolume7d": 450000,
+      "dependencyCount": 2
+    }
+  },
+  {
+    "name": "kill switch turned off in production",
+    "expected": "high",
+    "feature": {
+      "key": "payments_kill_switch",
+      "description": "Emergency kill switch that halts all payment processing when enabled",
+      "purpose": "Let on-call stop payments during an incident",
+      "tags": [
+        "payments",
+        "ops"
+      ]
+    },
+    "environment": {
+      "name": "prod-us",
+      "type": "production"
+    },
+    "change": {
+      "from_status": "DEPLOYED",
+      "to_status": "ROLLBACK_REQUESTED",
+      "diff": [
+        {
+          "path": "stages[0].status",
+          "change_type": "changed",
+          "before": "DEPLOYED",
+          "after": "ROLLBACK_APPROVED"
+        }
+      ]
+    },
+    "blast_radius": {
+      "riskLevel": "high",
+      "riskMarkers": [
+        "production-impact",
+        "high-traffic",
+        "rollback-impact"
+      ],
+      "affectedClients": 9,
+      "evaluationVolume7d": 120000,
+      "dependencyCount": 1
+    }
+  },
+  {
+    "name": "mfa skipped for trusted devices, full production rollout",
+    "expected": "high",
+    "feature": {
+      "key": "skip_mfa_for_trusted_devices",
+      "description": "Skips multi-factor authentication on devices marked as trusted",
+      "purpose": "Reduce login friction",
+      "tags": [
+        "auth",
+        "security"
+      ]
+    },
+    "environment": {
+      "name": "prod-eu",
+      "type": "production"
+    },
+    "change": {
+      "from_status": "NOT_DEPLOYED",
+      "to_status": "DEPLOYMENT_REQUESTED",
+      "diff": [
+        {
+          "path": "stages[0].status",
+          "change_type": "changed",
+          "before": "NOT_DEPLOYED",
+          "after": "DEPLOYMENT_APPROVED"
+        },
+        {
+          "path": "stages[0].criteria[0].rollout_percentage",
+          "change_type": "changed",
+          "before": 0,
+          "after": 100
+        }
+      ]
+    },
+    "blast_radius": {
+      "riskLevel": "high",
+      "riskMarkers": [
+        "production-impact",
+        "high-traffic"
+      ],
+      "affectedClients": 22,
+      "evaluationVolume7d": 800000,
+      "dependencyCount": 0
+    }
+  },
+  {
+    "name": "public API rate limiting disabled in production",
+    "expected": "high",
+    "feature": {
+      "key": "api_rate_limiting",
+      "description": "Enforces per-client rate limits on the public API",
+      "purpose": "Protect the API from abuse",
+      "tags": [
+        "api",
+        "ops"
+      ]
+    },
+    "environment": {
+      "name": "prod-us",
+      "type": "production"
+    },
+    "change": {
+      "from_status": "DEPLOYED",
+      "to_status": "ROLLBACK_REQUESTED",
+      "diff": [
+        {
+          "path": "stages[0].status",
+          "change_type": "changed",
+          "before": "DEPLOYED",
+          "after": "ROLLBACK_APPROVED"
+        }
+      ]
+    },
+    "blast_radius": {
+      "riskLevel": "high",
+      "riskMarkers": [
+        "production-impact",
+        "dependency-heavy",
+        "high-traffic",
+        "rollback-impact"
+      ],
+      "affectedClients": 40,
+      "evaluationVolume7d": 3000000,
+      "dependencyCount": 4
+    }
+  },
+  {
+    "name": "personal data deletion job enabled in production",
+    "expected": "high",
+    "feature": {
+      "key": "gdpr_data_deletion_job",
+      "description": "Permanently deletes personal data of accounts closed more than 30 days ago",
+      "purpose": "Comply with data deletion requests",
+      "tags": [
+        "privacy",
+        "data"
+      ]
+    },
+    "environment": {
+      "name": "prod-eu",
+      "type": "production"
+    },
+    "change": {
+      "from_status": "NOT_DEPLOYED",
+      "to_status": "DEPLOYMENT_REQUESTED",
+      "diff": [
+        {
+          "path": "stages[0].status",
+          "change_type": "changed",
+          "before": "NOT_DEPLOYED",
+          "after": "DEPLOYMENT_APPROVED"
+        }
+      ]
+    },
+    "blast_radius": {
+      "riskLevel": "high",
+      "riskMarkers": [
+        "production-impact",
+        "high-traffic"
+      ],
+      "affectedClients": 8,
+      "evaluationVolume7d": 50000,
+      "dependencyCount": 1
+    }
+  },
+  {
+    "name": "fraud screening turned off in production",
+    "expected": "high",
+    "feature": {
+      "key": "fraud_screening",
+      "description": "Blocks suspicious card transactions before they are authorized",
+      "purpose": "Prevent card fraud",
+      "tags": [
+        "payments",
+        "risk"
+      ]
+    },
+    "environment": {
+      "name": "prod-us",
+      "type": "production"
+    },
+    "change": {
+      "from_status": "DEPLOYED",
+      "to_status": "ROLLBACK_REQUESTED",
+      "diff": [
+        {
+          "path": "stages[0].status",
+          "change_type": "changed",
+          "before": "DEPLOYED",
+          "after": "ROLLBACK_APPROVED"
+        }
+      ]
+    },
+    "blast_radius": {
+      "riskLevel": "high",
+      "riskMarkers": [
+        "production-impact",
+        "high-traffic",
+        "rollback-impact"
+      ],
+      "affectedClients": 14,
+      "evaluationVolume7d": 450000,
+      "dependencyCount": 2
+    }
+  },
+  {
+    "name": "new permission checks for admin actions, full rollout",
+    "expected": "high",
+    "feature": {
+      "key": "admin_permission_checks_v2",
+      "description": "Replaces the permission checks that guard admin actions",
+      "purpose": "Tighten admin authorization",
+      "tags": [
+        "auth",
+        "security"
+      ]
+    },
+    "environment": {
+      "name": "prod-eu",
+      "type": "production"
+    },
+    "change": {
+      "from_status": "NOT_DEPLOYED",
+      "to_status": "DEPLOYMENT_REQUESTED",
+      "diff": [
+        {
+          "path": "stages[0].status",
+          "change_type": "changed",
+          "before": "NOT_DEPLOYED",
+          "after": "DEPLOYMENT_APPROVED"
+        },
+        {
+          "path": "stages[0].criteria[0].rollout_percentage",
+          "change_type": "changed",
+          "before": 0,
+          "after": 100
+        }
+      ]
+    },
+    "blast_radius": {
+      "riskLevel": "high",
+      "riskMarkers": [
+        "production-impact",
+        "dependency-heavy",
+        "high-traffic"
+      ],
+      "affectedClients": 6,
+      "evaluationVolume7d": 90000,
+      "dependencyCount": 3
+    }
+  },
+  {
+    "name": "usage based billing enabled for all customers",
+    "expected": "high",
+    "feature": {
+      "key": "usage_based_billing",
+      "description": "Charges customers by metered usage instead of a flat plan",
+      "purpose": "Launch usage based pricing",
+      "tags": [
+        "billing",
+        "payments"
+      ]
+    },
+    "environment": {
+      "name": "prod-us",
+      "type": "production"
+    },
+    "change": {
+      "from_status": "NOT_DEPLOYED",
+      "to_status": "DEPLOYMENT_REQUESTED",
+      "diff": [
+        {
+          "path": "stages[0].status",
+          "change_type": "changed",
+          "before": "NOT_DEPLOYED",
+          "after": "DEPLOYMENT_APPROVED"
+        },
+        {
+          "path": "stages[0].criteria[0].rollout_percentage",
+          "change_type": "changed",
+          "before": 0,
+          "after": 100
+        }
+      ]
+    },
+    "blast_radius": {
+      "riskLevel": "high",
+      "riskMarkers": [
+        "production-impact",
+        "high-traffic"
+      ],
+      "affectedClients": 30,
+      "evaluationVolume7d": 2000000,
+      "dependencyCount": 2
+    }
+  },
+  {
+    "name": "small beta of new search ranking in production",
+    "expected": "medium",
+    "feature": {
+      "key": "new_search_ranking",
+      "description": "Beta of the new search ranking algorithm",
+      "purpose": "Evaluate ranking quality with a few users",
+      "tags": [
+        "search",
+        "beta"
+      ]
+    },
+    "environment": {
+      "name": "prod-eu",
+      "type": "production"
+    },
+    "change": {
+      "from_status": "NOT_DEPLOYED",
+      "to_status": "DEPLOYMENT_REQUESTED",
+      "diff": [
+        {
+          "path": "stages[0].status",
+          "change_type": "changed",
+          "before": "NOT_DEPLOYED",
+          "after": "DEPLOYMENT_APPROVED"
+        },
+        {
+          "path": "stages[0].criteria[0].rollout_percentage",
+          "change_type": "changed",
+          "before": 0,
+          "after": 5
+        }
+      ]
+    },
+    "blast_radius": {
+      "riskLevel": "medium",
+      "riskMarkers": [
+        "production-impact"
+      ],
+      "affectedClients": 2,
+      "evaluationVolume7d": 800,
+      "dependencyCount": 0
+    }
+  },
+  {
+    "name": "dark mode enabled for everyone in production",
+    "expected": "medium",
+    "feature": {
+      "key": "dark_mode_toggle",
+      "description": "Adds a dark color theme to the web app",
+      "purpose": "Cosmetic option requested by users",
+      "tags": [
+        "ui"
+      ]
+    },
+    "environment": {
+      "name": "prod-us",
+      "type": "production"
+    },
+    "change": {
+      "from_status": "NOT_DEPLOYED",
+      "to_status": "DEPLOYMENT_REQUESTED",
+      "diff": [
+        {
+          "path": "stages[0].status",
+          "change_type": "changed",
+          "before": "NOT_DEPLOYED",
+          "after": "DEPLOYMENT_APPROVED"
+        },
+        {
+          "path": "stages[0].criteria[0].rollout_percentage",
+          "change_type": "changed",
+          "before": 0,
+          "after": 100
+        }
+      ]
+    },
+    "blast_radius": {
+      "riskLevel": "high",
+      "riskMarkers": [
+        "production-impact",
+        "high-traffic"
+      ],
+      "affectedClients": 12,
+      "evaluationVolume7d": 300000,
+      "dependencyCount": 0
+    }
+  },
+  {
+    "name": "onboarding checklist for 10% of new users",
+    "expected": "medium",
+    "feature": {
+      "key": "onboarding_checklist",
+      "description": "Shows a getting-started checklist to new users",
+      "purpose": "Improve activation",
+      "tags": [
+        "onboarding",
+        "growth"
+      ]
+    },
+    "environment": {
+      "name": "prod-eu",
+      "type": "production"
+    },
+    "change": {
+      "from_status": "NOT_DEPLOYED",
+      "to_status": "DEPLOYMENT_REQUESTED",
+      "diff": [
+        {
+          "path": "stages[0].status",
+          "change_type": "changed",
+          "before": "NOT_DEPLOYED",
+          "after": "DEPLOYMENT_APPROVED"
+        },
+        {
+          "path": "stages[0].criteria[0].rollout_percentage",
+          "change_type": "changed",
+          "before": 0,
+          "after": 10
+        }
+      ]
+    },
+    "blast_radius": {
+      "riskLevel": "high",
+      "riskMarkers": [
+        "production-impact",
+        "high-traffic"
+      ],
+      "affectedClients": 5,
+      "evaluationVolume7d": 15000,
+      "dependencyCount": 0
+    }
+  },
+  {
+    "name": "checkout button copy experiment at 20%",
+    "expected": "medium",
+    "feature": {
+      "key": "checkout_copy_experiment",
+      "description": "A/B test of the label on the checkout button",
+      "purpose": "Measure conversion with new copy",
+      "tags": [
+        "checkout",
+        "experiment"
+      ]
+    },
+    "environment": {
+      "name": "prod-us",
+      "type": "production"
+    },
+    "change": {
+      "from_status": "NOT_DEPLOYED",
+      "to_status": "DEPLOYMENT_REQUESTED",
+      "diff": [
+        {
+          "path": "stages[0].status",
+          "change_type": "changed",
+          "before": "NOT_DEPLOYED",
+          "after": "DEPLOYMENT_APPROVED"
+        },
+        {
+          "path": "stages[0].criteria[0].rollout_percentage",
+          "change_type": "changed",
+          "before": 0,
+          "after": 20
+        }
+      ]
+    },
+    "blast_radius": {
+      "riskLevel": "high",
+      "riskMarkers": [
+        "production-impact",
+        "high-traffic"
+      ],
+      "affectedClients": 7,
+      "evaluationVolume7d": 60000,
+      "dependencyCount": 0
+    }
+  },
+  {
+    "name": "new email template sent to a few customers",
+    "expected": "medium",
+    "feature": {
+      "key": "new_email_template",
+      "description": "Uses a redesigned layout for notification emails",
+      "purpose": "Refresh the notification emails",
+      "tags": [
+        "email"
+      ]
+    },
+    "environment": {
+      "name": "prod-eu",
+      "type": "production"
+    },
+    "change": {
+      "from_status": "NOT_DEPLOYED",
+      "to_status": "DEPLOYMENT_REQUESTED",
+      "diff": [
+        {
+          "path": "stages[0].status",
+          "change_type": "changed",
+          "before": "NOT_DEPLOYED",
+          "after": "DEPLOYMENT_APPROVED"
+        },
+        {
+          "path": "stages[0].criteria[0].rollout_percentage",
+          "change_type": "changed",
+          "before": 0,
+          "after": 15
+        }
+      ]
+    },
+    "blast_radius": {
+      "riskLevel": "medium",
+      "riskMarkers": [
+        "production-impact"
+      ],
+      "affectedClients": 4,
+      "evaluationVolume7d": 3000,
+      "dependencyCount": 0
+    }
+  },
+  {
+    "name": "new invoice PDF layout for early customers",
+    "expected": "medium",
+    "feature": {
+      "key": "invoice_pdf_layout_v2",
+      "description": "Generates invoices with the new PDF layout",
+      "purpose": "Pilot the redesigned invoice with early customers",
+      "tags": [
+        "billing",
+        "invoices"
+      ]
+    },
+    "environment": {
+      "name": "prod-us",
+      "type": "production"
+    },
+    "change": {
+      "from_status": "NOT_DEPLOYED",
+      "to_status": "DEPLOYMENT_REQUESTED",
+      "diff": [
+        {
+          "path": "stages[0].status",
+          "change_type": "changed",
+          "before": "NOT_DEPLOYED",
+          "after": "DEPLOYMENT_APPROVED"
+        },
+        {
+          "path": "stages[0].criteria[0].rollout_percentage",
+          "change_type": "changed",
+          "before": 0,
+          "after": 10
+        }
+      ]
+    },
+    "blast_radius": {
+      "riskLevel": "medium",
+      "riskMarkers": [
+        "production-impact"
+      ],
+      "affectedClients": 3,
+      "evaluationVolume7d": 2000,
+      "dependencyCount": 0
+    }
+  },
+  {
+    "name": "profile page redesign at 25%",
+    "expected": "medium",
+    "feature": {
+      "key": "profile_page_redesign",
+      "description": "Shows the redesigned profile page",
+      "purpose": "Gradual rollout of the redesign",
+      "tags": [
+        "ui",
+        "profile"
+      ]
+    },
+    "environment": {
+      "name": "prod-eu",
+      "type": "production"
+    },
+    "change": {
+      "from_status": "NOT_DEPLOYED",
+      "to_status": "DEPLOYMENT_REQUESTED",
+      "diff": [
+        {
+          "path": "stages[0].status",
+          "change_type": "changed",
+          "before": "NOT_DEPLOYED",
+          "after": "DEPLOYMENT_APPROVED"
+        },
+        {
+          "path": "stages[0].criteria[0].rollout_percentage",
+          "change_type": "changed",
+          "before": 0,
+          "after": 25
+        }
+      ]
+    },
+    "blast_radius": {
+      "riskLevel": "high",
+      "riskMarkers": [
+        "production-impact",
+        "high-traffic"
+      ],
+      "affectedClients": 9,
+      "evaluationVolume7d": 45000,
+      "dependencyCount": 0
+    }
+  },
+  {
+    "name": "recommendation widget for a small group in production",
+    "expected": "medium",
+    "feature": {
+      "key": "recommendation_widget",
+      "description": "Shows a product recommendation widget on the home page",
+      "purpose": "Test recommendations with a small audience",
+      "tags": [
+        "growth"
+      ]
+    },
+    "environment": {
+      "name": "prod-us",
+      "type": "production"
+    },
+    "change": {
+      "from_status": "NOT_DEPLOYED",
+      "to_status": "DEPLOYMENT_REQUESTED",
+      "diff": [
+        {
+          "path": "stages[0].status",
+          "change_type": "changed",
+          "before": "NOT_DEPLOYED",
+          "after": "DEPLOYMENT_APPROVED"
+        },
+        {
+          "path": "stages[0].criteria[0].rollout_percentage",
+          "change_type": "changed",
+          "before": 0,
+          "after": 5
+        }
+      ]
+    },
+    "blast_radius": {
+      "riskLevel": "medium",
+      "riskMarkers": [
+        "production-impact"
+      ],
+      "affectedClients": 3,
+      "evaluationVolume7d": 5000,
+      "dependencyCount": 0
+    }
+  },
+  {
+    "name": "dev-only cosmetic button color flag",
+    "expected": "low",
+    "feature": {
+      "key": "button_color_experiment",
+      "description": "Changes the primary button color",
+      "purpose": "Try a new brand color",
+      "tags": [
+        "ui"
+      ]
+    },
+    "environment": {
+      "name": "dev",
+      "type": "development"
+    },
+    "change": {
+      "from_status": "NOT_DEPLOYED",
+      "to_status": "DEPLOYMENT_REQUESTED",
+      "diff": [
+        {
+          "path": "stages[0].status",
+          "change_type": "changed",
+          "before": "NOT_DEPLOYED",
+          "after": "DEPLOYMENT_APPROVED"
+        }
+      ]
+    },
+    "blast_radius": {
+      "riskLevel": "low",
+      "riskMarkers": [],
+      "affectedClients": 0,
+      "evaluationVolume7d": 0,
+      "dependencyCount": 0
+    }
+  },
+  {
+    "name": "internal admin tooltips in development",
+    "expected": "low",
+    "feature": {
+      "key": "internal_admin_tooltips",
+      "description": "Shows help tooltips in the internal admin tool",
+      "purpose": "Help new staff",
+      "tags": [
+        "internal"
+      ]
+    },
+    "environment": {
+      "name": "dev",
+      "type": "development"
+    },
+    "change": {
+      "from_status": "NOT_DEPLOYED",
+      "to_status": "DEPLOYMENT_REQUESTED",
+      "diff": [
+        {
+          "path": "stages[0].status",
+          "change_type": "changed",
+          "before": "NOT_DEPLOYED",
+          "after": "DEPLOYMENT_APPROVED"
+        }
+      ]
+    },
+    "blast_radius": {
+      "riskLevel": "low",
+      "riskMarkers": [],
+      "affectedClients": 0,
+      "evaluationVolume7d": 0,
+      "dependencyCount": 0
+    }
+  },
+  {
+    "name": "new logging format turned off in development",
+    "expected": "low",
+    "feature": {
+      "key": "new_logging_format",
+      "description": "Writes logs in the new structured format",
+      "purpose": "Test the new log format",
+      "tags": [
+        "logging"
+      ]
+    },
+    "environment": {
+      "name": "dev",
+      "type": "development"
+    },
+    "change": {
+      "from_status": "DEPLOYED",
+      "to_status": "ROLLBACK_REQUESTED",
+      "diff": [
+        {
+          "path": "stages[0].status",
+          "change_type": "changed",
+          "before": "DEPLOYED",
+          "after": "ROLLBACK_APPROVED"
+        }
+      ]
+    },
+    "blast_radius": {
+      "riskLevel": "low",
+      "riskMarkers": [
+        "rollback-impact"
+      ],
+      "affectedClients": 1,
+      "evaluationVolume7d": 40,
+      "dependencyCount": 0
+    }
+  },
+  {
+    "name": "staging banner text change",
+    "expected": "low",
+    "feature": {
+      "key": "staging_banner_text",
+      "description": "Shows a banner with the build number in staging",
+      "purpose": "Make staging builds easy to identify",
+      "tags": [
+        "internal"
+      ]
+    },
+    "environment": {
+      "name": "staging",
+      "type": "development"
+    },
+    "change": {
+      "from_status": "NOT_DEPLOYED",
+      "to_status": "DEPLOYMENT_REQUESTED",
+      "diff": [
+        {
+          "path": "stages[0].status",
+          "change_type": "changed",
+          "before": "NOT_DEPLOYED",
+          "after": "DEPLOYMENT_APPROVED"
+        }
+      ]
+    },
+    "blast_radius": {
+      "riskLevel": "low",
+      "riskMarkers": [],
+      "affectedClients": 0,
+      "evaluationVolume7d": 0,
+      "dependencyCount": 0
+    }
+  },
+  {
+    "name": "sidebar icon refresh in development",
+    "expected": "low",
+    "feature": {
+      "key": "sidebar_icon_refresh",
+      "description": "Uses the new icon set in the sidebar",
+      "purpose": "Update the icon set",
+      "tags": [
+        "ui"
+      ]
+    },
+    "environment": {
+      "name": "dev",
+      "type": "development"
+    },
+    "change": {
+      "from_status": "NOT_DEPLOYED",
+      "to_status": "DEPLOYMENT_REQUESTED",
+      "diff": [
+        {
+          "path": "stages[0].status",
+          "change_type": "changed",
+          "before": "NOT_DEPLOYED",
+          "after": "DEPLOYMENT_APPROVED"
+        }
+      ]
+    },
+    "blast_radius": {
+      "riskLevel": "low",
+      "riskMarkers": [],
+      "affectedClients": 1,
+      "evaluationVolume7d": 10,
+      "dependencyCount": 0
+    }
+  },
+  {
+    "name": "docs link update in development",
+    "expected": "low",
+    "feature": {
+      "key": "docs_link_update",
+      "description": "Points the help menu to the new documentation site",
+      "purpose": "Move docs to the new site",
+      "tags": [
+        "docs"
+      ]
+    },
+    "environment": {
+      "name": "dev",
+      "type": "development"
+    },
+    "change": {
+      "from_status": "NOT_DEPLOYED",
+      "to_status": "DEPLOYMENT_REQUESTED",
+      "diff": [
+        {
+          "path": "stages[0].status",
+          "change_type": "changed",
+          "before": "NOT_DEPLOYED",
+          "after": "DEPLOYMENT_APPROVED"
+        }
+      ]
+    },
+    "blast_radius": {
+      "riskLevel": "low",
+      "riskMarkers": [],
+      "affectedClients": 1,
+      "evaluationVolume7d": 20,
+      "dependencyCount": 0
+    }
+  },
+  {
+    "name": "debug overlay removed from development",
+    "expected": "low",
+    "feature": {
+      "key": "debug_overlay",
+      "description": "Shows a debug overlay with request timings",
+      "purpose": "Developer aid",
+      "tags": [
+        "internal",
+        "debug"
+      ]
+    },
+    "environment": {
+      "name": "dev",
+      "type": "development"
+    },
+    "change": {
+      "from_status": "DEPLOYED",
+      "to_status": "ROLLBACK_REQUESTED",
+      "diff": [
+        {
+          "path": "stages[0].status",
+          "change_type": "changed",
+          "before": "DEPLOYED",
+          "after": "ROLLBACK_APPROVED"
+        }
+      ]
+    },
+    "blast_radius": {
+      "riskLevel": "low",
+      "riskMarkers": [
+        "rollback-impact"
+      ],
+      "affectedClients": 0,
+      "evaluationVolume7d": 0,
+      "dependencyCount": 0
+    }
+  },
+  {
+    "name": "experimental chart library in development",
+    "expected": "low",
+    "feature": {
+      "key": "experimental_chart_lib",
+      "description": "Renders dashboards with an experimental chart library",
+      "purpose": "Evaluate a new chart library",
+      "tags": [
+        "ui",
+        "experiment"
+      ]
+    },
+    "environment": {
+      "name": "dev",
+      "type": "development"
+    },
+    "change": {
+      "from_status": "NOT_DEPLOYED",
+      "to_status": "DEPLOYMENT_REQUESTED",
+      "diff": [
+        {
+          "path": "stages[0].status",
+          "change_type": "changed",
+          "before": "NOT_DEPLOYED",
+          "after": "DEPLOYMENT_APPROVED"
+        }
+      ]
+    },
+    "blast_radius": {
+      "riskLevel": "low",
+      "riskMarkers": [],
+      "affectedClients": 2,
+      "evaluationVolume7d": 40,
+      "dependencyCount": 0
+    }
+  },
+  {
+    "name": "seasonal banner rolled back in production",
+    "expected": "low",
+    "feature": {
+      "key": "holiday_banner",
+      "description": "Shows a seasonal greeting banner",
+      "purpose": "Holiday greeting",
+      "tags": [
+        "ui",
+        "marketing"
+      ]
+    },
+    "environment": {
+      "name": "prod-eu",
+      "type": "production"
+    },
+    "change": {
+      "from_status": "DEPLOYED",
+      "to_status": "ROLLBACK_REQUESTED",
+      "diff": [
+        {
+          "path": "stages[0].status",
+          "change_type": "changed",
+          "before": "DEPLOYED",
+          "after": "ROLLBACK_APPROVED"
+        }
+      ]
+    },
+    "blast_radius": {
+      "riskLevel": "high",
+      "riskMarkers": [
+        "production-impact",
+        "high-traffic",
+        "rollback-impact"
+      ],
+      "affectedClients": 12,
+      "evaluationVolume7d": 90000,
+      "dependencyCount": 0
+    }
+  },
+  {
+    "name": "beta search ranking rolled back in production",
+    "expected": "low",
+    "feature": {
+      "key": "new_search_ranking",
+      "description": "Beta of the new search ranking algorithm",
+      "purpose": "Evaluate ranking quality with a few users",
+      "tags": [
+        "search",
+        "beta"
+      ]
+    },
+    "environment": {
+      "name": "prod-us",
+      "type": "production"
+    },
+    "change": {
+      "from_status": "DEPLOYED",
+      "to_status": "ROLLBACK_REQUESTED",
+      "diff": [
+        {
+          "path": "stages[0].status",
+          "change_type": "changed",
+          "before": "DEPLOYED",
+          "after": "ROLLBACK_APPROVED"
+        },
+        {
+          "path": "stages[0].criteria[0].rollout_percentage",
+          "change_type": "changed",
+          "before": 5,
+          "after": 0
+        }
+      ]
+    },
+    "blast_radius": {
+      "riskLevel": "medium",
+      "riskMarkers": [
+        "production-impact",
+        "rollback-impact"
+      ],
+      "affectedClients": 2,
+      "evaluationVolume7d": 5000,
+      "dependencyCount": 0
+    }
+  }
+]

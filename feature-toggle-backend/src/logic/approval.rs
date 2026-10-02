@@ -15,13 +15,17 @@ use crate::database::feature::{
     diff_feature_snapshots, feature_repository_tx,
 };
 use crate::database::role::RoleRepository;
+use crate::judgment::service::JudgmentService;
+use crate::judgment::{JudgmentKind, SubjectType, approval_risk};
 use crate::logic::environment::EnvironmentLogic;
 use crate::model::ID;
 use chrono::Utc;
 use feature_toggle_shared::constants::StageStatus;
+use log::warn;
 use mockall::automock;
 use serde_json::Value as JsonValue;
 use sqlx::PgPool;
+use std::sync::Arc;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
@@ -180,6 +184,7 @@ pub fn approval_logic(
         approval_events_tx,
         feature_updates_tx,
         None,
+        None,
     )
 }
 
@@ -191,6 +196,7 @@ pub fn approval_logic_with_notifications(
     approval_events_tx: broadcast::Sender<ApprovalRequestEvent>,
     feature_updates_tx: broadcast::Sender<crate::grpc::pb::FeatureUpdate>,
     notification_logic: Option<Box<dyn crate::logic::notification::NotificationLogic>>,
+    judgments: Option<Arc<JudgmentService>>,
 ) -> Box<dyn ApprovalLogic> {
     Box::new(ApprovalLogicImpl {
         db_pool: None,
@@ -201,6 +207,7 @@ pub fn approval_logic_with_notifications(
         approval_events_tx,
         feature_updates_tx,
         notification_logic,
+        judgments,
     })
 }
 
@@ -222,6 +229,7 @@ pub fn approval_logic_with_pool(
         approval_events_tx,
         feature_updates_tx,
         None,
+        None,
     )
 }
 
@@ -234,6 +242,7 @@ pub fn approval_logic_with_pool_and_notifications(
     approval_events_tx: broadcast::Sender<ApprovalRequestEvent>,
     feature_updates_tx: broadcast::Sender<crate::grpc::pb::FeatureUpdate>,
     notification_logic: Option<Box<dyn crate::logic::notification::NotificationLogic>>,
+    judgments: Option<Arc<JudgmentService>>,
 ) -> Box<dyn ApprovalLogic> {
     Box::new(ApprovalLogicImpl {
         db_pool: Some(db_pool),
@@ -244,6 +253,7 @@ pub fn approval_logic_with_pool_and_notifications(
         approval_events_tx,
         feature_updates_tx,
         notification_logic,
+        judgments,
     })
 }
 
@@ -257,6 +267,8 @@ struct ApprovalLogicImpl {
     approval_events_tx: broadcast::Sender<ApprovalRequestEvent>,
     feature_updates_tx: broadcast::Sender<crate::grpc::pb::FeatureUpdate>,
     notification_logic: Option<Box<dyn crate::logic::notification::NotificationLogic>>,
+    /// Present only when TypeSafe judgments are available (`TYPESAFE_API_KEY` set).
+    judgments: Option<Arc<JudgmentService>>,
 }
 
 #[derive(Clone, Debug)]
@@ -289,6 +301,60 @@ impl ApprovalLogicImpl {
                     feature_key: String::new(),
                     error: String::new(),
                 });
+        }
+    }
+
+    /// Queues the background AI risk assessment of a new request. Advisory:
+    /// it never fails or delays the request. Every policy mode except `off`
+    /// assesses; enforcement is a separate task.
+    async fn submit_risk_assessment(
+        &self,
+        feature: &DbFeature,
+        stage: &FeaturePipelineStage,
+        policy: &ApprovalPolicy,
+        request: &ApprovalRequest,
+    ) {
+        let Some(judgments) = &self.judgments else {
+            return;
+        };
+        if policy.ai_risk_mode == "off"
+            || !judgments
+                .team_enabled(feature.team_id, JudgmentKind::ApprovalRisk.feature())
+                .await
+        {
+            return;
+        }
+
+        let environment = match self
+            .environment_logic
+            .get_environment_by_id(ID::from(stage.environment_id))
+            .await
+        {
+            Ok(environment) => environment,
+            Err(err) => {
+                warn!(
+                    "Skipping AI risk assessment of approval request {}: {err}",
+                    request.id
+                );
+                return;
+            }
+        };
+        let input =
+            approval_risk::build_input(feature, stage, &environment, &request.change_payload);
+        if let Err(err) = judgments
+            .submit(
+                feature.team_id,
+                JudgmentKind::ApprovalRisk,
+                SubjectType::ApprovalRequest,
+                request.id,
+                input,
+            )
+            .await
+        {
+            warn!(
+                "Could not queue AI risk assessment of approval request {}: {err}",
+                request.id
+            );
         }
     }
 
@@ -1446,6 +1512,9 @@ impl ApprovalLogic for ApprovalLogicImpl {
             })
             .await?;
 
+        self.submit_risk_assessment(feature, stage, &policy, &request)
+            .await;
+
         // Notify subscribers about the newly created request so dashboards/badges update immediately.
         self.publish_event(&request, feature.team_id).await?;
 
@@ -1802,6 +1871,7 @@ mod tests {
             auto_approve_after_hours: None,
             enabled: true,
             created_at: Utc::now(),
+            ai_risk_mode: "advisory".to_string(),
         }
     }
 
@@ -1873,6 +1943,7 @@ mod tests {
             approval_events_tx,
             feature_updates_tx,
             notification_logic: None,
+            judgments: None,
         };
 
         let production_preview = logic
@@ -1956,6 +2027,7 @@ mod tests {
             auto_approve_after_hours: None,
             enabled: true,
             created_at: Utc::now(),
+            ai_risk_mode: "advisory".to_string(),
         };
 
         // Mock user has "Approver" system role
@@ -2103,6 +2175,7 @@ mod tests {
             approval_events_tx,
             feature_updates_tx,
             notification_logic: Some(Box::new(RecordingNotificationLogic { sender })),
+            judgments: None,
         };
 
         let request = ApprovalRequest {
@@ -2194,6 +2267,7 @@ mod tests {
             auto_approve_after_hours: None,
             enabled: true,
             created_at: Utc::now(),
+            ai_risk_mode: "advisory".to_string(),
         };
 
         approval_repo
@@ -2311,6 +2385,7 @@ mod tests {
             auto_approve_after_hours: None,
             enabled: true,
             created_at: Utc::now(),
+            ai_risk_mode: "advisory".to_string(),
         };
 
         approval_repo
@@ -2428,6 +2503,7 @@ mod tests {
             auto_approve_after_hours: None,
             enabled: true,
             created_at: Utc::now(),
+            ai_risk_mode: "advisory".to_string(),
         };
 
         let created_request = ApprovalRequest {
@@ -2599,6 +2675,7 @@ mod tests {
             auto_approve_after_hours: None,
             enabled: true,
             created_at: Utc::now(),
+            ai_risk_mode: "advisory".to_string(),
         };
 
         let approved_request = ApprovalRequest {
@@ -2763,5 +2840,281 @@ mod tests {
         assert!(second_event.request.executed_at.is_some());
         assert_eq!(first_event.team_id, team_id);
         assert_eq!(second_event.team_id, team_id);
+    }
+}
+
+#[cfg(test)]
+mod ai_risk_trigger_tests {
+    use super::*;
+    use crate::database::ai::{
+        AiJudgment, MockAiJudgmentRepository, MockTeamAiSettingsRepository, StoredTeamAiSettings,
+        TeamAiSettings,
+    };
+    use crate::database::approval::MockApprovalRepository;
+    use crate::database::entity::FeatureType;
+    use crate::database::feature::MockFeatureRepository;
+    use crate::database::role::MockRoleRepository;
+    use crate::judgment::JudgmentKind;
+    use crate::judgment::client::MockJudgmentClient;
+    use crate::logic::environment::MockEnvironmentLogic;
+    use crate::model::Environment;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn judgment_service(
+        team_setting_on: bool,
+        submit_fails: bool,
+        submits: Arc<AtomicUsize>,
+    ) -> Arc<JudgmentService> {
+        let mut settings = MockTeamAiSettingsRepository::new();
+        settings.expect_get().returning(move |_| {
+            Ok(StoredTeamAiSettings {
+                settings: TeamAiSettings {
+                    approval_risk: team_setting_on,
+                    ..TeamAiSettings::default()
+                },
+                ..StoredTeamAiSettings::default()
+            })
+        });
+        let mut repo = MockAiJudgmentRepository::new();
+        repo.expect_upsert_pending().returning(move |new| {
+            submits.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(new.kind, JudgmentKind::ApprovalRisk);
+            assert_eq!(new.input["feature"]["key"], "checkout_new");
+            if submit_fails {
+                return Err(Error::InvalidInput("db down".into()));
+            }
+            Ok(AiJudgment {
+                id: Uuid::new_v4(),
+                team_id: new.team_id,
+                subject_type: new.subject_type.as_str().into(),
+                subject_id: new.subject_id,
+                kind: new.kind.as_str().into(),
+                status: "pending".into(),
+                attempts: 1,
+                input: new.input,
+                input_hash: new.input_hash,
+                model: None,
+                raw_answers: None,
+                derived: None,
+                input_tokens: None,
+                error: None,
+                created_at: Utc::now(),
+                completed_at: None,
+            })
+        });
+        // The background run has no handler registered in this test and is not
+        // the subject here; it only needs to be able to record a failure.
+        repo.expect_mark_failed().returning(|_, _, _| Ok(true));
+        Arc::new(JudgmentService::new(
+            Arc::new(MockJudgmentClient::new()),
+            Box::new(repo),
+            Box::new(settings),
+        ))
+    }
+
+    async fn create_request(
+        ai_risk_mode: &str,
+        judgments: Option<Arc<JudgmentService>>,
+    ) -> Result<Option<ApprovalRequest>, Error> {
+        let mut approval_repo = MockApprovalRepository::new();
+        let mut feature_repo = MockFeatureRepository::new();
+        let mut env_logic = MockEnvironmentLogic::new();
+
+        let team_id = Uuid::new_v4();
+        let environment_id = Uuid::new_v4();
+        let policy_id = Uuid::new_v4();
+        let requested_by = Uuid::new_v4();
+        let feature = DbFeature {
+            id: Uuid::new_v4(),
+            key: "checkout_new".into(),
+            description: Some("New checkout flow".into()),
+            feature_type: FeatureType::Simple,
+            team_id,
+            active: true,
+            created_at: Utc::now(),
+            kill_switch_enabled: false,
+            kill_switch_activated_at: None,
+            rollback_scheduled_at: None,
+            emergency_override_reason: None,
+            emergency_override_expires_at: None,
+            emergency_override_actor_id: None,
+            emergency_override_applied_at: None,
+            lifecycle_stage: "active".into(),
+            owner: None,
+            purpose: None,
+            reference_url: None,
+            expires_at: None,
+            cleanup_reason: None,
+            tags: vec![],
+            archived_at: None,
+            deprecated_at: None,
+            deprecation_notice: None,
+            last_evaluated_at: None,
+            evaluation_count_7d: 0,
+            evaluation_count_30d: 0,
+            evaluation_count_90d: 0,
+            dependencies: vec![],
+        };
+        let stage = FeaturePipelineStage {
+            id: Uuid::new_v4(),
+            feature_id: feature.id,
+            environment_id,
+            order_index: 0,
+            parent_stage_id: None,
+            position: "production".into(),
+            enabled: false,
+            status: "NOT_DEPLOYED".into(),
+        };
+        let policy = ApprovalPolicy {
+            id: policy_id,
+            team_id,
+            name: "Prod approvals".into(),
+            description: None,
+            applies_to: "production_only".into(),
+            environment_ids: None,
+            required_approvers: 1,
+            approver_role_ids: vec![Uuid::new_v4()],
+            approver_user_ids: Vec::new(),
+            allow_admin_override: false,
+            fallback_to_roles: true,
+            auto_approve_after_hours: None,
+            enabled: true,
+            created_at: Utc::now(),
+            ai_risk_mode: ai_risk_mode.to_string(),
+        };
+        let created = ApprovalRequest {
+            id: Uuid::new_v4(),
+            policy_id,
+            feature_id: feature.id,
+            environment_id: Some(environment_id),
+            change_type: "stage_change".into(),
+            change_payload: serde_json::json!({ "next_status": "DEPLOYMENT_REQUESTED" }),
+            change_description: None,
+            requested_by,
+            eligible_approver_ids: Vec::new(),
+            routing_reason: None,
+            admin_override_enabled: false,
+            status: ApprovalStatus::Pending,
+            approved_count: 0,
+            rejected_count: 0,
+            executed_at: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        env_logic
+            .expect_get_environment_by_id()
+            .returning(move |_| {
+                Ok(Environment {
+                    id: ID::from(environment_id),
+                    name: "Production".into(),
+                    active: true,
+                    team_id: ID::from(team_id),
+                    environment_type: "Production".into(),
+                })
+            });
+        approval_repo
+            .expect_list_policies_for_team()
+            .return_once(move |_| Ok(vec![policy]));
+        let stage_for_snapshot = stage.clone();
+        feature_repo
+            .expect_get_feature_stages()
+            .return_once(move |_| Ok(vec![stage_for_snapshot]));
+        feature_repo
+            .expect_get_feature_variants()
+            .returning(|_| Ok(vec![]));
+        feature_repo
+            .expect_get_stage_criteria()
+            .returning(|_| Ok(vec![]));
+        approval_repo
+            .expect_create_request()
+            .return_once(move |_| Ok(created));
+        approval_repo
+            .expect_list_votes_for_request()
+            .returning(|_| Ok(vec![]));
+
+        let (tx, _rx) = tokio::sync::broadcast::channel(8);
+        let (updates_tx, _updates_rx) = tokio::sync::broadcast::channel(8);
+        let logic = approval_logic_with_notifications(
+            Box::new(approval_repo),
+            Box::new(feature_repo),
+            Box::new(env_logic),
+            Box::new(MockRoleRepository::new()),
+            tx,
+            updates_tx,
+            None,
+            judgments,
+        );
+        logic
+            .maybe_create_stage_change_request(
+                &feature,
+                &stage,
+                "DEPLOYMENT_REQUESTED",
+                requested_by,
+            )
+            .await
+    }
+
+    #[tokio::test]
+    async fn advisory_policy_with_team_setting_on_submits_once() {
+        let submits = Arc::new(AtomicUsize::new(0));
+        let service = judgment_service(true, false, submits.clone());
+
+        let created = create_request("advisory", Some(service)).await.unwrap();
+
+        assert!(created.is_some());
+        assert_eq!(submits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn other_enabled_modes_also_submit_until_enforcement_exists() {
+        for mode in ["gate_auto_approve", "require_extra_approver"] {
+            let submits = Arc::new(AtomicUsize::new(0));
+            let service = judgment_service(true, false, submits.clone());
+
+            create_request(mode, Some(service)).await.unwrap();
+
+            assert_eq!(submits.load(Ordering::SeqCst), 1, "{mode}");
+        }
+    }
+
+    #[tokio::test]
+    async fn off_mode_does_not_submit() {
+        let submits = Arc::new(AtomicUsize::new(0));
+        let service = judgment_service(true, false, submits.clone());
+
+        let created = create_request("off", Some(service)).await.unwrap();
+
+        assert!(created.is_some());
+        assert_eq!(submits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn team_setting_off_does_not_submit() {
+        let submits = Arc::new(AtomicUsize::new(0));
+        let service = judgment_service(false, false, submits.clone());
+
+        let created = create_request("advisory", Some(service)).await.unwrap();
+
+        assert!(created.is_some());
+        assert_eq!(submits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn missing_service_creates_the_request_unchanged() {
+        let created = create_request("advisory", None).await.unwrap();
+
+        assert!(created.is_some());
+    }
+
+    #[tokio::test]
+    async fn submit_failure_does_not_fail_request_creation() {
+        let submits = Arc::new(AtomicUsize::new(0));
+        let service = judgment_service(true, true, submits.clone());
+
+        let created = create_request("advisory", Some(service)).await.unwrap();
+
+        assert!(created.is_some());
+        assert_eq!(submits.load(Ordering::SeqCst), 1);
     }
 }

@@ -384,6 +384,7 @@ pub struct ApprovalPolicy {
     pub auto_approve_after_hours: Option<i32>,
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
+    pub ai_risk_mode: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]

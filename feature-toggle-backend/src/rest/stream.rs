@@ -9,6 +9,7 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::database::activity_log::{ActivityLogFilter, ActivityLogRepository};
+use crate::database::ai::AiJudgmentRepository;
 use crate::database::approval::ApprovalRepository;
 use crate::database::feature::FeatureRepository;
 use crate::logic::approval::ApprovalRequestEvent;
@@ -18,9 +19,7 @@ use crate::logic::feature::FeatureLogic;
 use crate::logic::feature_evaluation::{FeatureEvaluationEvent, FeatureEvaluationLogic};
 use crate::logic::pipeline::PipelineLogic;
 use crate::model::ID;
-use crate::rest::approval::{
-    ApprovalRequestResponse, ApprovalRequestsResponse, map_request_with_policy,
-};
+use crate::rest::approval::{ApprovalRequestsResponse, load_ai_risk, map_request_with_policy};
 use crate::rest::error::ErrorResponse;
 use crate::rest::metrics::{
     ActivityEntityDetailsResponse, ActivityLogPageResponse, ActivityLogResponse,
@@ -444,13 +443,6 @@ fn parse_statuses(
     Ok(Some(statuses))
 }
 
-fn map_request(
-    request: crate::database::entity::ApprovalRequest,
-    votes: Vec<crate::database::entity::ApprovalVote>,
-) -> ApprovalRequestResponse {
-    map_request_with_policy(request, votes, None)
-}
-
 async fn send_evaluation_summary(
     session: &mut Session,
     logic: &Box<dyn FeatureEvaluationLogic>,
@@ -840,6 +832,7 @@ async fn send_feature_growth(
 async fn send_approval_requests(
     session: &mut Session,
     repo: &Box<dyn ApprovalRepository>,
+    ai_judgments: &Box<dyn AiJudgmentRepository>,
     query: &StreamQuery,
 ) -> Result<(), String> {
     let team_id = query
@@ -860,13 +853,29 @@ async fn send_approval_requests(
         .await
         .map_err(|e| format!("Failed to load approval requests: {e}"))?;
 
+    let mut ai_risk = load_ai_risk(
+        ai_judgments.as_ref(),
+        requests.iter().map(|request| request.id).collect(),
+    )
+    .await;
+
     let mut items = Vec::with_capacity(requests.len());
     for request in requests {
         let votes = repo
             .list_votes_for_request(request.id)
             .await
             .map_err(|e| format!("Failed to load approval votes: {e}"))?;
-        items.push(map_request(request, votes));
+        let policy = repo
+            .get_policy_by_id(request.policy_id)
+            .await
+            .map_err(|e| format!("Failed to load approval policy: {e}"))?;
+        let summary = ai_risk.remove(&request.id);
+        items.push(map_request_with_policy(
+            request,
+            votes,
+            policy.as_ref(),
+            summary,
+        ));
     }
 
     let response = ApprovalRequestsResponse {
@@ -950,6 +959,7 @@ pub async fn stream_ws(
     client_logic: web::Data<Box<dyn ClientLogic>>,
     activity_repo: web::Data<Box<dyn ActivityLogRepository>>,
     approval_repo: web::Data<Box<dyn ApprovalRepository>>,
+    ai_judgments: web::Data<Box<dyn AiJudgmentRepository>>,
     feature_repo: web::Data<Box<dyn FeatureRepository>>,
     environment_logic: web::Data<Box<dyn EnvironmentLogic>>,
     pipeline_logic: web::Data<Box<dyn PipelineLogic>>,
@@ -983,6 +993,7 @@ pub async fn stream_ws(
     let client_logic = client_logic.into_inner();
     let activity_repo = activity_repo.into_inner();
     let approval_repo = approval_repo.into_inner();
+    let ai_judgments = ai_judgments.into_inner();
     let feature_repo = feature_repo.into_inner();
     let environment_logic = environment_logic.into_inner();
     let pipeline_logic = pipeline_logic.into_inner();
@@ -1052,7 +1063,8 @@ pub async fn stream_ws(
                 send_feature_growth(&mut session_clone, &feature_repo, &query).await
             }
             StreamType::ApprovalRequests => {
-                send_approval_requests(&mut session_clone, &approval_repo, &query).await
+                send_approval_requests(&mut session_clone, &approval_repo, &ai_judgments, &query)
+                    .await
             }
         };
 
@@ -1105,7 +1117,7 @@ pub async fn stream_ws(
                 event = approval_events_rx.recv(), if matches!(stream_type, StreamType::ApprovalRequests) => {
                     match event {
                         Ok(_) => {
-                            if send_approval_requests(&mut session_clone, &approval_repo, &query).await.is_err() {
+                            if send_approval_requests(&mut session_clone, &approval_repo, &ai_judgments, &query).await.is_err() {
                                 break;
                             }
                         }

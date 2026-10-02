@@ -21,6 +21,7 @@ pub struct CreateApprovalPolicyInput {
     pub fallback_to_roles: bool,
     pub auto_approve_after_hours: Option<i32>,
     pub enabled: bool,
+    pub ai_risk_mode: String,
 }
 
 pub struct UpdateApprovalPolicyInput {
@@ -35,6 +36,7 @@ pub struct UpdateApprovalPolicyInput {
     pub fallback_to_roles: Option<bool>,
     pub auto_approve_after_hours: Option<i32>,
     pub enabled: Option<bool>,
+    pub ai_risk_mode: Option<String>,
 }
 
 pub struct CreateApprovalRequestInput {
@@ -226,11 +228,12 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
                 allow_admin_override,
                 fallback_to_roles,
                 auto_approve_after_hours,
-                enabled
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                enabled,
+                ai_risk_mode
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
             RETURNING id, team_id, name, description, applies_to, environment_ids, required_approvers,
                       approver_role_ids, approver_user_ids, allow_admin_override, fallback_to_roles,
-                      auto_approve_after_hours, enabled, created_at
+                      auto_approve_after_hours, enabled, created_at, ai_risk_mode
             "#,
         )
         .bind(input.team_id)
@@ -245,6 +248,7 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
         .bind(input.fallback_to_roles)
         .bind(input.auto_approve_after_hours)
         .bind(input.enabled)
+        .bind(input.ai_risk_mode)
         .fetch_one(&self.pool)
         .await;
 
@@ -256,7 +260,7 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
             r#"
             SELECT id, team_id, name, description, applies_to, environment_ids, required_approvers,
                    approver_role_ids, approver_user_ids, allow_admin_override, fallback_to_roles,
-                   auto_approve_after_hours, enabled, created_at
+                   auto_approve_after_hours, enabled, created_at, ai_risk_mode
             FROM approval_policies
             WHERE team_id = $1
             ORDER BY created_at DESC
@@ -274,7 +278,7 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
             r#"
             SELECT id, team_id, name, description, applies_to, environment_ids, required_approvers,
                    approver_role_ids, approver_user_ids, allow_admin_override, fallback_to_roles,
-                   auto_approve_after_hours, enabled, created_at
+                   auto_approve_after_hours, enabled, created_at, ai_risk_mode
             FROM approval_policies
             WHERE id = $1
             "#,
@@ -321,6 +325,7 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
             .auto_approve_after_hours
             .or(existing.auto_approve_after_hours);
         let enabled = input.enabled.unwrap_or(existing.enabled);
+        let ai_risk_mode = input.ai_risk_mode.unwrap_or(existing.ai_risk_mode);
 
         let result = sqlx::query_as::<_, ApprovalPolicy>(
             r#"
@@ -335,11 +340,12 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
                 allow_admin_override = $9,
                 fallback_to_roles = $10,
                 auto_approve_after_hours = $11,
-                enabled = $12
+                enabled = $12,
+                ai_risk_mode = $13
             WHERE id = $1
             RETURNING id, team_id, name, description, applies_to, environment_ids, required_approvers,
                       approver_role_ids, approver_user_ids, allow_admin_override, fallback_to_roles,
-                      auto_approve_after_hours, enabled, created_at
+                      auto_approve_after_hours, enabled, created_at, ai_risk_mode
             "#,
         )
         .bind(id)
@@ -354,6 +360,7 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
         .bind(fallback_to_roles)
         .bind(auto_approve_after_hours)
         .bind(enabled)
+        .bind(ai_risk_mode)
         .fetch_one(&self.pool)
         .await;
 
@@ -782,11 +789,12 @@ impl ApprovalRepositoryImpl {
                 allow_admin_override,
                 fallback_to_roles,
                 auto_approve_after_hours,
-                enabled
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                enabled,
+                ai_risk_mode
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
             RETURNING id, team_id, name, description, applies_to, environment_ids, required_approvers,
                       approver_role_ids, approver_user_ids, allow_admin_override, fallback_to_roles,
-                      auto_approve_after_hours, enabled, created_at
+                      auto_approve_after_hours, enabled, created_at, ai_risk_mode
             "#,
         )
         .bind(input.team_id)
@@ -801,6 +809,7 @@ impl ApprovalRepositoryImpl {
         .bind(input.fallback_to_roles)
         .bind(input.auto_approve_after_hours)
         .bind(input.enabled)
+        .bind(input.ai_risk_mode)
         .fetch_one(&mut *conn)
         .await;
 
@@ -893,7 +902,7 @@ impl ApprovalRepositoryTx for ApprovalRepositoryImpl {
             r#"
             SELECT id, team_id, name, description, applies_to, environment_ids, required_approvers,
                    approver_role_ids, approver_user_ids, allow_admin_override, fallback_to_roles,
-                   auto_approve_after_hours, enabled, created_at
+                   auto_approve_after_hours, enabled, created_at, ai_risk_mode
             FROM approval_policies
             WHERE id = $1
             "#,
@@ -928,6 +937,7 @@ impl ApprovalRepositoryTx for ApprovalRepositoryImpl {
             .auto_approve_after_hours
             .or(existing.auto_approve_after_hours);
         let enabled = input.enabled.unwrap_or(existing.enabled);
+        let ai_risk_mode = input.ai_risk_mode.unwrap_or(existing.ai_risk_mode);
 
         let result = sqlx::query_as::<_, ApprovalPolicy>(
             r#"
@@ -942,11 +952,12 @@ impl ApprovalRepositoryTx for ApprovalRepositoryImpl {
                 allow_admin_override = $9,
                 fallback_to_roles = $10,
                 auto_approve_after_hours = $11,
-                enabled = $12
+                enabled = $12,
+                ai_risk_mode = $13
             WHERE id = $1
             RETURNING id, team_id, name, description, applies_to, environment_ids, required_approvers,
                       approver_role_ids, approver_user_ids, allow_admin_override, fallback_to_roles,
-                      auto_approve_after_hours, enabled, created_at
+                      auto_approve_after_hours, enabled, created_at, ai_risk_mode
             "#,
         )
         .bind(policy_id)
@@ -961,6 +972,7 @@ impl ApprovalRepositoryTx for ApprovalRepositoryImpl {
         .bind(fallback_to_roles)
         .bind(auto_approve_after_hours)
         .bind(enabled)
+        .bind(ai_risk_mode)
         .fetch_one(&mut *conn)
         .await;
 

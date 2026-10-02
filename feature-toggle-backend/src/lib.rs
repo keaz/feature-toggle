@@ -100,6 +100,30 @@ pub async fn run() -> std::io::Result<()> {
     let (updates_tx, _updates_rx) =
         tokio::sync::broadcast::channel::<crate::grpc::pb::FeatureUpdate>(128);
 
+    // Async AI judgments. Built before the logic services because approval logic
+    // submits approval risk assessments. Each feature registers its handler here.
+    let team_ai_settings_repository = database::ai::team_ai_settings_repository(db_pool.clone());
+    let judgment_service = ai_client.clone().map(|client| {
+        Arc::new(
+            judgment::service::JudgmentService::new(
+                client,
+                database::ai::ai_judgment_repository(db_pool.clone()),
+                team_ai_settings_repository.clone_box(),
+            )
+            .with_handler(Arc::new(judgment::approval_risk::ApprovalRiskHandler::new(
+                activity_log_repository.clone_box(),
+                approval_repository.clone_box(),
+            ))),
+        )
+    });
+    if let Some(service) = judgment_service.clone() {
+        let ai_retry_scheduler =
+            scheduler::AiJudgmentRetryScheduler::new(service, Duration::from_secs(60));
+        tokio::spawn(async move {
+            ai_retry_scheduler.start().await;
+        });
+    }
+
     let approval_logic = logic::approval::approval_logic_with_pool_and_notifications(
         db_pool.clone(),
         approval_repository.clone(),
@@ -109,6 +133,7 @@ pub async fn run() -> std::io::Result<()> {
         approval_events_tx.clone(),
         updates_tx.clone(),
         Some(notification_logic.clone_box()),
+        judgment_service.clone(),
     );
     let team_logic = logic::team::team_logic_with_notifications(
         database::team::team_repository(db_pool.clone()),
@@ -213,21 +238,6 @@ pub async fn run() -> std::io::Result<()> {
         }
     });
 
-    let team_ai_settings_repository = database::ai::team_ai_settings_repository(db_pool.clone());
-    let judgment_service = ai_client.clone().map(|client| {
-        Arc::new(judgment::service::JudgmentService::new(
-            client,
-            database::ai::ai_judgment_repository(db_pool.clone()),
-            team_ai_settings_repository.clone_box(),
-        ))
-    });
-    if let Some(service) = judgment_service.clone() {
-        let ai_retry_scheduler =
-            scheduler::AiJudgmentRetryScheduler::new(service, Duration::from_secs(60));
-        tokio::spawn(async move {
-            ai_retry_scheduler.start().await;
-        });
-    }
     let ai_runtime = judgment::AiRuntime::new(ai_client.clone(), cfg.typesafe.model.clone())
         .with_judgments(judgment_service);
 
@@ -369,6 +379,9 @@ pub async fn run() -> std::io::Result<()> {
             .app_data(web::Data::new(updates_tx.clone()))
             .app_data(web::Data::new(ai_runtime.clone()))
             .app_data(web::Data::new(team_ai_settings_repository.clone_box()))
+            .app_data(web::Data::new(database::ai::ai_judgment_repository(
+                db_pool.clone(),
+            )))
             .service(
                 web::resource("/metrics/track")
                     .guard(guard::Post())
