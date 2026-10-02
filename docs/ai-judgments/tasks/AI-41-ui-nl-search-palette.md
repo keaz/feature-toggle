@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Type | Feature (UI) |
-| Status | Not started |
+| Status | Done in UI 18c9bdf |
 | Repo | UI (`../feature-toggle-ui/`) |
 | Depends on | AI-40, AI-02 |
 | Behavior change | New palette item and results group. Existing palette behavior is unchanged. |
@@ -55,4 +55,11 @@ Backend. Search history or saved queries.
 
 ## Handoff log
 
-_No entries yet._
+### 2026-10-02 (UI `18c9bdf`)
+
+- `api/ai.ts`: `nlSearchFeatures(teamId, {query, limit})` plus `NlSearchResult`, `NlSearchHit`, `NlSearchFiltersApplied` types. Pure helpers in `lib/nlSearch.ts` (`countWords`, `filterChips`, `filtersToListParams`, `formatRelevance`).
+- Palette: input is controlled (`value` / `onValueChange`, reset when the palette closes). The Ask item shows when `useAiFeatures(teamId).nlSearch` is on and the trimmed query has 3 or more words. cmdk filter stays on for the existing groups; a custom `filter` returns 1 for any value starting with `ask-fluxgate`, otherwise cmdk's exported `defaultFilter`. `forceMount` was not used because cmdk skips registering force-mounted items, which breaks the empty-state count.
+- One search is one request: selecting the item (click or Enter) calls the API once with `limit: 10`; the item is replaced by a "Searching…" row while loading, so it cannot fire twice. A sequence ref drops late responses after the query is edited. Editing the query clears the Ask state. `available: false` or an error shows "AI search unavailable". The "No results." row is suppressed while an Ask state is showing.
+- Results group "Ask results": chip row, then "Open in list" (only when at least one filter was applied), then hits (key, description snippet, relevance as a percent when not null). Selecting a hit goes to `/features/{id}`.
+- "Open in list" goes to `/features?...` using only the params `FeatureTable` reads: `lifecycleStage`, `featureType`, `dependencyStatus`, `approvalStatus`, `flagKind`, `tag`, `owner`, and `stale` / `expired` as `true` / `false`. Backend values (`ARCHIVED`, `CONTEXTUAL`, lowercase `flagKind`) already match what the table expects. The table derives `includeArchived` from `lifecycleStage=ARCHIVED` itself.
+- Tests: 12 new cases in `components/__tests__/CommandPalette.test.tsx` (hidden when off / under 3 words, shown first, no call while typing, one call on click and on Enter, results and chips, navigation, Searching, clear on edit, unavailable on `available: false` and on error, Open in list params, Open in list hidden with no filters). Full suite 653 passed, lint and build clean.

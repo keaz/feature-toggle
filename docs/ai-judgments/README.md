@@ -76,7 +76,7 @@ Features:
 | [ ] | [AI-31](tasks/AI-31-stale-rules-use-flag-kind.md) | Stale rules skip permanent kinds | backend | **Yes, needs sign-off** | AI-30 |
 | [x] | [AI-32](tasks/AI-32-ui-flag-kind.md) | UI: kind field, suggestion chips, filter, detail | UI | New UI | AI-30, AI-02 |
 | [x] | [AI-40](tasks/AI-40-nl-search-backend.md) | NL search endpoint | backend | Additive | AI-01 (AI-30 optional) |
-| [ ] | [AI-41](tasks/AI-41-ui-nl-search-palette.md) | UI: "Ask FluxGate" in the command palette | UI | New UI | AI-40, AI-02 |
+| [x] | [AI-41](tasks/AI-41-ui-nl-search-palette.md) | UI: "Ask FluxGate" in the command palette | UI | New UI | AI-40, AI-02 |
 
 ## Order and parallel work
 

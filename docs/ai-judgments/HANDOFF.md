@@ -18,7 +18,7 @@ Date: 2026-10-02. Read this after [`README.md`](README.md) and [`design.md`](des
 | AI-12 UI approval risk | Done (shows the extra-approver hint once AI-11 raises `requiredApprovalsEffective`) | UI `fb3a756` |
 | AI-21 UI justification hint | Done | UI `1672526` |
 | AI-32 UI flag kind | Done | UI `9aa9005` |
-| AI-41 UI NL search palette | **Ready to start** (AI-40 done) | UI |
+| AI-41 UI NL search palette | Done | UI `18c9bdf` |
 
 Suggested order: AI-30 and AI-40 can run in parallel (AI-10 and AI-20 are done). Each UI task follows its backend task. AI-11 and AI-31 last, after sign-off.
 
