@@ -17,7 +17,7 @@ Features:
 2. **Check "Depends on"** in the task header. Do not start until every dependency is merged. If a dependency is only on a branch, stop and ask.
 3. **Re-check the code first.** Line numbers come from backend `fc50086` and UI `bae1962` and will drift. Find code by symbol name (`grep -n "fn <name>"`). If the code no longer matches the task, stop and report in the handoff log.
 4. **Stay in scope.** Change only what the task lists. If you need a visible behavior change that the task does not list, stop and ask.
-5. **Tasks marked "needs sign-off"** (AI-31; AI-11 signed off 2026-10-02) need a maintainer's yes before you merge. You may write the code and the PR, but say in the PR that it is waiting for sign-off.
+5. **Tasks marked "needs sign-off"** (AI-31 and AI-11 signed off 2026-10-02) need a maintainer's yes before you merge. You may write the code and the PR, but say in the PR that it is waiting for sign-off.
 6. **Write the failing test first**, then the change. Each task lists its tests.
 7. **Run before you finish:**
    - Backend:
@@ -73,7 +73,7 @@ Features:
 | [x] | [AI-20](tasks/AI-20-justification-check-backend.md) | Justification check: sync endpoint and post-submit recording | backend | Additive | AI-01 |
 | [x] | [AI-21](tasks/AI-21-ui-justification-hint.md) | UI: `ReasonQualityHint` on 5 forms | UI | Warning only | AI-20, AI-02 |
 | [x] | [AI-30](tasks/AI-30-flag-kind-backend.md) | Flag kind: column, classification, suggestions, backfill, filter | backend | Additive | AI-01 |
-| [ ] | [AI-31](tasks/AI-31-stale-rules-use-flag-kind.md) | Stale rules skip permanent kinds | backend | **Yes, needs sign-off** | AI-30 |
+| [x] | [AI-31](tasks/AI-31-stale-rules-use-flag-kind.md) | Stale rules skip permanent kinds | backend | **Yes, needs sign-off** | AI-30 |
 | [x] | [AI-32](tasks/AI-32-ui-flag-kind.md) | UI: kind field, suggestion chips, filter, detail | UI | New UI | AI-30, AI-02 |
 | [x] | [AI-40](tasks/AI-40-nl-search-backend.md) | NL search endpoint | backend | Additive | AI-01 (AI-30 optional) |
 | [x] | [AI-41](tasks/AI-41-ui-nl-search-palette.md) | UI: "Ask FluxGate" in the command palette | UI | New UI | AI-40, AI-02 |
