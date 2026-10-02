@@ -2,6 +2,7 @@
 //! with probabilities. See `docs/ai-judgments/design.md`.
 
 pub mod client;
+pub mod service;
 pub mod types;
 
 use std::sync::Arc;
@@ -110,6 +111,8 @@ pub fn build_client(config: &TypesafeConfig) -> Option<Arc<dyn JudgmentClient>> 
 pub struct AiRuntime {
     pub client: Option<Arc<dyn JudgmentClient>>,
     pub model: String,
+    /// Present only when `client` is: the async judgment pipeline.
+    pub judgments: Option<Arc<service::JudgmentService>>,
 }
 
 impl AiRuntime {
@@ -117,7 +120,13 @@ impl AiRuntime {
         Self {
             client,
             model: model.into(),
+            judgments: None,
         }
+    }
+
+    pub fn with_judgments(mut self, judgments: Option<Arc<service::JudgmentService>>) -> Self {
+        self.judgments = judgments;
+        self
     }
 
     pub fn available(&self) -> bool {

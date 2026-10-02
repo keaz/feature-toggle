@@ -64,7 +64,6 @@ pub async fn run() -> std::io::Result<()> {
     } else {
         log::info!("TypeSafe judgments disabled (no TYPESAFE_API_KEY)");
     }
-    let ai_runtime = judgment::AiRuntime::new(ai_client.clone(), cfg.typesafe.model.clone());
 
     let db_pool = init_pg_pool().await;
     database::run_migrations(&db_pool)
@@ -214,6 +213,24 @@ pub async fn run() -> std::io::Result<()> {
         }
     });
 
+    let team_ai_settings_repository = database::ai::team_ai_settings_repository(db_pool.clone());
+    let judgment_service = ai_client.clone().map(|client| {
+        Arc::new(judgment::service::JudgmentService::new(
+            client,
+            database::ai::ai_judgment_repository(db_pool.clone()),
+            team_ai_settings_repository.clone_box(),
+        ))
+    });
+    if let Some(service) = judgment_service.clone() {
+        let ai_retry_scheduler =
+            scheduler::AiJudgmentRetryScheduler::new(service, Duration::from_secs(60));
+        tokio::spawn(async move {
+            ai_retry_scheduler.start().await;
+        });
+    }
+    let ai_runtime = judgment::AiRuntime::new(ai_client.clone(), cfg.typesafe.model.clone())
+        .with_judgments(judgment_service);
+
     // Start kill switch rollback scheduler
     let scheduler_feature_logic = feature_logic.clone();
     let scheduler_feature_repo = database::feature::feature_repository(db_pool.clone());
@@ -351,6 +368,7 @@ pub async fn run() -> std::io::Result<()> {
             .app_data(web::Data::new(compound_rules_repository.clone()))
             .app_data(web::Data::new(updates_tx.clone()))
             .app_data(web::Data::new(ai_runtime.clone()))
+            .app_data(web::Data::new(team_ai_settings_repository.clone_box()))
             .service(
                 web::resource("/metrics/track")
                     .guard(guard::Post())
