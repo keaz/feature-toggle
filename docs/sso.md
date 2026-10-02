@@ -82,6 +82,111 @@ Client authentication is `client_secret_basic`. FluxGate uses `client_secret_pos
 
 For example `https://fluxgate.example.com/api/v1/auth/sso/okta/callback`. The match is exact.
 
+## Admin UI walkthrough
+
+This walkthrough sets up Keycloak in the admin UI. The steps are the same for other IdPs. Setup recipes at the end of this page list the IdP-side settings.
+
+### Prerequisites
+
+- Sign in as a system admin. Other users see "Access Denied".
+- Set `FLUXGATE_ENCRYPTION_KEY` and restart the backend. The key must be standard base64 of 32 bytes: `openssl rand -base64 32`. Alternatively, provide the secret per provider with `FLUXGATE_SSO_<SLUG>_CLIENT_SECRET`. A missing or invalid key shows this message when you save a secret: `Server has no FLUXGATE_ENCRYPTION_KEY; set it or provide the secret via FLUXGATE_SSO_<SLUG>_CLIENT_SECRET`.
+- Set `public_base_url` (see "Backend settings"). The redirect URI shown in the form depends on it.
+- Create the roles and teams you want to map under **Settings → Roles** and **Settings → Teams**.
+
+### Step 1: Add a provider
+
+1. Open **Settings → Single Sign-On** (`/settings/sso`) and click **Add provider**.
+2. Fill in the form:
+
+| Field | Keycloak example |
+| --- | --- |
+| Display name | `Keycloak` (shown on the login button) |
+| Slug | `keycloak` (lowercase letters, digits and dashes) |
+| Issuer URL | `https://keycloak.example.com/realms/acme` |
+| Client ID | `fluxgate` |
+| Client secret | The secret from the Keycloak Credentials tab |
+| Scopes | Keep `openid`, `email`, `profile` |
+| Groups claim | `groups` |
+
+3. Copy the **Redirect URI** with the **Copy** button. Register it at the IdP exactly as shown (see "Redirect URI to register at the IdP").
+4. Leave **Enabled** off.
+5. Click **Create provider**.
+
+A badge next to **Client secret** shows its state: `Set`, `Not set`, or `Provided by environment variable (read-only)`. When you edit a provider, leave the field empty to keep the secret, or click **Clear secret** to remove it. Other fields (**Allowed email domains**, **Create accounts on first sign-in**, **Link to existing accounts by email**) are described in "Managing providers" and "Who may sign in".
+
+### Step 2: Test the connection
+
+1. In the provider list, click the **Edit provider** (pencil) button.
+2. Click **Test connection**.
+3. Success shows `Connection OK`, with the issuer and authorization endpoint. Failure shows `Connection failed` and an `Error:` line.
+
+The test uses the saved configuration, not unsaved edits. The button is not shown while you add a provider, so save first.
+
+### Step 3: Map groups
+
+1. In the provider list, click the **Group mappings** button.
+2. Click **Add mapping** for each row. Enter the group value, choose a **Target type** (`Role`, `Team` or `Admin`), then choose the target.
+3. Click **Save mappings**.
+
+Example:
+
+| Group value | Target type | Target |
+| --- | --- | --- |
+| `fluxgate-devs` | Role | Requester |
+| `fluxgate-devs` | Team | Payments |
+| `fluxgate-approvers` | Role | Approver |
+| `fluxgate-admins` | Admin | System administrator |
+
+- One group can map to several targets. Use one row per target.
+- The group value must match the IdP value exactly, including case. See "Group mapping and role sync".
+- Click the **Remove mapping** (trash) button to delete a row.
+- Saving replaces all mappings of the provider.
+- The editor shows these messages: `Group value is required.`, `Select a role.` or `Select a team.`, `Selected role no longer exists. Choose another.` (same for team), and `Duplicate mapping.`
+
+### Step 4: Choose the role sync mode
+
+Set **Role sync mode** in the provider form. See "Group mapping and role sync" for the full rules.
+
+- `Authoritative (IdP groups are the source of truth)`: use it when the IdP owns access. Sync also removes SSO-managed roles and teams. This is the default.
+- `Additive (only add roles and teams)`: use it when admins also manage access in FluxGate. Sync never removes anything.
+- `Off (do not sync roles)`: use it when SSO only authenticates users. Mappings are ignored.
+
+### Step 5: Enable and sign in
+
+1. Open the provider with **Edit provider**, turn **Enabled** on, and click **Save changes**. The list shows an `Enabled` badge.
+2. Open `/login`. The page shows a **Sign in with Keycloak** button above an `or` divider. The pattern is `Sign in with <Display name>`. The button is hidden when no provider is enabled.
+3. Click the button. The user signs in at the IdP and returns to FluxGate signed in.
+
+If a login fails, the user returns to `/login` with an error message above the form, for example `Your email domain is not allowed for this sign-in method.` See "Who may sign in" for the error codes.
+
+### Step 6: Verify
+
+- **Settings → Users** shows an `SSO` badge on users who sign in with SSO.
+- Open the user (**Edit User**). The **Basic Details** tab lists **Linked identities**: provider slug, email and last login.
+- On the **Assign Teams** and **Assign Roles** tabs, roles and teams granted by sync are checked, disabled, and marked with an `SSO` chip. The chip hint reads `Managed by single sign-on`.
+- If you change a locked assignment in another way (for example through the API), the request fails with `409 sso_managed` and the UI shows `This assignment is managed by single sign-on.` Remove the group at the IdP or remove the mapping. See the "Manual wins" rule.
+- On the user edit page, the **Admin** checkbox of a user whose admin flag came from an SSO `admin` mapping (`adminSource: "sso"`) is checked, locked, and marked with an `SSO` chip. The chip hint reads `Managed by single sign-on`. To change the flag, remove the user from the admin group at the IdP (or remove the admin mapping) and let the next SSO login revoke it. Then grant admin manually if needed.
+- A login that changes roles or teams writes a `sso_role_sync` activity.
+
+### Step 7 (optional): Enforce SSO
+
+Turn on **Enforce single sign-on** at the top of the **Single sign-on** page. The page warns: `Only break-glass admins (made admin manually, not through single sign-on) can still sign in with a password.` Everyone else sees `Password sign-in is disabled. Use single sign-on.`
+
+The toggle fails with `409 enforce_sso_requires_local_admin` when no enabled break-glass admin with a password exists. Keep at least one such admin with a strong password. See "Enforce SSO and break-glass admin". Test SSO login before you turn this on.
+
+### Troubleshooting
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| Save fails with `Server has no FLUXGATE_ENCRYPTION_KEY...` | The key is missing or invalid (not 32 bytes of standard base64). | Set a valid key and restart the backend, or use `FLUXGATE_SSO_<SLUG>_CLIENT_SECRET`. |
+| The IdP shows `redirect_uri` mismatch | The registered URI differs from the one FluxGate sends. `public_base_url` is unset or wrong. | Set `public_base_url`. Register the exact URI from the form. |
+| No login button | The provider is disabled, or the list failed to load. | Turn **Enabled** on. |
+| `Your email domain is not allowed for this sign-in method.` (`sso_email_domain_not_allowed`) | The domain is not in **Allowed email domains**, or the IdP does not send `email_verified: true`. | Add the domain, mark emails verified at the IdP, or empty the list. |
+| Roles are not synced | Wrong **Groups claim**; Keycloak **Full group path** is on, so groups arrive as `/fluxgate-devs`; sync mode is `Off`; or the mapping value differs in case. | Fix the claim name. Turn Full group path off or map `/fluxgate-devs`. Change the sync mode. Match the value exactly. |
+| `Sign-in session expired. Try again.` (`sso_state_invalid`) | A proxy strips the `fluxgate_sso_state` cookie, a second tab overwrote it, or the login took over 10 minutes. | Forward cookies on `/api/v1/auth/sso/`. Use one tab. Start again. |
+| Roles show in the Keycloak access token but are not synced | FluxGate reads the ID token (userinfo as fallback), never the access token. Keycloak client roles go only into the access token by default. | Add a mapper that sets Add to ID token and Add to userinfo. See the Keycloak recipe. |
+| `409 sso_managed` when you change a role or team | SSO sync owns the assignment. | Remove the group at the IdP or remove the mapping. |
+
 ## Who may sign in
 
 Checks run in this order after the id_token is valid:
@@ -124,11 +229,11 @@ Sync modes (applied at every SSO login):
 Rules:
 
 - **Manual wins.** Sync only removes assignments that it created (source `sso`). Assigning a role or team manually that a user holds through SSO converts the row to manual, and sync no longer removes it. Manually removing an SSO-managed role returns `409 sso_managed`. Remove the group from the user in the IdP, or remove the mapping.
-- **Admin.** Sync grants admin only to users who were not admins and marks the flag as SSO-managed. It revokes only an SSO-granted flag. Admins made manually, and admins that existed before SSO, are never revoked. If an admin saves a user who is already an SSO-granted admin in the UI with admin still on, the flag stays SSO-managed. To take ownership of the flag, revoke admin, then grant it again.
+- **Admin.** Sync grants admin only to users who were not admins and marks the flag as SSO-managed. It revokes only an SSO-granted flag. Admins made manually, and admins that existed before SSO, are never revoked. If an admin saves a user who is already an SSO-granted admin in the UI with admin still on, the flag stays SSO-managed. The users API reports the origin as `adminSource` (`manual` or `sso`). To take ownership of an SSO-granted flag, remove the user from the admin group at the IdP (or remove the admin mapping) and let the next SSO login revoke it, then grant admin manually. Through the API, revoking admin and then granting it again also works.
 - **Last admin.** Sync never removes the last enabled admin. It keeps the flag, logs a warning and writes an activity `sso_role_sync_warning`, at most once per 24 hours per user.
 - **Deleted targets.** Deleting a role or team deletes its mappings. Mappings whose target no longer exists are ignored.
 - **Audit.** A login that changes anything writes an activity `sso_role_sync` with the added and removed role and team IDs and the admin change. Other activities: `sso_user_provisioned`, `sso_identity_linked`, `sso_login`, `sso_provider_created|updated|deleted`, `sso_mappings_updated`, `sso_settings_updated`.
-- The users API shows `authSource`, `ssoManagedRoleIds`, `ssoManagedTeamIds` and `identities`.
+- The users API shows `authSource`, `adminSource`, `ssoManagedRoleIds`, `ssoManagedTeamIds` and `identities`. `adminSource` is `manual` or `sso` for admins and `null` for everyone else.
 - If sync is `authoritative` and the groups cannot be read (for example userinfo fails), the user logs in with SSO-managed roles removed. This fails closed.
 - **Stuck SSO rows.** Sync runs only at login through a provider with sync on. After a provider is deleted, or its sync is set to `off`, the SSO-managed roles and teams it granted stay and cannot be removed by hand (`409 sso_managed`). Workaround: assign the role or team manually (this converts the row to manual), then remove it.
 
@@ -162,8 +267,13 @@ In each recipe, replace `<slug>` with the slug you choose and register `<public_
 1. Create or pick a realm.
 2. Create a client: client type OpenID Connect, client authentication **on** (confidential), standard flow on. Valid redirect URI: `<public_base_url>/api/v1/auth/sso/<slug>/callback`.
 3. Copy the client secret from the Credentials tab.
-4. Groups: add a client scope mapper of type **Group Membership**, token claim name `groups`, **Full group path off**, add to ID token and userinfo. Group names then arrive as `fluxgate-devs`, not `/fluxgate-devs`. Or use realm roles: set `groupsClaim` to `realm_access.roles` and make sure the realm roles mapper has Add to ID token or Add to userinfo on (FluxGate reads userinfo when the id_token lacks the claim).
-5. Provider: `issuerUrl` = `https://<host>/realms/<realm>`, `groupsClaim` = `groups` (or `realm_access.roles`).
+4. Groups, roles or client roles. FluxGate reads claims from the ID token and falls back to userinfo. It never reads the access token. Pick one option below.
+   - Groups: add a client scope mapper of type **Group Membership**, token claim name `groups`, **Full group path off**, add to ID token and userinfo. Group names then arrive as `fluxgate-devs`, not `/fluxgate-devs`. Or use realm roles: set `groupsClaim` to `realm_access.roles` and make sure the realm roles mapper has Add to ID token or Add to userinfo on (FluxGate reads userinfo when the id_token lacks the claim).
+   - Client roles (third option): go to Clients → `<client>` → Client scopes → `<client>-dedicated` → Add mapper → By configuration → **User Client Role**. Set Client ID to the client, Token claim name to `groups`, **Multivalued** on, **Add to ID token** on and **Add to userinfo** on. Then set `groupsClaim` to `groups`.
+   - Client roles (alternative): in the built-in `roles` client scope, open the `client roles` mapper and turn **Add to ID token** (or **Add to userinfo**) on. Then set `groupsClaim` to `resource_access.<client>.roles`.
+   - Keycloak puts client roles only in the access token by default, so a client role mapping does nothing until one of these mappers adds the roles to the ID token or userinfo.
+   - Example mappings: client role `team_admin` → Role "Team Admin"; client role `perftest` → Team.
+5. Provider: `issuerUrl` = `https://<host>/realms/<realm>`, `groupsClaim` = `groups` (or `realm_access.roles`, or `resource_access.<client>.roles`).
 6. Make sure users have a verified email if you use domain restriction or linking.
 
 ### Okta
