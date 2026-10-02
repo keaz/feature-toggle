@@ -1825,6 +1825,26 @@ mod authorization_tests {
             .expect("insert scheduled change")
         }
 
+        /// Inserts a PENDING change that is not yet due. Unlike `insert_due_change`, no
+        /// concurrent scheduler run (`claim_due_scheduled_changes` claims every due
+        /// change in the database) can claim it, so tests that only touch the REST
+        /// layer stay independent of tests that run the scheduler.
+        async fn insert_future_change(&self, creator: Option<Uuid>, action: &str) -> Uuid {
+            sqlx::query_scalar(
+                r#"INSERT INTO scheduled_feature_changes
+                       (team_id, feature_id, action, reason, scheduled_at, requested_by)
+                   VALUES ($1, $2, $3, 'scheduled for test', NOW() + INTERVAL '1 hour', $4)
+                   RETURNING id"#,
+            )
+            .bind(self.team_id)
+            .bind(self.feature_id)
+            .bind(action)
+            .bind(creator)
+            .fetch_one(&self.pool)
+            .await
+            .expect("insert scheduled change")
+        }
+
         async fn change_state(&self, id: Uuid) -> (String, Option<String>) {
             sqlx::query_as::<_, (String, Option<String>)>(
                 "SELECT status, failure_message FROM scheduled_feature_changes WHERE id = $1",
@@ -2360,8 +2380,10 @@ mod authorization_tests {
     async fn reschedule_with_a_reason_records_against_the_scheduled_change() {
         let mut world = World::new().await;
         let admin = world.user(None, true, &[]).await;
+        // Not due: a due change would be claimed by a scheduler run in a parallel test,
+        // leaving it non-PENDING and making the reschedule answer 404.
         let change = world
-            .insert_due_change(Some(admin.id), "DISABLE_FEATURE")
+            .insert_future_change(Some(admin.id), "DISABLE_FEATURE")
             .await;
         let recorded: Recorded = Default::default();
         let when = (Utc::now() + ChronoDuration::hours(2)).to_rfc3339();
