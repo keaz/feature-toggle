@@ -10,17 +10,17 @@ Date: 2026-10-02. Read this after [`README.md`](README.md) and [`design.md`](des
 | AI-01 judgment store, team settings, service, retry sweep | Done, plus pre-AI-10 fixes | backend `88728a1..db0dc7e`, fixes `5ec630e` |
 | AI-02 UI settings page and `useAiFeatures` | Done | UI `02e7fd3`, `80bb277`, race fix `cb32e5b`, `useSharedQuery` fix `813342a` |
 | AI-10 approval risk assessment | Done | backend `69ef888` |
-| AI-20 justification check backend | **Ready to start** | backend |
+| AI-20 justification check backend | Done | backend `ddd3a6d` |
 | AI-30 flag kind backend | **Ready to start** | backend |
 | AI-40 NL search backend | **Ready to start** (better after AI-30, for the `flag_kind` filter) | backend |
 | AI-11 risk enforcement | **Ready to start** (AI-10 done). **Needs maintainer sign-off before merge** | backend |
 | AI-31 stale rules use flag kind | Blocked by AI-30. **Needs maintainer sign-off before merge** | backend |
 | AI-12 UI approval risk | **Ready to start** (AI-11 only for the extra-approver count) | UI |
-| AI-21 UI justification hint | Blocked by AI-20 | UI |
+| AI-21 UI justification hint | **Ready to start** (AI-20 done) | UI |
 | AI-32 UI flag kind | Blocked by AI-30 | UI |
 | AI-41 UI NL search palette | Blocked by AI-40 | UI |
 
-Suggested order: AI-20, AI-30 and AI-40 can run in parallel (AI-10 is done). Each UI task follows its backend task. AI-11 and AI-31 last, after sign-off.
+Suggested order: AI-30 and AI-40 can run in parallel (AI-10 and AI-20 are done). Each UI task follows its backend task. AI-11 and AI-31 last, after sign-off.
 
 Repo practice for this project: commit directly on `main` in each repo (the README's branch-per-task rule is not used here). Stage files by explicit path; both repos have unrelated local changes.
 
@@ -99,7 +99,7 @@ Repo practice for this project: commit directly on `main` in each repo (the READ
 
 - **AI-10 (done, `69ef888`):** pattern to copy: `judgment/approval_risk.rs` (pure `build_input`, `build`, `derive`; `apply` re-checks that its subject exists), a `submit_*` helper in the logic that skips on `None`/team toggle/policy and swallows errors, `load_ai_risk` in `rest/approval.rs` for batch reads (`map_request_with_policy` takes the summary). `AiJudgmentRepository` is a `web::Data`. Live tuning test and fixture: `tests/approval_risk_live_test.rs`, `tests/fixtures/ai/approval_risk.json` (accuracy 0.92). Mode `off` skips; every other mode behaves as `advisory` until AI-11. Details in the task's handoff log.
 - **AI-11 (sign-off):** `required_approvers_override` and `gate_auto_approve` use only `done` judgments with `derived->>'level' = 'high'`. Never reopen a closed request.
-- **AI-20:** `create_activity` / `create_activity_tx` must return the row id so the judgment can use (`activity`, id) as its subject. The rule check (ticket, URL, `#123`, `INC123`) records `done` without an API call; the service has no helper for that yet, so add a repository method or a handler path that writes `done` directly.
+- **AI-20 (done, `ddd3a6d`):** pattern to copy for recording: `judgment::justification::record_justification` (skips on no service, toggle off, blank input; swallows errors) called from REST handlers after the write, with `Option<web::Data<AiRuntime>>` as the extractor so existing apps and tests need no AI data; `rest::ai::record_reason` wraps it. `JudgmentService::record_rule_result` stores a rule-decided `done` row and runs `apply`; reuse it for any rule shortcut. `create_activity(_tx)` ids are threaded out only on the paths AI-20 needs (`emergency_*_in_tx` return a tuple, `update_feature_in_tx` returns `FeatureUpdateOutcome`, `enforce_freeze_*` return `Option<FreezeOverride>`). `ActivityLogRepository::merge_activity_metadata` adds a key to an entry's metadata. Handler test helper: `judgment::justification::test_support::recording_runtime`. Live fixture `tests/fixtures/ai/justification.json` (accuracy 1.00, 34 cases). Details in the task's handoff log.
 - **AI-30:** adding `flag_kind` fields to `model::Feature` breaks many struct literals in tests; fix them in the same change. `PATCH /features/{id}` is a full-body replace: only a changed `flag_kind` counts as a user choice (`Option<Option<_>>`).
 - **AI-31 (sign-off):** keep `FeatureLogicImpl::stale_reasons` and `stale_predicate_sql` equivalent.
 - **AI-40:** call 1 sends the team's tag and owner names (the settings page notice already says so). Keep Choice options at most 255 (254 values plus `none`/`unspecified`).

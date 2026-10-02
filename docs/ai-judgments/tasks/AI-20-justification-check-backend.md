@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Type | Feature |
-| Status | Not started |
+| Status | Done in ddd3a6d |
 | Repo | backend (`feature-toggle/`) |
 | Crate | `feature-toggle-backend` |
 | Depends on | AI-01 |
@@ -62,10 +62,10 @@ Tell users when a free-text reason is vague, before they submit (sync endpoint) 
 
 ## Acceptance criteria
 
-- [ ] All six paths record a judgment when the setting is on, and none do when it is off.
-- [ ] Emergency endpoint latency is unchanged; there is no API call in the request path.
-- [ ] The sync endpoint answers with `available: false`, never 5xx, on any TypeSafe failure.
-- [ ] Contract baseline is updated; all backend tests pass.
+- [x] All six paths record a judgment when the setting is on, and none do when it is off.
+- [x] Emergency endpoint latency is unchanged; there is no API call in the request path.
+- [x] The sync endpoint answers with `available: false`, never 5xx, on any TypeSafe failure.
+- [x] Contract baseline is updated; all backend tests pass.
 
 ## Out of scope
 
@@ -73,4 +73,35 @@ UI hint component (AI-21). Showing verdicts in the activity log UI (later).
 
 ## Handoff log
 
-_No entries yet._
+### 2026-10-02, Claude (AI-20 implementation)
+
+**What changed** (commit ddd3a6d):
+
+- `judgment/justification.rs`: `ReasonKind` (6 values, snake_case), `action_description`, `rule_check` (ticket key, URL, `#123`, `INC123`), `build_input`, `build`, `derive` (named thresholds `PLACEHOLDER_WEAK_AT` 0.6 and `CONCRETE_WEAK_BELOW` 0.4; a missing `concrete_cause` counts as 0.5 so incomplete answers never warn), `JustificationHandler` (`apply` merges `ai_justification` into the activity metadata for `activity` subjects, nothing for other subjects), and `record_justification` (the one helper every call site uses: skips on no service, blank reason, or team toggle off; rule pass goes to `record_rule_result`, otherwise `submit`; errors are logged and dropped). `test_support::recording_runtime` is a test-only `AiRuntime` for handler tests.
+- `JudgmentService::record_rule_result`: upserts the row, then in the background marks it `done` (`model = "rule"`, `derived = {verdict: "ok", source: "rule"}`) and runs the handler's `apply`, so the activity metadata gets `{verdict: "ok", probability: 1.0, model: "rule"}`. Like `submit`, it does not check the team toggle; callers do.
+- `ActivityLogRepository::merge_activity_metadata(id, key, value)` (`jsonb_set`, keeps other keys, no error for a missing row).
+- `POST /api/v1/teams/{team_id}/ai/justification-check` in `rest/ai.rs` (`JustificationCheckRequest`/`Response`, `ReasonKind` in `ApiDoc`; contract baseline updated). Reason is trimmed and must be 1 to 1000 characters, else 400. Unavailable (no key, toggle off, settings read error, client error) gives `{"available": false}`.
+- Logic: `emergency_disable_feature_in_tx` and `emergency_enable_feature_in_tx` now return `(Feature, activity_id)`. `update_feature_in_tx` returns `FeatureUpdateOutcome { feature, activity_id, cleanup_reason }`. It adds `cleanup_reason` to the `feature_lifecycle_updated` metadata only when the update moves the feature to `archived` and the stored reason is non-blank; `outcome.cleanup_reason` is set only then. `enforce_freeze_for_feature_environment` and `enforce_freeze_for_stage` return `Option<FreezeOverride>` (activity id, team, key, reason) when an override was used.
+- Recording call sites (all after the write, `Option<web::Data<AiRuntime>>` extractor so apps without an AI runtime still work): emergency disable and enable, `update_feature` (archive cleanup, and each freeze override), `request_stage_change` (freeze override), `create_scheduled_change`, `reschedule_scheduled_change`, `create_freeze_window`, `update_freeze_window`.
+- `lib.rs::run` registers `JustificationHandler` in the same `with_handler` chain. `regex = "1.10"` added to the backend crate.
+
+**Decisions and behavior to know:**
+
+- Subjects: activity row where one exists (emergency, freeze override, scheduled change create, archive). Reschedule uses (`scheduled_change`, id). Freeze windows use (`freeze_window`, id). Verdicts for the last two are only in `ai_judgments`, because they have no activity row to merge into.
+- Reschedule and freeze window update record only a reason sent in that request, not a stored one. A freeze window create records `reason` when present. Reschedule has no feature key, so the input has `feature_key: null`.
+- Freeze overrides are recorded right after `enforce_freeze_*` returns (the override activity row is already committed then), not after the later feature transaction. If that transaction fails, the judgment still exists for the override row.
+- Archive only records when the lifecycle stage actually changes to archived (that is the only case with a `feature_lifecycle_updated` row). Re-saving an archived feature records nothing.
+- `submit`/`record_rule_result` are awaited in the request; each is one upsert. No API call is in the request path. The emergency response does not change when it fails (tested).
+- The input stored in `ai_judgments` is `{reason_kind, reason, feature_key}`, reason trimmed and cut to 1000 characters. Rule check runs on the untruncated reason.
+- Retry sweep: failed justification rows rerun through `JustificationHandler::build` from the stored input.
+
+**Verified:**
+
+- `cargo test -p feature-toggle-backend` on `feture_toggle_test`: 628 unit tests, 251 integration tests, 25 grpc tests and contract compatibility all pass (0 failures). New tests: `judgment::justification` (rule, derive, wire snapshot, recording through the service with mocks), `rest::ai::tests::justification_check` (off, rule pass makes 0 client calls, model path, client error, 1001 chars gives 400), `rest::feature` handler tests (emergency disable/enable/off/submit fails, archive with and without reason), `rest::operational_safety` tests (schedule, reschedule, freeze window create/update, freeze override), integration `justification_recording_test` (activity ids, `cleanup_reason` in metadata, `merge_activity_metadata`).
+- Live tuning: `cargo test -p feature-toggle-backend --test justification_live_test -- --ignored --nocapture`. Fixture `tests/fixtures/ai/justification.json`: 34 labelled reasons (16 weak, 18 ok, 4 of them rule passes). Accuracy 34/34 = 1.00 with the design thresholds unchanged (min asserted 0.75). Weak placeholders score `placeholder_text` 0.4 to 0.99 and `concrete_cause` below 0.3; real reasons score `concrete_cause` 0.95 or more. Short non-placeholder weak reasons ("cleanup", "freeze", "not needed") are caught by `concrete_cause`, not `placeholder_text`.
+
+**For later tasks:**
+
+- AI-21 calls the new endpoint with `{reasonKind, reason, featureKey?}` and reads `{available, verdict, probability, hints, source}`; `available: false` means show nothing. Hints are fixed English strings.
+- Activity rows now carry `metadata.ai_justification = {verdict, probability, model}` once the judgment is done (later, not at write time). A UI that shows it must not assume it exists.
+- Not done (out of scope): UI hint (AI-21), showing verdicts in the activity log UI.
