@@ -1,0 +1,403 @@
+//! Persistence for TypeSafe judgments and per-team AI toggles.
+
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use mockall::automock;
+use serde::Serialize;
+use serde_json::Value;
+use sqlx::PgPool;
+use uuid::Uuid;
+
+use crate::database::{Error, handle_error};
+use crate::judgment::{JudgmentKind, SubjectType};
+
+/// Total attempts (first run plus sweeps) before a failed judgment stays failed.
+pub const MAX_ATTEMPTS: i32 = 3;
+/// Rows the retry sweep takes per tick.
+pub const RETRY_BATCH: i64 = 50;
+
+const TEAM_FK_CONSTRAINT: &str = "team_ai_settings_team_id_fkey";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AiFeature {
+    ApprovalRisk,
+    JustificationCheck,
+    FlagKind,
+    NlSearch,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct TeamAiSettings {
+    pub approval_risk: bool,
+    pub justification_check: bool,
+    pub flag_kind: bool,
+    pub nl_search: bool,
+}
+
+impl TeamAiSettings {
+    pub fn is_enabled(&self, feature: AiFeature) -> bool {
+        match feature {
+            AiFeature::ApprovalRisk => self.approval_risk,
+            AiFeature::JustificationCheck => self.justification_check,
+            AiFeature::FlagKind => self.flag_kind,
+            AiFeature::NlSearch => self.nl_search,
+        }
+    }
+}
+
+/// Settings plus audit fields. `updated_at` is `None` when no row exists.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StoredTeamAiSettings {
+    pub settings: TeamAiSettings,
+    pub updated_at: Option<DateTime<Utc>>,
+    pub updated_by: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct TeamAiSettingsRow {
+    approval_risk: bool,
+    justification_check: bool,
+    flag_kind: bool,
+    nl_search: bool,
+    updated_at: DateTime<Utc>,
+    updated_by: Option<Uuid>,
+}
+
+impl From<TeamAiSettingsRow> for StoredTeamAiSettings {
+    fn from(row: TeamAiSettingsRow) -> Self {
+        Self {
+            settings: TeamAiSettings {
+                approval_risk: row.approval_risk,
+                justification_check: row.justification_check,
+                flag_kind: row.flag_kind,
+                nl_search: row.nl_search,
+            },
+            updated_at: Some(row.updated_at),
+            updated_by: row.updated_by,
+        }
+    }
+}
+
+#[automock]
+#[async_trait]
+pub trait TeamAiSettingsRepository: Send + Sync {
+    /// All features off when the team has no row.
+    async fn get(&self, team_id: Uuid) -> Result<StoredTeamAiSettings, Error>;
+    /// `Error::NotFound(team_id)` when the team does not exist.
+    async fn upsert(
+        &self,
+        team_id: Uuid,
+        settings: TeamAiSettings,
+        updated_by: Option<Uuid>,
+    ) -> Result<StoredTeamAiSettings, Error>;
+    fn clone_box(&self) -> Box<dyn TeamAiSettingsRepository>;
+}
+
+impl Clone for Box<dyn TeamAiSettingsRepository> {
+    fn clone(&self) -> Box<dyn TeamAiSettingsRepository> {
+        self.clone_box()
+    }
+}
+
+pub fn team_ai_settings_repository(pool: PgPool) -> Box<dyn TeamAiSettingsRepository> {
+    Box::new(PgTeamAiSettingsRepository { pool })
+}
+
+#[derive(Clone)]
+pub struct PgTeamAiSettingsRepository {
+    pool: PgPool,
+}
+
+const SETTINGS_COLUMNS: &str =
+    "approval_risk, justification_check, flag_kind, nl_search, updated_at, updated_by";
+
+#[async_trait]
+impl TeamAiSettingsRepository for PgTeamAiSettingsRepository {
+    async fn get(&self, team_id: Uuid) -> Result<StoredTeamAiSettings, Error> {
+        let result = sqlx::query_as::<_, TeamAiSettingsRow>(&format!(
+            "SELECT {SETTINGS_COLUMNS} FROM team_ai_settings WHERE team_id = $1"
+        ))
+        .bind(team_id)
+        .fetch_optional(&self.pool)
+        .await;
+        Ok(handle_error(None, result)?
+            .map(StoredTeamAiSettings::from)
+            .unwrap_or_default())
+    }
+
+    async fn upsert(
+        &self,
+        team_id: Uuid,
+        settings: TeamAiSettings,
+        updated_by: Option<Uuid>,
+    ) -> Result<StoredTeamAiSettings, Error> {
+        let result = sqlx::query_as::<_, TeamAiSettingsRow>(&format!(
+            r#"
+            INSERT INTO team_ai_settings
+                (team_id, approval_risk, justification_check, flag_kind, nl_search, updated_at, updated_by)
+            VALUES ($1, $2, $3, $4, $5, NOW(), $6)
+            ON CONFLICT (team_id) DO UPDATE SET
+                approval_risk = EXCLUDED.approval_risk,
+                justification_check = EXCLUDED.justification_check,
+                flag_kind = EXCLUDED.flag_kind,
+                nl_search = EXCLUDED.nl_search,
+                updated_at = NOW(),
+                updated_by = EXCLUDED.updated_by
+            RETURNING {SETTINGS_COLUMNS}
+            "#
+        ))
+        .bind(team_id)
+        .bind(settings.approval_risk)
+        .bind(settings.justification_check)
+        .bind(settings.flag_kind)
+        .bind(settings.nl_search)
+        .bind(updated_by)
+        .fetch_one(&self.pool)
+        .await;
+
+        match result {
+            Err(sqlx::Error::Database(db_error))
+                if db_error.constraint() == Some(TEAM_FK_CONSTRAINT) =>
+            {
+                Err(Error::NotFound(team_id))
+            }
+            other => handle_error(Some(team_id), other).map(StoredTeamAiSettings::from),
+        }
+    }
+
+    fn clone_box(&self) -> Box<dyn TeamAiSettingsRepository> {
+        Box::new(self.clone())
+    }
+}
+
+/// One row of `ai_judgments`. `kind`, `subject_type`, `status` are the stored strings.
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
+pub struct AiJudgment {
+    pub id: Uuid,
+    pub team_id: Uuid,
+    pub subject_type: String,
+    pub subject_id: Uuid,
+    pub kind: String,
+    pub status: String,
+    pub attempts: i32,
+    pub input: Value,
+    pub input_hash: String,
+    pub model: Option<String>,
+    pub raw_answers: Option<Value>,
+    pub derived: Option<Value>,
+    pub input_tokens: Option<i32>,
+    pub error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewJudgment {
+    pub team_id: Uuid,
+    pub kind: JudgmentKind,
+    pub subject_type: SubjectType,
+    pub subject_id: Uuid,
+    pub input: Value,
+    pub input_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct JudgmentResult {
+    pub model: String,
+    pub raw_answers: Value,
+    pub derived: Value,
+    pub input_tokens: Option<i32>,
+}
+
+#[automock]
+#[async_trait]
+pub trait AiJudgmentRepository: Send + Sync {
+    /// Inserts or resets the row for (subject_type, subject_id, kind) to `pending`.
+    async fn upsert_pending(&self, judgment: NewJudgment) -> Result<AiJudgment, Error>;
+    /// False when `input_hash` no longer matches (a newer submission won).
+    async fn mark_done(
+        &self,
+        id: Uuid,
+        input_hash: String,
+        result: JudgmentResult,
+    ) -> Result<bool, Error>;
+    /// False when the hash is stale or the row is already done. Increments `attempts`.
+    async fn mark_failed(&self, id: Uuid, input_hash: String, error: String)
+    -> Result<bool, Error>;
+    async fn get_for_subject(
+        &self,
+        subject_type: SubjectType,
+        subject_id: Uuid,
+        kind: JudgmentKind,
+    ) -> Result<Option<AiJudgment>, Error>;
+    async fn get_for_subjects(
+        &self,
+        subject_type: SubjectType,
+        subject_ids: Vec<Uuid>,
+        kind: JudgmentKind,
+    ) -> Result<Vec<AiJudgment>, Error>;
+    /// Pending rows older than 2 minutes and failed rows under `MAX_ATTEMPTS`, oldest first.
+    async fn list_retryable(&self, limit: i64) -> Result<Vec<AiJudgment>, Error>;
+    fn clone_box(&self) -> Box<dyn AiJudgmentRepository>;
+}
+
+impl Clone for Box<dyn AiJudgmentRepository> {
+    fn clone(&self) -> Box<dyn AiJudgmentRepository> {
+        self.clone_box()
+    }
+}
+
+pub fn ai_judgment_repository(pool: PgPool) -> Box<dyn AiJudgmentRepository> {
+    Box::new(PgAiJudgmentRepository { pool })
+}
+
+#[derive(Clone)]
+pub struct PgAiJudgmentRepository {
+    pool: PgPool,
+}
+
+const JUDGMENT_COLUMNS: &str = "id, team_id, subject_type, subject_id, kind, status, attempts, \
+     input, input_hash, model, raw_answers, derived, input_tokens, error, created_at, completed_at";
+
+#[async_trait]
+impl AiJudgmentRepository for PgAiJudgmentRepository {
+    async fn upsert_pending(&self, judgment: NewJudgment) -> Result<AiJudgment, Error> {
+        let result = sqlx::query_as::<_, AiJudgment>(&format!(
+            r#"
+            INSERT INTO ai_judgments
+                (id, team_id, subject_type, subject_id, kind, status, attempts, input, input_hash)
+            VALUES ($1, $2, $3, $4, $5, 'pending', 0, $6, $7)
+            ON CONFLICT (subject_type, subject_id, kind) DO UPDATE SET
+                team_id = EXCLUDED.team_id,
+                status = 'pending',
+                attempts = 0,
+                input = EXCLUDED.input,
+                input_hash = EXCLUDED.input_hash,
+                model = NULL,
+                raw_answers = NULL,
+                derived = NULL,
+                input_tokens = NULL,
+                error = NULL,
+                created_at = NOW(),
+                completed_at = NULL
+            RETURNING {JUDGMENT_COLUMNS}
+            "#
+        ))
+        .bind(Uuid::new_v4())
+        .bind(judgment.team_id)
+        .bind(judgment.subject_type.as_str())
+        .bind(judgment.subject_id)
+        .bind(judgment.kind.as_str())
+        .bind(&judgment.input)
+        .bind(&judgment.input_hash)
+        .fetch_one(&self.pool)
+        .await;
+        handle_error(None, result)
+    }
+
+    async fn mark_done(
+        &self,
+        id: Uuid,
+        input_hash: String,
+        result: JudgmentResult,
+    ) -> Result<bool, Error> {
+        let outcome = sqlx::query(
+            r#"
+            UPDATE ai_judgments
+            SET status = 'done', model = $3, raw_answers = $4, derived = $5,
+                input_tokens = $6, error = NULL, completed_at = NOW()
+            WHERE id = $1 AND input_hash = $2
+            "#,
+        )
+        .bind(id)
+        .bind(&input_hash)
+        .bind(&result.model)
+        .bind(&result.raw_answers)
+        .bind(&result.derived)
+        .bind(result.input_tokens)
+        .execute(&self.pool)
+        .await;
+        Ok(handle_error(Some(id), outcome)?.rows_affected() > 0)
+    }
+
+    async fn mark_failed(
+        &self,
+        id: Uuid,
+        input_hash: String,
+        error: String,
+    ) -> Result<bool, Error> {
+        let outcome = sqlx::query(
+            r#"
+            UPDATE ai_judgments
+            SET status = 'failed', error = $3, attempts = attempts + 1
+            WHERE id = $1 AND input_hash = $2 AND status <> 'done'
+            "#,
+        )
+        .bind(id)
+        .bind(&input_hash)
+        .bind(&error)
+        .execute(&self.pool)
+        .await;
+        Ok(handle_error(Some(id), outcome)?.rows_affected() > 0)
+    }
+
+    async fn get_for_subject(
+        &self,
+        subject_type: SubjectType,
+        subject_id: Uuid,
+        kind: JudgmentKind,
+    ) -> Result<Option<AiJudgment>, Error> {
+        let result = sqlx::query_as::<_, AiJudgment>(&format!(
+            "SELECT {JUDGMENT_COLUMNS} FROM ai_judgments \
+             WHERE subject_type = $1 AND subject_id = $2 AND kind = $3"
+        ))
+        .bind(subject_type.as_str())
+        .bind(subject_id)
+        .bind(kind.as_str())
+        .fetch_optional(&self.pool)
+        .await;
+        handle_error(None, result)
+    }
+
+    async fn get_for_subjects(
+        &self,
+        subject_type: SubjectType,
+        subject_ids: Vec<Uuid>,
+        kind: JudgmentKind,
+    ) -> Result<Vec<AiJudgment>, Error> {
+        if subject_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let result = sqlx::query_as::<_, AiJudgment>(&format!(
+            "SELECT {JUDGMENT_COLUMNS} FROM ai_judgments \
+             WHERE subject_type = $1 AND subject_id = ANY($2) AND kind = $3"
+        ))
+        .bind(subject_type.as_str())
+        .bind(&subject_ids)
+        .bind(kind.as_str())
+        .fetch_all(&self.pool)
+        .await;
+        handle_error(None, result)
+    }
+
+    async fn list_retryable(&self, limit: i64) -> Result<Vec<AiJudgment>, Error> {
+        let result = sqlx::query_as::<_, AiJudgment>(&format!(
+            r#"
+            SELECT {JUDGMENT_COLUMNS} FROM ai_judgments
+            WHERE (status = 'pending' AND created_at < NOW() - INTERVAL '2 minutes')
+               OR (status = 'failed' AND attempts < $1)
+            ORDER BY created_at ASC
+            LIMIT $2
+            "#
+        ))
+        .bind(MAX_ATTEMPTS)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await;
+        handle_error(None, result)
+    }
+
+    fn clone_box(&self) -> Box<dyn AiJudgmentRepository> {
+        Box::new(self.clone())
+    }
+}

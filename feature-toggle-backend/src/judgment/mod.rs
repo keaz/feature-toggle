@@ -10,6 +10,76 @@ use crate::config::TypesafeConfig;
 
 pub use client::{HttpJudgmentClient, JudgmentClient, JudgmentError};
 
+use std::str::FromStr;
+
+/// What a judgment decides. Stored in `ai_judgments.kind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum JudgmentKind {
+    ApprovalRisk,
+    Justification,
+    FlagKind,
+}
+
+impl JudgmentKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            JudgmentKind::ApprovalRisk => "approval_risk",
+            JudgmentKind::Justification => "justification",
+            JudgmentKind::FlagKind => "flag_kind",
+        }
+    }
+}
+
+impl FromStr for JudgmentKind {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "approval_risk" => Ok(JudgmentKind::ApprovalRisk),
+            "justification" => Ok(JudgmentKind::Justification),
+            "flag_kind" => Ok(JudgmentKind::FlagKind),
+            other => Err(format!("unknown judgment kind: {other}")),
+        }
+    }
+}
+
+/// The row a judgment is about. Stored in `ai_judgments.subject_type`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SubjectType {
+    ApprovalRequest,
+    Feature,
+    Activity,
+    FreezeWindow,
+    ScheduledChange,
+}
+
+impl SubjectType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SubjectType::ApprovalRequest => "approval_request",
+            SubjectType::Feature => "feature",
+            SubjectType::Activity => "activity",
+            SubjectType::FreezeWindow => "freeze_window",
+            SubjectType::ScheduledChange => "scheduled_change",
+        }
+    }
+}
+
+impl FromStr for SubjectType {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "approval_request" => Ok(SubjectType::ApprovalRequest),
+            "feature" => Ok(SubjectType::Feature),
+            "activity" => Ok(SubjectType::Activity),
+            "freeze_window" => Ok(SubjectType::FreezeWindow),
+            "scheduled_change" => Ok(SubjectType::ScheduledChange),
+            other => Err(format!("unknown subject type: {other}")),
+        }
+    }
+}
+
 /// The only source of the API key. Never read it from TOML, never log it.
 pub const API_KEY_ENV: &str = "TYPESAFE_API_KEY";
 
@@ -88,6 +158,27 @@ mod tests {
             Some(value) => unsafe { std::env::set_var(API_KEY_ENV, value) },
             None => unsafe { std::env::remove_var(API_KEY_ENV) },
         }
+    }
+
+    #[test]
+    fn kind_and_subject_round_trip_through_strings() {
+        for kind in [
+            JudgmentKind::ApprovalRisk,
+            JudgmentKind::Justification,
+            JudgmentKind::FlagKind,
+        ] {
+            assert_eq!(kind.as_str().parse::<JudgmentKind>(), Ok(kind));
+        }
+        for subject in [
+            SubjectType::ApprovalRequest,
+            SubjectType::Feature,
+            SubjectType::Activity,
+            SubjectType::FreezeWindow,
+            SubjectType::ScheduledChange,
+        ] {
+            assert_eq!(subject.as_str().parse::<SubjectType>(), Ok(subject));
+        }
+        assert!("nope".parse::<JudgmentKind>().is_err());
     }
 
     #[test]

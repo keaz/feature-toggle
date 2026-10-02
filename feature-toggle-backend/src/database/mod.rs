@@ -1,4 +1,5 @@
 pub mod activity_log;
+pub mod ai;
 pub mod approval;
 pub mod canary;
 pub mod client;
