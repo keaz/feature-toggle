@@ -67,7 +67,7 @@ Features:
 | [x] | [AI-00](tasks/AI-00-typesafe-client-and-config.md) | TypeSafe config, client, wire types, `/ai/status` | backend | No | — |
 | [x] | [AI-01](tasks/AI-01-judgment-store-and-team-settings.md) | `ai_judgments`, `team_ai_settings`, settings API, `JudgmentService`, retry sweep | backend | No (all off) | AI-00 |
 | [x] | [AI-02](tasks/AI-02-ui-ai-foundation-and-settings.md) | UI: `api/ai.ts`, `useAiFeatures`, AI settings page | UI | New page | AI-01 |
-| [ ] | [AI-10](tasks/AI-10-approval-risk-assessment.md) | Approval risk assessment (advisory) | backend | Additive fields | AI-01 |
+| [x] | [AI-10](tasks/AI-10-approval-risk-assessment.md) | Approval risk assessment (advisory) | backend | Additive fields | AI-01 |
 | [ ] | [AI-11](tasks/AI-11-approval-risk-enforcement.md) | Risk enforcement: gate auto-approve, extra approver | backend | **Yes, needs sign-off** | AI-10 |
 | [ ] | [AI-12](tasks/AI-12-ui-approval-risk.md) | UI: risk panel, badge, policy mode | UI | New UI | AI-10, AI-02 (AI-11 for the extra-approver count) |
 | [ ] | [AI-20](tasks/AI-20-justification-check-backend.md) | Justification check: sync endpoint and post-submit recording | backend | Additive | AI-01 |

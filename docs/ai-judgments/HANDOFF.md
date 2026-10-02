@@ -9,18 +9,18 @@ Date: 2026-10-02. Read this after [`README.md`](README.md) and [`design.md`](des
 | AI-00 client, config, `/ai/status` | Done | backend `e9bf1e6..f7ddccb` |
 | AI-01 judgment store, team settings, service, retry sweep | Done, plus pre-AI-10 fixes | backend `88728a1..db0dc7e`, fixes `5ec630e` |
 | AI-02 UI settings page and `useAiFeatures` | Done | UI `02e7fd3`, `80bb277`, race fix `cb32e5b`, `useSharedQuery` fix `813342a` |
-| AI-10 approval risk assessment | **Ready to start** | backend |
+| AI-10 approval risk assessment | Done | backend `69ef888` |
 | AI-20 justification check backend | **Ready to start** | backend |
 | AI-30 flag kind backend | **Ready to start** | backend |
 | AI-40 NL search backend | **Ready to start** (better after AI-30, for the `flag_kind` filter) | backend |
-| AI-11 risk enforcement | Blocked by AI-10. **Needs maintainer sign-off before merge** | backend |
+| AI-11 risk enforcement | **Ready to start** (AI-10 done). **Needs maintainer sign-off before merge** | backend |
 | AI-31 stale rules use flag kind | Blocked by AI-30. **Needs maintainer sign-off before merge** | backend |
-| AI-12 UI approval risk | Blocked by AI-10 (and AI-11 for the extra-approver count) | UI |
+| AI-12 UI approval risk | **Ready to start** (AI-11 only for the extra-approver count) | UI |
 | AI-21 UI justification hint | Blocked by AI-20 | UI |
 | AI-32 UI flag kind | Blocked by AI-30 | UI |
 | AI-41 UI NL search palette | Blocked by AI-40 | UI |
 
-Suggested order: AI-10, AI-20, AI-30 and AI-40 can run in parallel. Each UI task follows its backend task. AI-11 and AI-31 last, after sign-off.
+Suggested order: AI-20, AI-30 and AI-40 can run in parallel (AI-10 is done). Each UI task follows its backend task. AI-11 and AI-31 last, after sign-off.
 
 Repo practice for this project: commit directly on `main` in each repo (the README's branch-per-task rule is not used here). Stage files by explicit path; both repos have unrelated local changes.
 
@@ -44,7 +44,7 @@ Repo practice for this project: commit directly on `main` in each repo (the READ
 
 1. Write `judgment/<kind>.rs` with a `JudgmentHandler`. Keep `build` and `derive` pure (snapshot tests on the request, table tests on `derive`). `apply` must re-check that its subject is still fresh, as design §3.4 says.
 2. Register it in `lib.rs::run`: today the service is built as `Arc::new(JudgmentService::new(...))`. Change that to `JudgmentService::new(...).with_handler(Arc::new(YourHandler::new(...)))` and then wrap it in `Arc`. Handlers cannot be added after the `Arc` exists.
-3. **Wiring order matters for AI-10.** The trigger is in `ApprovalLogicImpl::maybe_create_stage_change_request` (`logic/approval.rs`), but `lib.rs::run` builds `approval_logic` before `judgment_service`. Move the `team_ai_settings_repository` / `judgment_service` block above the logic services and pass `Option<Arc<JudgmentService>>` into the logic constructor. The same applies to the feature handlers in AI-20 and AI-30 if they submit from logic code.
+3. **Wiring order (done in AI-10).** The trigger is in `ApprovalLogicImpl::maybe_create_stage_change_request` (`logic/approval.rs`), but `lib.rs::run` builds `approval_logic` before `judgment_service`. AI-10 moved the `team_ai_settings_repository` / `judgment_service` block above the logic services and registers `ApprovalRiskHandler` there; add your handler to the same `with_handler` chain. Pass `Option<Arc<JudgmentService>>` into the logic constructor (see `approval_logic_with_notifications` for the pattern: tests pass `None`). The same applies to the feature handlers in AI-20 and AI-30 if they submit from logic code.
 4. At the call site: skip when the service is `None`, check `team_enabled(team_id, kind.feature())`, then `submit(...)`. Never let a submit error fail or slow the user's request: log it and continue.
 
 **Adding a sync endpoint (AI-20 pre-check, AI-30 suggestions, AI-40 NL search):** take `web::Data<AiRuntime>` and `web::Data<Box<dyn TeamAiSettingsRepository>>`. Return HTTP 200 with `{"available": false}` when `runtime.client` is `None`, the team toggle is off, or the call fails. Return 400 only for invalid input (design §6).
@@ -97,7 +97,7 @@ Repo practice for this project: commit directly on `main` in each repo (the READ
 
 ## 5. Notes per remaining task
 
-- **AI-10:** fill `ApprovalRequestResponse.ai_risk` with `AiJudgmentRepository::get_for_subjects` in list mappings (`map_request_with_policy` is also used by `rest/stream.rs`). Write the `approval_risk_assessed` activity in `apply`. A missing, pending or failed judgment means "assessment unavailable" (fail open, D3).
+- **AI-10 (done, `69ef888`):** pattern to copy: `judgment/approval_risk.rs` (pure `build_input`, `build`, `derive`; `apply` re-checks that its subject exists), a `submit_*` helper in the logic that skips on `None`/team toggle/policy and swallows errors, `load_ai_risk` in `rest/approval.rs` for batch reads (`map_request_with_policy` takes the summary). `AiJudgmentRepository` is a `web::Data`. Live tuning test and fixture: `tests/approval_risk_live_test.rs`, `tests/fixtures/ai/approval_risk.json` (accuracy 0.92). Mode `off` skips; every other mode behaves as `advisory` until AI-11. Details in the task's handoff log.
 - **AI-11 (sign-off):** `required_approvers_override` and `gate_auto_approve` use only `done` judgments with `derived->>'level' = 'high'`. Never reopen a closed request.
 - **AI-20:** `create_activity` / `create_activity_tx` must return the row id so the judgment can use (`activity`, id) as its subject. The rule check (ticket, URL, `#123`, `INC123`) records `done` without an API call; the service has no helper for that yet, so add a repository method or a handler path that writes `done` directly.
 - **AI-30:** adding `flag_kind` fields to `model::Feature` breaks many struct literals in tests; fix them in the same change. `PATCH /features/{id}` is a full-body replace: only a changed `flag_kind` counts as a user choice (`Option<Option<_>>`).

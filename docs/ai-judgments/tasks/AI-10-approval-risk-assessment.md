@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Type | Feature |
-| Status | Not started |
+| Status | Done in 69ef888 |
 | Repo | backend (`feature-toggle/`) |
 | Crate | `feature-toggle-backend` |
 | Depends on | AI-01 |
@@ -93,4 +93,36 @@ Gating auto-approve and extra approvers (AI-11). UI (AI-12).
 
 ## Handoff log
 
-_No entries yet._
+### 2026-10-02, Claude (AI-10 implementation)
+
+**What changed** (commit `69ef888`):
+
+- Migration `20261002040000_approval_policy_ai_risk_mode.sql` adds `approval_policies.ai_risk_mode` (default `advisory`, CHECK on the 4 values). Entity, inputs, all policy SQL, and the three DTOs carry it. Create defaults to `advisory`; update keeps the stored value when the field is absent; unknown values give 400.
+- `judgment/approval_risk.rs`: `build_input` (bucketed numbers, 30 diff entries, 200-char values, no owner or ids), `ApprovalRiskHandler` (4 questions with the design text, `derive` with named threshold constants, `apply` writes `approval_risk_assessed`).
+- `ApprovalLogicImpl` takes `Option<Arc<JudgmentService>>` (last argument of `approval_logic_with_notifications` and `approval_logic_with_pool_and_notifications`; `approval_logic` and `approval_logic_with_pool` pass `None`). `submit_risk_assessment` runs right after `create_request` succeeds. Every error is logged and swallowed.
+- `lib.rs::run` builds the judgment service (with the handler) before the logic services.
+- Responses: `ApprovalRequestResponse.aiRisk` and `requiredApprovalsEffective`. `list_approval_requests` loads judgments with one `get_for_subjects` call. `approve`/`reject`/`cancel` and the WebSocket stream fill the fields too. `AiJudgmentRepository` is now a `web::Data` registered in `lib.rs`.
+- `ApiDoc` has `AiRiskStatus` and `AiRiskSummary`; contract baseline updated.
+
+**Decisions and behavior to know:**
+
+- Every mode except `off` behaves like `advisory`. `requiredApprovalsEffective` is the policy's `required_approvers` (falls back to the policy snapshot in `change_payload` when the policy row is gone, then to 1).
+- `apply` fetches the request through `ApprovalRepository::get_request_by_id` for the feature id, and skips when the request no longer exists. It logs the activity even when the request is already closed (history, not a decision). The activity uses `entity_type = feature`, `entity_id = feature id`, no actor, so it shows in the feature history.
+- AI-11 extends `ApprovalRiskHandler::apply` (it already holds the approval repository). It has no pool or transaction yet; the `required_approvers_override` update needs a new repository method.
+- The stream (`rest/stream.rs`) used to map requests with no policy. It now loads the policy per request (like the list endpoint) so `policy` and `requiredApprovalsEffective` are right there too. `policy` in stream messages is therefore populated now (additive).
+- Reason strings: a reason is listed when its signal reaches the threshold of the rule it triggers (widens >= 0.7, safety >= 0.7, sensitive >= 0.7 or (>= 0.6 with widens >= 0.7), impact >= 1.3, confidence < 0.3).
+- Missing answers count as 0 with zero confidence, so an incomplete answer set reads as medium ("Assessment uncertain").
+- `feature.description` and `feature.purpose` are cut to 500 characters (not in the design; keeps the state small).
+- In a test module that imports `actix_web::test`, `#[test]` resolves to the actix module: use `#[actix_web::test]` (as `rest/approval.rs` tests do).
+
+**Verified:**
+
+- `cargo test -p feature-toggle-backend` on `feture_toggle_test`: all pass (589 lib tests, 247 integration tests). Clippy has no new warnings. Contract check passes.
+- Live tuning: `cargo test -p feature-toggle-backend --test approval_risk_live_test -- --ignored --nocapture`. Fixture `tests/fixtures/ai/approval_risk.json` has 26 labelled cases (8 high, 8 medium, 10 low). Accuracy 24/26 = 0.92 with the design thresholds unchanged (min asserted 0.7). Confusion (rows expected): low 9/1/0, medium 0/7/1, high 0/0/8. The two misses: "new invoice PDF layout for early customers" (medium expected, high: billing read as sensitive 0.92) and "seasonal banner rolled back in production" (low expected, medium: overall_risk 1.77). Both defensible; no threshold change.
+- Live end-to-end: `live_stage_change_request_gets_a_done_assessment` (ignored, needs key and the seeded test DB) creates a stage-change request through `ApprovalLogic`, waits for the judgment to reach `done`, and checks the `approval_risk_assessed` activity. It passed (level `high` for a payments flag).
+
+**For later tasks:**
+
+- AI-12 reads `aiRisk` (`status`, `level`, `reasons`, `signals`, `model`, `assessedAt`) and `requiredApprovalsEffective`; the policy DTOs have `aiRiskMode`.
+- The seeded policy needs 2 eligible approvers when the logic has a DB pool. Tests that create requests through a pool-based logic need approvers; the pool-less constructor skips that check.
+- Not done (out of scope): enforcement (AI-11), UI (AI-12). The api-tests were not changed.
