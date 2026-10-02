@@ -403,11 +403,11 @@ Response:
 
 ```jsonc
 { "available": true,
-  "filtersApplied": { "lifecycleStage": "active", "stale": true, "tag": "payments" },
+  "filtersApplied": { "lifecycleStage": "ACTIVE", "stale": true, "tag": "payments" },
   "results": [ { "feature": { /* same item shape as GET /teams/{id}/features */ }, "relevance": 0.91 } ] }
 ```
 
-If unavailable, the response is `{ "available": false }`.
+If unavailable, the response is `{ "available": false }`. `filtersApplied` uses the same field names and the same REST enum spelling as `FeatureListQuery` (`lifecycleStage` and `featureType` are upper case, for example `ARCHIVED`, `CONTEXTUAL`; `flagKind` is lower case), so its values can be sent back to the list endpoint unchanged. Only the filters that were applied are present.
 
 **Call 1: map the query to filters.** State `{ "query": "..." }`. One Choice per filter. Every Choice has an `unspecified` option meaning "The query does not say".
 
@@ -423,9 +423,26 @@ If unavailable, the response is `{ "available": false }`.
 | `tag` | the team's distinct tags (the 254 most used) plus `none` |
 | `owner` | the team's distinct owners (the 254 most used) plus `none` |
 
-Also a Noul `has_topic`: "Does `query` describe what the flags are about, such as a product area, feature, or behavior, beyond status filters like stale, archived, owner, or tag?"
+Also a Noul `has_topic`.
 
-Code applies a filter only when the chosen option is not `unspecified` or `none` and its confidence is at least 0.6. Write instructions per Choice, for example "Which lifecycle stage does `query` ask for?"
+**As built** (`judgment/nl_search.rs`, constants `Q_*`). The first draft used "Which X does `query` ask for?" and scored 0.43 filter accuracy on the live fixture, because that wording invites the model to answer even when the query never mentions X. The wording below scored 0.86. Each Choice also has a description per option; `unspecified` means "The query does not mention this."
+
+| id | instruction |
+|---|---|
+| `lifecycle_stage` | Does `query` name a lifecycle stage for the flags, and which one? Choose `unspecified` unless the query says draft, active, deprecated, archived, or a close synonym such as retired. |
+| `stale` | Does `query` say the flags must be stale or must not be stale? Choose `unspecified` unless the query uses a word such as stale, unused, abandoned, forgotten, cleanup, or still in use. Do not choose `stale` only because the query says expired. |
+| `expired` | Does `query` say the flags must be expired or must not be expired? Choose `unspecified` unless the query mentions expiry or expiration. Being stale or unused is not the same as being expired. |
+| `feature_type` | Does `query` name a feature type, and which one? Choose `unspecified` unless the query says simple, contextual, or describes targeting by context. |
+| `dependency_status` | Does `query` ask about dependencies between flags? Choose `unspecified` unless the query mentions dependencies or flags that depend on or block other flags. (`has_dependencies`: the flag depends on others. `blocked_by_dependencies`: other flags depend on it. This follows the existing SQL filter.) |
+| `approval_status` | Does `query` ask for flags that have an approval request in a given status? Choose `unspecified` unless the query mentions approvals or approval requests. |
+| `flag_kind` | Does `query` name a kind of flag, and which one? Choose `unspecified` unless the query says release, experiment, ops, permission, config, or unclassified (or a clear synonym such as kill switch, A/B test, or entitlement). |
+| `tag` | Which of these tags does `query` ask for, for example by naming the tag or its product area? Choose `none` when the query names no tag. |
+| `owner` | Which of these owners does `query` ask for? Choose `none` when the query names no owner. |
+| `has_topic` (Noul) | Does `query` describe what the flags are about, such as a product area, feature, or behavior, beyond status filters like stale, expired, archived, owner, tag, flag kind, feature type, dependencies, or approvals? |
+
+Tag and owner options come from unarchived features only (the 254 most used, trimmed, de-duplicated). A tag or owner spelled `none` (any case) is skipped, so it cannot be selected. The Choice is left out when the team has no values. Code ignores a chosen tag or owner that was not among the offered values.
+
+Code applies a filter only when the chosen option is not `unspecified` or `none` and its confidence is at least 0.6.
 
 **Candidates.** Run the existing list query (`get_features_windowed` path) with the applied filters, ordered by `evaluation_count_30d` descending, taking at most 50.
 

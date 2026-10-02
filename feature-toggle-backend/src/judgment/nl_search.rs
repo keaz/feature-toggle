@@ -229,17 +229,23 @@ fn fixed_choice(instructions: &str, options: &[(&str, &str)]) -> Question {
     .expect("fixed filter options are within the choice limits")
 }
 
-/// A Choice over team values (at most 254, first listed wins) plus `none`.
-/// Blank values, repeats, and any value spelled like the `none` option are skipped.
-fn value_choice(instructions: &str, none_text: &str, values: &[String]) -> Option<Question> {
+/// The team values a Choice offers: trimmed, without blanks, repeats, or
+/// anything spelled like `none`, at most 254, in the given order.
+fn offered_values(values: &[String]) -> Vec<&str> {
     let mut seen = std::collections::BTreeSet::new();
-    let kept: Vec<&str> = values
+    values
         .iter()
         .map(|value| value.trim())
         .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case(NONE))
         .filter(|value| seen.insert(*value))
         .take(MAX_FILTER_VALUES)
-        .collect();
+        .collect()
+}
+
+/// A Choice over team values (at most 254, first listed wins) plus `none`.
+/// Blank values, repeats, and any value spelled like the `none` option are skipped.
+fn value_choice(instructions: &str, none_text: &str, values: &[String]) -> Option<Question> {
+    let kept = offered_values(values);
     if kept.is_empty() {
         return None;
     }
@@ -269,8 +275,10 @@ fn confident_choice<'a>(answers: &'a Answers, id: &str) -> Option<&'a str> {
 }
 
 /// The filters to apply: only confident answers that name an option. A value
-/// the code does not recognise is ignored.
-pub fn derive_filters(answers: &Answers) -> AppliedFilters {
+/// the code does not recognise is ignored, and so is a tag or owner that was
+/// not among the offered `tags` and `owners` (the lists given to
+/// [`build_filter_questions`]).
+pub fn derive_filters(answers: &Answers, tags: &[String], owners: &[String]) -> AppliedFilters {
     AppliedFilters {
         lifecycle_stage: confident_choice(answers, Q_LIFECYCLE_STAGE).and_then(
             |value| match value {
@@ -313,8 +321,12 @@ pub fn derive_filters(answers: &Answers) -> AppliedFilters {
             .map(str::to_string),
         flag_kind: confident_choice(answers, Q_FLAG_KIND)
             .and_then(|value| value.parse::<FlagKindFilter>().ok()),
-        tag: confident_choice(answers, Q_TAG).map(str::to_string),
-        owner: confident_choice(answers, Q_OWNER).map(str::to_string),
+        tag: confident_choice(answers, Q_TAG)
+            .filter(|value| offered_values(tags).contains(value))
+            .map(str::to_string),
+        owner: confident_choice(answers, Q_OWNER)
+            .filter(|value| offered_values(owners).contains(value))
+            .map(str::to_string),
     }
 }
 
@@ -441,7 +453,7 @@ pub async fn search(
             SearchError::Unavailable
         })?;
     let mut input_tokens = u64::from(filter_response.usage.input_tokens);
-    let filters = derive_filters(&filter_response.answers);
+    let filters = derive_filters(&filter_response.answers, &tags, &owners);
 
     let candidates = logic
         .search_features_by_usage(ID::from(team_id), filters.clone(), MAX_CANDIDATES)
@@ -503,6 +515,11 @@ mod tests {
         let mut values = names(values);
         values.sort();
         values
+    }
+
+    /// `derive_filters` with the tag `payments` and the owner `ann` on offer.
+    fn derive(answers: &Answers) -> AppliedFilters {
+        derive_filters(answers, &names(&["payments"]), &names(&["ann"]))
     }
 
     fn choice(value: &str, confidence: f64) -> Answer {
@@ -719,7 +736,7 @@ mod tests {
 
     #[test]
     fn derive_applies_confident_answers() {
-        let filters = derive_filters(&answers(vec![
+        let filters = derive(&answers(vec![
             (Q_LIFECYCLE_STAGE, choice("archived", 0.9)),
             (Q_STALE, choice("stale", 0.8)),
             (Q_EXPIRED, choice("not_expired", 0.7)),
@@ -748,7 +765,7 @@ mod tests {
 
     #[test]
     fn derive_maps_the_negative_booleans() {
-        let filters = derive_filters(&answers(vec![
+        let filters = derive(&answers(vec![
             (Q_STALE, choice("not_stale", 0.9)),
             (Q_EXPIRED, choice("expired", 0.9)),
             (Q_FLAG_KIND, choice("unclassified", 0.9)),
@@ -760,7 +777,7 @@ mod tests {
 
     #[test]
     fn derive_ignores_low_confidence_unspecified_none_and_unknown_values() {
-        let filters = derive_filters(&answers(vec![
+        let filters = derive(&answers(vec![
             (Q_LIFECYCLE_STAGE, choice("archived", 0.59)),
             (Q_STALE, choice("unspecified", 0.99)),
             (Q_TAG, choice("none", 0.99)),
@@ -770,15 +787,33 @@ mod tests {
             (Q_EXPIRED, Answer::Noul { noul: 0.99 }),
         ]));
         assert_eq!(filters, AppliedFilters::default());
+        assert_eq!(derive(&Answers::default()), AppliedFilters::default());
+    }
+
+    #[test]
+    fn derive_ignores_a_tag_or_owner_that_was_not_offered() {
+        let answered = answers(vec![
+            (Q_TAG, choice("invented", 0.95)),
+            (Q_OWNER, choice("bob", 0.95)),
+        ]);
+        assert_eq!(derive(&answered), AppliedFilters::default());
+        // Without any offered values nothing can apply, even a confident answer.
         assert_eq!(
-            derive_filters(&Answers::default()),
+            derive_filters(&answers(vec![(Q_TAG, choice("payments", 0.95))]), &[], &[]),
             AppliedFilters::default()
         );
+        // Offered values are compared after the same trimming the Choice used.
+        let filters = derive_filters(
+            &answers(vec![(Q_TAG, choice("payments", 0.95))]),
+            &names(&[" payments "]),
+            &[],
+        );
+        assert_eq!(filters.tag.as_deref(), Some("payments"));
     }
 
     #[test]
     fn derive_applies_a_filter_at_exactly_the_threshold() {
-        let filters = derive_filters(&answers(vec![(Q_STALE, choice("stale", 0.6))]));
+        let filters = derive(&answers(vec![(Q_STALE, choice("stale", 0.6))]));
         assert_eq!(filters.stale, Some(true));
     }
 
