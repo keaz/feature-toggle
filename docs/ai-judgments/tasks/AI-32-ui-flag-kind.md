@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Type | Feature (UI) |
-| Status | Not started |
+| Status | Done in UI `9aa9005` |
 | Repo | UI (`../feature-toggle-ui/`) |
 | Depends on | AI-30, AI-02 |
 | Behavior change | New UI only |
@@ -67,4 +67,26 @@ Backend. Bulk "set kind" actions.
 
 ## Handoff log
 
-_No entries yet._
+### 2026-10-02, Claude (AI-32 implementation)
+
+**What changed** (UI commit 9aa9005):
+
+- `api/features.ts`: `FlagKind`, `FlagKindSource`; `Feature` gains `flagKind`, `flagKindSource`, `flagKindConfidence`; create and update inputs gain `flagKind`; `FeatureFilters.flagKind` (`FlagKind | 'unclassified'`) is passed by `fetchFeatures`. `api/ai.ts`: `getFeatureSuggestions`, `backfillFlagKinds`.
+- `lib/flagKind.ts`: labels (short for badges, "Ops / kill switch" for select options) and `isStaleExemptKind` (ops, permission, config).
+- `hooks/useFeatureSuggestions.ts`: debounced (1 s idle on description or purpose change, immediate on blur) suggestions call. Needs a non-empty key and the team's `flagKind` toggle. Skips an identical repeat request, ignores stale responses, renders nothing on `available: false` or an error.
+- `components/features/FlagKindField.tsx`: Kind select (5 kinds plus "Not set"), muted "AI suggested" label for an untouched AI value, "Suggested: Ops (82%) · Use" chip for an empty untouched field, and `SuggestedTagChips` (up to 5 "＋tag" chips, hides tags already entered).
+- `FeatureCreate.tsx`: Kind field next to the type select, tag chips under the tag preview. `flagKind` is sent on create and update only when `flagKindTouched`; "Not set" after a touch sends `null`. Touch state resets when the saved feature is reloaded.
+- `FeatureTable.tsx`: "Kind" select filter (kinds plus Unclassified) seeded from and written to the `flagKind` URL param, included in saved views (old saved views without it load as unset); kind badge next to the lifecycle badge.
+- `FeatureDetail.tsx`: Lifecycle card shows "Kind: Ops (AI, 82%)" or "(set by user)" when a kind exists, and the muted note "Inactivity stale checks skipped for this kind" for ops, permission and config (ahead of AI-31, per ruling).
+- `AiSettingsPage.tsx`: "Classify existing flags" button under the flag kind toggle, shown when the server has AI and the saved `flagKind` toggle is on (not for an unsaved toggle); toasts `Queued N flags` (`Queued 1 flag` for one).
+
+**Decisions and behavior to know:**
+
+- Suggestions trigger from user edits only, not when an existing feature loads in edit mode.
+- The kind chip shows only for an empty, untouched kind (a stored NULL with source `user` still counts as empty).
+- With no kind set the detail page shows no Kind row, so a page without kinds looks as before.
+- The note text appears before AI-31 lands; until then it is slightly ahead of the backend behavior.
+- The backend sends `flagKindConfidence` only for the `ai` source; the detail page omits the percentage when it is missing.
+
+**Verified:** `pnpm lint`, `pnpm build`, `pnpm test:run` (80 files, 616 tests, includes the design-token guard). New tests: `api/ai.test.ts`, `hooks/useFeatureSuggestions.test.tsx`, `FlagKindField.test.tsx`, `FeatureDetail.test.tsx`, plus new cases in `FeatureCreate.test.tsx` (the Select mock now forwards `onValueChange`), `FeatureTable.test.tsx` (memory router, because the test setup stubs `window.history`), `AiSettingsPage.test.tsx`. The unrelated 2-line local change in `FeatureDetail.tsx` was not committed.
+

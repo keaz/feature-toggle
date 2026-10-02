@@ -17,7 +17,7 @@ Date: 2026-10-02. Read this after [`README.md`](README.md) and [`design.md`](des
 | AI-31 stale rules use flag kind | **Ready to start** (AI-30 done). **Needs maintainer sign-off before merge** | backend |
 | AI-12 UI approval risk | **Ready to start** (AI-11 only for the extra-approver count) | UI |
 | AI-21 UI justification hint | Done | UI `1672526` |
-| AI-32 UI flag kind | **Ready to start** (AI-30 done) | UI |
+| AI-32 UI flag kind | Done | UI `9aa9005` |
 | AI-41 UI NL search palette | Blocked by AI-40 | UI |
 
 Suggested order: AI-30 and AI-40 can run in parallel (AI-10 and AI-20 are done). Each UI task follows its backend task. AI-11 and AI-31 last, after sign-off.
