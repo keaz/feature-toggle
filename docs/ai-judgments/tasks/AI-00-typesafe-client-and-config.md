@@ -71,12 +71,12 @@ Add a typed, testable client for `POST https://api.typesafe.ai/v1/systemone` and
 
 ## Acceptance criteria
 
-- [ ] With no key, the server starts, logs "disabled", and `GET /api/v1/ai/status` returns `{"available": false, "model": null}`.
-- [ ] With a key, `/ai/status` returns `available: true` and model `jev-1.13.0`.
+- [x] With no key, the server starts, logs "disabled", and `GET /api/v1/ai/status` returns `{"available": false, "model": null}`.
+- [x] With a key, `/ai/status` returns `available: true` and model `jev-1.13.0`.
 - [x] The live smoke test passes with a real key.
 - [x] `MockJudgmentClient` is usable from other modules' tests.
 - [x] The contract compatibility check passes after the baseline update.
-- [ ] No key appears in any log or committed file.
+- [x] No key appears in any log or committed file.
 
 ## Out of scope
 

@@ -71,7 +71,7 @@ Give later tasks one way to run an async judgment: `JudgmentService::submit(...)
 ## Acceptance criteria
 
 - [x] Migrations apply on a clean DB and on a DB with existing data.
-- [ ] Without a key, the service is not built, the scheduler is not started, and the settings API still works and returns `available: false`.
+- [x] Without a key, the service is not built, the scheduler is not started, and the settings API still works and returns `available: false`.
 - [x] With a key and a fake handler registered in a test, a submitted judgment reaches `done` and apply runs once.
 - [x] A failed judgment is retried by the sweep at most 3 times in total.
 - [x] Contract baseline is updated; all backend tests pass.

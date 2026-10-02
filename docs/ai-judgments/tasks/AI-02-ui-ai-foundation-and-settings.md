@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Type | Feature (UI foundation) |
-| Status | Not started |
+| Status | Done in 80bb277 (feature-toggle-ui, commits 02e7fd3, 80bb277) |
 | Repo | UI (`../feature-toggle-ui/`, separate git repo) |
 | Depends on | AI-01 merged and deployed to the dev backend |
 | Behavior change | New settings page. Nothing else changes. |
@@ -60,7 +60,7 @@ Give every AI UI task one hook that answers "is this AI feature on for this team
 
 ## Acceptance criteria
 
-- [ ] `npm run lint`, `npm run build`, and `npm run test:run` pass, including the design-token guard.
+- [x] `pnpm lint`, `pnpm build`, and `pnpm test:run` pass (this repo uses pnpm), including the design-token guard.
 - [ ] With the backend running without a key, the page shows the not-configured state.
 - [ ] With a key, the toggles persist across reload.
 
@@ -71,3 +71,11 @@ Any feature-specific AI UI (AI-12, AI-21, AI-32, AI-41).
 ## Handoff log
 
 _No entries yet._
+
+### 2026-10-02, Claude (plan 2026-10-02-ai-judgments-foundation)
+
+- Changed (UI repo): `api/ai.ts`, `hooks/useAiFeatures.ts` (a feature is on only when `available` and its toggle are both true; any error means all off), `pages/AiSettingsPage.tsx` (system-admin only, team from `TeamContext`, data notice, not-configured and load-error states), route `/settings/ai`, Settings nav item "AI assistance" (admin gate).
+- Verified: `pnpm lint`, `pnpm build`, `pnpm test:run` (75 files, 554 tests). Backend end to end on a seeded test DB: without a key the server logs "disabled", `/ai/status` returns `{"available":false,"model":null}` and settings return `available: false`; with a key it logs "enabled (model jev-1.13.0)", a PUT persists and the next GET returns it, and an `ai_settings_updated` activity row is written. The key appears in no log line and no commit.
+- Not verified: the page in a real browser (the two unticked boxes). The page states are covered by component tests and the API by the end-to-end calls above.
+- Note: `useSharedQuery` does not handle the rejection of its background fetch (every consumer gets an unhandled rejection on a failed request). `useAiFeatures` maps a failed fetch to `null` to avoid it; the shared hook is unchanged.
+- Next: AI-12, AI-21, AI-32, AI-41 call `useAiFeatures(selectedTeam?.id)` and hide their UI when the flag is false.
