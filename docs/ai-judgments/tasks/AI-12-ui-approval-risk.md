@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Type | Feature (UI) |
-| Status | Not started |
+| Status | Done in UI `fb3a756` |
 | Repo | UI (`../feature-toggle-ui/`) |
 | Depends on | AI-10 and AI-02. AI-11 is needed only for a non-default `requiredApprovalsEffective`; the UI just displays the field. |
 | Behavior change | New UI only |
@@ -71,4 +71,22 @@ Backend logic. Any change to vote buttons or flows.
 
 ## Handoff log
 
-_No entries yet._
+### 2026-10-02, Claude (AI-12 implementation)
+
+**What changed** (UI commit `fb3a756`):
+
+- Types: `AiRiskSummary`, `ApprovalRequest.aiRisk`, `requiredApprovalsEffective` in `api/approvals.ts`; `AiRiskMode` and `aiRiskMode` on policy, create and update inputs, and form state in `types/approval.ts`. `ApprovalPolicy.aiRiskMode` is optional in the type so older fixtures still compile; the server always sends it.
+- `components/approvals/AiRiskPanel.tsx`: `AiRiskPanel` (pending skeleton "Assessing risk…", done level badge plus reasons plus collapsible Signals and model, failed muted text, advisory footer with the policy mode) and `AiRiskLevelBadge` (compact badge in the card header, only for a done assessment with a level). Both render nothing unless `useAiFeatures(teamId).approvalRisk` is on. Panel sits between the badges row and Blast radius.
+- Poll: `ApprovalsPage` uses 5 s while AI is on and any listed request is `pending`, 30 s otherwise (state set from the data, so it returns to 30 s once nothing is pending). Applies to both the pending query and the paged query.
+- Effective approvals: the policy block shows `requiredApprovalsEffective` when present. When it exceeds the policy `requiredApprovers`, the card shows "+1 approver required: high AI risk" (or "+N approvers ..."). It is not gated on the AI flag, because the raised requirement stays true after AI is turned off.
+- Policy form: "AI risk mode" select (4 options, help text: default is Advisory, enforcement fails open), shown only when `useAiFeatures().available`. `aiRiskMode` is in the create/update payload only when the select is shown; otherwise it is omitted (server default on create, unchanged on update). Policy table has an "AI Risk" column when AI is available (`utils/aiRiskModes.ts` holds labels).
+
+**Decisions and behavior to know:**
+
+- `ApprovalRequest.policy` (the summary) has no `aiRiskMode`, so the panel footer gets the mode from `fetchApprovalPolicies`, fetched through `useSharedQuery` only when AI is on and a request is expanded. The footer omits the mode until it loads. If the backend later adds `aiRiskMode` to `ApprovalPolicySummaryResponse`, use it and drop that fetch.
+- Signals: `overall_risk` is a 0 to 3 score, not a probability, so it shows as "2.4 / 3". The other signals show as percentages.
+- Optional FeatureDetail `ApprovalList` badge skipped (FeatureDetail.tsx has an unrelated uncommitted user change).
+- Pre-existing: `ApprovalsPage` strips `?requestId=` on first render because the list is empty at that point, so deep links to a request do not open details.
+
+**Verified:** `pnpm lint`, `pnpm build` (tsc -b plus vite), `pnpm test:run` (82 files, 642 tests) pass, including the design-token guard. New tests: `AiRiskPanel.test.tsx` (12), `ApprovalsAiRisk.test.tsx` (7, fake-timer poll 5 s then back to 30 s), 5 policy modal tests, 2 policy table tests.
+

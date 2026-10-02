@@ -15,7 +15,7 @@ Date: 2026-10-02. Read this after [`README.md`](README.md) and [`design.md`](des
 | AI-40 NL search backend | **Ready to start** (AI-30 done, so the `flag_kind` filter exists) | backend |
 | AI-11 risk enforcement | **Ready to start** (AI-10 done). **Needs maintainer sign-off before merge** | backend |
 | AI-31 stale rules use flag kind | **Ready to start** (AI-30 done). **Needs maintainer sign-off before merge** | backend |
-| AI-12 UI approval risk | **Ready to start** (AI-11 only for the extra-approver count) | UI |
+| AI-12 UI approval risk | Done (shows the extra-approver hint once AI-11 raises `requiredApprovalsEffective`) | UI `fb3a756` |
 | AI-21 UI justification hint | Done | UI `1672526` |
 | AI-32 UI flag kind | Done | UI `9aa9005` |
 | AI-41 UI NL search palette | Blocked by AI-40 | UI |
