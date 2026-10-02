@@ -157,6 +157,14 @@ impl FlagKind {
         FlagKind::Config,
     ];
 
+    /// Kinds that are long-lived by design. Inactivity and disabled-for-long
+    /// stale rules do not apply to them (AI-31).
+    pub const PERMANENT: [FlagKind; 3] = [FlagKind::Ops, FlagKind::Permission, FlagKind::Config];
+
+    pub fn is_permanent(self) -> bool {
+        Self::PERMANENT.contains(&self)
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             FlagKind::Release => "release",

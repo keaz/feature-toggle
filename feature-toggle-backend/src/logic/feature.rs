@@ -440,6 +440,49 @@ pub fn feature_logic_with_approval_and_notifications(
     })
 }
 
+/// Why a feature counts as stale. Features of a permanent kind (`ops`,
+/// `permission`, `config`) are idle or disabled by design, so only the
+/// "Expired" rule applies to them.
+///
+/// This must stay equivalent to `FeatureRepositoryImpl::stale_predicate_sql`
+/// (`database/feature.rs`), which runs the same rules for the `stale` list
+/// filter. Change both together; a parity test covers every kind and rule.
+pub(crate) fn stale_reasons(feature: &crate::database::entity::Feature) -> Vec<String> {
+    let now = Utc::now();
+    let mut reasons = Vec::new();
+
+    if feature
+        .expires_at
+        .is_some_and(|expires_at| expires_at < now)
+    {
+        reasons.push("Expired".to_string());
+    }
+
+    let lifecycle = feature.lifecycle_stage.to_lowercase();
+    let lifecycle_can_stale = lifecycle == "active" || lifecycle == "deprecated";
+    let skips_inactivity_rules = feature.flag_kind.is_some_and(|kind| kind.is_permanent());
+    if lifecycle_can_stale && !skips_inactivity_rules {
+        let older_than_30_days = feature.created_at < now - Duration::days(30);
+        let no_recent_evaluations = feature
+            .last_evaluated_at
+            .map(|last| last < now - Duration::days(30))
+            .unwrap_or(true);
+        if older_than_30_days && no_recent_evaluations {
+            reasons.push("No recent evaluations".to_string());
+        }
+
+        if feature.created_at < now - Duration::days(90) && feature.evaluation_count_90d == 0 {
+            reasons.push("No evaluations in 90 days".to_string());
+        }
+
+        if feature.created_at < now - Duration::days(90) && !feature.active {
+            reasons.push("Disabled for 90+ days".to_string());
+        }
+    }
+
+    reasons
+}
+
 struct FeatureLogicImpl {
     repository: Box<dyn FeatureRepository>,
     environment_logic: Box<dyn EnvironmentLogic>,
@@ -675,39 +718,9 @@ impl FeatureLogicImpl {
         })
     }
 
+    /// See [`stale_reasons`]: must stay equivalent to `stale_predicate_sql`.
     fn stale_reasons(feature: &crate::database::entity::Feature) -> Vec<String> {
-        let now = Utc::now();
-        let mut reasons = Vec::new();
-
-        if feature
-            .expires_at
-            .is_some_and(|expires_at| expires_at < now)
-        {
-            reasons.push("Expired".to_string());
-        }
-
-        let lifecycle = feature.lifecycle_stage.to_lowercase();
-        let lifecycle_can_stale = lifecycle == "active" || lifecycle == "deprecated";
-        if lifecycle_can_stale {
-            let older_than_30_days = feature.created_at < now - Duration::days(30);
-            let no_recent_evaluations = feature
-                .last_evaluated_at
-                .map(|last| last < now - Duration::days(30))
-                .unwrap_or(true);
-            if older_than_30_days && no_recent_evaluations {
-                reasons.push("No recent evaluations".to_string());
-            }
-
-            if feature.created_at < now - Duration::days(90) && feature.evaluation_count_90d == 0 {
-                reasons.push("No evaluations in 90 days".to_string());
-            }
-
-            if feature.created_at < now - Duration::days(90) && !feature.active {
-                reasons.push("Disabled for 90+ days".to_string());
-            }
-        }
-
-        reasons
+        stale_reasons(feature)
     }
 
     fn map_entity_to_api_feature(feature: crate::database::entity::Feature) -> Feature {
@@ -4085,5 +4098,380 @@ mod test {
             .await;
 
         assert!(matches!(result, Err(Error::InvalidInput(_))));
+    }
+}
+
+#[cfg(test)]
+mod stale_rules_tests {
+    use super::*;
+    use crate::database::entity::{Feature as EntityFeature, FeatureType as EntityFeatureType};
+    use crate::database::feature::CreateFeature;
+    use crate::model::FlagKind;
+    use std::collections::BTreeSet;
+
+    const NO_RECENT: &str = "No recent evaluations";
+    const NO_90D: &str = "No evaluations in 90 days";
+    const DISABLED_90D: &str = "Disabled for 90+ days";
+    const PERMANENT: [FlagKind; 3] = FlagKind::PERMANENT;
+
+    /// One row of the rule matrix: how the feature looks, in days.
+    struct Scenario {
+        name: &'static str,
+        lifecycle: &'static str,
+        age_days: i64,
+        evaluated_days_ago: Option<i64>,
+        evaluations_90d: i64,
+        active: bool,
+        expires_in_days: Option<i64>,
+        /// Reasons for a feature that has no permanent kind.
+        reasons: &'static [&'static str],
+    }
+
+    const SCENARIOS: &[Scenario] = &[
+        Scenario {
+            name: "fresh and used",
+            lifecycle: "active",
+            age_days: 1,
+            evaluated_days_ago: Some(0),
+            evaluations_90d: 10,
+            active: true,
+            expires_in_days: None,
+            reasons: &[],
+        },
+        Scenario {
+            name: "old, never evaluated",
+            lifecycle: "active",
+            age_days: 100,
+            evaluated_days_ago: None,
+            evaluations_90d: 0,
+            active: true,
+            expires_in_days: None,
+            reasons: &[NO_RECENT, NO_90D],
+        },
+        Scenario {
+            name: "idle for 30 days only",
+            lifecycle: "active",
+            age_days: 40,
+            evaluated_days_ago: Some(35),
+            evaluations_90d: 5,
+            active: true,
+            expires_in_days: None,
+            reasons: &[NO_RECENT],
+        },
+        Scenario {
+            name: "disabled for 90 days but used",
+            lifecycle: "active",
+            age_days: 100,
+            evaluated_days_ago: Some(1),
+            evaluations_90d: 5,
+            active: false,
+            expires_in_days: None,
+            reasons: &[DISABLED_90D],
+        },
+        Scenario {
+            name: "old, never evaluated, expired",
+            lifecycle: "active",
+            age_days: 100,
+            evaluated_days_ago: None,
+            evaluations_90d: 0,
+            active: true,
+            expires_in_days: Some(-1),
+            reasons: &["Expired", NO_RECENT, NO_90D],
+        },
+        Scenario {
+            name: "fresh and used, expired",
+            lifecycle: "active",
+            age_days: 1,
+            evaluated_days_ago: Some(0),
+            evaluations_90d: 10,
+            active: true,
+            expires_in_days: Some(-1),
+            reasons: &["Expired"],
+        },
+        Scenario {
+            name: "old, never evaluated, not yet expired",
+            lifecycle: "active",
+            age_days: 100,
+            evaluated_days_ago: None,
+            evaluations_90d: 0,
+            active: true,
+            expires_in_days: Some(5),
+            reasons: &[NO_RECENT, NO_90D],
+        },
+        Scenario {
+            name: "old deprecated, never evaluated",
+            lifecycle: "deprecated",
+            age_days: 100,
+            evaluated_days_ago: None,
+            evaluations_90d: 0,
+            active: true,
+            expires_in_days: None,
+            reasons: &[NO_RECENT, NO_90D],
+        },
+        Scenario {
+            name: "old draft, never evaluated",
+            lifecycle: "draft",
+            age_days: 100,
+            evaluated_days_ago: None,
+            evaluations_90d: 0,
+            active: false,
+            expires_in_days: None,
+            reasons: &[],
+        },
+        Scenario {
+            name: "old draft, expired",
+            lifecycle: "draft",
+            age_days: 100,
+            evaluated_days_ago: None,
+            evaluations_90d: 0,
+            active: false,
+            expires_in_days: Some(-1),
+            reasons: &["Expired"],
+        },
+    ];
+
+    fn kinds() -> Vec<Option<FlagKind>> {
+        std::iter::once(None)
+            .chain(FlagKind::ALL.into_iter().map(Some))
+            .collect()
+    }
+
+    fn entity(scenario: &Scenario, flag_kind: Option<FlagKind>) -> EntityFeature {
+        let now = Utc::now();
+        EntityFeature {
+            id: Uuid::new_v4(),
+            key: scenario.name.to_string(),
+            description: None,
+            feature_type: EntityFeatureType::Simple,
+            team_id: Uuid::new_v4(),
+            active: scenario.active,
+            created_at: now - Duration::days(scenario.age_days),
+            kill_switch_enabled: true,
+            kill_switch_activated_at: None,
+            rollback_scheduled_at: None,
+            emergency_override_reason: None,
+            emergency_override_expires_at: None,
+            emergency_override_actor_id: None,
+            emergency_override_applied_at: None,
+            lifecycle_stage: scenario.lifecycle.to_string(),
+            owner: None,
+            purpose: None,
+            reference_url: None,
+            expires_at: scenario
+                .expires_in_days
+                .map(|days| now + Duration::days(days)),
+            cleanup_reason: None,
+            tags: vec![],
+            archived_at: None,
+            deprecated_at: None,
+            deprecation_notice: None,
+            last_evaluated_at: scenario
+                .evaluated_days_ago
+                .map(|days| now - Duration::days(days)),
+            evaluation_count_7d: 0,
+            evaluation_count_30d: 0,
+            evaluation_count_90d: scenario.evaluations_90d,
+            dependencies: vec![],
+            flag_kind,
+            flag_kind_source: None,
+            flag_kind_confidence: None,
+        }
+    }
+
+    /// What the rules must return for this scenario and kind.
+    fn expected(scenario: &Scenario, kind: Option<FlagKind>) -> Vec<&'static str> {
+        if kind.is_some_and(|kind| PERMANENT.contains(&kind)) {
+            scenario
+                .reasons
+                .iter()
+                .copied()
+                .filter(|reason| *reason == "Expired")
+                .collect()
+        } else {
+            scenario.reasons.to_vec()
+        }
+    }
+
+    #[test]
+    fn permanent_kinds_skip_inactivity_rules_and_keep_expired() {
+        for scenario in SCENARIOS {
+            for kind in kinds() {
+                let reasons = FeatureLogicImpl::stale_reasons(&entity(scenario, kind));
+                assert_eq!(
+                    reasons,
+                    expected(scenario, kind),
+                    "scenario '{}', kind {kind:?}",
+                    scenario.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn permanent_kind_with_old_age_and_no_evaluations_is_not_stale() {
+        let scenario = &SCENARIOS[1];
+        for kind in PERMANENT {
+            let feature = entity(scenario, Some(kind));
+            assert!(FeatureLogicImpl::stale_reasons(&feature).is_empty());
+            assert!(!FeatureLogicImpl::map_entity_to_api_feature(feature).is_stale);
+        }
+    }
+
+    #[test]
+    fn permanent_kind_with_expiry_is_stale_for_expiry_only() {
+        let scenario = &SCENARIOS[4];
+        for kind in PERMANENT {
+            let feature = FeatureLogicImpl::map_entity_to_api_feature(entity(scenario, Some(kind)));
+            assert!(feature.is_stale);
+            assert_eq!(feature.stale_reasons, vec!["Expired".to_string()]);
+        }
+    }
+
+    #[test]
+    fn release_experiment_and_null_keep_current_behavior() {
+        let scenario = &SCENARIOS[1];
+        for kind in [None, Some(FlagKind::Release), Some(FlagKind::Experiment)] {
+            let reasons = FeatureLogicImpl::stale_reasons(&entity(scenario, kind));
+            assert_eq!(reasons, vec![NO_RECENT.to_string(), NO_90D.to_string()]);
+        }
+    }
+
+    /// Create one feature per scenario and kind, with the stored columns
+    /// matching the scenario, and return the ids with the entity read back.
+    async fn seed(pool: &sqlx::PgPool, team_id: Uuid) -> Vec<(String, EntityFeature)> {
+        let repository = crate::database::feature::feature_repository(pool.clone());
+        let mut loaded = Vec::new();
+        for (scenario_index, scenario) in SCENARIOS.iter().enumerate() {
+            for kind in kinds() {
+                let label = format!(
+                    "{} / {}",
+                    scenario.name,
+                    kind.map(FlagKind::as_str).unwrap_or("null")
+                );
+                let id = repository
+                    .create_feature(CreateFeature {
+                        team_id,
+                        key: format!("stale-parity-{scenario_index}-{}", Uuid::new_v4()),
+                        description: None,
+                        feature_type: EntityFeatureType::Simple,
+                        lifecycle_stage: scenario.lifecycle.to_string(),
+                        owner: None,
+                        purpose: None,
+                        reference_url: None,
+                        expires_at: None,
+                        cleanup_reason: None,
+                        tags: vec![],
+                        flag_kind: kind,
+                        stages: vec![],
+                        dependencies: vec![],
+                        variants: None,
+                    })
+                    .await
+                    .expect("create feature");
+                let now = Utc::now();
+                sqlx::query(
+                    "UPDATE features SET created_at = $2, last_evaluated_at = $3, \
+                     evaluation_count_90d = $4, active = $5, expires_at = $6 WHERE id = $1",
+                )
+                .bind(id)
+                .bind(now - Duration::days(scenario.age_days))
+                .bind(
+                    scenario
+                        .evaluated_days_ago
+                        .map(|days| now - Duration::days(days)),
+                )
+                .bind(scenario.evaluations_90d)
+                .bind(scenario.active)
+                .bind(
+                    scenario
+                        .expires_in_days
+                        .map(|days| now + Duration::days(days)),
+                )
+                .execute(pool)
+                .await
+                .expect("set scenario columns");
+                let feature = repository
+                    .get_feature_by_id(id)
+                    .await
+                    .expect("load feature");
+                loaded.push((label, feature));
+            }
+        }
+        loaded
+    }
+
+    async fn filtered_ids(pool: &sqlx::PgPool, team_id: Uuid, stale: bool) -> BTreeSet<Uuid> {
+        let repository = crate::database::feature::feature_repository(pool.clone());
+        let (features, total) = repository
+            .get_features_with_offset_filtered(
+                team_id,
+                None,
+                None,
+                None,
+                Some(stale),
+                true,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                0,
+                1000,
+            )
+            .await
+            .expect("filtered query");
+        assert_eq!(total as usize, features.len());
+        features.into_iter().map(|feature| feature.id).collect()
+    }
+
+    /// The Rust rules (computed on read) and the SQL `stale` filter must give
+    /// the same answer for every kind, including NULL, and every rule.
+    #[tokio::test]
+    async fn rust_rules_and_sql_stale_filter_agree() {
+        let pool = crate::database::init_pg_pool().await;
+        let team_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO teams (id, name, description) VALUES ($1, $2, $3)")
+            .bind(team_id)
+            .bind(format!("Stale parity team {team_id}"))
+            .bind("stale parity test")
+            .execute(&pool)
+            .await
+            .expect("insert team");
+
+        let loaded = seed(&pool, team_id).await;
+        let sql_stale = filtered_ids(&pool, team_id, true).await;
+        let sql_not_stale = filtered_ids(&pool, team_id, false).await;
+
+        let mut mismatches = Vec::new();
+        let mut rust_stale = 0;
+        for (label, feature) in &loaded {
+            let rust_says_stale = !FeatureLogicImpl::stale_reasons(feature).is_empty();
+            rust_stale += usize::from(rust_says_stale);
+            if rust_says_stale != sql_stale.contains(&feature.id)
+                || rust_says_stale == sql_not_stale.contains(&feature.id)
+            {
+                mismatches.push(label.clone());
+            }
+        }
+
+        sqlx::query("DELETE FROM features WHERE team_id = $1")
+            .bind(team_id)
+            .execute(&pool)
+            .await
+            .expect("delete features");
+        sqlx::query("DELETE FROM teams WHERE id = $1")
+            .bind(team_id)
+            .execute(&pool)
+            .await
+            .expect("delete team");
+
+        assert!(
+            mismatches.is_empty(),
+            "Rust and SQL differ for: {mismatches:?}"
+        );
+        assert_eq!(loaded.len(), SCENARIOS.len() * 6);
+        assert_eq!(sql_stale.len(), rust_stale);
+        assert!(rust_stale > 0 && rust_stale < loaded.len());
     }
 }

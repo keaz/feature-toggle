@@ -12,6 +12,7 @@ use crate::database::variant_allocations::{
     CreateVariantAllocationInput, VariantAllocationsRepositoryTx,
 };
 use crate::logic::ActorContext;
+use crate::logic::feature::stale_reasons;
 use crate::logic::stage_builder::build_stage_relationships;
 use crate::model::ID;
 use crate::model::{
@@ -20,7 +21,7 @@ use crate::model::{
     LifecycleStage as ModelLifecycleStage, RuleOperator, StageCriterion as ModelStageCriterion,
     UpdateFeatureInput, VariantValueType as ModelVariantValueType,
 };
-use chrono::{Duration, Utc};
+use chrono::Utc;
 use sqlx::PgConnection;
 use uuid::Uuid;
 
@@ -61,41 +62,6 @@ fn normalize_tags(tags: Vec<String>) -> Vec<String> {
     normalized.sort();
     normalized.dedup();
     normalized
-}
-
-fn stale_reasons(feature: &crate::database::entity::Feature) -> Vec<String> {
-    let now = Utc::now();
-    let mut reasons = Vec::new();
-
-    if feature
-        .expires_at
-        .is_some_and(|expires_at| expires_at < now)
-    {
-        reasons.push("Expired".to_string());
-    }
-
-    let lifecycle = feature.lifecycle_stage.to_lowercase();
-    let lifecycle_can_stale = lifecycle == "active" || lifecycle == "deprecated";
-    if lifecycle_can_stale {
-        let older_than_30_days = feature.created_at < now - Duration::days(30);
-        let no_recent_evaluations = feature
-            .last_evaluated_at
-            .map(|last| last < now - Duration::days(30))
-            .unwrap_or(true);
-        if older_than_30_days && no_recent_evaluations {
-            reasons.push("No recent evaluations".to_string());
-        }
-
-        if feature.created_at < now - Duration::days(90) && feature.evaluation_count_90d == 0 {
-            reasons.push("No evaluations in 90 days".to_string());
-        }
-
-        if feature.created_at < now - Duration::days(90) && !feature.active {
-            reasons.push("Disabled for 90+ days".to_string());
-        }
-    }
-
-    reasons
 }
 
 fn map_entity_to_api_feature(feature_entity: crate::database::entity::Feature) -> ModelFeature {

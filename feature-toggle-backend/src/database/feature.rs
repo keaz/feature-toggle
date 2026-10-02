@@ -1741,22 +1741,36 @@ impl FeatureRepositoryImpl {
         Ok(())
     }
 
+    /// SQL form of the stale rules, used by the `stale` list filter. Features of
+    /// a permanent kind (`ops`, `permission`, `config`) skip the three
+    /// inactivity rules and stay stale only when expired. A NULL `flag_kind`
+    /// keeps every rule.
+    ///
+    /// This must stay equivalent to `FeatureLogicImpl::stale_reasons`
+    /// (`logic/feature.rs`), which computes `is_stale` on read. Change both
+    /// together; a parity test covers every kind and rule. The kind list must
+    /// match `FlagKind::PERMANENT`.
     fn stale_predicate_sql() -> &'static str {
         r#"((
             f.expires_at IS NOT NULL
             AND f.expires_at < NOW()
         ) OR (
-            f.lifecycle_stage IN ('active', 'deprecated')
-            AND COALESCE(f.created_at, NOW()) < NOW() - INTERVAL '30 days'
-            AND (f.last_evaluated_at IS NULL OR f.last_evaluated_at < NOW() - INTERVAL '30 days')
-        ) OR (
-            f.lifecycle_stage IN ('active', 'deprecated')
-            AND COALESCE(f.created_at, NOW()) < NOW() - INTERVAL '90 days'
-            AND f.evaluation_count_90d = 0
-        ) OR (
-            f.lifecycle_stage IN ('active', 'deprecated')
-            AND COALESCE(f.created_at, NOW()) < NOW() - INTERVAL '90 days'
-            AND f.active = false
+            (f.flag_kind IS NULL OR f.flag_kind NOT IN ('ops', 'permission', 'config'))
+            AND (
+                (
+                    f.lifecycle_stage IN ('active', 'deprecated')
+                    AND COALESCE(f.created_at, NOW()) < NOW() - INTERVAL '30 days'
+                    AND (f.last_evaluated_at IS NULL OR f.last_evaluated_at < NOW() - INTERVAL '30 days')
+                ) OR (
+                    f.lifecycle_stage IN ('active', 'deprecated')
+                    AND COALESCE(f.created_at, NOW()) < NOW() - INTERVAL '90 days'
+                    AND f.evaluation_count_90d = 0
+                ) OR (
+                    f.lifecycle_stage IN ('active', 'deprecated')
+                    AND COALESCE(f.created_at, NOW()) < NOW() - INTERVAL '90 days'
+                    AND f.active = false
+                )
+            )
         ))"#
     }
 
@@ -5303,6 +5317,17 @@ mod tests {
     use chrono::{Duration, Utc};
     use sqlx::PgPool;
     use uuid::Uuid;
+
+    #[test]
+    fn stale_predicate_lists_the_permanent_kinds() {
+        let sql = FeatureRepositoryImpl::stale_predicate_sql();
+        let list = FlagKind::PERMANENT
+            .iter()
+            .map(|kind| format!("'{}'", kind.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert!(sql.contains(&format!("f.flag_kind NOT IN ({list})")));
+    }
 
     #[test]
     fn flag_kind_update_follows_the_user_choice_rules() {
