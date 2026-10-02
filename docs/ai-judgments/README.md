@@ -1,6 +1,6 @@
 # AI judgments (TypeSafe Jev): work packages
 
-This folder holds the design and the task breakdown for adding TypeSafe Jev judgments to FluxGate. Read [`design.md`](design.md) once. Then pick one task file under [`tasks/`](tasks/). Each task file says what to change, where, how to test it, and when it is done. One agent can finish one task without reading the other task files.
+This folder holds the design and the task breakdown for adding TypeSafe Jev judgments to FluxGate. Read [`design.md`](design.md) once, then [`HANDOFF.md`](HANDOFF.md) for the current state and what the next tasks must know. Then pick one task file under [`tasks/`](tasks/). Each task file says what to change, where, how to test it, and when it is done. One agent can finish one task without reading the other task files.
 
 Features:
 
@@ -29,9 +29,9 @@ Features:
      ```
    - UI (in `../feature-toggle-ui/`):
      ```bash
-     npm run lint
-     npm run build        # also the type check
-     npm run test:run
+     pnpm lint
+     pnpm build           # also the type check
+     pnpm test:run        # use pnpm, never npm
      ```
 8. **Repo gotchas:**
    - Never edit an applied migration. Add a new timestamped one: `migrations/YYYYMMDDHHMMSS_name.sql`, later than every existing file.
