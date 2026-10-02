@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Type | Feature (UI) |
-| Status | Not started |
+| Status | Done in UI 1672526 |
 | Repo | UI (`../feature-toggle-ui/`) |
 | Depends on | AI-20, AI-02 |
 | Behavior change | Warning text only. Submit is never blocked. |
@@ -65,4 +65,19 @@ Backend. Displaying stored verdicts in the activity UI.
 
 ## Handoff log
 
-_No entries yet._
+### 2026-10-02, Claude (AI-21 implementation)
+
+**What changed** (UI repo, commit 1672526):
+
+- `api/ai.ts`: `ReasonKind`, `JustificationCheckInput`, `JustificationCheckResult`, `checkJustification(teamId, input)` (POST `/teams/{id}/ai/justification-check`, camelCase body and response).
+- `components/ai/ReasonQualityHint.tsx` (props `teamId`, `reasonKind`, `reason`, `featureKey?`): renders nothing unless `useAiFeatures(teamId).justificationCheck`. Checks after 800 ms without typing, only for 5 to 1000 trimmed characters. Results are cached in a ref per `(reasonKind, trimmed reason)`. A response is shown only while its key equals the current reason's key, so stale responses and old warnings never show. Only `available && verdict === "weak" && source !== "rule"` renders: `AlertTriangle` plus hints joined with a space, `text-warning`, `role="status"`, `data-testid="reason-quality-hint"`. Errors, `available: false`, `ok` and rule passes render nothing. Never touches the submit button.
+- Wired under: `FeatureEmergencyActionModal` (both textareas, kinds `emergency_disable` and `emergency_enable`, team and key from the feature), `FeatureCreate` (`#freeze-override-reason`, `#scheduled-reason`, `#feature-cleanup-reason` with `archive_cleanup` shown only when the stage is ARCHIVED or the reason is non-empty; key from the form, omitted when empty), `FreezeWindowsPage` (`freeze_window`, no feature key).
+
+**Decisions and behavior to know:**
+
+- The brief's acceptance example "typing `test`" has 4 characters, below the 5-character minimum the brief and the modal's own validation use, so no call is made for it. Any 5+ character placeholder (for example "asdfg", "testing") shows the warning.
+- Blur does not trigger an immediate check; the 800 ms debounce is the only trigger (the brief allowed either). Errors are not cached, so retyping retries.
+- `useAiFeatures` only reads the team setting on mount (known gap in HANDOFF), so toggling the setting applies on the next mount.
+- No dedicated test for the `FeatureCreate` and `FreezeWindowsPage` wiring (the `FeatureCreate` test mounts a heavy page); the component and the modal are tested.
+
+**Verified:** `pnpm lint`, `pnpm build`, `pnpm test:run`: 76 files, 572 tests pass (includes the design-token guard). New: 11 tests in `components/ai/__tests__/ReasonQualityHint.test.tsx`, 3 in the modal test (weak hint still submits for disable and enable, no call when off).

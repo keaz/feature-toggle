@@ -71,7 +71,7 @@ Features:
 | [ ] | [AI-11](tasks/AI-11-approval-risk-enforcement.md) | Risk enforcement: gate auto-approve, extra approver | backend | **Yes, needs sign-off** | AI-10 |
 | [ ] | [AI-12](tasks/AI-12-ui-approval-risk.md) | UI: risk panel, badge, policy mode | UI | New UI | AI-10, AI-02 (AI-11 for the extra-approver count) |
 | [x] | [AI-20](tasks/AI-20-justification-check-backend.md) | Justification check: sync endpoint and post-submit recording | backend | Additive | AI-01 |
-| [ ] | [AI-21](tasks/AI-21-ui-justification-hint.md) | UI: `ReasonQualityHint` on 5 forms | UI | Warning only | AI-20, AI-02 |
+| [x] | [AI-21](tasks/AI-21-ui-justification-hint.md) | UI: `ReasonQualityHint` on 5 forms | UI | Warning only | AI-20, AI-02 |
 | [x] | [AI-30](tasks/AI-30-flag-kind-backend.md) | Flag kind: column, classification, suggestions, backfill, filter | backend | Additive | AI-01 |
 | [ ] | [AI-31](tasks/AI-31-stale-rules-use-flag-kind.md) | Stale rules skip permanent kinds | backend | **Yes, needs sign-off** | AI-30 |
 | [ ] | [AI-32](tasks/AI-32-ui-flag-kind.md) | UI: kind field, suggestion chips, filter, detail | UI | New UI | AI-30, AI-02 |
