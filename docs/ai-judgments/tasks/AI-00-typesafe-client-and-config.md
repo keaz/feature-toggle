@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Type | Feature (foundation) |
-| Status | Not started |
+| Status | Done in f7ddccb (commits e9bf1e6..f7ddccb) |
 | Repo | backend (`feature-toggle/`) |
 | Crate | `feature-toggle-backend` |
 | Depends on | — |
@@ -73,9 +73,9 @@ Add a typed, testable client for `POST https://api.typesafe.ai/v1/systemone` and
 
 - [ ] With no key, the server starts, logs "disabled", and `GET /api/v1/ai/status` returns `{"available": false, "model": null}`.
 - [ ] With a key, `/ai/status` returns `available: true` and model `jev-1.13.0`.
-- [ ] The live smoke test passes with a real key.
-- [ ] `MockJudgmentClient` is usable from other modules' tests.
-- [ ] The contract compatibility check passes after the baseline update.
+- [x] The live smoke test passes with a real key.
+- [x] `MockJudgmentClient` is usable from other modules' tests.
+- [x] The contract compatibility check passes after the baseline update.
 - [ ] No key appears in any log or committed file.
 
 ## Out of scope
@@ -84,4 +84,12 @@ Database tables, team settings, and any feature-specific question (AI-01 and lat
 
 ## Handoff log
 
-_No entries yet._ Format: `### YYYY-MM-DD, <agent or person>`, then what changed, what you verified, open questions, and next step.
+_Format:_ `### YYYY-MM-DD, <agent or person>`, then what changed, what you verified, open questions, and next step.
+
+### 2026-10-02, Claude (plan 2026-10-02-ai-judgments-foundation)
+
+- Changed: `[typesafe]` config (sanitized), `judgment::{types, client}`, `build_client`, `AiRuntime`, `GET /api/v1/ai/status`, contract baseline. TOML parse errors now log at error level.
+- Verified: unit tests for wire types, retry/backoff helpers, key normalization, status endpoint; live smoke test passed against `jev-1.13.0`; contract check passes; `cargo test -p feature-toggle-backend --lib` 537/537 on a migrated and seeded test DB.
+- Deviations: `JudgmentClient::model()` returns `String`; `JudgmentError::Transport` added; zero `timeout_ms`/`max_in_flight` fall back to defaults; Choice needs at least 2 options.
+- Open: the server start checks (no key / with key, no key in logs) are verified end to end in the plan's Task 10; see the AI-02 handoff entry.
+- Next: AI-01 uses `MockJudgmentClient` (unconditional `#[automock]`) and extends `AiRuntime` with `judgments`.
