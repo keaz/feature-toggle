@@ -343,6 +343,9 @@ struct FeaturePipelineStageRow {
     pub enabled: bool,
 }
 
+/// `(created_at, id)` of the last feature of a page.
+pub type FlagKindCursor = (DateTime<Utc>, Uuid);
+
 /// The stored `(kind, source, confidence)` after a user's `flag_kind` input.
 /// Only a value that differs from the stored kind counts as a choice: the UI
 /// resends the current value on every full-body update.
@@ -627,11 +630,15 @@ pub trait FeatureRepository: Send + Sync {
         offset: i64,
         limit: i64,
     ) -> Result<(Vec<Feature>, i64), Error>;
-    /// Unarchived features in a team with no kind and no user decision, oldest
-    /// first, up to `limit`. Used by the flag kind backfill. Dependencies are not loaded.
+    /// Unarchived features in a team with no kind and no user decision, ordered
+    /// by `(created_at, id)`, up to `limit`. With `after` it returns only the
+    /// rows past that cursor (the last row of the previous page), so a caller
+    /// can scan past rows it skips. Used by the flag kind backfill.
+    /// Dependencies are not loaded.
     async fn get_features_needing_flag_kind(
         &self,
         team_id: Uuid,
+        after: Option<FlagKindCursor>,
         limit: i64,
     ) -> Result<Vec<Feature>, Error>;
     /// The team's most used tags on unarchived features, skipping `exclude`.
@@ -2134,14 +2141,18 @@ impl FeatureRepositoryImpl {
             None => existing_feature.cleanup_reason,
         };
         let tags = input.tags.clone().unwrap_or(existing_feature.tags);
-        let (flag_kind, flag_kind_source, flag_kind_confidence) = resolve_flag_kind_update(
-            (
-                existing_feature.flag_kind,
-                existing_feature.flag_kind_source,
-                existing_feature.flag_kind_confidence,
-            ),
-            input.flag_kind,
+        let stored_flag_kind = (
+            existing_feature.flag_kind,
+            existing_feature.flag_kind_source,
+            existing_feature.flag_kind_confidence,
         );
+        let (flag_kind, flag_kind_source, flag_kind_confidence) =
+            resolve_flag_kind_update(stored_flag_kind, input.flag_kind);
+        // The feature was read without a lock. Write the kind columns only for
+        // a real user change; otherwise an AI result stored in between would be
+        // overwritten with the stale values read above.
+        let flag_kind_changed =
+            (flag_kind, flag_kind_source, flag_kind_confidence) != stored_flag_kind;
         let deprecated_at = if lifecycle_stage == "deprecated" {
             existing_feature.deprecated_at.or_else(|| Some(Utc::now()))
         } else {
@@ -2167,10 +2178,10 @@ impl FeatureRepositoryImpl {
                    tags = $10,
                    deprecated_at = $11,
                    archived_at = $12,
-                   flag_kind = $13,
-                   flag_kind_source = $14,
-                   flag_kind_confidence = $15
-               WHERE id = $16"#,
+                   flag_kind = CASE WHEN $13 THEN $14::text ELSE flag_kind END,
+                   flag_kind_source = CASE WHEN $13 THEN $15::text ELSE flag_kind_source END,
+                   flag_kind_confidence = CASE WHEN $13 THEN $16::real ELSE flag_kind_confidence END
+               WHERE id = $17"#,
         )
         .bind(key)
         .bind(description)
@@ -2184,6 +2195,7 @@ impl FeatureRepositoryImpl {
         .bind(tags)
         .bind(deprecated_at)
         .bind(archived_at)
+        .bind(flag_kind_changed)
         .bind(flag_kind.map(FlagKind::as_str))
         .bind(flag_kind_source.map(FlagKindSource::as_str))
         .bind(flag_kind_confidence)
@@ -2638,6 +2650,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
     async fn get_features_needing_flag_kind(
         &self,
         team_id: Uuid,
+        after: Option<FlagKindCursor>,
         limit: i64,
     ) -> Result<Vec<Feature>, Error> {
         let mut query_builder = sqlx::QueryBuilder::new(FEATURE_SELECT);
@@ -2646,9 +2659,18 @@ impl FeatureRepository for FeatureRepositoryImpl {
             .push_bind(team_id)
             .push(
                 " AND f.flag_kind IS NULL AND f.archived_at IS NULL \
-                 AND (f.flag_kind_source IS NULL OR f.flag_kind_source <> 'user') \
-                 ORDER BY f.created_at, f.id LIMIT ",
-            )
+                 AND (f.flag_kind_source IS NULL OR f.flag_kind_source <> 'user')",
+            );
+        if let Some((created_at, id)) = after {
+            query_builder
+                .push(" AND (f.created_at, f.id) > (")
+                .push_bind(created_at)
+                .push(", ")
+                .push_bind(id)
+                .push(")");
+        }
+        query_builder
+            .push(" ORDER BY f.created_at, f.id LIMIT ")
             .push_bind(limit);
         let rows = query_builder
             .build_query_as::<FeatureWithStageRow>()

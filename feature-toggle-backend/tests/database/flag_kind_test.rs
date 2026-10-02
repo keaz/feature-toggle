@@ -332,16 +332,109 @@ async fn backfill_selection_skips_classified_archived_and_user_decided_features(
     );
 
     let needing = repo
-        .get_features_needing_flag_kind(team_id, 500)
+        .get_features_needing_flag_kind(team_id, None, 500)
         .await
         .unwrap();
     assert_eq!(needing.iter().map(|f| f.id).collect::<Vec<_>>(), [wanted]);
 
     let limited = repo
-        .get_features_needing_flag_kind(team_id, 0)
+        .get_features_needing_flag_kind(team_id, None, 0)
         .await
         .unwrap();
     assert!(limited.is_empty());
+
+    delete_team(&pool, team_id).await;
+}
+
+/// A full-body update that does not touch the kind must not write the kind
+/// columns. `update_feature` reads the feature before it writes, so an AI
+/// `apply` that commits in between would otherwise be overwritten with the
+/// stale values it read.
+#[tokio::test]
+async fn an_update_that_leaves_the_kind_alone_keeps_a_concurrent_ai_write() {
+    let pool = init_pg_pool().await;
+    let repo = feature_repository(pool.clone());
+    let team_id = insert_team(&pool).await;
+    let input = new_feature(team_id, "race", &[], None, "active");
+    let key = input.key.clone();
+    let id = repo.create_feature(input).await.unwrap();
+
+    // Hold the row lock: the update below reads the feature (kind still NULL),
+    // then blocks on its UPDATE until this transaction commits.
+    let mut locker = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM features WHERE id = $1 FOR UPDATE")
+        .bind(id)
+        .fetch_one(&mut *locker)
+        .await
+        .unwrap();
+
+    let updater = {
+        let repo = feature_repository(pool.clone());
+        tokio::spawn(async move { repo.update_feature(update_with(id, key, None)).await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // The AI result lands while the update is waiting.
+    sqlx::query(
+        "UPDATE features SET flag_kind = 'ops', flag_kind_source = 'ai', \
+         flag_kind_confidence = 0.9 WHERE id = $1",
+    )
+    .bind(id)
+    .execute(&mut *locker)
+    .await
+    .unwrap();
+    locker.commit().await.unwrap();
+    updater.await.unwrap().unwrap();
+
+    let feature = repo.get_feature_by_id(id).await.unwrap();
+    assert_eq!(feature.flag_kind, Some(FlagKind::Ops));
+    assert_eq!(feature.flag_kind_source, Some(FlagKindSource::Ai));
+    assert!(feature.flag_kind_confidence.is_some());
+
+    delete_team(&pool, team_id).await;
+}
+
+#[tokio::test]
+async fn backfill_selection_pages_by_cursor() {
+    let pool = init_pg_pool().await;
+    let repo = feature_repository(pool.clone());
+    let team_id = insert_team(&pool).await;
+    let mut created = Vec::new();
+    for index in 0..5 {
+        created.push(
+            repo.create_feature(new_feature(
+                team_id,
+                &format!("page{index}"),
+                &[],
+                None,
+                "active",
+            ))
+            .await
+            .unwrap(),
+        );
+    }
+
+    let mut seen = Vec::new();
+    let mut cursor = None;
+    let mut pages = 0;
+    loop {
+        let page = repo
+            .get_features_needing_flag_kind(team_id, cursor, 2)
+            .await
+            .unwrap();
+        let Some(last) = page.last() else { break };
+        cursor = Some((last.created_at, last.id));
+        seen.extend(page.iter().map(|feature| feature.id));
+        pages += 1;
+    }
+
+    assert_eq!(pages, 3, "pages of 2, 2 and 1");
+    let mut expected = created.clone();
+    expected.sort();
+    let mut got = seen.clone();
+    got.sort();
+    assert_eq!(got, expected, "every feature once, none repeated");
+    assert_eq!(seen.len(), 5);
 
     delete_team(&pool, team_id).await;
 }

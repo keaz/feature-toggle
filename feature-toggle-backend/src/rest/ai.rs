@@ -506,11 +506,15 @@ pub(crate) async fn backfill_flag_kind(
     {
         return Ok(HttpResponse::Ok().json(FlagKindBackfillResponse { queued: 0 }));
     }
-    let pending = features
-        .get_features_needing_flag_kind(team_id, flag_kind::BACKFILL_LIMIT)
-        .await
-        .map_err(RestError::from)?;
-    let queued = flag_kind::backfill(service, team_id, &pending).await;
+    let queued = flag_kind::backfill(
+        service,
+        features.as_ref().as_ref(),
+        team_id,
+        flag_kind::BACKFILL_LIMIT,
+        flag_kind::BACKFILL_PAGE,
+    )
+    .await
+    .map_err(RestError::from)?;
     Ok(HttpResponse::Ok().json(FlagKindBackfillResponse {
         queued: queued as u64,
     }))
@@ -1278,9 +1282,9 @@ mod tests {
             let mut features = MockFeatureRepository::new();
             features
                 .expect_get_features_needing_flag_kind()
-                .withf(|_, limit| *limit == 500)
+                .withf(|_, after, limit| after.is_none() && *limit == 500)
                 .times(1)
-                .returning(|_, _| Ok(vec![feature("a"), feature("b"), feature("c")]));
+                .returning(|_, _, _| Ok(vec![feature("a"), feature("b"), feature("c")]));
             let (status, body) = backfill(true, runtime, features).await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(body, json!({ "queued": 3 }));

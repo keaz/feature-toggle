@@ -26,7 +26,9 @@ pub const MAX_SUGGESTED_TAGS: usize = 5;
 /// Candidate tags sent to Jev in one suggestions request.
 pub const MAX_TAG_CANDIDATES: i64 = 50;
 /// Features one backfill call submits.
-pub const BACKFILL_LIMIT: i64 = 500;
+pub const BACKFILL_LIMIT: usize = 500;
+/// Unclassified features one backfill scan page reads.
+pub const BACKFILL_PAGE: i64 = 500;
 /// Longest `description` / `purpose` sent to Jev.
 const MAX_TEXT_CHARS: usize = 1000;
 
@@ -384,49 +386,73 @@ pub async fn record_flag_kind(
     }
 }
 
-/// Queues a judgment for each feature without a `done` judgment for its
-/// current content. Returns how many it queued. The client semaphore bounds how
-/// many run at once.
+/// Whether the backfill should submit a feature: it has no stored judgment for
+/// its current content, or that judgment failed. A `done` judgment (even one
+/// that left the kind empty) and a `pending` one for the same content are
+/// skipped, so a feature is never run twice for one input.
+fn backfill_needs_submit(existing: Option<&AiJudgment>, hash: &str) -> bool {
+    match existing {
+        Some(row) if stored_hash(&row.input) == Some(hash) => row.status == "failed",
+        _ => true,
+    }
+}
+
+/// Queues a judgment for up to `limit` features whose content has no `done` or
+/// `pending` judgment yet. It pages through the team's unclassified features
+/// (`page_size` rows at a time, by cursor) until `limit` are queued or the rows
+/// run out, so features that were judged before and stayed unclassified (an
+/// `unknown` answer) cannot hide later ones. Returns how many it queued. The
+/// client semaphore bounds how many run at once.
 pub async fn backfill(
     service: &Arc<JudgmentService>,
+    features: &dyn FeatureRepository,
     team_id: Uuid,
-    features: &[EntityFeature],
-) -> usize {
-    let ids: Vec<Uuid> = features.iter().map(|feature| feature.id).collect();
-    let existing = match service
-        .judgments_for(SubjectType::Feature, ids, JudgmentKind::FlagKind)
-        .await
-    {
-        Ok(rows) => rows,
-        Err(err) => {
-            warn!("Could not read flag kind judgments for backfill: {err}");
-            return 0;
-        }
-    };
-    let by_subject: std::collections::HashMap<Uuid, AiJudgment> = existing
-        .into_iter()
-        .map(|row| (row.subject_id, row))
-        .collect();
-
+    limit: usize,
+    page_size: i64,
+) -> Result<usize, crate::Error> {
     let mut queued = 0;
-    for feature in features {
-        let input = input_from_entity(feature);
-        let hash = stored_hash(&input).unwrap_or_default();
-        let current = by_subject
-            .get(&feature.id)
-            .filter(|row| row.status == "done");
-        if !needs_submit(current, hash) {
-            continue;
+    let mut cursor = None;
+    while queued < limit {
+        let page = features
+            .get_features_needing_flag_kind(team_id, cursor, page_size)
+            .await?;
+        let Some(last) = page.last() else {
+            break;
+        };
+        cursor = Some((last.created_at, last.id));
+        let exhausted = (page.len() as i64) < page_size;
+
+        let ids: Vec<Uuid> = page.iter().map(|feature| feature.id).collect();
+        let existing = service
+            .judgments_for(SubjectType::Feature, ids, JudgmentKind::FlagKind)
+            .await?;
+        let by_subject: std::collections::HashMap<Uuid, AiJudgment> = existing
+            .into_iter()
+            .map(|row| (row.subject_id, row))
+            .collect();
+
+        for feature in &page {
+            if queued >= limit {
+                break;
+            }
+            let input = input_from_entity(feature);
+            let hash = stored_hash(&input).unwrap_or_default();
+            if !backfill_needs_submit(by_subject.get(&feature.id), hash) {
+                continue;
+            }
+            match submit(service, team_id, feature.id, input).await {
+                Ok(()) => queued += 1,
+                Err(err) => warn!(
+                    "Could not queue flag kind judgment for feature {}: {err}",
+                    feature.id
+                ),
+            }
         }
-        match submit(service, team_id, feature.id, input).await {
-            Ok(()) => queued += 1,
-            Err(err) => warn!(
-                "Could not queue flag kind judgment for feature {}: {err}",
-                feature.id
-            ),
+        if exhausted {
+            break;
         }
     }
-    queued
+    Ok(queued)
 }
 
 /// Shared by REST handler tests: a judgment service whose store returns canned
@@ -822,12 +848,16 @@ mod tests {
     }
 
     mod pipeline {
+        use std::sync::Mutex;
+
         use chrono::Utc;
 
         use super::*;
         use crate::database::entity::FeatureType as EntityFeatureType;
         use crate::database::feature::MockFeatureRepository;
-        use crate::judgment::flag_kind::test_support::{judgment, recording_service as service};
+        use crate::judgment::flag_kind::test_support::{
+            Upserts, judgment, recording_service as service,
+        };
         use crate::model::{FeatureType, ID, LifecycleStage};
 
         fn entity_feature(
@@ -1115,43 +1145,153 @@ mod tests {
             assert!(upserts.lock().unwrap().is_empty());
         }
 
+        /// A repository holding `all` (already in cursor order): serves the
+        /// rows after the cursor, like the SQL does, and records each call's cursor.
+        fn paged_repo(
+            all: Vec<EntityFeature>,
+        ) -> (MockFeatureRepository, Arc<Mutex<Vec<Option<Uuid>>>>) {
+            let cursors: Arc<Mutex<Vec<Option<Uuid>>>> = Arc::default();
+            let seen = cursors.clone();
+            let mut repo = MockFeatureRepository::new();
+            repo.expect_get_features_needing_flag_kind()
+                .returning(move |_, after, limit| {
+                    seen.lock().unwrap().push(after.map(|(_, id)| id));
+                    let start = after
+                        .map(|(_, id)| all.iter().position(|f| f.id == id).unwrap() + 1)
+                        .unwrap_or(0);
+                    Ok(all
+                        .iter()
+                        .skip(start)
+                        .take(limit as usize)
+                        .cloned()
+                        .collect())
+                });
+            (repo, cursors)
+        }
+
+        fn submitted(upserts: &Upserts) -> Vec<Uuid> {
+            upserts.lock().unwrap().iter().map(|(id, _)| *id).collect()
+        }
+
         #[tokio::test]
-        async fn backfill_skips_features_with_a_done_judgment_for_the_same_content() {
+        async fn backfill_submits_only_features_without_a_current_done_or_pending_judgment() {
             let current = entity_feature(Uuid::new_v4(), "Kill switch for checkout", None, None);
             let edited_since =
                 entity_feature(Uuid::new_v4(), "Rollout of the new page", None, None);
             let never_judged = entity_feature(Uuid::new_v4(), "Max items per page", None, None);
             let pending = entity_feature(Uuid::new_v4(), "Beta for enterprise plans", None, None);
+            let pending_old = entity_feature(Uuid::new_v4(), "New text for pending", None, None);
+            let failed = entity_feature(Uuid::new_v4(), "Failed earlier", None, None);
 
-            let stale = judgment(
-                edited_since.id,
-                "done",
-                input_from_entity(&entity_feature(edited_since.id, "Older text", None, None)),
-                json!({}),
-            );
+            let stale = |feature: &EntityFeature, status: &str| {
+                judgment(
+                    feature.id,
+                    status,
+                    input_from_entity(&entity_feature(feature.id, "Older text", None, None)),
+                    json!({}),
+                )
+            };
+            let same = |feature: &EntityFeature, status: &str| {
+                judgment(feature.id, status, input_from_entity(feature), json!({}))
+            };
             let stored = vec![
                 done_ops(&current),
-                stale,
-                judgment(
-                    pending.id,
-                    "pending",
-                    input_from_entity(&pending),
-                    json!({}),
-                ),
+                stale(&edited_since, "done"),
+                same(&pending, "pending"),
+                stale(&pending_old, "pending"),
+                same(&failed, "failed"),
             ];
             let (service, upserts) = service(true, stored);
-            let features = vec![
+            let (repo, _) = paged_repo(vec![
                 current,
                 edited_since.clone(),
                 never_judged.clone(),
-                pending.clone(),
-            ];
+                pending,
+                pending_old.clone(),
+                failed.clone(),
+            ]);
 
-            let queued = backfill(&service, team(), &features).await;
+            let queued = backfill(&service, &repo, team(), 500, 500).await.unwrap();
+
+            assert_eq!(queued, 4);
+            assert_eq!(
+                submitted(&upserts),
+                [edited_since.id, never_judged.id, pending_old.id, failed.id]
+            );
+        }
+
+        #[tokio::test]
+        async fn backfill_reaches_features_beyond_a_window_of_already_judged_ones() {
+            // Two judged features that stayed unclassified (an `unknown` answer)
+            // fill the first page. The ones that need work come after them.
+            let judged: Vec<EntityFeature> = (0..4)
+                .map(|index| {
+                    entity_feature(Uuid::new_v4(), &format!("unclear {index}"), None, None)
+                })
+                .collect();
+            let wanted: Vec<EntityFeature> = (0..3)
+                .map(|index| entity_feature(Uuid::new_v4(), &format!("wanted {index}"), None, None))
+                .collect();
+            let stored: Vec<_> = judged
+                .iter()
+                .map(|feature| {
+                    judgment(
+                        feature.id,
+                        "done",
+                        input_from_entity(feature),
+                        json!({ "kind": null, "confidence": 0.9, "probabilities": {} }),
+                    )
+                })
+                .collect();
+            let (service, upserts) = service(true, stored);
+            let all: Vec<EntityFeature> = judged.iter().chain(&wanted).cloned().collect();
+            let (repo, cursors) = paged_repo(all);
+
+            let queued = backfill(&service, &repo, team(), 500, 2).await.unwrap();
 
             assert_eq!(queued, 3);
-            let submitted: Vec<Uuid> = upserts.lock().unwrap().iter().map(|(id, _)| *id).collect();
-            assert_eq!(submitted, [edited_since.id, never_judged.id, pending.id]);
+            assert_eq!(
+                submitted(&upserts),
+                wanted.iter().map(|f| f.id).collect::<Vec<_>>()
+            );
+            // Each page starts after the last row of the one before.
+            assert_eq!(
+                cursors.lock().unwrap().clone(),
+                [
+                    None,
+                    Some(judged[1].id),
+                    Some(judged[3].id),
+                    Some(wanted[1].id)
+                ]
+            );
+        }
+
+        #[tokio::test]
+        async fn backfill_stops_at_the_limit_even_in_the_middle_of_a_page() {
+            let all: Vec<EntityFeature> = (0..5)
+                .map(|index| entity_feature(Uuid::new_v4(), &format!("f{index}"), None, None))
+                .collect();
+            let (service, upserts) = service(true, vec![]);
+            let (repo, cursors) = paged_repo(all.clone());
+
+            let queued = backfill(&service, &repo, team(), 3, 2).await.unwrap();
+
+            assert_eq!(queued, 3);
+            assert_eq!(
+                submitted(&upserts),
+                all.iter().take(3).map(|f| f.id).collect::<Vec<_>>()
+            );
+            assert_eq!(cursors.lock().unwrap().len(), 2, "no page past the limit");
+        }
+
+        #[tokio::test]
+        async fn backfill_reports_a_repository_error() {
+            let (service, upserts) = service(true, vec![]);
+            let mut repo = MockFeatureRepository::new();
+            repo.expect_get_features_needing_flag_kind()
+                .returning(|_, _, _| Err(crate::Error::InvalidInput("db down".into())));
+            assert!(backfill(&service, &repo, team(), 500, 500).await.is_err());
+            assert!(upserts.lock().unwrap().is_empty());
         }
     }
 }
