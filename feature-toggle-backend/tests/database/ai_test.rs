@@ -7,7 +7,16 @@ use feature_toggle_backend::database::init_pg_pool;
 use feature_toggle_backend::judgment::{JudgmentKind, SubjectType};
 use serde_json::json;
 use sqlx::PgPool;
+use std::sync::OnceLock;
+use tokio::sync::Mutex;
 use uuid::Uuid;
+
+/// `claim_retryable` claims rows across all teams, so tests that create or claim
+/// judgments run one at a time.
+fn ai_judgment_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 async fn insert_team(pool: &PgPool) -> Uuid {
     let team_id = Uuid::new_v4();
@@ -51,6 +60,7 @@ fn result() -> JudgmentResult {
 
 #[tokio::test]
 async fn settings_default_to_all_off_and_upsert_persists() {
+    let _guard = ai_judgment_lock().lock().await;
     let pool = init_pg_pool().await;
     let team_id = insert_team(&pool).await;
     let repo = team_ai_settings_repository(pool.clone());
@@ -90,6 +100,7 @@ async fn settings_default_to_all_off_and_upsert_persists() {
 
 #[tokio::test]
 async fn upsert_unknown_team_is_not_found() {
+    let _guard = ai_judgment_lock().lock().await;
     let pool = init_pg_pool().await;
     let repo = team_ai_settings_repository(pool);
     let missing = Uuid::new_v4();
@@ -105,6 +116,7 @@ async fn upsert_unknown_team_is_not_found() {
 
 #[tokio::test]
 async fn upsert_pending_resets_an_existing_row() {
+    let _guard = ai_judgment_lock().lock().await;
     let pool = init_pg_pool().await;
     let team_id = insert_team(&pool).await;
     let repo = ai_judgment_repository(pool.clone());
@@ -130,7 +142,10 @@ async fn upsert_pending_resets_an_existing_row() {
         "the unique key keeps one row per subject and kind"
     );
     assert_eq!(second.status, "pending");
-    assert_eq!(second.attempts, 0);
+    assert_eq!(
+        second.attempts, 1,
+        "the initial run counts as the first attempt"
+    );
     assert_eq!(second.input_hash, "h2");
     assert!(second.error.is_none());
     assert!(second.completed_at.is_none());
@@ -140,6 +155,7 @@ async fn upsert_pending_resets_an_existing_row() {
 
 #[tokio::test]
 async fn mark_done_with_stale_hash_changes_nothing() {
+    let _guard = ai_judgment_lock().lock().await;
     let pool = init_pg_pool().await;
     let team_id = insert_team(&pool).await;
     let repo = ai_judgment_repository(pool.clone());
@@ -201,7 +217,46 @@ async fn mark_done_with_stale_hash_changes_nothing() {
 }
 
 #[tokio::test]
-async fn list_retryable_picks_old_pending_and_failed_under_three_attempts() {
+async fn mark_done_is_applied_only_once() {
+    let _guard = ai_judgment_lock().lock().await;
+    let pool = init_pg_pool().await;
+    let team_id = insert_team(&pool).await;
+    let repo = ai_judgment_repository(pool.clone());
+    let row = repo
+        .upsert_pending(new_judgment(team_id, Uuid::new_v4(), "h"))
+        .await
+        .unwrap();
+
+    assert!(repo.mark_done(row.id, "h".into(), result()).await.unwrap());
+    assert!(
+        !repo.mark_done(row.id, "h".into(), result()).await.unwrap(),
+        "a second run of the same input must not be stored or applied again"
+    );
+
+    delete_team(&pool, team_id).await;
+}
+
+async fn set_attempts(pool: &PgPool, id: Uuid, status: &str, attempts: i32) {
+    sqlx::query("UPDATE ai_judgments SET status = $2, attempts = $3 WHERE id = $1")
+        .bind(id)
+        .bind(status)
+        .bind(attempts)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn age(pool: &PgPool, id: Uuid) {
+    sqlx::query("UPDATE ai_judgments SET created_at = NOW() - INTERVAL '5 minutes' WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn claim_retryable_picks_old_pending_and_failed_under_three_attempts() {
+    let _guard = ai_judgment_lock().lock().await;
     let pool = init_pg_pool().await;
     let team_id = insert_team(&pool).await;
     let repo = ai_judgment_repository(pool.clone());
@@ -214,11 +269,11 @@ async fn list_retryable_picks_old_pending_and_failed_under_three_attempts() {
         .upsert_pending(new_judgment(team_id, Uuid::new_v4(), "b"))
         .await
         .unwrap();
-    let failed_twice = repo
+    let failed_once = repo
         .upsert_pending(new_judgment(team_id, Uuid::new_v4(), "c"))
         .await
         .unwrap();
-    let failed_thrice = repo
+    let exhausted = repo
         .upsert_pending(new_judgment(team_id, Uuid::new_v4(), "d"))
         .await
         .unwrap();
@@ -227,35 +282,50 @@ async fn list_retryable_picks_old_pending_and_failed_under_three_attempts() {
         .await
         .unwrap();
 
-    sqlx::query("UPDATE ai_judgments SET created_at = NOW() - INTERVAL '5 minutes' WHERE id = $1")
-        .bind(old_pending.id)
-        .execute(&pool)
-        .await
-        .unwrap();
-    for _ in 0..2 {
-        repo.mark_failed(failed_twice.id, "c".into(), "x".into())
+    age(&pool, old_pending.id).await;
+    assert!(
+        repo.mark_failed(failed_once.id, "c".into(), "x".into())
             .await
-            .unwrap();
-    }
-    for _ in 0..3 {
-        repo.mark_failed(failed_thrice.id, "d".into(), "x".into())
-            .await
-            .unwrap();
-    }
+            .unwrap()
+    );
+    set_attempts(&pool, exhausted.id, "failed", 3).await;
     repo.mark_done(done.id, "e".into(), result()).await.unwrap();
 
-    let ids: Vec<Uuid> = repo
-        .list_retryable(1000)
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|row| row.id)
-        .collect();
+    let claimed = repo.claim_retryable(1000).await.unwrap();
+    let ids: Vec<Uuid> = claimed.iter().map(|row| row.id).collect();
     assert!(ids.contains(&old_pending.id));
-    assert!(ids.contains(&failed_twice.id));
+    assert!(ids.contains(&failed_once.id));
     assert!(!ids.contains(&fresh_pending.id));
-    assert!(!ids.contains(&failed_thrice.id));
+    assert!(!ids.contains(&exhausted.id));
     assert!(!ids.contains(&done.id));
+    for row in claimed.iter().filter(|row| row.team_id == team_id) {
+        assert_eq!(row.attempts, 2, "claiming a row counts the retry attempt");
+    }
+
+    delete_team(&pool, team_id).await;
+}
+
+#[tokio::test]
+async fn stuck_pending_row_stops_after_three_attempts() {
+    let _guard = ai_judgment_lock().lock().await;
+    let pool = init_pg_pool().await;
+    let team_id = insert_team(&pool).await;
+    let repo = ai_judgment_repository(pool.clone());
+    let stuck = repo
+        .upsert_pending(new_judgment(team_id, Uuid::new_v4(), "s"))
+        .await
+        .unwrap();
+    age(&pool, stuck.id).await;
+
+    let claimed_ids = |rows: Vec<feature_toggle_backend::database::ai::AiJudgment>| -> Vec<Uuid> {
+        rows.into_iter().map(|row| row.id).collect()
+    };
+    assert!(claimed_ids(repo.claim_retryable(1000).await.unwrap()).contains(&stuck.id));
+    assert!(claimed_ids(repo.claim_retryable(1000).await.unwrap()).contains(&stuck.id));
+    assert!(
+        !claimed_ids(repo.claim_retryable(1000).await.unwrap()).contains(&stuck.id),
+        "a row whose result can never be stored must stop after 3 attempts"
+    );
 
     delete_team(&pool, team_id).await;
 }

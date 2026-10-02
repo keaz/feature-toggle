@@ -106,6 +106,16 @@ fn classify_transport_error(error: reqwest::Error) -> AttemptError {
     }
 }
 
+/// A timeout while reading the body is retried like any other timeout; any
+/// other body error means the response cannot be decoded.
+fn classify_body_error(error: reqwest::Error) -> AttemptError {
+    if error.is_timeout() {
+        AttemptError::Retryable(JudgmentError::Timeout, None)
+    } else {
+        AttemptError::Fatal(JudgmentError::Decode(error.without_url().to_string()))
+    }
+}
+
 pub struct HttpJudgmentClient {
     http: reqwest::Client,
     api_key: String,
@@ -144,9 +154,10 @@ impl HttpJudgmentClient {
 
         let status = response.status().as_u16();
         if response.status().is_success() {
-            return response.json::<SystemOneResponse>().await.map_err(|e| {
-                AttemptError::Fatal(JudgmentError::Decode(e.without_url().to_string()))
-            });
+            return response
+                .json::<SystemOneResponse>()
+                .await
+                .map_err(classify_body_error);
         }
 
         let retry_after = parse_retry_after(
@@ -295,6 +306,59 @@ mod tests {
         assert_eq!(
             JudgmentError::Transport("x".into()).log_label(),
             "transport"
+        );
+    }
+
+    /// Serves headers, then never finishes the body. Returns the base URL and
+    /// a counter of accepted connections.
+    async fn stalling_body_server() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let counter = connections.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                counter.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut buffer = [0u8; 4096];
+                    let _ = socket.read(&mut buffer).await;
+                    let _ = socket
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{",
+                        )
+                        .await;
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                });
+            }
+        });
+        (format!("http://{address}"), connections)
+    }
+
+    #[tokio::test]
+    async fn body_read_timeout_is_retried_as_timeout() {
+        let (base_url, connections) = stalling_body_server().await;
+        let cfg = TypesafeConfig {
+            base_url,
+            timeout_ms: 200,
+            ..TypesafeConfig::default()
+        };
+        let client = HttpJudgmentClient::new(&cfg, "key".into()).unwrap();
+
+        let error = client
+            .evaluate(Value::from("state"), BTreeMap::new())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, JudgmentError::Timeout);
+        assert_eq!(
+            connections.load(std::sync::atomic::Ordering::SeqCst),
+            1 + MAX_RETRIES as usize
         );
     }
 

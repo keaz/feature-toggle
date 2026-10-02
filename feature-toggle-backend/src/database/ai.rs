@@ -11,7 +11,8 @@ use uuid::Uuid;
 use crate::database::{Error, handle_error};
 use crate::judgment::{JudgmentKind, SubjectType};
 
-/// Total attempts (first run plus sweeps) before a failed judgment stays failed.
+/// Total runs (the first run plus sweep retries) before a judgment is left alone.
+/// `attempts` counts runs that started.
 pub const MAX_ATTEMPTS: i32 = 3;
 /// Rows the retry sweep takes per tick.
 pub const RETRY_BATCH: i64 = 50;
@@ -212,16 +213,19 @@ pub struct JudgmentResult {
 #[automock]
 #[async_trait]
 pub trait AiJudgmentRepository: Send + Sync {
-    /// Inserts or resets the row for (subject_type, subject_id, kind) to `pending`.
+    /// Inserts or resets the row for (subject_type, subject_id, kind) to `pending`
+    /// with `attempts = 1`: the run that `submit` starts is the first attempt.
     async fn upsert_pending(&self, judgment: NewJudgment) -> Result<AiJudgment, Error>;
-    /// False when `input_hash` no longer matches (a newer submission won).
+    /// False when `input_hash` no longer matches (a newer submission won) or the
+    /// row is already done (another run of the same input finished first).
     async fn mark_done(
         &self,
         id: Uuid,
         input_hash: String,
         result: JudgmentResult,
     ) -> Result<bool, Error>;
-    /// False when the hash is stale or the row is already done. Increments `attempts`.
+    /// False when the hash is stale or the row is already done. Does not count
+    /// an attempt: runs are counted when they start (`upsert_pending`, `claim_retryable`).
     async fn mark_failed(&self, id: Uuid, input_hash: String, error: String)
     -> Result<bool, Error>;
     async fn get_for_subject(
@@ -236,8 +240,11 @@ pub trait AiJudgmentRepository: Send + Sync {
         subject_ids: Vec<Uuid>,
         kind: JudgmentKind,
     ) -> Result<Vec<AiJudgment>, Error>;
-    /// Pending rows older than 2 minutes and failed rows under `MAX_ATTEMPTS`, oldest first.
-    async fn list_retryable(&self, limit: i64) -> Result<Vec<AiJudgment>, Error>;
+    /// Claims rows for the retry sweep, oldest first: pending rows older than
+    /// 2 minutes (their run was lost or never stored) and failed rows, both
+    /// only while `attempts < MAX_ATTEMPTS`. Claiming counts the attempt, so a
+    /// row whose result can never be stored stops after `MAX_ATTEMPTS` runs.
+    async fn claim_retryable(&self, limit: i64) -> Result<Vec<AiJudgment>, Error>;
     fn clone_box(&self) -> Box<dyn AiJudgmentRepository>;
 }
 
@@ -266,11 +273,11 @@ impl AiJudgmentRepository for PgAiJudgmentRepository {
             r#"
             INSERT INTO ai_judgments
                 (id, team_id, subject_type, subject_id, kind, status, attempts, input, input_hash)
-            VALUES ($1, $2, $3, $4, $5, 'pending', 0, $6, $7)
+            VALUES ($1, $2, $3, $4, $5, 'pending', 1, $6, $7)
             ON CONFLICT (subject_type, subject_id, kind) DO UPDATE SET
                 team_id = EXCLUDED.team_id,
                 status = 'pending',
-                attempts = 0,
+                attempts = 1,
                 input = EXCLUDED.input,
                 input_hash = EXCLUDED.input_hash,
                 model = NULL,
@@ -306,7 +313,7 @@ impl AiJudgmentRepository for PgAiJudgmentRepository {
             UPDATE ai_judgments
             SET status = 'done', model = $3, raw_answers = $4, derived = $5,
                 input_tokens = $6, error = NULL, completed_at = NOW()
-            WHERE id = $1 AND input_hash = $2
+            WHERE id = $1 AND input_hash = $2 AND status <> 'done'
             "#,
         )
         .bind(id)
@@ -329,7 +336,7 @@ impl AiJudgmentRepository for PgAiJudgmentRepository {
         let outcome = sqlx::query(
             r#"
             UPDATE ai_judgments
-            SET status = 'failed', error = $3, attempts = attempts + 1
+            SET status = 'failed', error = $3
             WHERE id = $1 AND input_hash = $2 AND status <> 'done'
             "#,
         )
@@ -380,21 +387,29 @@ impl AiJudgmentRepository for PgAiJudgmentRepository {
         handle_error(None, result)
     }
 
-    async fn list_retryable(&self, limit: i64) -> Result<Vec<AiJudgment>, Error> {
+    async fn claim_retryable(&self, limit: i64) -> Result<Vec<AiJudgment>, Error> {
         let result = sqlx::query_as::<_, AiJudgment>(&format!(
             r#"
-            SELECT {JUDGMENT_COLUMNS} FROM ai_judgments
-            WHERE (status = 'pending' AND created_at < NOW() - INTERVAL '2 minutes')
-               OR (status = 'failed' AND attempts < $1)
-            ORDER BY created_at ASC
-            LIMIT $2
+            UPDATE ai_judgments SET attempts = attempts + 1
+            WHERE id IN (
+                SELECT id FROM ai_judgments
+                WHERE ((status = 'pending' AND created_at < NOW() - INTERVAL '2 minutes')
+                       OR status = 'failed')
+                  AND attempts < $1
+                ORDER BY created_at ASC
+                LIMIT $2
+                FOR UPDATE SKIP LOCKED
+            )
+            RETURNING {JUDGMENT_COLUMNS}
             "#
         ))
         .bind(MAX_ATTEMPTS)
         .bind(limit)
         .fetch_all(&self.pool)
         .await;
-        handle_error(None, result)
+        let mut rows = handle_error(None, result)?;
+        rows.sort_by_key(|row| row.created_at);
+        Ok(rows)
     }
 
     fn clone_box(&self) -> Box<dyn AiJudgmentRepository> {

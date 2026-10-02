@@ -51,6 +51,8 @@ pub fn input_hash(input: &Value) -> String {
         .collect()
 }
 
+const TEAM_FEATURE_OFF: &str = "skipped: AI feature turned off for this team";
+
 pub struct JudgmentService {
     client: Arc<dyn JudgmentClient>,
     judgments: Box<dyn AiJudgmentRepository>,
@@ -182,18 +184,38 @@ impl JudgmentService {
         }
     }
 
-    /// Re-runs retryable rows one by one. Returns how many it ran.
+    /// Re-runs claimed rows one by one. A row whose team has since turned the
+    /// feature off is marked failed without an API call, so no team data is
+    /// sent after the toggle goes off. Returns how many rows it claimed.
     pub async fn retry_tick(&self) -> usize {
-        let rows = match self.judgments.list_retryable(RETRY_BATCH).await {
+        let rows = match self.judgments.claim_retryable(RETRY_BATCH).await {
             Ok(rows) => rows,
             Err(err) => {
-                error!("Could not list retryable AI judgments: {err}");
+                error!("Could not claim retryable AI judgments: {err}");
                 return 0;
             }
         };
         let count = rows.len();
+        let mut enabled: HashMap<(Uuid, JudgmentKind), bool> = HashMap::new();
         for row in rows {
-            self.run(row).await;
+            let Ok(kind) = row.kind.parse::<JudgmentKind>() else {
+                self.run(row).await;
+                continue;
+            };
+            let key = (row.team_id, kind);
+            let on = match enabled.get(&key) {
+                Some(on) => *on,
+                None => {
+                    let on = self.team_enabled(row.team_id, kind.feature()).await;
+                    enabled.insert(key, on);
+                    on
+                }
+            };
+            if on {
+                self.run(row).await;
+            } else {
+                self.fail(&row, TEAM_FEATURE_OFF.to_string()).await;
+            }
         }
         count
     }
@@ -475,11 +497,25 @@ mod tests {
         );
     }
 
+    fn settings_with_flag_kind(on: bool) -> MockTeamAiSettingsRepository {
+        let mut settings = MockTeamAiSettingsRepository::new();
+        settings.expect_get().returning(move |_| {
+            Ok(StoredTeamAiSettings {
+                settings: TeamAiSettings {
+                    flag_kind: on,
+                    ..TeamAiSettings::default()
+                },
+                ..StoredTeamAiSettings::default()
+            })
+        });
+        settings
+    }
+
     #[tokio::test]
     async fn retry_tick_runs_each_retryable_row() {
         let rows = vec![row("a"), row("b")];
         let mut repo = MockAiJudgmentRepository::new();
-        repo.expect_list_retryable()
+        repo.expect_claim_retryable()
             .withf(|limit| *limit == crate::database::ai::RETRY_BATCH)
             .times(1)
             .returning(move |_| Ok(rows.clone()));
@@ -491,9 +527,42 @@ mod tests {
             .expect_evaluate()
             .times(2)
             .returning(|_, _| Ok(ok_response()));
-        let (service, applied, _) = service(client, repo, MockTeamAiSettingsRepository::new());
+        let (service, applied, _) = service(client, repo, settings_with_flag_kind(true));
 
         assert_eq!(service.retry_tick().await, 2);
         assert_eq!(applied.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn retry_tick_skips_teams_that_turned_the_feature_off() {
+        let rows = vec![row("a")];
+        let mut repo = MockAiJudgmentRepository::new();
+        repo.expect_claim_retryable()
+            .times(1)
+            .returning(move |_| Ok(rows.clone()));
+        repo.expect_mark_done().times(0);
+        repo.expect_mark_failed()
+            .withf(|_, hash, error| hash == "a" && error.contains("turned off"))
+            .times(1)
+            .returning(|_, _, _| Ok(true));
+        let mut client = MockJudgmentClient::new();
+        client.expect_evaluate().times(0);
+        let (service, applied, _) = service(client, repo, settings_with_flag_kind(false));
+
+        assert_eq!(service.retry_tick().await, 1);
+        assert_eq!(applied.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn each_kind_maps_to_its_team_toggle() {
+        assert_eq!(
+            JudgmentKind::ApprovalRisk.feature(),
+            AiFeature::ApprovalRisk
+        );
+        assert_eq!(
+            JudgmentKind::Justification.feature(),
+            AiFeature::JustificationCheck
+        );
+        assert_eq!(JudgmentKind::FlagKind.feature(), AiFeature::FlagKind);
     }
 }

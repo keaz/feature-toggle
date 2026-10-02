@@ -160,9 +160,9 @@ pub trait JudgmentHandler: Send + Sync {
 }
 ```
 
-- `submit(team_id, kind, subject_type, subject_id, input)`: upsert the row on `(subject_type, subject_id, kind)` with `status = pending`, `attempts = 0`, new `input` and `input_hash` (SHA-256 of canonical input JSON, `sha2` is already a dependency). Then `tokio::spawn` the run.
-- Run: call the client; on success write `raw_answers`, `derived`, `model`, `input_tokens`, `status = done`, `completed_at` with `WHERE id = $1 AND input_hash = $2` (a newer submission wins), then call `apply`. On error write `status = failed`, `error`, `attempts + 1` with the same guard.
-- Retry sweep (`scheduler/ai_judgment_retry.rs`, every 60 s, started in `lib.rs::run` like the other schedulers): rows with `status = pending AND created_at < now() - 2 min` or `status = failed AND attempts < 3`, oldest first, at most 50 per tick. This also recovers work lost on restart.
+- `submit(team_id, kind, subject_type, subject_id, input)`: upsert the row on `(subject_type, subject_id, kind)` with `status = pending`, `attempts = 1` (the run it starts is the first attempt), new `input` and `input_hash` (SHA-256 of canonical input JSON, `sha2` is already a dependency). Then `tokio::spawn` the run.
+- Run: call the client; on success write `raw_answers`, `derived`, `model`, `input_tokens`, `status = done`, `completed_at` with `WHERE id = $1 AND input_hash = $2 AND status <> 'done'` (a newer submission wins, and a second run of the same input is not applied twice), then call `apply`. On error write `status = failed` and `error` with the same hash guard; a `done` row is never overwritten.
+- Retry sweep (`scheduler/ai_judgment_retry.rs`, every 60 s, started in `lib.rs::run` like the other schedulers): claims rows with (`status = pending AND created_at < now() - 2 min` or `status = failed`) and `attempts < 3`, oldest first, at most 50 per tick, incrementing `attempts` as it claims them (`FOR UPDATE SKIP LOCKED`). A row therefore runs at most 3 times, even when its result can never be stored. Before each run the sweep checks the team toggle for the kind; when it is off, the row is marked failed without an API call. This also recovers work lost on restart.
 - Pure `build`/`derive` functions make unit tests easy and let a threshold change be re-derived from stored `raw_answers` without new API calls.
 
 ## 4. Data model

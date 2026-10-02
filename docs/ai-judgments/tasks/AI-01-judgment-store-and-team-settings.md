@@ -101,3 +101,13 @@ Deferred findings from the final review that AI-10 (the first real handler) shou
 - The retry sweep does not check the team toggle, so a team that turns AI off can still get up to 2 retries.
 - A timeout while reading the response body maps to `Decode` (fatal) instead of `Timeout` (retryable).
 
+### 2026-10-02, Claude (pre-AI-10 fixes)
+
+The four findings above are fixed:
+
+- `attempts` now counts runs that started. `upsert_pending` sets it to 1, and the sweep claims rows with `claim_retryable` (renamed from `list_retryable`), which increments it with `FOR UPDATE SKIP LOCKED`. `mark_failed` no longer increments it. Pending and failed rows both stop at `MAX_ATTEMPTS = 3` runs in total. Test: `stuck_pending_row_stops_after_three_attempts`.
+- `mark_done` adds `AND status <> 'done'`, so a second run of the same input returns `RunOutcome::Stale` and `apply` runs once. Test: `mark_done_is_applied_only_once`.
+- `retry_tick` checks the team toggle for each row's kind (`JudgmentKind::feature()`). When it is off, the row is marked failed with "skipped: AI feature turned off for this team" and no API call is made. Test: `retry_tick_skips_teams_that_turned_the_feature_off`.
+- A timeout while reading the response body is now `JudgmentError::Timeout` and is retried. Test: `body_read_timeout_is_retried_as_timeout` (local TCP server, no mock crate).
+- The AI repository tests share a lock, because `claim_retryable` claims rows across all teams.
+

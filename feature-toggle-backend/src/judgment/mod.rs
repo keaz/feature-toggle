@@ -29,6 +29,16 @@ impl JudgmentKind {
             JudgmentKind::FlagKind => "flag_kind",
         }
     }
+
+    /// The per-team toggle that must be on for this kind to run.
+    pub fn feature(self) -> crate::database::ai::AiFeature {
+        use crate::database::ai::AiFeature;
+        match self {
+            JudgmentKind::ApprovalRisk => AiFeature::ApprovalRisk,
+            JudgmentKind::Justification => AiFeature::JustificationCheck,
+            JudgmentKind::FlagKind => AiFeature::FlagKind,
+        }
+    }
 }
 
 impl FromStr for JudgmentKind {
