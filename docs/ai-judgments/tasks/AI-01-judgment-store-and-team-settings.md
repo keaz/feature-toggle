@@ -91,3 +91,13 @@ _No entries yet._
 - Deviations: `AiRuntime.judgments` holds `Option<Arc<JudgmentService>>`; register handlers with `JudgmentService::with_handler` before wrapping in `Arc` (in `lib.rs::run`). `mark_failed` never overwrites `done`. `updated_by` has no FK. PUT for an unknown team returns 404. Repository string args are owned (`String`) for mockall.
 - Open: the no-key server start check is verified end to end in the plan's Task 10; see the AI-02 handoff entry.
 - Next: feature tasks build a handler, register it in `lib.rs::run`, and call `runtime.judgments` / `team_enabled(team_id, AiFeature::...)` before `submit`.
+
+### 2026-10-02, Claude (final review follow-up)
+
+Deferred findings from the final review that AI-10 (the first real handler) should fix first:
+
+- Pending rows have no attempt cap: if `mark_done` keeps failing (for example a JSONB error), the sweep re-runs the row and calls the paid API every 60 s forever. Count attempts for pending rows too, and apply `attempts < MAX_ATTEMPTS` to them.
+- `mark_done` has no `AND status <> 'done'` guard. When the 16-permit semaphore queue backs up for more than 2 minutes, the sweep and the original spawned run can both finish, and `apply` then runs twice.
+- The retry sweep does not check the team toggle, so a team that turns AI off can still get up to 2 retries.
+- A timeout while reading the response body maps to `Decode` (fatal) instead of `Timeout` (retryable).
+
