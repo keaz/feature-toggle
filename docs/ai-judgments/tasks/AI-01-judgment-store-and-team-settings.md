@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Type | Feature (foundation) |
-| Status | Not started |
+| Status | Done in db0dc7e (commits 88728a1..db0dc7e) |
 | Repo | backend (`feature-toggle/`) |
 | Crate | `feature-toggle-backend` |
 | Depends on | AI-00 |
@@ -70,11 +70,11 @@ Give later tasks one way to run an async judgment: `JudgmentService::submit(...)
 
 ## Acceptance criteria
 
-- [ ] Migrations apply on a clean DB and on a DB with existing data.
+- [x] Migrations apply on a clean DB and on a DB with existing data.
 - [ ] Without a key, the service is not built, the scheduler is not started, and the settings API still works and returns `available: false`.
-- [ ] With a key and a fake handler registered in a test, a submitted judgment reaches `done` and apply runs once.
-- [ ] A failed judgment is retried by the sweep at most 3 times in total.
-- [ ] Contract baseline is updated; all backend tests pass.
+- [x] With a key and a fake handler registered in a test, a submitted judgment reaches `done` and apply runs once.
+- [x] A failed judgment is retried by the sweep at most 3 times in total.
+- [x] Contract baseline is updated; all backend tests pass.
 
 ## Out of scope
 
@@ -83,3 +83,11 @@ Feature handlers (AI-10, AI-20, AI-30) and UI (AI-02).
 ## Handoff log
 
 _No entries yet._
+
+### 2026-10-02, Claude (plan 2026-10-02-ai-judgments-foundation)
+
+- Changed: migration `20261002030000_ai_judgments.sql`; `database::ai` (`TeamAiSettingsRepository`, `AiJudgmentRepository`, unconditional automocks); `judgment::service` (`JudgmentHandler`, `JudgmentService`, `RunOutcome`, `input_hash`); `AiJudgmentRetryScheduler` (60 s, started only with a key); `GET`/`PUT /api/v1/teams/{team_id}/ai-settings` (PUT is system-admin only, logs `ai_settings_updated`); contract baseline.
+- Verified: migrations applied to an empty DB, then the AI migration applied after seeding with `init.sql`; repository tests against Postgres; service tests with `MockJudgmentClient`; REST tests; full `cargo test -p feature-toggle-backend` green on the seeded test DB (`feture_toggle_test`). The developer DB `feature_toggle` is not seeded, so 10 seed-dependent tests fail there; unrelated to this change.
+- Deviations: `AiRuntime.judgments` holds `Option<Arc<JudgmentService>>`; register handlers with `JudgmentService::with_handler` before wrapping in `Arc` (in `lib.rs::run`). `mark_failed` never overwrites `done`. `updated_by` has no FK. PUT for an unknown team returns 404. Repository string args are owned (`String`) for mockall.
+- Open: the no-key server start check is verified end to end in the plan's Task 10; see the AI-02 handoff entry.
+- Next: feature tasks build a handler, register it in `lib.rs::run`, and call `runtime.judgments` / `team_enabled(team_id, AiFeature::...)` before `submit`.
