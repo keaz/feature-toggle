@@ -201,6 +201,22 @@ impl std::str::FromStr for FlagKindFilter {
     }
 }
 
+/// The list filters a natural-language search applies (AI-40). Same meaning as
+/// the matching `FeatureListQuery` fields; archived features stay hidden unless
+/// `lifecycle_stage` is `Archived`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FeatureSearchFilters {
+    pub lifecycle_stage: Option<LifecycleStage>,
+    pub stale: Option<bool>,
+    pub expired: Option<bool>,
+    pub feature_type: Option<FeatureType>,
+    pub dependency_status: Option<String>,
+    pub approval_status: Option<String>,
+    pub flag_kind: Option<FlagKindFilter>,
+    pub tag: Option<String>,
+    pub owner: Option<String>,
+}
+
 /// Who set the stored flag kind. A `user` kind is never changed by AI.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]

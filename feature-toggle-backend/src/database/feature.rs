@@ -10,6 +10,24 @@ use sqlx::{FromRow, PgConnection, PgPool, Postgres, Row, Transaction};
 use std::collections::{BTreeSet, HashMap};
 use uuid::Uuid;
 
+/// Sort order of the windowed feature query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FeatureOrder {
+    /// By key: the list endpoint's order.
+    Key,
+    /// Busiest first: `evaluation_count_30d` descending, then key.
+    Usage,
+}
+
+impl FeatureOrder {
+    fn order_by_sql(self) -> &'static str {
+        match self {
+            FeatureOrder::Key => " ORDER BY f.key",
+            FeatureOrder::Usage => " ORDER BY f.evaluation_count_30d DESC, f.key",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateStageCriterion {
     #[serde(default)]
@@ -648,6 +666,31 @@ pub trait FeatureRepository: Send + Sync {
         exclude: Vec<String>,
         limit: i64,
     ) -> Result<Vec<String>, Error>;
+    /// The team's most used owners on unarchived features, up to `limit`.
+    async fn get_team_owner_candidates(
+        &self,
+        team_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<String>, Error>;
+    /// Features matching the list filters, busiest first
+    /// (`evaluation_count_30d` descending, then key), at most `limit`. Same
+    /// filter semantics as `get_features_with_offset_filtered` with archived
+    /// features hidden unless `lifecycle_stage` is `archived`. Used by the
+    /// natural-language search. Dependencies are loaded.
+    async fn get_features_by_usage_filtered(
+        &self,
+        team_id: Uuid,
+        feature_type: Option<FeatureType>,
+        lifecycle_stage: Option<String>,
+        stale: Option<bool>,
+        owner: Option<String>,
+        expired: Option<bool>,
+        tag: Option<String>,
+        dependency_status: Option<String>,
+        approval_status: Option<String>,
+        flag_kind: Option<FlagKindFilter>,
+        limit: i64,
+    ) -> Result<Vec<Feature>, Error>;
     /// Stores an AI-chosen kind. False when a user chose one (or cleared it) in
     /// the meantime, or the feature is gone.
     async fn set_ai_flag_kind(
@@ -1876,6 +1919,7 @@ impl FeatureRepositoryImpl {
         dependency_status: Option<String>,
         approval_status: Option<String>,
         flag_kind: Option<FlagKindFilter>,
+        order: FeatureOrder,
         limit: i64,
         offset: i64,
     ) -> Result<(Vec<FeatureWithStageRow>, i64), Error> {
@@ -1928,7 +1972,7 @@ impl FeatureRepositoryImpl {
             approval_status.as_deref(),
             flag_kind,
         );
-        query_builder.push(" ORDER BY f.key");
+        query_builder.push(order.order_by_sql());
         query_builder.push(" LIMIT ").push_bind(limit);
         query_builder.push(" OFFSET ").push_bind(offset);
 
@@ -2564,6 +2608,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
                 None,
                 None,
                 None,
+                FeatureOrder::Key,
                 page_size as i64,
                 offset as i64,
             )
@@ -2596,6 +2641,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
                 None,
                 None,
                 None,
+                FeatureOrder::Key,
                 limit,
                 offset,
             )
@@ -2637,6 +2683,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
                 dependency_status,
                 approval_status,
                 flag_kind,
+                FeatureOrder::Key,
                 limit,
                 offset,
             )
@@ -2701,6 +2748,67 @@ impl FeatureRepository for FeatureRepositoryImpl {
         .fetch_all(&self.pool)
         .await;
         handle_error(None, result)
+    }
+
+    async fn get_team_owner_candidates(
+        &self,
+        team_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<String>, Error> {
+        let result = sqlx::query_scalar::<_, String>(
+            r#"SELECT BTRIM(owner) AS owner_name
+               FROM features
+               WHERE team_id = $1
+                 AND archived_at IS NULL
+                 AND owner IS NOT NULL
+                 AND BTRIM(owner) <> ''
+               GROUP BY owner_name
+               ORDER BY COUNT(*) DESC, owner_name
+               LIMIT $2"#,
+        )
+        .bind(team_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await;
+        handle_error(None, result)
+    }
+
+    async fn get_features_by_usage_filtered(
+        &self,
+        team_id: Uuid,
+        feature_type: Option<FeatureType>,
+        lifecycle_stage: Option<String>,
+        stale: Option<bool>,
+        owner: Option<String>,
+        expired: Option<bool>,
+        tag: Option<String>,
+        dependency_status: Option<String>,
+        approval_status: Option<String>,
+        flag_kind: Option<FlagKindFilter>,
+        limit: i64,
+    ) -> Result<Vec<Feature>, Error> {
+        let (feature_rows, _) = self
+            .get_features_windowed(
+                team_id,
+                None,
+                feature_type,
+                lifecycle_stage,
+                stale,
+                false,
+                owner,
+                expired,
+                tag,
+                dependency_status,
+                approval_status,
+                flag_kind,
+                FeatureOrder::Usage,
+                limit,
+                0,
+            )
+            .await?;
+        let mut features = Self::map_rows_to_feature_list(feature_rows);
+        self.hydrate_feature_dependencies(&mut features).await?;
+        Ok(features)
     }
 
     async fn set_ai_flag_kind(

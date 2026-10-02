@@ -106,6 +106,15 @@ pub trait FeatureCrudLogic: Send + Sync {
         offset: i64,
         limit: i64,
     ) -> Result<(Vec<Feature>, i64), Error>;
+    /// Features matching `filters`, busiest first (`evaluation_count_30d`
+    /// descending), at most `limit`. Archived features are hidden unless the
+    /// filters ask for the archived stage. Used by the natural-language search.
+    async fn search_features_by_usage(
+        &self,
+        team_id: ID,
+        filters: crate::model::FeatureSearchFilters,
+        limit: i64,
+    ) -> Result<Vec<Feature>, Error>;
     async fn create_feature(
         &self,
         team_id: ID,
@@ -292,6 +301,7 @@ mockall::mock! {
             offset: i64,
             limit: i64,
         ) -> Result<(Vec<Feature>, i64), Error>;
+        async fn search_features_by_usage(&self, team_id: ID, filters: crate::model::FeatureSearchFilters, limit: i64) -> Result<Vec<Feature>, Error>;
         async fn create_feature(&self, team_id: ID, input: CreateFeatureInput, actor: Option<crate::logic::ActorContext>) -> Result<ID, Error>;
         async fn update_feature(&self, id: ID, input: UpdateFeatureInput, actor: Option<crate::logic::ActorContext>) -> Result<Feature, Error>;
         async fn delete_feature(&self, id: ID, actor: Option<crate::logic::ActorContext>) -> Result<(), Error>;
@@ -987,6 +997,37 @@ impl FeatureCrudLogic for FeatureLogicImpl {
             .collect();
 
         Ok((mapped_features, total))
+    }
+
+    async fn search_features_by_usage(
+        &self,
+        team_id: ID,
+        filters: crate::model::FeatureSearchFilters,
+        limit: i64,
+    ) -> Result<Vec<Feature>, Error> {
+        let team_id = Uuid::try_from(team_id).map_err(|e| Error::InvalidInput(e.to_string()))?;
+        let features = self
+            .repository
+            .get_features_by_usage_filtered(
+                team_id,
+                filters
+                    .feature_type
+                    .map(Self::map_api_to_entity_feature_type),
+                filters.lifecycle_stage.map(Self::map_lifecycle_filter),
+                filters.stale,
+                filters.owner,
+                filters.expired,
+                filters.tag,
+                filters.dependency_status,
+                filters.approval_status,
+                filters.flag_kind,
+                limit,
+            )
+            .await?;
+        Ok(features
+            .into_iter()
+            .map(Self::map_entity_to_api_feature)
+            .collect())
     }
 
     async fn create_feature(
@@ -2415,6 +2456,72 @@ mod test {
         assert_eq!(feature.key, "Test Feature");
         assert_eq!(feature.description, Some("Test description".to_string()));
         assert!(matches!(feature.feature_type, ModelFeatureType::Simple));
+    }
+
+    #[tokio::test]
+    async fn search_features_by_usage_maps_filters_for_the_repository() {
+        let team = Uuid::parse_str("51ecc366-f1cd-4d3d-ab73-fa60bad98f27").unwrap();
+        let mut repository = MockFeatureRepository::new();
+        repository
+            .expect_get_features_by_usage_filtered()
+            .withf(
+                move |team_id,
+                      feature_type,
+                      lifecycle_stage,
+                      stale,
+                      owner,
+                      expired,
+                      tag,
+                      dependency_status,
+                      approval_status,
+                      flag_kind,
+                      limit| {
+                    *team_id == team
+                        && matches!(feature_type, Some(EntityFeatureType::Contextual))
+                        && lifecycle_stage.as_deref() == Some("archived")
+                        && *stale == Some(true)
+                        && owner.as_deref() == Some("payments")
+                        && *expired == Some(false)
+                        && tag.as_deref() == Some("checkout")
+                        && dependency_status.as_deref() == Some("independent")
+                        && approval_status.as_deref() == Some("pending")
+                        && *flag_kind
+                            == Some(crate::model::FlagKindFilter::Kind(
+                                crate::model::FlagKind::Ops,
+                            ))
+                        && *limit == 50
+                },
+            )
+            .times(1)
+            .returning(|_, _, _, _, _, _, _, _, _, _, _| Ok(vec![]));
+
+        let logic = feature_logic(
+            Box::new(repository),
+            Box::new(MockEnvironmentLogic::new()),
+            create_mock_activity_log(),
+            create_mock_user_repository(),
+        );
+        let found = logic
+            .search_features_by_usage(
+                ID::from(team),
+                crate::model::FeatureSearchFilters {
+                    lifecycle_stage: Some(LifecycleStage::Archived),
+                    stale: Some(true),
+                    expired: Some(false),
+                    feature_type: Some(ModelFeatureType::Contextual),
+                    dependency_status: Some("independent".into()),
+                    approval_status: Some("pending".into()),
+                    flag_kind: Some(crate::model::FlagKindFilter::Kind(
+                        crate::model::FlagKind::Ops,
+                    )),
+                    tag: Some("checkout".into()),
+                    owner: Some("payments".into()),
+                },
+                50,
+            )
+            .await
+            .unwrap();
+        assert!(found.is_empty());
     }
 
     #[tokio::test]

@@ -278,7 +278,7 @@ fn parse_flag_kind_filter(
     .transpose()
 }
 
-fn feature_base_response(feature: &ModelFeature) -> FeatureResponse {
+pub(crate) fn feature_base_response(feature: &ModelFeature) -> FeatureResponse {
     FeatureResponse {
         id: feature.id.to_string(),
         key: feature.key.clone(),

@@ -39,8 +39,8 @@ use utoipa_swagger_ui::SwaggerUi;
 use crate::rest::ai::{
     AiStatusResponse, FeatureSuggestionsRequest, FeatureSuggestionsResponse,
     FlagKindBackfillResponse, JustificationCheckRequest, JustificationCheckResponse,
-    KindSuggestionResponse, TagSuggestionResponse, TeamAiSettingsResponse,
-    UpdateTeamAiSettingsRequest,
+    KindSuggestionResponse, NlSearchFiltersApplied, NlSearchRequest, NlSearchResponse,
+    NlSearchResult, TagSuggestionResponse, TeamAiSettingsResponse, UpdateTeamAiSettingsRequest,
 };
 use crate::rest::approval::{
     AiRiskStatus, AiRiskSummary, AppliesTo, ApprovalActionRequest,
@@ -167,6 +167,7 @@ async fn health() -> impl Responder {
         ai::check_justification,
         ai::suggest_feature_details,
         ai::backfill_flag_kind,
+        ai::nl_search_features,
         environment::list_environments,
         environment::get_environment,
         environment::create_environment,
@@ -308,6 +309,10 @@ async fn health() -> impl Responder {
         KindSuggestionResponse,
         TagSuggestionResponse,
         FlagKindBackfillResponse,
+        NlSearchRequest,
+        NlSearchResponse,
+        NlSearchResult,
+        NlSearchFiltersApplied,
         crate::model::FlagKind,
         crate::model::FlagKindSource,
         PaginationQuery,

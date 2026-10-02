@@ -1,0 +1,598 @@
+{
+  "features": [
+    {
+      "key": "checkout-kill-switch",
+      "description": "Emergency kill switch that disables the checkout flow",
+      "tags": [
+        "checkout",
+        "ops"
+      ],
+      "owner": "platform-team",
+      "lifecycle_stage": "active",
+      "feature_type": "Simple",
+      "evaluations_30d": 900,
+      "flag_kind": "ops"
+    },
+    {
+      "key": "payments-circuit-breaker",
+      "description": "Circuit breaker that stops calls to the payment gateway when it keeps failing",
+      "tags": [
+        "payments",
+        "ops"
+      ],
+      "owner": "platform-team",
+      "lifecycle_stage": "active",
+      "feature_type": "Simple",
+      "evaluations_30d": 700,
+      "flag_kind": "ops"
+    },
+    {
+      "key": "new-checkout-flow",
+      "description": "Gradual rollout of the redesigned checkout page",
+      "tags": [
+        "checkout",
+        "ui"
+      ],
+      "owner": "growth-team",
+      "lifecycle_stage": "active",
+      "feature_type": "Simple",
+      "evaluations_30d": 800,
+      "flag_kind": "release"
+    },
+    {
+      "key": "checkout-button-color-test",
+      "description": "A/B test of the checkout button color",
+      "tags": [
+        "checkout",
+        "ui"
+      ],
+      "owner": "growth-team",
+      "lifecycle_stage": "active",
+      "feature_type": "Simple",
+      "evaluations_30d": 300,
+      "flag_kind": "experiment"
+    },
+    {
+      "key": "stripe-payouts-v2",
+      "description": "Use the new payouts API for stripe payments",
+      "tags": [
+        "payments"
+      ],
+      "owner": "payments-team",
+      "lifecycle_stage": "active",
+      "feature_type": "Simple",
+      "evaluations_30d": 500,
+      "flag_kind": "release"
+    },
+    {
+      "key": "legacy-invoice-export",
+      "description": "Old invoice CSV export that is no longer used",
+      "tags": [
+        "billing",
+        "payments"
+      ],
+      "owner": "payments-team",
+      "lifecycle_stage": "active",
+      "feature_type": "Simple",
+      "evaluations_30d": 0,
+      "stale": true
+    },
+    {
+      "key": "refund-flow-old",
+      "description": "Previous refund flow kept as a fallback",
+      "tags": [
+        "payments"
+      ],
+      "owner": "payments-team",
+      "lifecycle_stage": "deprecated",
+      "feature_type": "Simple",
+      "evaluations_30d": 0,
+      "stale": true
+    },
+    {
+      "key": "apple-pay-beta",
+      "description": "Apple Pay beta for selected customers",
+      "tags": [
+        "payments",
+        "beta",
+        "mobile"
+      ],
+      "owner": "payments-team",
+      "lifecycle_stage": "active",
+      "feature_type": "Simple",
+      "evaluations_30d": 120,
+      "flag_kind": "permission"
+    },
+    {
+      "key": "search-ranking-v3",
+      "description": "New search ranking algorithm",
+      "tags": [
+        "search"
+      ],
+      "owner": "search-team",
+      "lifecycle_stage": "active",
+      "feature_type": "Simple",
+      "evaluations_30d": 600,
+      "flag_kind": "release"
+    },
+    {
+      "key": "search-autocomplete-timeout",
+      "description": "Timeout in milliseconds for search autocomplete",
+      "tags": [
+        "search"
+      ],
+      "owner": "search-team",
+      "lifecycle_stage": "active",
+      "feature_type": "Simple",
+      "evaluations_30d": 200,
+      "flag_kind": "config"
+    },
+    {
+      "key": "onboarding-checklist",
+      "description": "Show the onboarding checklist to new users",
+      "tags": [
+        "onboarding",
+        "ui"
+      ],
+      "owner": "growth-team",
+      "lifecycle_stage": "active",
+      "feature_type": "Simple",
+      "evaluations_30d": 150,
+      "flag_kind": "release"
+    },
+    {
+      "key": "onboarding-email-experiment",
+      "description": "Experiment comparing welcome email variants",
+      "tags": [
+        "onboarding"
+      ],
+      "owner": "growth-team",
+      "lifecycle_stage": "active",
+      "feature_type": "Simple",
+      "evaluations_30d": 90,
+      "flag_kind": "experiment",
+      "expired": true
+    },
+    {
+      "key": "dark-mode",
+      "description": "Dark mode theme",
+      "tags": [
+        "ui",
+        "mobile"
+      ],
+      "owner": "growth-team",
+      "lifecycle_stage": "draft",
+      "feature_type": "Simple",
+      "evaluations_30d": 0
+    },
+    {
+      "key": "maintenance-mode",
+      "description": "Puts the site into read-only maintenance mode",
+      "tags": [
+        "ops"
+      ],
+      "owner": "platform-team",
+      "lifecycle_stage": "active",
+      "feature_type": "Simple",
+      "evaluations_30d": 10,
+      "flag_kind": "ops"
+    },
+    {
+      "key": "billing-plan-limits",
+      "description": "Maximum seats per billing plan",
+      "tags": [
+        "billing"
+      ],
+      "owner": "payments-team",
+      "lifecycle_stage": "active",
+      "feature_type": "Simple",
+      "evaluations_30d": 80,
+      "flag_kind": "config"
+    },
+    {
+      "key": "enterprise-sso-access",
+      "description": "Single sign-on available to enterprise plan customers",
+      "tags": [
+        "billing",
+        "enterprise"
+      ],
+      "owner": "platform-team",
+      "lifecycle_stage": "active",
+      "feature_type": "Simple",
+      "evaluations_30d": 60,
+      "flag_kind": "permission"
+    },
+    {
+      "key": "old-homepage-banner",
+      "description": "Banner on the old homepage",
+      "tags": [
+        "ui"
+      ],
+      "owner": "growth-team",
+      "lifecycle_stage": "archived",
+      "feature_type": "Simple",
+      "evaluations_30d": 0
+    },
+    {
+      "key": "archived-payments-test",
+      "description": "Retired payments experiment",
+      "tags": [
+        "payments"
+      ],
+      "owner": "payments-team",
+      "lifecycle_stage": "archived",
+      "feature_type": "Simple",
+      "evaluations_30d": 0
+    },
+    {
+      "key": "mobile-push-v2",
+      "description": "Second version of mobile push notifications",
+      "tags": [
+        "mobile"
+      ],
+      "owner": "growth-team",
+      "lifecycle_stage": "active",
+      "feature_type": "Simple",
+      "evaluations_30d": 250,
+      "flag_kind": "release"
+    },
+    {
+      "key": "unclassified-checkout-tweak",
+      "description": "Small tweak to the checkout form",
+      "tags": [
+        "checkout"
+      ],
+      "owner": "payments-team",
+      "lifecycle_stage": "active",
+      "feature_type": "Simple",
+      "evaluations_30d": 40
+    },
+    {
+      "key": "load-shedding-api",
+      "description": "Sheds low priority API traffic under heavy load",
+      "tags": [
+        "ops"
+      ],
+      "owner": "platform-team",
+      "lifecycle_stage": "active",
+      "feature_type": "Simple",
+      "evaluations_30d": 55,
+      "flag_kind": "ops"
+    },
+    {
+      "key": "invoice-tax-rounding",
+      "description": "Round invoice tax per line instead of per invoice",
+      "tags": [
+        "billing"
+      ],
+      "owner": "payments-team",
+      "lifecycle_stage": "active",
+      "feature_type": "Contextual",
+      "evaluations_30d": 30
+    },
+    {
+      "key": "contextual-pricing-rules",
+      "description": "Pricing rules evaluated per customer context",
+      "tags": [
+        "billing",
+        "payments"
+      ],
+      "owner": "payments-team",
+      "lifecycle_stage": "active",
+      "feature_type": "Contextual",
+      "evaluations_30d": 70
+    },
+    {
+      "key": "expired-promo-banner",
+      "description": "Promotional banner that should have been removed",
+      "tags": [
+        "ui"
+      ],
+      "owner": "growth-team",
+      "lifecycle_stage": "active",
+      "feature_type": "Simple",
+      "evaluations_30d": 0,
+      "expired": true
+    },
+    {
+      "key": "legacy-dashboard-widget",
+      "description": "Unused widget on the dashboard",
+      "tags": [
+        "ui"
+      ],
+      "owner": "growth-team",
+      "lifecycle_stage": "active",
+      "feature_type": "Simple",
+      "evaluations_30d": 0,
+      "stale": true
+    }
+  ],
+  "queries": [
+    {
+      "query": "stale flags in payments",
+      "expected": {
+        "stale": true,
+        "tag": "payments"
+      },
+      "topic": false,
+      "keys_exact": [
+        "legacy-invoice-export",
+        "refund-flow-old"
+      ]
+    },
+    {
+      "query": "archived flags owned by payments-team",
+      "expected": {
+        "lifecycle_stage": "archived",
+        "owner": "payments-team"
+      },
+      "topic": false,
+      "keys_exact": [
+        "archived-payments-test"
+      ]
+    },
+    {
+      "query": "kill switches for checkout",
+      "expected": {
+        "tag": "checkout"
+      },
+      "topic": true,
+      "optional": [
+        "flag_kind"
+      ],
+      "top_any": [
+        "checkout-kill-switch"
+      ]
+    },
+    {
+      "query": "flags that have not been evaluated lately",
+      "expected": {
+        "stale": true
+      },
+      "topic": false
+    },
+    {
+      "query": "active flags that are not stale",
+      "expected": {
+        "lifecycle_stage": "active",
+        "stale": false
+      },
+      "topic": false
+    },
+    {
+      "query": "expired flags",
+      "expected": {
+        "expired": true
+      },
+      "topic": false,
+      "keys_exact": [
+        "onboarding-email-experiment",
+        "expired-promo-banner"
+      ]
+    },
+    {
+      "query": "flags that have not expired",
+      "expected": {
+        "expired": false
+      },
+      "topic": false
+    },
+    {
+      "query": "contextual flags",
+      "expected": {
+        "feature_type": "contextual"
+      },
+      "topic": false,
+      "keys_exact": [
+        "invoice-tax-rounding",
+        "contextual-pricing-rules"
+      ]
+    },
+    {
+      "query": "simple on off flags",
+      "expected": {
+        "feature_type": "simple"
+      },
+      "topic": false
+    },
+    {
+      "query": "release flags owned by growth-team",
+      "expected": {
+        "flag_kind": "release",
+        "owner": "growth-team"
+      },
+      "topic": false,
+      "keys_exact": [
+        "new-checkout-flow",
+        "onboarding-checklist",
+        "mobile-push-v2"
+      ]
+    },
+    {
+      "query": "experiments",
+      "expected": {
+        "flag_kind": "experiment"
+      },
+      "topic": false,
+      "keys_exact": [
+        "checkout-button-color-test",
+        "onboarding-email-experiment"
+      ]
+    },
+    {
+      "query": "flags with no kind assigned",
+      "expected": {
+        "flag_kind": "unclassified"
+      },
+      "topic": false
+    },
+    {
+      "query": "deprecated flags",
+      "expected": {
+        "lifecycle_stage": "deprecated"
+      },
+      "topic": false,
+      "keys_exact": [
+        "refund-flow-old"
+      ]
+    },
+    {
+      "query": "draft flags",
+      "expected": {
+        "lifecycle_stage": "draft"
+      },
+      "topic": false,
+      "keys_exact": [
+        "dark-mode"
+      ]
+    },
+    {
+      "query": "flags waiting for approval",
+      "expected": {
+        "approval_status": "pending"
+      },
+      "topic": false
+    },
+    {
+      "query": "flags with approved requests",
+      "expected": {
+        "approval_status": "approved"
+      },
+      "topic": false
+    },
+    {
+      "query": "flags that depend on other flags",
+      "expected": {
+        "dependency_status": "has_dependencies"
+      },
+      "topic": false
+    },
+    {
+      "query": "flags with no dependencies",
+      "expected": {
+        "dependency_status": "independent"
+      },
+      "topic": false
+    },
+    {
+      "query": "search ranking",
+      "expected": {},
+      "topic": true,
+      "optional": [
+        "tag",
+        "flag_kind"
+      ],
+      "top_any": [
+        "search-ranking-v3"
+      ]
+    },
+    {
+      "query": "apple pay",
+      "expected": {},
+      "topic": true,
+      "optional": [
+        "tag",
+        "flag_kind"
+      ],
+      "top_any": [
+        "apple-pay-beta"
+      ]
+    },
+    {
+      "query": "flags owned by search-team",
+      "expected": {
+        "owner": "search-team"
+      },
+      "topic": false,
+      "keys_exact": [
+        "search-ranking-v3",
+        "search-autocomplete-timeout"
+      ]
+    },
+    {
+      "query": "payments tagged flags that are ops kind",
+      "expected": {
+        "tag": "payments",
+        "flag_kind": "ops"
+      },
+      "topic": false,
+      "keys_exact": [
+        "payments-circuit-breaker"
+      ]
+    },
+    {
+      "query": "long-lived config values for billing",
+      "expected": {
+        "flag_kind": "config",
+        "tag": "billing"
+      },
+      "topic": false,
+      "keys_exact": [
+        "billing-plan-limits"
+      ]
+    },
+    {
+      "query": "permission flags for beta customers",
+      "expected": {
+        "flag_kind": "permission"
+      },
+      "topic": true,
+      "optional": [
+        "tag"
+      ],
+      "top_any": [
+        "apple-pay-beta",
+        "enterprise-sso-access"
+      ]
+    },
+    {
+      "query": "show me the new checkout redesign rollout",
+      "expected": {},
+      "topic": true,
+      "optional": [
+        "tag",
+        "flag_kind"
+      ],
+      "top_any": [
+        "new-checkout-flow"
+      ]
+    },
+    {
+      "query": "something that stops payment traffic when the gateway fails",
+      "expected": {},
+      "topic": true,
+      "optional": [
+        "tag",
+        "flag_kind"
+      ],
+      "top_any": [
+        "payments-circuit-breaker"
+      ]
+    },
+    {
+      "query": "stale ui flags owned by growth-team",
+      "expected": {
+        "stale": true,
+        "tag": "ui",
+        "owner": "growth-team"
+      },
+      "topic": false,
+      "keys_exact": [
+        "legacy-dashboard-widget",
+        "expired-promo-banner"
+      ]
+    },
+    {
+      "query": "flags on mobile",
+      "expected": {
+        "tag": "mobile"
+      },
+      "topic": false,
+      "keys_exact": [
+        "apple-pay-beta",
+        "dark-mode",
+        "mobile-push-v2"
+      ]
+    }
+  ]
+}

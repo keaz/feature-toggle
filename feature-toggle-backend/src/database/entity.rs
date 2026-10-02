@@ -310,6 +310,15 @@ pub enum ApprovalStatus {
 }
 
 impl ApprovalStatus {
+    /// Every status, in the order the list filter documents them.
+    pub const ALL: [ApprovalStatus; 5] = [
+        ApprovalStatus::Pending,
+        ApprovalStatus::Approved,
+        ApprovalStatus::Rejected,
+        ApprovalStatus::Cancelled,
+        ApprovalStatus::AutoApproved,
+    ];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             ApprovalStatus::Pending => "pending",

@@ -15,9 +15,12 @@ use crate::database::ai::{StoredTeamAiSettings, TeamAiSettings, TeamAiSettingsRe
 use crate::database::feature::FeatureRepository;
 use crate::judgment::flag_kind;
 use crate::judgment::justification::{self, MAX_REASON_CHARS, ReasonKind};
+use crate::judgment::nl_search;
 use crate::judgment::{AiRuntime, JudgmentKind, SubjectType};
-use crate::model::FlagKind;
+use crate::logic::feature::FeatureLogic;
+use crate::model::{FlagKind, FlagKindFilter};
 use crate::rest::error::RestError;
+use crate::rest::feature::{FeatureResponse, feature_base_response};
 use crate::utils::activity_logger::{activity_types, log_team_activity};
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -520,6 +523,180 @@ pub(crate) async fn backfill_flag_kind(
     }))
 }
 
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NlSearchRequest {
+    /// 3 to 300 characters after trimming.
+    pub query: String,
+    /// 1 to 20; 10 when absent.
+    pub limit: Option<i64>,
+}
+
+/// The list filters the search applied, named like `FeatureListQuery`. A field
+/// is present only when the search applied it.
+#[derive(Debug, Default, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NlSearchFiltersApplied {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle_stage: Option<crate::rest::feature::LifecycleStage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expired: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub feature_type: Option<crate::rest::feature::FeatureType>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dependency_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_status: Option<String>,
+    /// `release`, `experiment`, `ops`, `permission`, `config`, or `unclassified`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flag_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+}
+
+impl From<&nl_search::AppliedFilters> for NlSearchFiltersApplied {
+    fn from(filters: &nl_search::AppliedFilters) -> Self {
+        Self {
+            lifecycle_stage: filters.lifecycle_stage.map(Into::into),
+            stale: filters.stale,
+            expired: filters.expired,
+            feature_type: filters.feature_type.map(Into::into),
+            dependency_status: filters.dependency_status.clone(),
+            approval_status: filters.approval_status.clone(),
+            flag_kind: filters.flag_kind.map(|kind| match kind {
+                FlagKindFilter::Kind(kind) => kind.as_str().to_string(),
+                FlagKindFilter::Unclassified => "unclassified".to_string(),
+            }),
+            tag: filters.tag.clone(),
+            owner: filters.owner.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NlSearchResult {
+    /// Same shape as an item of `GET /teams/{team_id}/features`.
+    pub feature: FeatureResponse,
+    /// 0 to 1; null when the query named no topic and the results were not reranked.
+    pub relevance: Option<f64>,
+}
+
+/// `{ "available": false }` when the search cannot run. The other fields are
+/// present only when `available` is true.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NlSearchResponse {
+    pub available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filters_applied: Option<NlSearchFiltersApplied>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub results: Option<Vec<NlSearchResult>>,
+}
+
+impl NlSearchResponse {
+    fn unavailable() -> Self {
+        Self {
+            available: false,
+            filters_applied: None,
+            results: None,
+        }
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/teams/{team_id}/features/nl-search",
+    request_body = NlSearchRequest,
+    params(("team_id" = String, Path, description = "Team ID")),
+    responses(
+        (status = 200, description = "Matching features, or `available: false` when the search cannot run", body = NlSearchResponse),
+        (status = 400, description = "Invalid input", body = crate::rest::error::ErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::rest::error::ErrorResponse)
+    ),
+    tag = "AI"
+)]
+#[post("/teams/{team_id}/features/nl-search")]
+pub(crate) async fn nl_search_features(
+    runtime: web::Data<AiRuntime>,
+    settings: web::Data<Box<dyn TeamAiSettingsRepository>>,
+    features: web::Data<Box<dyn FeatureRepository>>,
+    logic: web::Data<Box<dyn FeatureLogic>>,
+    team_id: web::Path<String>,
+    payload: web::Json<NlSearchRequest>,
+) -> Result<impl Responder, RestError> {
+    let team_id = parse_team_id(&team_id)?;
+    let query = payload.query.trim();
+    let query_chars = query.chars().count();
+    if !(nl_search::MIN_QUERY_CHARS..=nl_search::MAX_QUERY_CHARS).contains(&query_chars) {
+        return Err(RestError::invalid_input(format!(
+            "query must be {} to {} characters",
+            nl_search::MIN_QUERY_CHARS,
+            nl_search::MAX_QUERY_CHARS
+        )));
+    }
+    let limit = match payload.limit {
+        None => nl_search::DEFAULT_LIMIT,
+        Some(limit) if (1..=nl_search::MAX_LIMIT as i64).contains(&limit) => limit as usize,
+        Some(_) => {
+            return Err(RestError::invalid_input(format!(
+                "limit must be 1 to {}",
+                nl_search::MAX_LIMIT
+            )));
+        }
+    };
+
+    let Some(client) = runtime.client.as_ref() else {
+        return Ok(HttpResponse::Ok().json(NlSearchResponse::unavailable()));
+    };
+    let enabled = match settings.get(team_id).await {
+        Ok(stored) => stored.settings.is_enabled(AiFeature::NlSearch),
+        Err(err) => {
+            warn!("Could not read AI settings for team {team_id}: {err}");
+            false
+        }
+    };
+    if !enabled {
+        return Ok(HttpResponse::Ok().json(NlSearchResponse::unavailable()));
+    }
+
+    let outcome = match nl_search::search(
+        client.as_ref(),
+        features.as_ref().as_ref(),
+        logic.as_ref().as_ref(),
+        team_id,
+        query,
+        limit,
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(nl_search::SearchError::Unavailable) => {
+            return Ok(HttpResponse::Ok().json(NlSearchResponse::unavailable()));
+        }
+        Err(nl_search::SearchError::Candidates(err)) => return Err(RestError::from(err)),
+    };
+
+    Ok(HttpResponse::Ok().json(NlSearchResponse {
+        available: true,
+        filters_applied: Some(NlSearchFiltersApplied::from(&outcome.filters)),
+        results: Some(
+            outcome
+                .results
+                .iter()
+                .map(|(feature, relevance)| NlSearchResult {
+                    feature: feature_base_response(feature),
+                    relevance: *relevance,
+                })
+                .collect(),
+        ),
+    }))
+}
+
 /// Hands a free-text reason to the justification check after the user's change
 /// committed. A no-op without an AI runtime (some apps and tests register none);
 /// never fails the request.
@@ -566,7 +743,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .service(update_team_ai_settings)
         .service(check_justification)
         .service(suggest_feature_details)
-        .service(backfill_flag_kind);
+        .service(backfill_flag_kind)
+        .service(nl_search_features);
 }
 
 #[cfg(test)]
@@ -1305,6 +1483,474 @@ mod tests {
             features.expect_get_features_needing_flag_kind().times(0);
             let (_, body) = backfill(true, AiRuntime::new(None, "jev-1.13.0"), features).await;
             assert_eq!(body, json!({ "queued": 0 }));
+        }
+    }
+
+    mod nl_search_endpoints {
+        use std::collections::BTreeMap;
+        use std::sync::Mutex;
+
+        use super::*;
+        use crate::database::feature::{FeatureRepository, MockFeatureRepository};
+        use crate::judgment::client::JudgmentError;
+        use crate::judgment::types::{Answer, Answers, ChoiceAnswer, SystemOneResponse, Usage};
+        use crate::logic::feature::{FeatureLogic, MockFeatureLogic};
+        use crate::model::{Feature, FeatureSearchFilters, FeatureType, FlagKind, LifecycleStage};
+
+        fn settings(nl_search: bool) -> MockTeamAiSettingsRepository {
+            let mut settings = MockTeamAiSettingsRepository::new();
+            settings.expect_get().returning(move |_| {
+                Ok(StoredTeamAiSettings {
+                    settings: TeamAiSettings {
+                        nl_search,
+                        ..TeamAiSettings::default()
+                    },
+                    ..StoredTeamAiSettings::default()
+                })
+            });
+            settings
+        }
+
+        fn feature(key: &str) -> Feature {
+            Feature {
+                id: Uuid::new_v4().into(),
+                key: key.to_string(),
+                description: Some(format!("About {key}")),
+                feature_type: FeatureType::Simple,
+                enabled: true,
+                created_at: Utc::now(),
+                kill_switch_enabled: false,
+                kill_switch_activated_at: None,
+                rollback_scheduled_at: None,
+                emergency_override_reason: None,
+                emergency_override_expires_at: None,
+                emergency_override_actor_id: None,
+                emergency_override_applied_at: None,
+                lifecycle_stage: LifecycleStage::Active,
+                owner: None,
+                purpose: None,
+                reference_url: None,
+                expires_at: None,
+                cleanup_reason: None,
+                tags: vec![],
+                archived_at: None,
+                deprecated_at: None,
+                deprecation_notice: None,
+                last_evaluated_at: None,
+                evaluation_count_7d: 0,
+                evaluation_count_30d: 0,
+                evaluation_count_90d: 0,
+                is_stale: false,
+                stale_reasons: vec![],
+                dependencies: vec![],
+                team_id: Uuid::new_v4().into(),
+                pending_approval_request_id: None,
+                flag_kind: Some(FlagKind::Ops),
+                flag_kind_source: None,
+                flag_kind_confidence: None,
+            }
+        }
+
+        fn choice(value: &str, confidence: f64) -> Answer {
+            Answer::Choice(ChoiceAnswer {
+                choice: value.to_string(),
+                probabilities: BTreeMap::new(),
+                confidence,
+            })
+        }
+
+        fn filter_response(items: Vec<(&str, Answer)>, topic: f64) -> SystemOneResponse {
+            let mut answers: BTreeMap<String, Answer> = items
+                .into_iter()
+                .map(|(id, answer)| (id.to_string(), answer))
+                .collect();
+            answers.insert("has_topic".to_string(), Answer::Noul { noul: topic });
+            SystemOneResponse {
+                model: "jev-1.13.0".to_string(),
+                answers: Answers(answers),
+                usage: Usage {
+                    input_tokens: 100,
+                    output_tokens: 5,
+                },
+            }
+        }
+
+        fn rerank_response(values: &[f64]) -> SystemOneResponse {
+            SystemOneResponse {
+                model: "jev-1.13.0".to_string(),
+                answers: Answers(
+                    values
+                        .iter()
+                        .enumerate()
+                        .map(|(index, value)| (format!("c{index}"), Answer::Noul { noul: *value }))
+                        .collect(),
+                ),
+                usage: Usage::default(),
+            }
+        }
+
+        /// What the mock logic saw.
+        type SearchCalls = Arc<Mutex<Vec<(FeatureSearchFilters, i64)>>>;
+
+        fn logic_returning(found: Vec<Feature>) -> (MockFeatureLogic, SearchCalls) {
+            let calls: SearchCalls = Arc::new(Mutex::new(Vec::new()));
+            let seen = calls.clone();
+            let mut logic = MockFeatureLogic::new();
+            logic
+                .expect_search_features_by_usage()
+                .returning(move |_, filters, limit| {
+                    seen.lock().unwrap().push((filters, limit));
+                    Ok(found.clone())
+                });
+            (logic, calls)
+        }
+
+        fn features_repo() -> MockFeatureRepository {
+            let mut features = MockFeatureRepository::new();
+            features
+                .expect_get_team_tag_candidates()
+                .returning(|_, _, _| Ok(vec!["payments".to_string(), "ui".to_string()]));
+            features
+                .expect_get_team_owner_candidates()
+                .returning(|_, _| Ok(vec!["payments".to_string()]));
+            features
+        }
+
+        async fn search_with(
+            client: Option<MockJudgmentClient>,
+            settings: MockTeamAiSettingsRepository,
+            features: MockFeatureRepository,
+            logic: MockFeatureLogic,
+            body: Value,
+        ) -> (StatusCode, Value) {
+            let client = client.map(|client| Arc::new(client) as Arc<dyn JudgmentClient>);
+            let app = test::init_service(
+                App::new()
+                    .app_data(web::Data::new(AiRuntime::new(client, "jev-1.13.0")))
+                    .app_data(web::Data::new(
+                        Box::new(settings) as Box<dyn TeamAiSettingsRepository>
+                    ))
+                    .app_data(web::Data::new(
+                        Box::new(features) as Box<dyn FeatureRepository>
+                    ))
+                    .app_data(web::Data::new(Box::new(logic) as Box<dyn FeatureLogic>))
+                    .service(web::scope("/api/v1").configure(super::super::configure)),
+            )
+            .await;
+            let req = test::TestRequest::post()
+                .uri(&format!(
+                    "/api/v1/teams/{}/features/nl-search",
+                    Uuid::new_v4()
+                ))
+                .set_json(body)
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            let status = resp.status();
+            let bytes = test::read_body(resp).await;
+            (
+                status,
+                serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+            )
+        }
+
+        /// A client that answers the filter call with `filter` and the rerank
+        /// call (the one without `has_topic`) with `rerank`, and counts calls.
+        fn scripted_client(
+            filter: SystemOneResponse,
+            rerank: Option<SystemOneResponse>,
+        ) -> (MockJudgmentClient, Arc<Mutex<Vec<bool>>>) {
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let seen = calls.clone();
+            let mut client = MockJudgmentClient::new();
+            client.expect_evaluate().returning(move |_, questions| {
+                let is_filter_call = questions.contains_key("has_topic");
+                seen.lock().unwrap().push(is_filter_call);
+                if is_filter_call {
+                    Ok(filter.clone())
+                } else {
+                    rerank.clone().ok_or(JudgmentError::Timeout)
+                }
+            });
+            (client, calls)
+        }
+
+        #[actix_web::test]
+        async fn topic_query_makes_two_calls_and_ranks_by_relevance() {
+            let (client, calls) = scripted_client(
+                filter_response(
+                    vec![
+                        ("stale", choice("stale", 0.9)),
+                        ("tag", choice("payments", 0.8)),
+                        ("flag_kind", choice("ops", 0.3)),
+                    ],
+                    0.9,
+                ),
+                Some(rerank_response(&[0.2, 0.9, 0.5])),
+            );
+            let (logic, searched) =
+                logic_returning(vec![feature("low"), feature("best"), feature("mid")]);
+            let (status, body) = search_with(
+                Some(client),
+                settings(true),
+                features_repo(),
+                logic,
+                json!({ "query": "kill switches for checkout", "limit": 5 }),
+            )
+            .await;
+
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(*calls.lock().unwrap(), vec![true, false]);
+            assert_eq!(body["available"], true);
+            assert_eq!(
+                body["filtersApplied"],
+                json!({ "stale": true, "tag": "payments" })
+            );
+            let results = body["results"].as_array().unwrap();
+            let keys: Vec<_> = results
+                .iter()
+                .map(|r| r["feature"]["key"].as_str().unwrap())
+                .collect();
+            assert_eq!(keys, ["best", "mid"]);
+            assert_eq!(results[0]["relevance"], 0.9);
+            assert_eq!(results[0]["feature"]["flagKind"], "ops");
+
+            let searched = searched.lock().unwrap();
+            assert_eq!(searched.len(), 1);
+            assert_eq!(searched[0].1, 50);
+            assert_eq!(searched[0].0.stale, Some(true));
+            assert_eq!(searched[0].0.tag.as_deref(), Some("payments"));
+            assert_eq!(searched[0].0.flag_kind, None);
+        }
+
+        #[actix_web::test]
+        async fn filter_only_query_makes_one_call_and_returns_null_relevance() {
+            let (client, calls) = scripted_client(
+                filter_response(
+                    vec![
+                        ("lifecycle_stage", choice("archived", 0.95)),
+                        ("owner", choice("payments", 0.9)),
+                    ],
+                    0.1,
+                ),
+                None,
+            );
+            let (logic, searched) = logic_returning(vec![feature("a"), feature("b"), feature("c")]);
+            let (status, body) = search_with(
+                Some(client),
+                settings(true),
+                features_repo(),
+                logic,
+                json!({ "query": "archived flags owned by payments", "limit": 2 }),
+            )
+            .await;
+
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(*calls.lock().unwrap(), vec![true]);
+            assert_eq!(
+                body["filtersApplied"],
+                json!({ "lifecycleStage": "ARCHIVED", "owner": "payments" })
+            );
+            let results = body["results"].as_array().unwrap();
+            assert_eq!(results.len(), 2);
+            assert!(results.iter().all(|r| r["relevance"].is_null()));
+            assert_eq!(results[0]["feature"]["key"], "a");
+            let searched = searched.lock().unwrap();
+            assert_eq!(
+                searched[0].0.lifecycle_stage,
+                Some(LifecycleStage::Archived)
+            );
+            assert_eq!(searched[0].0.owner.as_deref(), Some("payments"));
+        }
+
+        #[actix_web::test]
+        async fn default_limit_is_ten() {
+            let (client, _) = scripted_client(filter_response(vec![], 0.0), None);
+            let found: Vec<Feature> = (0..15).map(|i| feature(&format!("f{i}"))).collect();
+            let (logic, _) = logic_returning(found);
+            let (_, body) = search_with(
+                Some(client),
+                settings(true),
+                features_repo(),
+                logic,
+                json!({ "query": "everything" }),
+            )
+            .await;
+            assert_eq!(body["results"].as_array().unwrap().len(), 10);
+            assert_eq!(body["filtersApplied"], json!({}));
+        }
+
+        #[actix_web::test]
+        async fn topic_without_candidates_skips_the_rerank_call() {
+            let (client, calls) = scripted_client(filter_response(vec![], 0.9), None);
+            let (logic, _) = logic_returning(vec![]);
+            let (_, body) = search_with(
+                Some(client),
+                settings(true),
+                features_repo(),
+                logic,
+                json!({ "query": "checkout flags" }),
+            )
+            .await;
+            assert_eq!(*calls.lock().unwrap(), vec![true]);
+            assert_eq!(body["available"], true);
+            assert_eq!(body["results"], json!([]));
+        }
+
+        #[actix_web::test]
+        async fn client_error_returns_available_false() {
+            let mut client = MockJudgmentClient::new();
+            client
+                .expect_evaluate()
+                .returning(|_, _| Err(JudgmentError::Timeout));
+            let mut logic = MockFeatureLogic::new();
+            logic.expect_search_features_by_usage().times(0);
+            let (status, body) = search_with(
+                Some(client),
+                settings(true),
+                features_repo(),
+                logic,
+                json!({ "query": "stale flags in payments" }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body, json!({ "available": false }));
+        }
+
+        #[actix_web::test]
+        async fn rerank_error_returns_available_false() {
+            let (client, calls) = scripted_client(filter_response(vec![], 0.9), None);
+            let (logic, _) = logic_returning(vec![feature("a")]);
+            let (status, body) = search_with(
+                Some(client),
+                settings(true),
+                features_repo(),
+                logic,
+                json!({ "query": "checkout flags" }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(*calls.lock().unwrap(), vec![true, false]);
+            assert_eq!(body, json!({ "available": false }));
+        }
+
+        #[actix_web::test]
+        async fn off_or_no_client_or_settings_error_return_available_false_without_work() {
+            let untouched = || {
+                let mut client = MockJudgmentClient::new();
+                client.expect_evaluate().times(0);
+                client
+            };
+            let idle_features = || {
+                let mut features = MockFeatureRepository::new();
+                features.expect_get_team_tag_candidates().times(0);
+                features.expect_get_team_owner_candidates().times(0);
+                features
+            };
+            let idle_logic = || {
+                let mut logic = MockFeatureLogic::new();
+                logic.expect_search_features_by_usage().times(0);
+                logic
+            };
+            let body = json!({ "query": "stale flags" });
+
+            let (status, off) = search_with(
+                Some(untouched()),
+                settings(false),
+                idle_features(),
+                idle_logic(),
+                body.clone(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(off, json!({ "available": false }));
+
+            let (_, no_client) = search_with(
+                None,
+                settings(true),
+                idle_features(),
+                idle_logic(),
+                body.clone(),
+            )
+            .await;
+            assert_eq!(no_client, json!({ "available": false }));
+
+            let mut failing = MockTeamAiSettingsRepository::new();
+            failing
+                .expect_get()
+                .returning(|_| Err(crate::Error::InvalidInput("db down".into())));
+            let (_, unreadable) = search_with(
+                Some(untouched()),
+                failing,
+                idle_features(),
+                idle_logic(),
+                body,
+            )
+            .await;
+            assert_eq!(unreadable, json!({ "available": false }));
+        }
+
+        #[actix_web::test]
+        async fn invalid_input_returns_400_before_anything_else() {
+            for body in [
+                json!({ "query": "ab" }),
+                json!({ "query": "  ab  " }),
+                json!({ "query": "x".repeat(301) }),
+                json!({ "query": "stale flags", "limit": 0 }),
+                json!({ "query": "stale flags", "limit": 21 }),
+            ] {
+                let mut client = MockJudgmentClient::new();
+                client.expect_evaluate().times(0);
+                let (status, _) = search_with(
+                    Some(client),
+                    settings(true),
+                    MockFeatureRepository::new(),
+                    MockFeatureLogic::new(),
+                    body.clone(),
+                )
+                .await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            }
+            // Boundaries are accepted.
+            let (client, _) = scripted_client(filter_response(vec![], 0.0), None);
+            let (logic, _) = logic_returning(vec![]);
+            let (status, _) = search_with(
+                Some(client),
+                settings(true),
+                features_repo(),
+                logic,
+                json!({ "query": "x".repeat(300), "limit": 20 }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+        }
+
+        #[actix_web::test]
+        async fn filter_call_sends_the_trimmed_query_and_team_values() {
+            let sent = Arc::new(Mutex::new(None));
+            let seen = sent.clone();
+            let mut client = MockJudgmentClient::new();
+            client.expect_evaluate().returning(move |state, questions| {
+                *seen.lock().unwrap() = Some((state, questions));
+                Ok(filter_response(vec![], 0.0))
+            });
+            let (logic, _) = logic_returning(vec![]);
+            search_with(
+                Some(client),
+                settings(true),
+                features_repo(),
+                logic,
+                json!({ "query": "  stale flags in payments  " }),
+            )
+            .await;
+            let (state, questions) = sent.lock().unwrap().take().unwrap();
+            assert_eq!(state, json!({ "query": "stale flags in payments" }));
+            assert!(questions.contains_key("flag_kind"));
+            match &questions["tag"] {
+                crate::judgment::types::Question::Choice { criteria, .. } => {
+                    assert!(criteria.contains_key("payments") && criteria.contains_key("none"))
+                }
+                other => panic!("unexpected {other:?}"),
+            }
         }
     }
 

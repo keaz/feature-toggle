@@ -14,6 +14,7 @@ mod justification_recording_test;
 mod jwt_secret_test;
 mod last_admin_test;
 mod metrics_test;
+mod nl_search_test;
 mod notification_test;
 mod pipeline_test;
 mod refresh_token_test;
