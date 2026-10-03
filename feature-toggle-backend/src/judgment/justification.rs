@@ -48,6 +48,7 @@ pub enum ReasonKind {
     ScheduledChange,
     ArchiveCleanup,
     FreezeWindow,
+    StageChange,
 }
 
 impl ReasonKind {
@@ -59,6 +60,7 @@ impl ReasonKind {
             ReasonKind::ScheduledChange => "scheduled_change",
             ReasonKind::ArchiveCleanup => "archive_cleanup",
             ReasonKind::FreezeWindow => "freeze_window",
+            ReasonKind::StageChange => "stage_change",
         }
     }
 }
@@ -75,6 +77,9 @@ pub fn action_description(kind: ReasonKind) -> &'static str {
         }
         ReasonKind::FreezeWindow => {
             "Create or change a change-freeze window that blocks feature flag changes"
+        }
+        ReasonKind::StageChange => {
+            "Request a stage change (deploy, approve or roll back a feature flag in an environment)"
         }
     }
 }
@@ -469,6 +474,19 @@ mod tests {
     }
 
     #[test]
+    fn stage_change_kind_round_trips() {
+        let wire = serde_json::to_value(ReasonKind::StageChange).unwrap();
+        assert_eq!(wire, json!("stage_change"));
+        assert_eq!(ReasonKind::StageChange.as_str(), "stage_change");
+        let back: ReasonKind = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, ReasonKind::StageChange);
+        assert_eq!(
+            action_description(ReasonKind::StageChange),
+            "Request a stage change (deploy, approve or roll back a feature flag in an environment)"
+        );
+    }
+
+    #[test]
     fn every_reason_kind_has_its_own_description() {
         let kinds = [
             ReasonKind::EmergencyDisable,
@@ -477,6 +495,7 @@ mod tests {
             ReasonKind::ScheduledChange,
             ReasonKind::ArchiveCleanup,
             ReasonKind::FreezeWindow,
+            ReasonKind::StageChange,
         ];
         let texts: std::collections::BTreeSet<_> =
             kinds.iter().map(|kind| action_description(*kind)).collect();

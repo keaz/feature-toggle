@@ -1146,6 +1146,28 @@ mod tests {
         }
 
         #[actix_web::test]
+        async fn stage_change_reason_kind_is_accepted() {
+            let mut client = MockJudgmentClient::new();
+            client
+                .expect_evaluate()
+                .withf(|state, _| {
+                    state["action"]
+                        == "Request a stage change (deploy, approve or roll back a feature flag in an environment)"
+                })
+                .times(1)
+                .returning(|_, _| Ok(model_answers(0.1, 0.9)));
+            let (status, body) = post(
+                Some(client),
+                settings(true),
+                json!({ "reasonKind": "stage_change", "reason": "urgent", "featureKey": "checkout-v2" }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["available"], json!(true));
+            assert_eq!(body["verdict"], "weak");
+        }
+
+        #[actix_web::test]
         async fn unknown_reason_kind_is_rejected() {
             let (status, _) = post(
                 None,
