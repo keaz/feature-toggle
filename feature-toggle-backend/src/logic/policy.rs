@@ -1294,6 +1294,17 @@ mod tests {
                 Method::POST,
                 format!("/api/v1/jira-integrations/{integration_id}/writeback/resume"),
             ),
+            (
+                Method::GET,
+                format!("/api/v1/jira-integrations/{integration_id}/outbound-jobs"),
+            ),
+            (
+                Method::POST,
+                format!(
+                    "/api/v1/jira-integrations/{integration_id}/outbound-jobs/{}/retry",
+                    Uuid::new_v4()
+                ),
+            ),
         ]
     }
 
@@ -1318,6 +1329,8 @@ mod tests {
                 format!("/api/v1/jira-integrations/{id}/writeback"),
                 format!("/api/v1/jira-integrations/{id}/writeback/test"),
                 format!("/api/v1/jira-integrations/{id}/writeback/resume"),
+                format!("/api/v1/jira-integrations/{id}/outbound-jobs"),
+                format!("/api/v1/jira-integrations/{id}/outbound-jobs/{id}/retry"),
                 // A route added later under the prefix is guarded by default.
                 format!("/api/v1/jira-integrations/{id}/events"),
             ] {

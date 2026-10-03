@@ -13,6 +13,7 @@ use crate::database::entity::{JiraIntegrationRow, JiraStatusRuleRow};
 use crate::database::jira_integration::{
     CreateJiraIntegration, JiraIntegrationRepositoryTx, JiraWritebackColumns, UpdateJiraIntegration,
 };
+use crate::database::jira_outbound_job::JiraOutboundJobRepositoryTx;
 use crate::logic::ActorContext;
 use crate::logic::external_link::validate_url;
 use crate::logic::jira_client::JiraEdition;
@@ -27,6 +28,8 @@ use crate::utils::activity_logger::activity_types::{
 };
 
 const ENTITY_TYPE: &str = "jira_integration";
+/// `last_error` of jobs cancelled because write-back went off.
+const WRITEBACK_DISABLED: &str = "write-back disabled";
 
 /// A new integration as sent by a client. Environment ids are strings, checked
 /// against the team.
@@ -159,9 +162,10 @@ where
 
 /// Applies `patch` and writes a `jira_integration_updated` activity row.
 /// `Error::NotFound(id)` when the integration does not exist.
-pub async fn update_jira_integration_in_tx<R>(
+pub async fn update_jira_integration_in_tx<R, O>(
     conn: &mut PgConnection,
     repo: &R,
+    outbound_repo: &O,
     activity_repo: &dyn ActivityLogRepository,
     id: Uuid,
     patch: JiraIntegrationPatch,
@@ -170,6 +174,7 @@ pub async fn update_jira_integration_in_tx<R>(
 ) -> Result<JiraIntegrationRow, Error>
 where
     R: JiraIntegrationRepositoryTx + ?Sized,
+    O: JiraOutboundJobRepositoryTx + ?Sized,
 {
     let current = existing(conn, repo, id).await?;
     let team_environments = team_environment_ids(conn, repo, current.team_id).await?;
@@ -243,6 +248,9 @@ where
         changed_fields.push("jira_credential");
         if current.writeback_enabled {
             changed_fields.push("writeback_enabled");
+            outbound_repo
+                .cancel_pending_tx(conn, id, WRITEBACK_DISABLED)
+                .await?;
         }
     }
     let mut metadata = config_metadata(&updated);
@@ -323,12 +331,13 @@ fn validate_writeback_base_url(base_url: Option<&str>, config: &JiraConfig) -> R
 
 /// Stores the write-back configuration and writes a `jira_integration_updated`
 /// activity row whose `changed_fields` name the columns, never the credential.
-/// Rules apply only when `patch.enabled`. `Error::NotFound(id)` when the integration
-/// does not exist.
+/// Rules apply only when `patch.enabled`. Turning write-back off cancels the pending
+/// outbound jobs. `Error::NotFound(id)` when the integration does not exist.
 #[allow(clippy::too_many_arguments)]
-pub async fn update_jira_writeback_in_tx<R>(
+pub async fn update_jira_writeback_in_tx<R, O>(
     conn: &mut PgConnection,
     repo: &R,
+    outbound_repo: &O,
     activity_repo: &dyn ActivityLogRepository,
     id: Uuid,
     patch: WritebackPatch,
@@ -338,6 +347,7 @@ pub async fn update_jira_writeback_in_tx<R>(
 ) -> Result<JiraIntegrationRow, Error>
 where
     R: JiraIntegrationRepositoryTx + ?Sized,
+    O: JiraOutboundJobRepositoryTx + ?Sized,
 {
     let current = existing(conn, repo, id).await?;
 
@@ -446,6 +456,12 @@ where
         .set_writeback_tx(conn, id, columns)
         .await?
         .ok_or(Error::NotFound(id))?;
+    if current.writeback_enabled && !updated.writeback_enabled {
+        // Jobs queued while write-back was on must not go out after it is turned off.
+        outbound_repo
+            .cancel_pending_tx(conn, id, WRITEBACK_DISABLED)
+            .await?;
+    }
     write_writeback_activity(
         conn,
         activity_repo,

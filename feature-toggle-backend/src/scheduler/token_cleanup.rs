@@ -1,5 +1,6 @@
 use crate::Error;
 use crate::database::jira_event::JiraEventRepository;
+use crate::database::jira_outbound_job::JiraOutboundJobRepository;
 use crate::database::jwt_token::JwtTokenRepository;
 use crate::database::refresh_token::RefreshTokenRepository;
 use crate::database::sso_login_code::SsoLoginCodeRepository;
@@ -12,18 +13,24 @@ use tokio::time;
 /// access tokens, refresh tokens that expired more than a day ago, expired SSO
 /// login states and SSO exchange codes that expired more than a day ago. With
 /// [`TokenCleanupScheduler::with_jira_events`], also Jira events older than
-/// [`JIRA_EVENT_RETENTION_DAYS`].
+/// [`JIRA_EVENT_RETENTION_DAYS`]. With [`TokenCleanupScheduler::with_jira_outbound_jobs`],
+/// also finished Jira write-back jobs.
 pub struct TokenCleanupScheduler {
     jwt_token_repository: Box<dyn JwtTokenRepository>,
     refresh_token_repository: Box<dyn RefreshTokenRepository>,
     sso_login_state_repository: Box<dyn SsoLoginStateRepository>,
     sso_login_code_repository: Box<dyn SsoLoginCodeRepository>,
     jira_event_repository: Option<Box<dyn JiraEventRepository>>,
+    jira_outbound_job_repository: Option<Box<dyn JiraOutboundJobRepository>>,
     interval: Duration,
 }
 
 /// Days a Jira event stays in the event log (JI-15).
 pub const JIRA_EVENT_RETENTION_DAYS: i64 = 30;
+/// Days a sent Jira write-back job is kept (JI-42).
+pub const JIRA_SENT_JOB_RETENTION_DAYS: i64 = 30;
+/// Days a dead Jira write-back job is kept, so it can still be inspected and retried.
+pub const JIRA_DEAD_JOB_RETENTION_DAYS: i64 = 90;
 
 /// Rows deleted by one cleanup run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -33,6 +40,7 @@ pub struct CleanupCounts {
     pub sso_login_states: u64,
     pub sso_login_codes: u64,
     pub jira_events: u64,
+    pub jira_outbound_jobs: u64,
 }
 
 impl CleanupCounts {
@@ -42,6 +50,7 @@ impl CleanupCounts {
             + self.sso_login_states
             + self.sso_login_codes
             + self.jira_events
+            + self.jira_outbound_jobs
     }
 }
 
@@ -59,6 +68,7 @@ impl TokenCleanupScheduler {
             sso_login_state_repository,
             sso_login_code_repository,
             jira_event_repository: None,
+            jira_outbound_job_repository: None,
             interval,
         }
     }
@@ -69,6 +79,16 @@ impl TokenCleanupScheduler {
         self
     }
 
+    /// Also deletes finished Jira write-back jobs: `sent` after
+    /// [`JIRA_SENT_JOB_RETENTION_DAYS`], `dead` after [`JIRA_DEAD_JOB_RETENTION_DAYS`].
+    pub fn with_jira_outbound_jobs(
+        mut self,
+        repository: Box<dyn JiraOutboundJobRepository>,
+    ) -> Self {
+        self.jira_outbound_job_repository = Some(repository);
+        self
+    }
+
     pub async fn start(self) {
         let mut ticker = time::interval(self.interval);
         loop {
@@ -76,12 +96,13 @@ impl TokenCleanupScheduler {
             match self.run_once().await {
                 Ok(counts) if counts.total() > 0 => {
                     info!(
-                        "Token cleanup deleted {} access token(s), {} refresh token(s), {} SSO login state(s), {} SSO login code(s) and {} Jira event(s)",
+                        "Token cleanup deleted {} access token(s), {} refresh token(s), {} SSO login state(s), {} SSO login code(s), {} Jira event(s) and {} Jira outbound job(s)",
                         counts.access_tokens,
                         counts.refresh_tokens,
                         counts.sso_login_states,
                         counts.sso_login_codes,
-                        counts.jira_events
+                        counts.jira_events,
+                        counts.jira_outbound_jobs
                     );
                 }
                 Ok(_) => {}
@@ -112,6 +133,18 @@ impl TokenCleanupScheduler {
                 }
                 None => 0,
             },
+            jira_outbound_jobs: match &self.jira_outbound_job_repository {
+                Some(repository) => {
+                    let now = chrono::Utc::now();
+                    repository
+                        .delete_finished_before(
+                            now - chrono::Duration::days(JIRA_SENT_JOB_RETENTION_DAYS),
+                            now - chrono::Duration::days(JIRA_DEAD_JOB_RETENTION_DAYS),
+                        )
+                        .await?
+                }
+                None => 0,
+            },
         })
     }
 }
@@ -120,6 +153,7 @@ impl TokenCleanupScheduler {
 mod tests {
     use super::*;
     use crate::database::jira_event::MockJiraEventRepository;
+    use crate::database::jira_outbound_job::MockJiraOutboundJobRepository;
     use crate::database::jwt_token::MockJwtTokenRepository;
     use crate::database::refresh_token::MockRefreshTokenRepository;
     use crate::database::sso_login_code::MockSsoLoginCodeRepository;
@@ -157,6 +191,20 @@ mod tests {
             .times(1)
             .returning(|_| Ok(6));
 
+        let mut jira_jobs = MockJiraOutboundJobRepository::new();
+        jira_jobs
+            .expect_delete_finished_before()
+            .withf(|sent_before, dead_before| {
+                let sent_age = chrono::Utc::now() - *sent_before;
+                let dead_age = chrono::Utc::now() - *dead_before;
+                sent_age >= chrono::Duration::days(JIRA_SENT_JOB_RETENTION_DAYS)
+                    && sent_age < chrono::Duration::days(JIRA_SENT_JOB_RETENTION_DAYS + 1)
+                    && dead_age >= chrono::Duration::days(JIRA_DEAD_JOB_RETENTION_DAYS)
+                    && dead_age < chrono::Duration::days(JIRA_DEAD_JOB_RETENTION_DAYS + 1)
+            })
+            .times(1)
+            .returning(|_, _| Ok(7));
+
         let scheduler = TokenCleanupScheduler::new(
             Box::new(jwt),
             Box::new(refresh),
@@ -164,7 +212,8 @@ mod tests {
             Box::new(codes),
             Duration::from_secs(3600),
         )
-        .with_jira_events(Box::new(jira_events));
+        .with_jira_events(Box::new(jira_events))
+        .with_jira_outbound_jobs(Box::new(jira_jobs));
         assert_eq!(
             scheduler.run_once().await.unwrap(),
             CleanupCounts {
@@ -173,6 +222,7 @@ mod tests {
                 sso_login_states: 3,
                 sso_login_codes: 4,
                 jira_events: 6,
+                jira_outbound_jobs: 7,
             }
         );
     }

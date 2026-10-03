@@ -12,6 +12,7 @@ pub mod external_link;
 pub mod feature;
 pub mod jira_events;
 pub mod jira_integration;
+pub mod jira_outbound_jobs;
 pub mod jwt_secret;
 pub mod metrics;
 pub mod notification;
@@ -101,6 +102,7 @@ use crate::rest::jira_integration::{
     JiraStatusRulesResponse, JiraWritebackResponse, JiraWritebackTestResponse,
     ReplaceJiraStatusRulesRequest, UpdateJiraIntegrationRequest, UpdateJiraWritebackRequest,
 };
+use crate::rest::jira_outbound_jobs::{JiraOutboundJobResponse, JiraOutboundJobsResponse};
 use crate::rest::jwt_secret::JwtSecretResponse;
 use crate::rest::metrics::{
     ActivityEntityDetailsResponse, ActivityLogPageResponse, ActivityLogResponse,
@@ -233,6 +235,8 @@ async fn health() -> impl Responder {
         jira_integration::resume_jira_writeback,
         jira_events::receive_jira_event,
         jira_events::list_jira_events,
+        jira_outbound_jobs::list_jira_outbound_jobs,
+        jira_outbound_jobs::retry_jira_outbound_job,
         feature::create_feature,
         feature::update_feature,
         feature::emergency_disable_feature,
@@ -424,6 +428,8 @@ async fn health() -> impl Responder {
         JiraEventResponse,
         JiraEventLogItem,
         JiraEventsResponse,
+        JiraOutboundJobResponse,
+        JiraOutboundJobsResponse,
         crate::logic::jira_rules::RuleResult,
         crate::logic::jira_events::JiraActor,
         CreateFeatureRequest,
@@ -724,6 +730,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .configure(external_link::configure)
             .configure(jira_integration::configure)
             .configure(jira_events::configure)
+            .configure(jira_outbound_jobs::configure)
             .configure(criteria::configure)
             .configure(metrics::configure)
             .configure(approval::configure)

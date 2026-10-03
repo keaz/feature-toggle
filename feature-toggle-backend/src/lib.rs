@@ -321,9 +321,23 @@ pub async fn run() -> std::io::Result<()> {
         database::sso_login_code::sso_login_code_repository(db_pool.clone()),
         Duration::from_secs(3600),
     )
-    .with_jira_events(database::jira_event::jira_event_repository(db_pool.clone()));
+    .with_jira_events(database::jira_event::jira_event_repository(db_pool.clone()))
+    .with_jira_outbound_jobs(database::jira_outbound_job::jira_outbound_job_repository(
+        db_pool.clone(),
+    ));
     tokio::spawn(async move {
         token_cleanup_scheduler.start().await;
+    });
+
+    // Jira write-back sender: delivers the outbound job queue (every 5 s)
+    let jira_writeback_sender = scheduler::JiraWritebackSender::new(
+        db_pool.clone(),
+        cfg.jira.clone(),
+        cfg.jira_ui_base_url(),
+        Duration::from_secs(5),
+    );
+    tokio::spawn(async move {
+        jira_writeback_sender.run().await;
     });
 
     // Clone values for use in the HttpServer closure
@@ -411,6 +425,9 @@ pub async fn run() -> std::io::Result<()> {
             .app_data(web::Data::new(database::jira_event::jira_event_repository(
                 db_pool.clone(),
             )))
+            .app_data(web::Data::new(
+                database::jira_outbound_job::jira_outbound_job_repository(db_pool.clone()),
+            ))
             .app_data(web::Data::new(environment_repository.clone()))
             .app_data(web::Data::new(variant_allocations_repository.clone()))
             .app_data(web::Data::new(compound_rules_repository.clone()))

@@ -2108,6 +2108,17 @@ mod tests {
                 "PUT",
                 format!("/api/v1/jira-integrations/{integration_id}/rules"),
             ),
+            (
+                "GET",
+                format!("/api/v1/jira-integrations/{integration_id}/outbound-jobs"),
+            ),
+            (
+                "POST",
+                format!(
+                    "/api/v1/jira-integrations/{integration_id}/outbound-jobs/{}/retry",
+                    Uuid::new_v4()
+                ),
+            ),
         ];
         for (method, uri) in routes {
             let builder = match method {

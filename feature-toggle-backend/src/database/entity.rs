@@ -699,3 +699,22 @@ pub struct JiraStatusRuleRow {
     pub enabled: bool,
     pub position: i32,
 }
+
+/// A Jira write-back job (`jira_outbound_jobs`). `payload` is internal and never
+/// returned by the API.
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
+pub struct OutboundJobRow {
+    pub id: Uuid,
+    pub integration_id: Uuid,
+    pub issue_key: String,
+    pub feature_id: Option<Uuid>,
+    pub kind: String,
+    pub payload: JsonValue,
+    pub dedupe_key: String,
+    pub status: String,
+    pub attempts: i32,
+    pub next_attempt_at: DateTime<Utc>,
+    pub last_error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub sent_at: Option<DateTime<Utc>>,
+}

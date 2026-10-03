@@ -4,6 +4,8 @@
 use std::fmt;
 use std::time::Duration;
 
+use base64::Engine;
+
 use crate::Error;
 use crate::config::JiraConfig;
 use crate::database::entity::JiraIntegrationRow;
@@ -115,6 +117,10 @@ impl JiraClient {
         })
     }
 
+    pub fn edition(&self) -> JiraEdition {
+        self.edition
+    }
+
     /// `GET rest/api/{v}/myself`.
     pub async fn myself(&self) -> Result<JiraResponse, JiraTransportError> {
         self.get_myself().await.map(|(response, _)| response)
@@ -140,7 +146,73 @@ impl JiraClient {
             self.base_url,
             self.edition.api_version()
         );
-        let request = self.http.get(url);
+        self.execute(self.http.get(url)).await
+    }
+
+    /// `POST rest/api/{v}/issue/{issue}/comment`.
+    pub async fn add_comment(
+        &self,
+        issue: &str,
+        body: &serde_json::Value,
+    ) -> Result<JiraResponse, JiraTransportError> {
+        let url = self.issue_url(issue, "comment");
+        self.execute(self.http.post(url).json(body))
+            .await
+            .map(|(response, _)| response)
+    }
+
+    /// `POST rest/api/{v}/issue/{issue}/remotelink`. The same `globalId` updates the
+    /// existing link.
+    pub async fn put_remote_link(
+        &self,
+        issue: &str,
+        body: &serde_json::Value,
+    ) -> Result<JiraResponse, JiraTransportError> {
+        let url = self.issue_url(issue, "remotelink");
+        self.execute(self.http.post(url).json(body))
+            .await
+            .map(|(response, _)| response)
+    }
+
+    /// `DELETE rest/api/{v}/issue/{issue}/remotelink?globalId=...`.
+    pub async fn delete_remote_link(
+        &self,
+        issue: &str,
+        global_id: &str,
+    ) -> Result<JiraResponse, JiraTransportError> {
+        let url = self.issue_url(issue, "remotelink");
+        self.execute(self.http.delete(url).query(&[("globalId", global_id)]))
+            .await
+            .map(|(response, _)| response)
+    }
+
+    fn issue_url(&self, issue: &str, resource: &str) -> String {
+        format!(
+            "{}/rest/api/{}/issue/{}/{resource}",
+            self.base_url,
+            self.edition.api_version(),
+            encode_path_segment(issue)
+        )
+    }
+
+    /// The credential and every form of it that can appear in a reply: the token, and
+    /// the Basic header value (`base64(email:token)`) on Cloud.
+    pub fn secrets(&self) -> Vec<String> {
+        match &self.auth {
+            JiraAuth::Basic { email, token } => vec![
+                token.clone(),
+                base64::engine::general_purpose::STANDARD.encode(format!("{email}:{token}")),
+            ],
+            JiraAuth::Bearer { token } => vec![token.clone()],
+        }
+    }
+
+    /// Sends `request` with the credential. The body excerpt is scrubbed of the
+    /// credential before it is cut, so a secret split by the cut cannot survive.
+    async fn execute(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<(JiraResponse, String), JiraTransportError> {
         let request = match &self.auth {
             JiraAuth::Basic { email, token } => request.basic_auth(email, Some(token)),
             JiraAuth::Bearer { token } => request.bearer_auth(token),
@@ -163,7 +235,10 @@ impl JiraClient {
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.trim().parse::<u64>().ok());
         let body = response.text().await.unwrap_or_default();
-        let body_excerpt = body.chars().take(BODY_EXCERPT_CHARS).collect();
+        let body_excerpt = scrub_secrets(&body, &self.secrets())
+            .chars()
+            .take(BODY_EXCERPT_CHARS)
+            .collect();
         Ok((
             JiraResponse {
                 status,
@@ -173,6 +248,28 @@ impl JiraClient {
             body,
         ))
     }
+}
+
+/// Replaces every non-empty string of `secrets` in `text` with `***`.
+pub fn scrub_secrets(text: &str, secrets: &[String]) -> String {
+    secrets
+        .iter()
+        .filter(|secret| !secret.is_empty())
+        .fold(text.to_string(), |text, secret| text.replace(secret, "***"))
+}
+
+/// Percent-encodes everything but unreserved characters, for one path segment.
+fn encode_path_segment(segment: &str) -> String {
+    let mut out = String::with_capacity(segment.len());
+    for byte in segment.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 /// Decrypts the stored credential and builds the client. `None` when write-back is
@@ -223,7 +320,6 @@ pub fn client_for(
 mod tests {
     use super::*;
     use crate::config::JiraConfig;
-    use base64::Engine;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -352,6 +448,139 @@ mod tests {
         assert_eq!(response.status, 500);
         assert_eq!(response.retry_after_secs, Some(7));
         assert_eq!(response.body_excerpt.chars().count(), 300);
+    }
+
+    fn cloud_client(server: &MockServer, token: &str) -> JiraClient {
+        JiraClient::new(
+            &server.uri(),
+            JiraEdition::Cloud,
+            JiraAuth::Basic {
+                email: "me@example.com".into(),
+                token: token.to_string(),
+            },
+        )
+        .unwrap()
+    }
+
+    fn basic_header(token: &str) -> String {
+        format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(format!("me@example.com:{token}"))
+        )
+    }
+
+    #[tokio::test]
+    async fn add_comment_posts_the_body_with_auth() {
+        let server = MockServer::start().await;
+        let token = token();
+        let body = serde_json::json!({"body": "hello"});
+        Mock::given(method("POST"))
+            .and(path("/rest/api/3/issue/PROJ-1/comment"))
+            .and(header("Authorization", basic_header(&token).as_str()))
+            .and(wiremock::matchers::body_json(&body))
+            .respond_with(ResponseTemplate::new(201).set_body_string("{}"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let response = cloud_client(&server, &token)
+            .add_comment("PROJ-1", &body)
+            .await
+            .unwrap();
+        assert_eq!(response.status, 201);
+    }
+
+    #[tokio::test]
+    async fn put_remote_link_posts_to_remotelink_on_data_center() {
+        let server = MockServer::start().await;
+        let token = token();
+        let body = serde_json::json!({"globalId": "fluxgate:feature:x"});
+        Mock::given(method("POST"))
+            .and(path("/rest/api/2/issue/PROJ-2/remotelink"))
+            .and(header("Authorization", format!("Bearer {token}").as_str()))
+            .and(wiremock::matchers::body_json(&body))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = JiraClient::new(
+            &server.uri(),
+            JiraEdition::DataCenter,
+            JiraAuth::Bearer { token },
+        )
+        .unwrap();
+        assert_eq!(
+            client
+                .put_remote_link("PROJ-2", &body)
+                .await
+                .unwrap()
+                .status,
+            200
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_remote_link_sends_the_url_encoded_global_id() {
+        let server = MockServer::start().await;
+        let token = token();
+        Mock::given(method("DELETE"))
+            .and(path("/rest/api/3/issue/PROJ-3/remotelink"))
+            .and(wiremock::matchers::query_param(
+                "globalId",
+                "fluxgate:feature:a b&c",
+            ))
+            .and(header("Authorization", basic_header(&token).as_str()))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let response = cloud_client(&server, &token)
+            .delete_remote_link("PROJ-3", "fluxgate:feature:a b&c")
+            .await
+            .unwrap();
+        assert_eq!(response.status, 204);
+        let requests = server.received_requests().await.unwrap();
+        let query = requests[0].url.query().unwrap();
+        assert!(!query.contains(' ') && !query.contains("&c"), "{query}");
+    }
+
+    #[tokio::test]
+    async fn issue_key_is_one_encoded_path_segment() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        cloud_client(&server, &token())
+            .add_comment("A/../B?x", &serde_json::json!({}))
+            .await
+            .unwrap();
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(
+            requests[0].url.path(),
+            "/rest/api/3/issue/A%2F..%2FB%3Fx/comment"
+        );
+    }
+
+    #[tokio::test]
+    async fn echoed_credential_is_scrubbed_before_the_excerpt_is_cut() {
+        let server = MockServer::start().await;
+        let token = token();
+        // The token sits across the 300 character cut.
+        let echo = format!("{}{}", "x".repeat(290), token);
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(400).set_body_string(echo))
+            .mount(&server)
+            .await;
+        let response = cloud_client(&server, &token)
+            .add_comment("PROJ-1", &serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(
+            !response.body_excerpt.contains(&token[..8]),
+            "{}",
+            response.body_excerpt
+        );
+        assert!(response.body_excerpt.ends_with("***"));
     }
 
     fn row(base_url: &str) -> JiraIntegrationRow {

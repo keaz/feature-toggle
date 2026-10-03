@@ -20,6 +20,7 @@ use crate::database::entity::{JiraIntegrationRow, JiraStatusRuleRow};
 use crate::database::jira_integration::{
     JiraIntegrationRepository, jira_integration_repository_tx,
 };
+use crate::database::jira_outbound_job::jira_outbound_job_repository_tx;
 use crate::logic::ActorContext;
 use crate::logic::jira_client::client_for;
 use crate::logic::jira_integration::JiraStatusRuleInput;
@@ -434,9 +435,11 @@ pub(crate) async fn update_jira_integration(
 
     let repo = jira_integration_repository_tx(db_pool.get_ref().clone());
     let mut tx = begin(db_pool.get_ref()).await?;
+    let outbound_repo = jira_outbound_job_repository_tx(db_pool.get_ref().clone());
     let updated = update_jira_integration_in_tx(
         &mut tx,
         &repo,
+        &outbound_repo,
         activity_repo.as_ref().as_ref(),
         id,
         patch,
@@ -646,9 +649,11 @@ pub(crate) async fn update_jira_writeback(
 
     let repo = jira_integration_repository_tx(db_pool.get_ref().clone());
     let mut tx = begin(db_pool.get_ref()).await?;
+    let outbound_repo = jira_outbound_job_repository_tx(db_pool.get_ref().clone());
     let updated = update_jira_writeback_in_tx(
         &mut tx,
         &repo,
+        &outbound_repo,
         activity_repo.as_ref().as_ref(),
         id,
         patch,
@@ -1828,6 +1833,92 @@ mod tests {
         assert!(changed.contains("jira_credential"), "{changed}");
         assert!(changed.contains("writeback_enabled"), "{changed}");
         assert!(!metadata.to_string().contains(&token));
+        fixture.cleanup(&[]).await;
+    }
+
+    async fn insert_job(fixture: &Fixture, integration: &str, status: &str) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO jira_outbound_jobs (id, integration_id, issue_key, kind, dedupe_key, status) \
+             VALUES ($1, $2, 'PROJ-1', 'comment', $3, $4)",
+        )
+        .bind(id)
+        .bind(Uuid::parse_str(integration).unwrap())
+        .bind(format!("rest-test:{id}"))
+        .bind(status)
+        .execute(&fixture.pool)
+        .await
+        .expect("insert job");
+        id
+    }
+
+    async fn job_state(fixture: &Fixture, id: Uuid) -> (String, Option<String>) {
+        sqlx::query_as("SELECT status, last_error FROM jira_outbound_jobs WHERE id = $1")
+            .bind(id)
+            .fetch_one(&fixture.pool)
+            .await
+            .expect("job state")
+    }
+
+    #[actix_web::test]
+    #[serial]
+    async fn writeback_off_cancels_pending_jobs() {
+        ensure_encryption_key();
+        let fixture = Fixture::new().await;
+        let id = enabled_integration(&fixture, "https://jira.example.com", &test_token()).await;
+        let pending = insert_job(&fixture, &id, "pending").await;
+        let sent = insert_job(&fixture, &id, "sent").await;
+
+        // Saving with write-back still on keeps the queue.
+        let (status, body) = fixture
+            .call(
+                "PUT",
+                &format!("/jira-integrations/{id}/writeback"),
+                Some(writeback_body(None)),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(job_state(&fixture, pending).await.0, "pending");
+
+        let mut off = writeback_body(None);
+        off["enabled"] = serde_json::json!(false);
+        let (status, body) = fixture
+            .call(
+                "PUT",
+                &format!("/jira-integrations/{id}/writeback"),
+                Some(off),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            job_state(&fixture, pending).await,
+            ("dead".to_string(), Some("write-back disabled".to_string()))
+        );
+        assert_eq!(job_state(&fixture, sent).await.0, "sent");
+        fixture.cleanup(&[]).await;
+    }
+
+    #[actix_web::test]
+    #[serial]
+    async fn changing_jira_host_cancels_pending_jobs() {
+        ensure_encryption_key();
+        let fixture = Fixture::new().await;
+        let id = enabled_integration(&fixture, "https://jira.example.com", &test_token()).await;
+        let pending = insert_job(&fixture, &id, "pending").await;
+
+        let (status, body) = fixture
+            .call(
+                "PATCH",
+                &format!("/jira-integrations/{id}"),
+                Some(serde_json::json!({"jiraBaseUrl": "https://other.example.com"})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["writeback"]["enabled"], false);
+        assert_eq!(
+            job_state(&fixture, pending).await,
+            ("dead".to_string(), Some("write-back disabled".to_string()))
+        );
         fixture.cleanup(&[]).await;
     }
 

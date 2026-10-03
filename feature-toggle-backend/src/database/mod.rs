@@ -12,6 +12,7 @@ pub mod feature;
 pub mod feature_evaluation;
 pub mod jira_event;
 pub mod jira_integration;
+pub mod jira_outbound_job;
 pub mod jwt_secret;
 pub mod jwt_token;
 pub mod metrics;

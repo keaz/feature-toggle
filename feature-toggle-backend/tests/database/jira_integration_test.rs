@@ -6,6 +6,7 @@ use feature_toggle_backend::database::init_pg_pool;
 use feature_toggle_backend::database::jira_integration::{
     jira_integration_repository, jira_integration_repository_tx,
 };
+use feature_toggle_backend::database::jira_outbound_job::jira_outbound_job_repository_tx;
 use feature_toggle_backend::logic::ActorContext;
 use feature_toggle_backend::logic::jira_integration::{JiraStatusRuleInput, hash_secret};
 use feature_toggle_backend::logic::jira_integration_tx::{
@@ -295,11 +296,13 @@ async fn update_changes_only_the_given_fields() {
     let created = create(&pool, &team, "Jira").await.expect("create");
 
     let repo = jira_integration_repository_tx(pool.clone());
+    let outbound = jira_outbound_job_repository_tx(pool.clone());
     let activity = activity_log_repository(pool.clone());
     let mut tx = pool.begin().await.expect("begin");
     let updated = update_jira_integration_in_tx(
         &mut tx,
         &repo,
+        &outbound,
         activity.as_ref(),
         created.integration.id,
         JiraIntegrationPatch {
@@ -345,6 +348,7 @@ async fn update_changes_only_the_given_fields() {
     let unchanged = update_jira_integration_in_tx(
         &mut tx,
         &repo,
+        &outbound,
         activity.as_ref(),
         created.integration.id,
         JiraIntegrationPatch::default(),
