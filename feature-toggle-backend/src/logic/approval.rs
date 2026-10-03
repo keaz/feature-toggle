@@ -132,6 +132,31 @@ pub struct ApprovalPolicyPreview {
     pub reason: String,
 }
 
+/// An approval given by an external system (JI-14) instead of votes.
+#[derive(Clone, Debug)]
+pub struct ExternalApproval {
+    /// User recorded as the actor (the integration's shadow user).
+    pub actor_user_id: Uuid,
+    /// Actor name for the activity row, for example "Jira (Jane Doe)".
+    pub actor_name: String,
+    /// `approval_requests.approval_source`, for example `jira`.
+    pub source: String,
+    /// Stored in `approval_requests.external_approver`.
+    pub approver: JsonValue,
+    /// Extra activity metadata (a JSON object), merged into the row's.
+    pub metadata: JsonValue,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExternalApprovalResult {
+    /// The stage moved to `*_APPROVED`. `approval_request_id` is the request
+    /// that was closed; `None` when the stage had no pending request (no
+    /// policy applied when it was requested).
+    Approved { approval_request_id: Option<Uuid> },
+    /// The request was closed, or the stage changed, meanwhile. Nothing changed.
+    AlreadyResolved,
+}
+
 #[automock]
 #[async_trait::async_trait]
 pub trait ApprovalLogic: Send + Sync {
@@ -198,6 +223,21 @@ pub trait ApprovalLogic: Send + Sync {
         environment_id: Uuid,
         requested_status: &str,
     ) -> Result<ApprovalPolicyPreview, Error>;
+
+    /// Approves the requested stage change of `stage_id` on behalf of an
+    /// external system (JI-14): no vote and no voter checks. With a pending
+    /// request, closes it (guarded by `status = 'pending'`, so a concurrent
+    /// vote and this never both close it) and applies the change in the same
+    /// transaction, as the vote path does; AI-11 and auto-approval never run
+    /// for it. Without one, moves a `*_REQUESTED` stage to `*_APPROVED`
+    /// directly. Writes an `approval_request_approved_externally` activity
+    /// row; after commit publishes the request event, notifies edge servers
+    /// and sends the "approved" notification. Needs a database pool.
+    async fn approve_stage_change_externally(
+        &self,
+        stage_id: Uuid,
+        approval: ExternalApproval,
+    ) -> Result<ExternalApprovalResult, Error>;
 
     fn clone_box(&self) -> Box<dyn ApprovalLogic>;
 }
@@ -2089,6 +2129,174 @@ impl ApprovalLogic for ApprovalLogicImpl {
         })
     }
 
+    async fn approve_stage_change_externally(
+        &self,
+        stage_id: Uuid,
+        approval: ExternalApproval,
+    ) -> Result<ExternalApprovalResult, Error> {
+        let pool = self
+            .db_pool
+            .as_ref()
+            .ok_or_else(|| Error::InvalidInput("Transaction pool not configured".into()))?;
+        let stage = self
+            .feature_repository
+            .get_stage_by_id(stage_id)
+            .await?
+            .ok_or(Error::NotFound(stage_id))?;
+        let feature = self
+            .feature_repository
+            .get_feature_by_id(stage.feature_id)
+            .await?;
+        let environment_name = self
+            .environment_logic
+            .get_environment_by_id(ID::from(stage.environment_id))
+            .await
+            .ok()
+            .map(|environment| environment.name);
+        let feature_repo_tx = feature_repository_tx(pool.clone());
+
+        let mut metadata = serde_json::json!({
+            "feature_id": feature.id.to_string(),
+            "feature_key": feature.key,
+            "team_id": feature.team_id.to_string(),
+            "stage_id": stage_id.to_string(),
+            "environment_id": stage.environment_id.to_string(),
+            "environment_name": environment_name,
+            "approval_source": approval.source,
+        });
+        if let (Some(target), Some(extra)) =
+            (metadata.as_object_mut(), approval.metadata.as_object())
+        {
+            target.extend(extra.clone());
+        }
+        let describe = |kind: &str| match environment_name.as_deref() {
+            Some(environment_name) => format!(
+                "{} approved the {kind} of feature '{}' in environment '{environment_name}'",
+                approval.actor_name, feature.key
+            ),
+            None => format!(
+                "{} approved the {kind} of feature '{}'",
+                approval.actor_name, feature.key
+            ),
+        };
+
+        if let Some(request) = self
+            .approval_repository
+            .find_pending_stage_change_request(stage_id)
+            .await?
+        {
+            let policy = self
+                .approval_repository
+                .get_policy_by_id(request.policy_id)
+                .await?
+                .ok_or(Error::NotFound(request.policy_id))?;
+            let mut tx = pool.begin().await.map_err(Error::DatabaseError)?;
+            let Some(approved) = approval_repository_tx(pool.clone())
+                .approve_externally_tx(
+                    &mut tx,
+                    request.id,
+                    &approval.source,
+                    approval.approver.clone(),
+                )
+                .await?
+            else {
+                tx.rollback().await.map_err(Error::DatabaseError)?;
+                return Ok(ExternalApprovalResult::AlreadyResolved);
+            };
+            // An error here drops the transaction, so the request stays pending.
+            self.execute_change_tx(&feature_repo_tx, &mut tx, &approved, approval.actor_user_id)
+                .await?;
+            metadata["approval_request_id"] = serde_json::json!(approved.id.to_string());
+            metadata["status"] = approved
+                .change_payload
+                .get("approval_target_status")
+                .cloned()
+                .unwrap_or(JsonValue::Null);
+            // AI risk assessment (and AI-11) would act on the pending request;
+            // it is closed before they run. Record that they were skipped.
+            if policy.ai_risk_mode != "off" {
+                metadata["ai_risk_mode_skipped"] = serde_json::json!(policy.ai_risk_mode);
+            }
+            let kind = Self::stage_change_request_kind(&approved).unwrap_or("stage change");
+            activity_log_repository(pool.clone())
+                .create_activity_tx(
+                    &mut tx,
+                    CreateActivityLog {
+                        activity_type: activity_types::APPROVAL_REQUEST_APPROVED_EXTERNALLY
+                            .to_string(),
+                        entity_type: entity_types::FEATURE.to_string(),
+                        entity_id: feature.id.to_string(),
+                        actor_id: Some(approval.actor_user_id),
+                        actor_name: Some(approval.actor_name.clone()),
+                        description: describe(kind),
+                        metadata: Some(metadata),
+                    },
+                )
+                .await
+                .map_err(Error::DatabaseError)?;
+            tx.commit().await.map_err(Error::DatabaseError)?;
+
+            self.publish_event(&approved, policy.team_id).await?;
+            self.notify_edge_servers(approved.feature_id).await;
+            self.dispatch_stage_change_approved_notification(
+                &approved,
+                policy.team_id,
+                Some(approval.actor_user_id),
+            )
+            .await;
+            return Ok(ExternalApprovalResult::Approved {
+                approval_request_id: Some(approved.id),
+            });
+        }
+
+        // No pending request: no policy applied when the change was requested,
+        // and no other path moves a stage to `*_APPROVED`. Lock the stage and
+        // move it only from the requested status it is in now.
+        let mut tx = pool.begin().await.map_err(Error::DatabaseError)?;
+        let current: Option<String> = sqlx::query_scalar(
+            "SELECT status FROM features_pipeline_stages WHERE id = $1 FOR UPDATE",
+        )
+        .bind(stage_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(Error::DatabaseError)?;
+        let (target, kind) = match current.as_deref() {
+            Some("DEPLOYMENT_REQUESTED") => {
+                (StageStatus::DeploymentApproved.as_str(), "deployment")
+            }
+            Some("ROLLBACK_REQUESTED") => (StageStatus::RollbackApproved.as_str(), "rollback"),
+            _ => {
+                tx.rollback().await.map_err(Error::DatabaseError)?;
+                return Ok(ExternalApprovalResult::AlreadyResolved);
+            }
+        };
+        feature_repo_tx
+            .approve_or_reject_stage_change_tx(&mut tx, stage_id, target, approval.actor_user_id)
+            .await?;
+        metadata["approval_request_id"] = JsonValue::Null;
+        metadata["status"] = serde_json::json!(target);
+        activity_log_repository(pool.clone())
+            .create_activity_tx(
+                &mut tx,
+                CreateActivityLog {
+                    activity_type: activity_types::APPROVAL_REQUEST_APPROVED_EXTERNALLY.to_string(),
+                    entity_type: entity_types::FEATURE.to_string(),
+                    entity_id: feature.id.to_string(),
+                    actor_id: Some(approval.actor_user_id),
+                    actor_name: Some(approval.actor_name.clone()),
+                    description: describe(kind),
+                    metadata: Some(metadata),
+                },
+            )
+            .await
+            .map_err(Error::DatabaseError)?;
+        tx.commit().await.map_err(Error::DatabaseError)?;
+        self.notify_edge_servers(feature.id).await;
+        Ok(ExternalApprovalResult::Approved {
+            approval_request_id: None,
+        })
+    }
+
     fn clone_box(&self) -> Box<dyn ApprovalLogic> {
         Box::new(self.clone())
     }
@@ -2313,6 +2521,8 @@ mod tests {
             required_approvers_override: None,
             external_ref: None,
             request_reason: None,
+            approval_source: "fluxgate".to_string(),
+            external_approver: None,
         };
 
         // Mock the policy - requires "Senior Engineer" role
@@ -2508,6 +2718,8 @@ mod tests {
             required_approvers_override: None,
             external_ref: None,
             request_reason: None,
+            approval_source: "fluxgate".to_string(),
+            external_approver: None,
         };
 
         logic
@@ -2565,6 +2777,8 @@ mod tests {
             required_approvers_override: None,
             external_ref: None,
             request_reason: None,
+            approval_source: "fluxgate".to_string(),
+            external_approver: None,
         };
 
         // Policy requires "Senior Engineer" role
@@ -2684,6 +2898,8 @@ mod tests {
             required_approvers_override: None,
             external_ref: None,
             request_reason: None,
+            approval_source: "fluxgate".to_string(),
+            external_approver: None,
         };
         let policy = ApprovalPolicy {
             id: policy_id,
@@ -2786,6 +3002,8 @@ mod tests {
             required_approvers_override: None,
             external_ref: None,
             request_reason: None,
+            approval_source: "fluxgate".to_string(),
+            external_approver: None,
         };
 
         let policy = ApprovalPolicy {
@@ -2951,6 +3169,8 @@ mod tests {
             required_approvers_override: None,
             external_ref: None,
             request_reason: None,
+            approval_source: "fluxgate".to_string(),
+            external_approver: None,
         };
 
         env_logic
@@ -3094,6 +3314,8 @@ mod tests {
             required_approvers_override: None,
             external_ref: None,
             request_reason: None,
+            approval_source: "fluxgate".to_string(),
+            external_approver: None,
         };
 
         let policy = ApprovalPolicy {
@@ -3465,6 +3687,8 @@ mod ai_risk_trigger_tests {
             required_approvers_override: None,
             external_ref: None,
             request_reason: None,
+            approval_source: "fluxgate".to_string(),
+            external_approver: None,
         };
 
         env_logic
@@ -3666,6 +3890,8 @@ mod ai_risk_trigger_tests {
             required_approvers_override: request_override,
             external_ref: None,
             request_reason: None,
+            approval_source: "fluxgate".to_string(),
+            external_approver: None,
         };
         let policy = ApprovalPolicy {
             id: policy_id,

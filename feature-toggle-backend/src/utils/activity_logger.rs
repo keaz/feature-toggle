@@ -92,6 +92,8 @@ pub mod activity_types {
     /// be reached (no remaining eligible approver can vote) and its approvals
     /// meet the policy.
     pub const APPROVAL_REQUIREMENT_RECONCILED: &str = "approval_requirement_reconciled";
+    /// An external system (Jira, JI-14) approved a stage change; no vote.
+    pub const APPROVAL_REQUEST_APPROVED_EXTERNALLY: &str = "approval_request_approved_externally";
     /// The reconciliation could not approve a request (its change failed)
     /// `MAX_RECONCILE_FAILURES` times and stopped retrying it.
     pub const APPROVAL_RECONCILIATION_STOPPED: &str = "approval_reconciliation_stopped";

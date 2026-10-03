@@ -48,8 +48,8 @@ use crate::rest::approval::{
     AiRiskStatus, AiRiskSummary, AppliesTo, ApprovalActionRequest,
     ApprovalPolicyPreviewOutcomeResponse, ApprovalPolicyPreviewRequest,
     ApprovalPolicyPreviewResponse, ApprovalPolicyResponse, ApprovalRequestListQuery,
-    ApprovalRequestResponse, ApprovalRequestStatus, ApprovalRequestsResponse, ApprovalVoteResponse,
-    CreateApprovalPolicyRequest, UpdateApprovalPolicyRequest,
+    ApprovalRequestResponse, ApprovalRequestStatus, ApprovalRequestsResponse, ApprovalSource,
+    ApprovalVoteResponse, CreateApprovalPolicyRequest, UpdateApprovalPolicyRequest,
 };
 use crate::rest::auth::{
     AuthStatusResponse, LoginRequest, LoginResponse, LogoutRequest, RefreshRequest,
@@ -438,6 +438,7 @@ async fn health() -> impl Responder {
         AuditAnalyticsResponse,
         ApprovalRequestListQuery,
         ApprovalRequestStatus,
+        ApprovalSource,
         AiRiskStatus,
         AiRiskSummary,
         ApprovalVoteResponse,

@@ -34,6 +34,7 @@ pub mod context_tx;
 pub mod dependency_graph;
 pub mod environment;
 pub mod environment_tx;
+pub mod external_change;
 pub mod external_link;
 pub mod external_link_tx;
 pub mod feature;

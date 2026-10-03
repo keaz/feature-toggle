@@ -13,7 +13,10 @@ use crate::database::approval::{
     ApprovalRepository, CreateApprovalPolicyInput, UpdateApprovalPolicyInput,
     approval_repository_tx,
 };
-use crate::database::entity::{ApprovalPolicy, ApprovalRequest, ApprovalStatus, ApprovalVote};
+use crate::database::entity::{
+    APPROVAL_SOURCE_AUTO, APPROVAL_SOURCE_JIRA, ApprovalPolicy, ApprovalRequest, ApprovalStatus,
+    ApprovalVote,
+};
 use crate::database::feature::{FeatureVersionDiffEntry, diff_feature_snapshots};
 use crate::judgment::{JudgmentKind, SubjectType};
 use crate::logic::ActorContext;
@@ -42,6 +45,26 @@ impl From<ApprovalStatus> for ApprovalRequestStatus {
             ApprovalStatus::Rejected => ApprovalRequestStatus::Rejected,
             ApprovalStatus::Cancelled => ApprovalRequestStatus::Cancelled,
             ApprovalStatus::AutoApproved => ApprovalRequestStatus::AutoApproved,
+        }
+    }
+}
+
+/// Who closed an approval request: votes in FluxGate, the auto-approval job,
+/// or Jira in an environment that trusts it (JI-14).
+#[derive(Debug, Serialize, Deserialize, ToSchema, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalSource {
+    Fluxgate,
+    Jira,
+    Auto,
+}
+
+impl ApprovalSource {
+    fn from_db(value: &str) -> Self {
+        match value {
+            APPROVAL_SOURCE_JIRA => ApprovalSource::Jira,
+            APPROVAL_SOURCE_AUTO => ApprovalSource::Auto,
+            _ => ApprovalSource::Fluxgate,
         }
     }
 }
@@ -216,6 +239,11 @@ pub struct ApprovalRequestResponse {
     pub external_ref: Option<String>,
     /// Why the requester asked for the change.
     pub request_reason: Option<String>,
+    /// Who closed the request. `jira` means a Jira status rule approved it
+    /// without votes; `externalApprover` then names the Jira user and issue.
+    pub approval_source: ApprovalSource,
+    /// For `jira`: `system`, `account_id`, `display_name`, `issue_key`, `status`.
+    pub external_approver: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -902,6 +930,8 @@ pub(crate) fn map_request_with_policy(
         required_approvals_effective,
         external_ref: request.external_ref,
         request_reason: request.request_reason,
+        approval_source: ApprovalSource::from_db(&request.approval_source),
+        external_approver: request.external_approver,
     }
 }
 
@@ -1611,6 +1641,8 @@ mod tests {
             required_approvers_override: None,
             external_ref: None,
             request_reason: None,
+            approval_source: "fluxgate".to_string(),
+            external_approver: None,
         }
     }
 
@@ -1870,6 +1902,39 @@ mod tests {
         let json = serde_json::to_value(&without).unwrap();
         assert!(json["externalRef"].is_null());
         assert!(json["requestReason"].is_null());
+    }
+
+    #[actix_web::test]
+    async fn map_request_returns_the_approval_source_and_external_approver() {
+        let request = ApprovalRequest {
+            status: ApprovalStatus::Approved,
+            approval_source: "jira".to_string(),
+            external_approver: Some(serde_json::json!({
+                "system": "jira",
+                "display_name": "Jane Doe",
+                "issue_key": "PROJ-123",
+            })),
+            ..sample_request(Uuid::new_v4())
+        };
+        let policy = sample_policy(request.policy_id);
+
+        let response = map_request_with_policy(request, vec![], Some(&policy), None, None);
+        let json = serde_json::to_value(&response).unwrap();
+
+        assert_eq!(json["approvalSource"], "jira");
+        assert_eq!(json["externalApprover"]["display_name"], "Jane Doe");
+        assert_eq!(json["externalApprover"]["issue_key"], "PROJ-123");
+
+        let voted = map_request_with_policy(
+            sample_request(Uuid::new_v4()),
+            vec![],
+            Some(&policy),
+            None,
+            None,
+        );
+        let json = serde_json::to_value(&voted).unwrap();
+        assert_eq!(json["approvalSource"], "fluxgate");
+        assert!(json["externalApprover"].is_null());
     }
 
     #[actix_web::test]

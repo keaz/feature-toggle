@@ -1287,13 +1287,9 @@ async fn auto_approval_applies_the_stage_change(use_pool: bool) {
     cleanup_stage(&pool, &fixture).await;
 
     assert_ne!(requested, target);
-    assert_eq!(
-        approved
-            .expect("auto-approval should succeed")
-            .status
-            .as_str(),
-        "auto_approved"
-    );
+    let approved = approved.expect("auto-approval should succeed");
+    assert_eq!(approved.status.as_str(), "auto_approved");
+    assert_eq!(approved.approval_source, "auto");
     assert_eq!(after, target, "the stage change must be applied");
     assert!(
         again.is_err(),

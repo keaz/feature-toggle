@@ -4361,6 +4361,8 @@ mod test {
                     required_approvers_override: None,
                     external_ref: meta.external_ref.clone(),
                     request_reason: meta.reason.clone(),
+                    approval_source: "fluxgate".to_string(),
+                    external_approver: None,
                 }))
             });
 

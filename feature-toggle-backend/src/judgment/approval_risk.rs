@@ -994,6 +994,8 @@ mod tests {
             required_approvers_override: None,
             external_ref: None,
             request_reason: None,
+            approval_source: "fluxgate".to_string(),
+            external_approver: None,
         }
     }
 

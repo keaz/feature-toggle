@@ -166,6 +166,15 @@ pub async fn run() -> std::io::Result<()> {
         Some(approval_logic.clone()),
         Some(notification_logic.clone_box()),
     );
+    // Stage changes on behalf of Jira (JI-14); used by the JI-15 rule engine.
+    let external_change_logic = logic::external_change::external_change_logic(
+        db_pool.clone(),
+        feature_logic.clone(),
+        approval_logic.clone(),
+        feature_repository.clone_box(),
+        activity_log_repository.clone_box(),
+        updates_tx.clone(),
+    );
 
     let client_logic = logic::client::client_logic(
         database::client::client_repository(db_pool.clone()),
@@ -375,6 +384,7 @@ pub async fn run() -> std::io::Result<()> {
             .app_data(web::Data::new(feature_logic.clone()))
             .app_data(web::Data::new(canary_logic.clone()))
             .app_data(web::Data::new(approval_logic.clone()))
+            .app_data(web::Data::new(external_change_logic.clone()))
             .app_data(web::Data::new(approval_repository.clone_box()))
             .app_data(web::Data::new(activity_log_repository.clone_box()))
             .app_data(web::Data::new(role_logic.clone()))

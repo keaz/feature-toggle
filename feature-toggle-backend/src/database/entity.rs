@@ -427,7 +427,17 @@ pub struct ApprovalRequest {
     pub external_ref: Option<String>,
     /// Why the requester asked for the change (JI-11).
     pub request_reason: Option<String>,
+    /// Who closed the request (JI-14): [`APPROVAL_SOURCE_FLUXGATE`] (votes),
+    /// [`APPROVAL_SOURCE_AUTO`] (auto-approval) or [`APPROVAL_SOURCE_JIRA`].
+    pub approval_source: String,
+    /// The external actor that approved it, for `jira`: `system`,
+    /// `account_id`, `display_name`, `issue_key`, `status`.
+    pub external_approver: Option<JsonValue>,
 }
+
+pub const APPROVAL_SOURCE_FLUXGATE: &str = "fluxgate";
+pub const APPROVAL_SOURCE_AUTO: &str = "auto";
+pub const APPROVAL_SOURCE_JIRA: &str = "jira";
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
 pub struct ApprovalVote {

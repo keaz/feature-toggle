@@ -36,6 +36,8 @@ async fn auto_approval_scheduler_processes_pending_requests() {
         required_approvers_override: None,
         external_ref: None,
         request_reason: None,
+        approval_source: "fluxgate".to_string(),
+        external_approver: None,
     };
 
     let pending_clone = pending_request.clone();
@@ -85,6 +87,8 @@ async fn reconciliation_approves_each_ready_request() {
         required_approvers_override: Some(2),
         external_ref: None,
         request_reason: None,
+        approval_source: "fluxgate".to_string(),
+        external_approver: None,
     };
     let ready_id = ready.id;
     mock_repo

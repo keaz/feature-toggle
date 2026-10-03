@@ -20,7 +20,8 @@ pub const MAX_AUTO_APPROVE_FAILURES: i32 = 3;
 const REQUEST_RETURNING: &str = "RETURNING id, policy_id, feature_id, environment_id, change_type, \
      change_payload, change_description, requested_by, eligible_approver_ids, routing_reason, \
      admin_override_enabled, status, approved_count, rejected_count, executed_at, created_at, \
-     updated_at, required_approvers_override, external_ref, request_reason";
+     updated_at, required_approvers_override, external_ref, request_reason, approval_source, \
+     external_approver";
 
 /// Returned when a vote or status change reaches a request that is no longer
 /// pending. Same message the vote logic uses for a closed request.
@@ -270,6 +271,11 @@ pub trait ApprovalRepository: Send + Sync {
         &self,
         request_id: Uuid,
     ) -> Result<Option<ApprovalRequest>, Error>;
+    /// The newest pending stage change request for `stage_id`, if any.
+    async fn find_pending_stage_change_request(
+        &self,
+        stage_id: Uuid,
+    ) -> Result<Option<ApprovalRequest>, Error>;
 
     fn clone_box(&self) -> Box<dyn ApprovalRepository>;
 }
@@ -340,6 +346,17 @@ pub trait ApprovalRepositoryTx: ApprovalRepository {
         conn: &mut PgConnection,
         request_id: Uuid,
     ) -> Result<Option<ApprovalRequest>, Error>;
+    /// Marks a pending request approved by an external system (JI-14): no
+    /// vote, `approval_source = source`, `external_approver` set. Guarded by
+    /// `status = 'pending'`, so it and a vote never both close one request.
+    /// `None` when it is no longer pending (nothing changed).
+    async fn approve_externally_tx(
+        &self,
+        conn: &mut PgConnection,
+        request_id: Uuid,
+        source: &str,
+        external_approver: serde_json::Value,
+    ) -> Result<Option<ApprovalRequest>, Error>;
 }
 
 pub fn approval_repository(pool: PgPool) -> Box<dyn ApprovalRepository> {
@@ -396,13 +413,14 @@ impl ApprovalRepositoryImpl {
             sqlx::query(
                 r#"
                 UPDATE approval_requests
-                SET status = 'auto_approved', executed_at = NOW(), updated_at = NOW()
+                SET status = 'auto_approved', approval_source = 'auto', executed_at = NOW(),
+                    updated_at = NOW()
                 WHERE id = $1 AND status = 'pending'
                 RETURNING id, policy_id, feature_id, environment_id, change_type, change_payload,
                           change_description, requested_by, eligible_approver_ids, routing_reason,
                           admin_override_enabled, status, approved_count, rejected_count,
                           executed_at, created_at, updated_at, required_approvers_override,
-                      external_ref, request_reason
+                      external_ref, request_reason, approval_source, external_approver
                 "#,
             )
             .bind(request_id)
@@ -435,6 +453,8 @@ impl ApprovalRepositoryImpl {
             required_approvers_override: row.get("required_approvers_override"),
             external_ref: row.get("external_ref"),
             request_reason: row.get("request_reason"),
+            approval_source: row.get("approval_source"),
+            external_approver: row.get("external_approver"),
         }
     }
 }
@@ -630,7 +650,7 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
                       change_description, requested_by, eligible_approver_ids, routing_reason,
                       admin_override_enabled, status, approved_count, rejected_count, executed_at,
                       created_at, updated_at, required_approvers_override,
-                      external_ref, request_reason
+                      external_ref, request_reason, approval_source, external_approver
             "#,
         )
         .bind(input.policy_id)
@@ -659,7 +679,7 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
                    change_description, requested_by, eligible_approver_ids, routing_reason,
                    admin_override_enabled, status, approved_count, rejected_count, executed_at,
                    created_at, updated_at, required_approvers_override,
-                      external_ref, request_reason
+                      external_ref, request_reason, approval_source, external_approver
             FROM approval_requests WHERE id = $1
             "#,
         )
@@ -720,7 +740,7 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
                       change_description, requested_by, eligible_approver_ids, routing_reason,
                       admin_override_enabled, status, approved_count, rejected_count, executed_at,
                       created_at, updated_at, required_approvers_override,
-                      external_ref, request_reason
+                      external_ref, request_reason, approval_source, external_approver
             "#,
         )
         .bind(input.request_id)
@@ -757,7 +777,7 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
                       change_description, requested_by, eligible_approver_ids, routing_reason,
                       admin_override_enabled, status, approved_count, rejected_count, executed_at,
                       created_at, updated_at, required_approvers_override,
-                      external_ref, request_reason
+                      external_ref, request_reason, approval_source, external_approver
             "#,
         )
         .bind(request_id)
@@ -1159,12 +1179,41 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
             sqlx::query(&format!(
                 r#"
                 UPDATE approval_requests
-                SET status = 'pending', executed_at = NULL, updated_at = NOW()
+                SET status = 'pending', approval_source = 'fluxgate', executed_at = NULL,
+                    updated_at = NOW()
                 WHERE id = $1 AND status = 'auto_approved'
                 {REQUEST_RETURNING}
                 "#
             ))
             .bind(request_id)
+            .map(Self::map_request_row)
+            .fetch_optional(&self.pool)
+            .await,
+        )
+    }
+
+    async fn find_pending_stage_change_request(
+        &self,
+        stage_id: Uuid,
+    ) -> Result<Option<ApprovalRequest>, Error> {
+        handle_error(
+            Some(stage_id),
+            sqlx::query(
+                r#"
+                SELECT id, policy_id, feature_id, environment_id, change_type, change_payload,
+                       change_description, requested_by, eligible_approver_ids, routing_reason,
+                       admin_override_enabled, status, approved_count, rejected_count, executed_at,
+                       created_at, updated_at, required_approvers_override,
+                       external_ref, request_reason, approval_source, external_approver
+                FROM approval_requests
+                WHERE status = 'pending'
+                  AND change_type = 'stage_change'
+                  AND change_payload->>'stage_id' = $1::text
+                ORDER BY created_at DESC
+                LIMIT 1
+                "#,
+            )
+            .bind(stage_id)
             .map(Self::map_request_row)
             .fetch_optional(&self.pool)
             .await,
@@ -1248,7 +1297,7 @@ impl ApprovalRepositoryImpl {
                       change_description, requested_by, eligible_approver_ids, routing_reason,
                       admin_override_enabled, status, approved_count, rejected_count, executed_at,
                       created_at, updated_at, required_approvers_override,
-                      external_ref, request_reason
+                      external_ref, request_reason, approval_source, external_approver
             "#,
         )
         .bind(input.policy_id)
@@ -1287,7 +1336,7 @@ impl ApprovalRepositoryImpl {
                       change_description, requested_by, eligible_approver_ids, routing_reason,
                       admin_override_enabled, status, approved_count, rejected_count, executed_at,
                       created_at, updated_at, required_approvers_override,
-                      external_ref, request_reason
+                      external_ref, request_reason, approval_source, external_approver
             "#,
         )
         .bind(request_id)
@@ -1453,6 +1502,33 @@ impl ApprovalRepositoryTx for ApprovalRepositoryImpl {
         Self::cancel_pending_internal(conn, request_id).await
     }
 
+    async fn approve_externally_tx(
+        &self,
+        conn: &mut PgConnection,
+        request_id: Uuid,
+        source: &str,
+        external_approver: serde_json::Value,
+    ) -> Result<Option<ApprovalRequest>, Error> {
+        handle_error(
+            Some(request_id),
+            sqlx::query(&format!(
+                r#"
+                UPDATE approval_requests
+                SET status = 'approved', approval_source = $2, external_approver = $3,
+                    executed_at = NOW(), updated_at = NOW()
+                WHERE id = $1 AND status = 'pending'
+                {REQUEST_RETURNING}
+                "#
+            ))
+            .bind(request_id)
+            .bind(source)
+            .bind(external_approver)
+            .map(Self::map_request_row)
+            .fetch_optional(&mut *conn)
+            .await,
+        )
+    }
+
     async fn approve_capped_request_tx(
         &self,
         conn: &mut PgConnection,
@@ -1471,7 +1547,7 @@ impl ApprovalRepositoryTx for ApprovalRepositoryImpl {
                           r.eligible_approver_ids, r.routing_reason, r.admin_override_enabled,
                           r.status, r.approved_count, r.rejected_count, r.executed_at,
                           r.created_at, r.updated_at, r.required_approvers_override,
-                          r.external_ref, r.request_reason
+                          r.external_ref, r.request_reason, r.approval_source, r.external_approver
                 "#,
                 ready = capped_request_ready_sql()
             ))
@@ -1525,7 +1601,7 @@ impl ApprovalRepositoryTx for ApprovalRepositoryImpl {
                       change_description, requested_by, eligible_approver_ids, routing_reason,
                       admin_override_enabled, status, approved_count, rejected_count, executed_at,
                       created_at, updated_at, required_approvers_override,
-                      external_ref, request_reason
+                      external_ref, request_reason, approval_source, external_approver
             "#,
         )
         .bind(input.request_id)
