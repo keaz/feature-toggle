@@ -64,6 +64,8 @@ pub trait JiraOutboundJobRepository: Send + Sync {
         limit: i64,
         lease: chrono::Duration,
     ) -> Result<Vec<OutboundJobRow>, Error>;
+    /// The `mark_*` calls change a job only while it is `pending`: a job cancelled
+    /// meanwhile stays `dead`.
     /// Marks the job `sent`; `note` is kept in `last_error` (for example "skipped: ...").
     async fn mark_sent(&self, id: Uuid, note: Option<String>) -> Result<(), Error>;
     async fn mark_retry(
@@ -74,6 +76,8 @@ pub trait JiraOutboundJobRepository: Send + Sync {
         error: String,
     ) -> Result<(), Error>;
     async fn mark_dead(&self, id: Uuid, attempts: i32, error: String) -> Result<(), Error>;
+    /// Whether the job is still `pending` (not cancelled since it was claimed).
+    async fn is_pending(&self, id: Uuid) -> Result<bool, Error>;
     /// Makes pending jobs due again at `next_attempt_at`, without counting an attempt.
     async fn release(&self, ids: &[Uuid], next_attempt_at: DateTime<Utc>) -> Result<(), Error>;
     /// Jobs of the integration, newest first, and their total.
@@ -129,11 +133,14 @@ pub struct JiraOutboundJobRepositoryImpl {
 
 impl JiraOutboundJobRepositoryImpl {
     async fn enqueue_conn(conn: &mut PgConnection, job: NewOutboundJob) -> Result<bool, Error> {
+        // `clock_timestamp()`, not the transaction's `now()`: jobs enqueued in one
+        // transaction keep their insert order.
         // No conflict target: both the `dedupe_key` constraint and the partial unique
         // index on pending remote links make a duplicate a no-op.
         let result = sqlx::query(
             "INSERT INTO jira_outbound_jobs (integration_id, issue_key, feature_id, kind, \
-             payload, dedupe_key) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
+             payload, dedupe_key, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, clock_timestamp()) ON CONFLICT DO NOTHING",
         )
         .bind(job.integration_id)
         .bind(job.issue_key)
@@ -184,7 +191,7 @@ impl JiraOutboundJobRepository for JiraOutboundJobRepositoryImpl {
     async fn mark_sent(&self, id: Uuid, note: Option<String>) -> Result<(), Error> {
         let result = sqlx::query(
             "UPDATE jira_outbound_jobs SET status = 'sent', sent_at = now(), last_error = $2 \
-             WHERE id = $1",
+             WHERE id = $1 AND status = 'pending'",
         )
         .bind(id)
         .bind(note)
@@ -202,7 +209,7 @@ impl JiraOutboundJobRepository for JiraOutboundJobRepositoryImpl {
     ) -> Result<(), Error> {
         let result = sqlx::query(
             "UPDATE jira_outbound_jobs SET status = 'pending', attempts = $2, \
-             next_attempt_at = $3, last_error = $4 WHERE id = $1",
+             next_attempt_at = $3, last_error = $4 WHERE id = $1 AND status = 'pending'",
         )
         .bind(id)
         .bind(attempts)
@@ -216,7 +223,7 @@ impl JiraOutboundJobRepository for JiraOutboundJobRepositoryImpl {
     async fn mark_dead(&self, id: Uuid, attempts: i32, error: String) -> Result<(), Error> {
         let result = sqlx::query(
             "UPDATE jira_outbound_jobs SET status = 'dead', attempts = $2, last_error = $3 \
-             WHERE id = $1",
+             WHERE id = $1 AND status = 'pending'",
         )
         .bind(id)
         .bind(attempts)
@@ -224,6 +231,16 @@ impl JiraOutboundJobRepository for JiraOutboundJobRepositoryImpl {
         .execute(&self.pool)
         .await;
         handle_error(Some(id), result).map(|_| ())
+    }
+
+    async fn is_pending(&self, id: Uuid) -> Result<bool, Error> {
+        let result = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM jira_outbound_jobs WHERE id = $1 AND status = 'pending')",
+        )
+        .bind(id)
+        .fetch_one(&self.pool)
+        .await;
+        handle_error(Some(id), result)
     }
 
     async fn release(&self, ids: &[Uuid], next_attempt_at: DateTime<Utc>) -> Result<(), Error> {

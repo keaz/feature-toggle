@@ -433,3 +433,75 @@ async fn delete_finished_before_keeps_pending() {
 
     fx.cleanup(&pool).await;
 }
+
+#[tokio::test]
+async fn cancelled_job_is_not_revived_by_mark_retry() {
+    let pool = init_pg_pool().await;
+    let fx = fixture(&pool).await;
+    let repo = jira_outbound_job_repository(pool.clone());
+    let tx_repo = jira_outbound_job_repository_tx(pool.clone());
+    repo.enqueue(fx.job(OutboundKind::Comment, &format!("rv-{}", fx.integration_id)))
+        .await
+        .unwrap();
+    let (rows, _) = repo.list(fx.integration_id, None, 0, 10).await.unwrap();
+    let id = rows[0].id;
+    assert!(repo.is_pending(id).await.unwrap());
+
+    let mut conn = pool.acquire().await.unwrap();
+    tx_repo
+        .cancel_pending_tx(&mut conn, fx.integration_id, "write-back disabled")
+        .await
+        .unwrap();
+    drop(conn);
+    assert!(!repo.is_pending(id).await.unwrap());
+
+    repo.mark_retry(id, 1, Utc::now(), "500: x".to_string())
+        .await
+        .unwrap();
+    repo.mark_sent(id, None).await.unwrap();
+    repo.mark_dead(id, 2, "other".to_string()).await.unwrap();
+    let (rows, _) = repo.list(fx.integration_id, None, 0, 10).await.unwrap();
+    assert_eq!(rows[0].status, "dead");
+    assert_eq!(rows[0].attempts, 0);
+    assert_eq!(rows[0].last_error.as_deref(), Some("write-back disabled"));
+    assert!(rows[0].sent_at.is_none());
+
+    fx.cleanup(&pool).await;
+}
+
+#[tokio::test]
+#[serial(jira_jobs)]
+async fn jobs_enqueued_in_one_tx_keep_insert_order() {
+    let pool = init_pg_pool().await;
+    let fx = fixture(&pool).await;
+    let tx_repo = jira_outbound_job_repository_tx(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+    for name in ["a", "b", "c"] {
+        let job = fx.job(
+            OutboundKind::Comment,
+            &format!("{name}-{}", fx.integration_id),
+        );
+        assert!(tx_repo.enqueue_tx(&mut tx, job).await.unwrap());
+    }
+    tx.commit().await.unwrap();
+
+    let repo = jira_outbound_job_repository(pool.clone());
+    let claimed: Vec<_> = repo
+        .claim_due(500, Duration::minutes(5))
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|row| row.integration_id == fx.integration_id)
+        .collect();
+    let mut by_created = claimed.clone();
+    by_created.sort_by_key(|row| (row.created_at, row.id));
+    let order: Vec<_> = by_created
+        .iter()
+        .map(|row| row.dedupe_key.split('-').next().unwrap().to_string())
+        .collect();
+    assert_eq!(order, vec!["a", "b", "c"]);
+    assert!(by_created[0].created_at < by_created[1].created_at);
+    assert!(by_created[1].created_at < by_created[2].created_at);
+
+    fx.cleanup(&pool).await;
+}

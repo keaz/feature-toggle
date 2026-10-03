@@ -101,8 +101,7 @@ impl JiraWritebackSender {
     /// Claims due jobs and sends them. Within one issue, jobs go out in `created_at`
     /// order, and a retry holds back the rest of the issue's jobs.
     pub async fn run_once(&self) -> SendCounts {
-        let mut counts = SendCounts::default();
-        let mut claimed = match self
+        let claimed = match self
             .jobs
             .claim_due(BATCH_SIZE, chrono::Duration::minutes(LEASE_MINUTES))
             .await
@@ -110,9 +109,15 @@ impl JiraWritebackSender {
             Ok(claimed) => claimed,
             Err(err) => {
                 warn!("Jira write-back sender could not claim jobs: {err}");
-                return counts;
+                return SendCounts::default();
             }
         };
+        self.process(claimed).await
+    }
+
+    /// Sends a claimed batch.
+    async fn process(&self, mut claimed: Vec<OutboundJobRow>) -> SendCounts {
+        let mut counts = SendCounts::default();
         claimed.sort_by_key(|job| (job.created_at, job.id));
         let mut groups: BTreeMap<(Uuid, String), Vec<OutboundJobRow>> = BTreeMap::new();
         for job in claimed {
@@ -140,6 +145,10 @@ impl JiraWritebackSender {
             };
             let mut remaining = jobs.into_iter();
             while let Some(job) = remaining.next() {
+                // Write-back may have been turned off (jobs cancelled) since the claim.
+                if !matches!(self.jobs.is_pending(job.id).await, Ok(true)) {
+                    continue;
+                }
                 match self.send(client, &job).await {
                     Settled::Sent => counts.sent += 1,
                     Settled::Dead => counts.dead += 1,
@@ -673,6 +682,47 @@ mod tests {
             sent[0].body_json::<serde_json::Value>().unwrap(),
             json!({"body": "hello"})
         );
+
+        fx.cleanup().await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn cancelled_job_in_claimed_batch_is_not_sent() {
+        let fx = Fixture::new(false).await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&fx.jira)
+            .await;
+        let first = fx.comment("PROJ-1", "one").await;
+        let second = fx.comment("PROJ-1", "two").await;
+        let jobs = jira_outbound_job_repository(fx.pool.clone());
+        let claimed = jobs
+            .claim_due(500, chrono::Duration::minutes(5))
+            .await
+            .unwrap();
+        // Write-back is turned off while the batch is in flight.
+        let mut conn = fx.pool.acquire().await.unwrap();
+        let cancelled =
+            crate::database::jira_outbound_job::jira_outbound_job_repository_tx(fx.pool.clone());
+        use crate::database::jira_outbound_job::JiraOutboundJobRepositoryTx;
+        cancelled
+            .cancel_pending_tx(&mut conn, fx.integration_id, "write-back disabled")
+            .await
+            .unwrap();
+        drop(conn);
+
+        let counts = fx.sender().process(claimed).await;
+        assert_eq!(counts, SendCounts::default());
+        assert!(
+            requests(&fx.jira).await.is_empty(),
+            "a cancelled job was sent"
+        );
+        for id in [first, second] {
+            let job = fx.job(id).await;
+            assert_eq!(job.status, "dead");
+            assert_eq!(job.last_error.as_deref(), Some("write-back disabled"));
+        }
 
         fx.cleanup().await;
     }

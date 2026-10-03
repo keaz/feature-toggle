@@ -188,3 +188,8 @@ A durable outbox for Jira write-back, and a worker that delivers it with retries
 - Verified: `cargo fmt`; `cargo clippy --all-targets` (no warnings in the touched files); `cargo test -p feature-toggle-backend` passes (899 lib, 335 integration); `./scripts/check-contract-compat.sh` passes after copying the baseline.
 - Known flaky, unrelated: `tests/database/feature_test::test_pending_approval_listing_maps_feature_metadata` failed once in the full run and passed on rerun.
 - Open: the sender does not create the `remote_link` jobs or comments yet (JI-43). `last_error` of a `sent` job holds the skip note.
+
+Fix round 1 (review):
+- `mark_sent`, `mark_retry` and `mark_dead` only change a job that is still `pending`, so a job cancelled meanwhile stays `dead`. New `is_pending(id)` on the repository; the sender checks it right before each send (batch processing is now `process(claimed)`), so a claimed job cancelled by turning write-back off is skipped, not sent.
+- `enqueue` sets `created_at = clock_timestamp()`: jobs enqueued in one transaction (JI-43: comment + remote link) keep insert order and are claimed in that order.
+- Tests: `cancelled_job_is_not_revived_by_mark_retry`, `jobs_enqueued_in_one_tx_keep_insert_order`, `cancelled_job_in_claimed_batch_is_not_sent`.
