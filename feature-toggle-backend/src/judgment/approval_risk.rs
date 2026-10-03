@@ -275,10 +275,15 @@ enum ExtraApprover {
 }
 
 /// The approvals a high-risk request needs under `require_extra_approver`:
-/// the policy's count plus one, capped at the request's named eligible
-/// approvers so votes alone can still approve it. An empty list means the
-/// request is role-routed and its approver count is not known here, so no cap
-/// applies. `None` when the cap leaves nothing to add.
+/// the policy's count plus one, capped at the request's eligible approvers so
+/// votes alone can still approve it. Routing resolves both named approvers and
+/// role members into `eligible_approver_ids` (requester excluded), so the cap
+/// applies to role-based policies too. The list is empty only for a request
+/// created without a database pool (routing not resolved) or a legacy row
+/// created before routing existed; then the count is not known and no cap
+/// applies. `None` when the cap leaves nothing to add. Votes later count
+/// against a requirement that is also capped at who can still vote
+/// (`logic::approval::effective_required_approvals`).
 fn extra_approver_requirement(required_approvers: i32, eligible_approvers: usize) -> Option<i32> {
     let raised = required_approvers.saturating_add(1);
     let target = if eligible_approvers == 0 {
@@ -369,7 +374,7 @@ impl JudgmentHandler for ApprovalRiskHandler {
     ///
     /// Enforcement (AI-11): for a `high` level on a still-pending request under
     /// a `require_extra_approver` policy, raises the approvals needed by one,
-    /// capped at the request's named eligible approvers (no cap when the list
+    /// capped at the request's eligible approver list (no cap when the list
     /// is empty). When the cap leaves nothing to add, no override is written
     /// and the entry says `extra_approver_skipped`.
     /// The update is guarded in SQL by `status = 'pending'`, so a closed request
@@ -1101,9 +1106,9 @@ mod tests {
         .await
     }
 
-    /// [`apply_enforcement`] for a request routed to `eligible` named
-    /// approvers (0 = role-routed, empty list). `expected_override` is the
-    /// value the override update must be called with.
+    /// [`apply_enforcement`] for a request with `eligible` approvers in its
+    /// eligible list (0 = empty list: no pool at creation, or a legacy row).
+    /// `expected_override` is the value the override update must be called with.
     #[allow(clippy::too_many_arguments)]
     async fn apply_enforcement_with_eligible(
         mode: &str,
@@ -1221,7 +1226,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_role_routed_request_gets_required_plus_one() {
+    async fn a_request_without_an_eligible_list_gets_required_plus_one() {
         let metadata = apply_enforcement_with_eligible(
             "require_extra_approver",
             "high",

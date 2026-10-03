@@ -2147,7 +2147,7 @@ mod tests {
             eligible_approver_ids: vec![Uuid::new_v4()],
             ..sample_request(Uuid::new_v4())
         };
-        let role_routed = ApprovalRequest {
+        let unlisted = ApprovalRequest {
             required_approvers_override: Some(3),
             eligible_approver_ids: vec![],
             ..sample_request(Uuid::new_v4())
@@ -2166,7 +2166,7 @@ mod tests {
             .times(1)
             .returning(|ids| Ok(ids.into_iter().map(|id| (id, 0)).collect()));
         let loaded =
-            load_remaining_approvers(&repo, [&capped, &no_override, &role_routed, &closed]).await;
+            load_remaining_approvers(&repo, [&capped, &no_override, &unlisted, &closed]).await;
         assert_eq!(loaded.get(&capped_id), Some(&0));
         assert_eq!(loaded.len(), 1);
 
