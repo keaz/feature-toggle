@@ -17,7 +17,10 @@ use crate::database::entity::{ApprovalPolicy, ApprovalRequest, ApprovalStatus, A
 use crate::database::feature::{FeatureVersionDiffEntry, diff_feature_snapshots};
 use crate::judgment::{JudgmentKind, SubjectType};
 use crate::logic::ActorContext;
-use crate::logic::approval::{ApprovalLogic, ApprovalPolicyPreview, ApprovalPolicyPreviewOutcome};
+use crate::logic::approval::{
+    ApprovalLogic, ApprovalPolicyPreview, ApprovalPolicyPreviewOutcome,
+    effective_required_approvals,
+};
 use crate::rest::error::RestError;
 use crate::rest::pagination::{PageMeta, PaginationQuery, normalize_pagination};
 
@@ -778,16 +781,49 @@ pub(crate) async fn load_ai_risk(
     }
 }
 
-/// Approvals needed. The request's AI risk override wins. Otherwise the policy
-/// applies, falling back to the snapshot in the request payload when the policy
-/// row is gone.
+/// Loads, with one query, how many eligible approvers can still vote on each
+/// request whose requirement depends on it: pending, with an AI risk override
+/// and a named eligible list. Other requests are not read. Fails open: a read
+/// error is logged and the override is shown uncapped.
+pub(crate) async fn load_remaining_approvers<'a>(
+    repo: &dyn ApprovalRepository,
+    requests: impl IntoIterator<Item = &'a ApprovalRequest>,
+) -> HashMap<Uuid, i64> {
+    let request_ids: Vec<Uuid> = requests
+        .into_iter()
+        .filter(|request| {
+            matches!(request.status, ApprovalStatus::Pending)
+                && request.required_approvers_override.is_some()
+                && !request.eligible_approver_ids.is_empty()
+        })
+        .map(|request| request.id)
+        .collect();
+    if request_ids.is_empty() {
+        return HashMap::new();
+    }
+    match repo.count_remaining_eligible_approvers(request_ids).await {
+        Ok(remaining) => remaining,
+        Err(err) => {
+            warn!("Could not count remaining eligible approvers: {err}");
+            HashMap::new()
+        }
+    }
+}
+
+/// Approvals needed. The policy applies, falling back to the snapshot in the
+/// request payload when the policy row is gone. An AI risk override raises it,
+/// capped at the approvals given plus `remaining_approvers` (eligible
+/// approvers who can still vote) and never below the policy; see
+/// [`effective_required_approvals`].
 fn required_approvals_effective(
     required_approvers_override: Option<i32>,
     policy: Option<&ApprovalPolicy>,
     change_payload: &serde_json::Value,
+    approved_count: i32,
+    remaining_approvers: Option<i64>,
 ) -> i32 {
-    required_approvers_override
-        .or_else(|| policy.map(|policy| policy.required_approvers))
+    let policy_required = policy
+        .map(|policy| policy.required_approvers)
         .or_else(|| {
             change_payload
                 .get("policy")
@@ -795,14 +831,22 @@ fn required_approvals_effective(
                 .and_then(|value| value.as_i64())
                 .and_then(|value| i32::try_from(value).ok())
         })
-        .unwrap_or(1)
+        .unwrap_or(1);
+    effective_required_approvals(
+        policy_required,
+        required_approvers_override,
+        approved_count,
+        remaining_approvers,
+    )
 }
 
+/// `remaining_approvers` comes from [`load_remaining_approvers`].
 pub(crate) fn map_request_with_policy(
     request: ApprovalRequest,
     votes: Vec<ApprovalVote>,
     policy: Option<&ApprovalPolicy>,
     ai_risk: Option<AiRiskSummary>,
+    remaining_approvers: Option<i64>,
 ) -> ApprovalRequestResponse {
     let reviewed_snapshot_id = snapshot_id_from_payload(&request.change_payload, request.id);
     let change_diff = build_change_diff(request.id, &request.change_payload, policy);
@@ -810,6 +854,8 @@ pub(crate) fn map_request_with_policy(
         request.required_approvers_override,
         policy,
         &request.change_payload,
+        request.approved_count,
+        remaining_approvers,
     );
     let policy = policy.map(map_policy_summary);
 
@@ -991,6 +1037,7 @@ pub(crate) async fn list_approval_requests(
         requests.iter().map(|request| request.policy_id),
     )
     .await;
+    let remaining = load_remaining_approvers(repo.get_ref().as_ref(), &requests).await;
 
     let mut items = Vec::with_capacity(requests.len());
     for request in requests {
@@ -1000,7 +1047,10 @@ pub(crate) async fn list_approval_requests(
             .map_err(RestError::from)?;
         let summary = ai_risk.remove(&request.id);
         let policy = policies.get(&request.policy_id);
-        items.push(map_request_with_policy(request, votes, policy, summary));
+        let remaining = remaining.get(&request.id).copied();
+        items.push(map_request_with_policy(
+            request, votes, policy, summary, remaining,
+        ));
     }
 
     Ok(HttpResponse::Ok().json(ApprovalRequestsResponse {
@@ -1056,12 +1106,16 @@ pub(crate) async fn approve_request(
     let ai_risk = load_ai_risk(ai_judgments.get_ref().as_ref(), vec![updated.id])
         .await
         .remove(&updated.id);
+    let remaining = load_remaining_approvers(repo.get_ref().as_ref(), [&updated])
+        .await
+        .remove(&updated.id);
 
     Ok(HttpResponse::Ok().json(map_request_with_policy(
         updated,
         votes,
         policy.as_ref(),
         ai_risk,
+        remaining,
     )))
 }
 
@@ -1108,12 +1162,16 @@ pub(crate) async fn reject_request(
     let ai_risk = load_ai_risk(ai_judgments.get_ref().as_ref(), vec![updated.id])
         .await
         .remove(&updated.id);
+    let remaining = load_remaining_approvers(repo.get_ref().as_ref(), [&updated])
+        .await
+        .remove(&updated.id);
 
     Ok(HttpResponse::Ok().json(map_request_with_policy(
         updated,
         votes,
         policy.as_ref(),
         ai_risk,
+        remaining,
     )))
 }
 
@@ -1158,12 +1216,16 @@ pub(crate) async fn cancel_request(
     let ai_risk = load_ai_risk(ai_judgments.get_ref().as_ref(), vec![updated.id])
         .await
         .remove(&updated.id);
+    let remaining = load_remaining_approvers(repo.get_ref().as_ref(), [&updated])
+        .await
+        .remove(&updated.id);
 
     Ok(HttpResponse::Ok().json(map_request_with_policy(
         updated,
         votes,
         policy.as_ref(),
         ai_risk,
+        remaining,
     )))
 }
 
@@ -1776,7 +1838,7 @@ mod tests {
         };
         let policy = sample_policy(request.policy_id);
 
-        let response = map_request_with_policy(request, vec![], Some(&policy), None);
+        let response = map_request_with_policy(request, vec![], Some(&policy), None, None);
 
         assert!(response.change_diff.malformed);
         assert!(response.change_diff.entries.is_empty());
@@ -2007,12 +2069,15 @@ mod tests {
         let payload = serde_json::json!({ "policy": { "required_approvers": 4 } });
 
         assert_eq!(
-            required_approvals_effective(None, Some(&policy), &payload),
+            required_approvals_effective(None, Some(&policy), &payload, 0, None),
             2
         );
-        assert_eq!(required_approvals_effective(None, None, &payload), 4);
         assert_eq!(
-            required_approvals_effective(None, None, &serde_json::json!({})),
+            required_approvals_effective(None, None, &payload, 0, None),
+            4
+        );
+        assert_eq!(
+            required_approvals_effective(None, None, &serde_json::json!({}), 0, None),
             1
         );
     }
@@ -2023,10 +2088,105 @@ mod tests {
         let payload = serde_json::json!({ "policy": { "required_approvers": 4 } });
 
         assert_eq!(
-            required_approvals_effective(Some(3), Some(&policy), &payload),
+            required_approvals_effective(Some(3), Some(&policy), &payload, 0, None),
             3
         );
-        assert_eq!(required_approvals_effective(Some(3), None, &payload), 3);
+        assert_eq!(
+            required_approvals_effective(Some(5), None, &payload, 0, None),
+            5
+        );
+    }
+
+    /// The override is capped at the approvals already given plus the eligible
+    /// approvers who can still vote, but never below the policy (or, without
+    /// the policy row, its snapshot in the payload).
+    #[actix_web::test]
+    async fn required_approvals_effective_caps_the_override_at_who_can_still_vote() {
+        let policy = sample_policy(Uuid::new_v4()); // requires 2
+        let payload = serde_json::json!({ "policy": { "required_approvers": 4 } });
+
+        assert_eq!(
+            required_approvals_effective(Some(3), Some(&policy), &payload, 2, Some(0)),
+            2
+        );
+        assert_eq!(
+            required_approvals_effective(Some(3), Some(&policy), &payload, 1, Some(1)),
+            2
+        );
+        assert_eq!(
+            required_approvals_effective(Some(3), Some(&policy), &payload, 1, Some(2)),
+            3
+        );
+        assert_eq!(
+            required_approvals_effective(Some(3), Some(&policy), &payload, 0, Some(0)),
+            2,
+            "never below the policy"
+        );
+        assert_eq!(
+            required_approvals_effective(Some(5), None, &payload, 0, Some(0)),
+            4,
+            "never below the payload snapshot when the policy row is gone"
+        );
+        assert_eq!(
+            required_approvals_effective(None, Some(&policy), &payload, 0, Some(0)),
+            2,
+            "no override: the policy applies unchanged"
+        );
+    }
+
+    /// Only pending requests with an override and a named eligible list need
+    /// the count; one read covers them all. A read error shows the override.
+    #[actix_web::test]
+    async fn remaining_approvers_are_loaded_only_for_overridden_pending_requests() {
+        let capped = ApprovalRequest {
+            required_approvers_override: Some(3),
+            eligible_approver_ids: vec![Uuid::new_v4()],
+            ..sample_request(Uuid::new_v4())
+        };
+        let no_override = ApprovalRequest {
+            eligible_approver_ids: vec![Uuid::new_v4()],
+            ..sample_request(Uuid::new_v4())
+        };
+        let role_routed = ApprovalRequest {
+            required_approvers_override: Some(3),
+            eligible_approver_ids: vec![],
+            ..sample_request(Uuid::new_v4())
+        };
+        let closed = ApprovalRequest {
+            required_approvers_override: Some(3),
+            eligible_approver_ids: vec![Uuid::new_v4()],
+            status: ApprovalStatus::Approved,
+            ..sample_request(Uuid::new_v4())
+        };
+        let capped_id = capped.id;
+
+        let mut repo = MockApprovalRepository::new();
+        repo.expect_count_remaining_eligible_approvers()
+            .withf(move |ids| ids == &vec![capped_id])
+            .times(1)
+            .returning(|ids| Ok(ids.into_iter().map(|id| (id, 0)).collect()));
+        let loaded =
+            load_remaining_approvers(&repo, [&capped, &no_override, &role_routed, &closed]).await;
+        assert_eq!(loaded.get(&capped_id), Some(&0));
+        assert_eq!(loaded.len(), 1);
+
+        let mut quiet = MockApprovalRepository::new();
+        quiet.expect_count_remaining_eligible_approvers().times(0);
+        assert!(
+            load_remaining_approvers(&quiet, [&no_override, &closed])
+                .await
+                .is_empty()
+        );
+
+        let mut failing = MockApprovalRepository::new();
+        failing
+            .expect_count_remaining_eligible_approvers()
+            .returning(|_| Err(crate::Error::InvalidInput("db down".into())));
+        assert!(
+            load_remaining_approvers(&failing, [&capped])
+                .await
+                .is_empty()
+        );
     }
 
     #[actix_web::test]

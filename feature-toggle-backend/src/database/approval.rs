@@ -8,6 +8,100 @@ use uuid::Uuid;
 
 pub const DEFAULT_APPROVAL_PAGE_SIZE: i32 = 20;
 
+/// SQL condition: user `u` (a `users u` row in scope) may approve under a
+/// policy with the given team, approver roles, named approvers and role
+/// fallback, and is not the requester. Each argument is a SQL expression
+/// (a bind parameter or a column). Approval routing
+/// (`ApprovalLogicImpl::resolve_approval_routing`) and the "who can still vote"
+/// count both use it, so the two always apply the same checks.
+pub(crate) fn approver_qualifies_sql(
+    team_id: &str,
+    approver_role_ids: &str,
+    approver_user_ids: &str,
+    fallback_to_roles: &str,
+    requester_id: &str,
+) -> String {
+    format!(
+        r#"(
+              EXISTS (
+                  SELECT 1 FROM user_teams ut
+                  WHERE ut.user_id = u.id AND ut.team_id = {team_id}
+              )
+              -- A system client's shadow user is not a team member, but it
+              -- belongs to its client's team while the client is active.
+              OR EXISTS (
+                  SELECT 1 FROM system_clients sc
+                  WHERE sc.id = u.id
+                    AND sc.team_id = {team_id}
+                    AND sc.enabled = TRUE
+                    AND sc.expires_at > NOW()
+              )
+          )
+          AND u.enabled = TRUE
+          AND ({requester_id} IS NULL OR u.id <> {requester_id})
+          AND EXISTS (
+              SELECT 1
+              FROM user_roles approver_ur
+              JOIN roles approver_role ON approver_role.id = approver_ur.role_id
+              WHERE approver_ur.user_id = u.id
+                AND LOWER(approver_role.name) = LOWER('Approver')
+          )
+          AND (
+              (cardinality({approver_user_ids}) > 0 AND u.id = ANY({approver_user_ids}))
+              OR (
+                  ({fallback_to_roles} OR cardinality({approver_user_ids}) = 0)
+                  AND cardinality({approver_role_ids}) > 0
+                  AND EXISTS (
+                      SELECT 1
+                      FROM user_roles policy_ur
+                      WHERE policy_ur.user_id = u.id
+                        AND policy_ur.role_id = ANY({approver_role_ids})
+                  )
+              )
+          )"#
+    )
+}
+
+/// SQL expression for request `r` under policy `p`: how many of the request's
+/// eligible approvers (the snapshot taken at creation) still qualify under the
+/// policy today and have not voted on it yet.
+fn remaining_eligible_approvers_sql() -> String {
+    format!(
+        r#"(SELECT COUNT(*) FROM users u
+            WHERE u.id = ANY(r.eligible_approver_ids)
+              AND {qualifies}
+              AND NOT EXISTS (
+                  SELECT 1 FROM approval_votes v
+                  WHERE v.request_id = r.id AND v.approver_id = u.id
+              ))"#,
+        qualifies = approver_qualifies_sql(
+            "p.team_id",
+            "p.approver_role_ids",
+            "p.approver_user_ids",
+            "p.fallback_to_roles",
+            "r.requested_by",
+        )
+    )
+}
+
+/// SQL condition for request `r` under policy `p`: pending, its AI-11
+/// override is not met yet, but its approvals already meet the effective
+/// requirement because no remaining eligible approver can vote. That
+/// requirement is `max(policy, min(override, approved + remaining))`, which
+/// with `remaining = 0` and `approved < override` is met exactly when
+/// `approved >= policy`.
+fn capped_request_ready_sql() -> String {
+    format!(
+        r#"r.status = 'pending'
+          AND r.required_approvers_override IS NOT NULL
+          AND cardinality(r.eligible_approver_ids) > 0
+          AND r.approved_count >= p.required_approvers
+          AND r.approved_count < r.required_approvers_override
+          AND {remaining} = 0"#,
+        remaining = remaining_eligible_approvers_sql()
+    )
+}
+
 pub struct CreateApprovalPolicyInput {
     pub team_id: Uuid,
     pub name: String,
@@ -122,6 +216,18 @@ pub trait ApprovalRepository: Send + Sync {
         request_id: Uuid,
         required_approvers: i32,
     ) -> Result<bool, Error>;
+    /// For each given request that lists eligible approvers: how many of them
+    /// still qualify under the request's policy (enabled, team member, Approver
+    /// role, named or role-routed as routing checks it, not the requester) and
+    /// have not voted yet. Requests with an empty list are left out.
+    async fn count_remaining_eligible_approvers(
+        &self,
+        request_ids: Vec<Uuid>,
+    ) -> Result<std::collections::HashMap<Uuid, i64>, Error>;
+    /// Pending requests whose AI-11 override can no longer be reached because
+    /// no remaining eligible approver can vote, while their approvals already
+    /// meet the policy's `required_approvers`. The reconciliation approves them.
+    async fn list_capped_requests_ready_for_approval(&self) -> Result<Vec<ApprovalRequest>, Error>;
 
     fn clone_box(&self) -> Box<dyn ApprovalRepository>;
 }
@@ -170,6 +276,15 @@ pub trait ApprovalRepositoryTx: ApprovalRepository {
         input: CreateApprovalVoteInput,
         required_approvers: i32,
     ) -> Result<ApprovalRequest, Error>;
+    /// Marks the request approved when it is still pending and still matches
+    /// [`ApprovalRepository::list_capped_requests_ready_for_approval`]'s
+    /// condition (re-checked in the same statement). `None` when it no longer
+    /// does, for example because it was closed or someone can vote again.
+    async fn approve_capped_request_tx(
+        &self,
+        conn: &mut PgConnection,
+        request_id: Uuid,
+    ) -> Result<Option<ApprovalRequest>, Error>;
 }
 
 pub fn approval_repository(pool: PgPool) -> Box<dyn ApprovalRepository> {
@@ -791,6 +906,53 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
         Ok(result.rows_affected() > 0)
     }
 
+    async fn count_remaining_eligible_approvers(
+        &self,
+        request_ids: Vec<Uuid>,
+    ) -> Result<std::collections::HashMap<Uuid, i64>, Error> {
+        if request_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let rows = handle_error(
+            None,
+            sqlx::query(&format!(
+                r#"
+                SELECT r.id, {remaining} AS remaining
+                FROM approval_requests r
+                JOIN approval_policies p ON p.id = r.policy_id
+                WHERE r.id = ANY($1) AND cardinality(r.eligible_approver_ids) > 0
+                "#,
+                remaining = remaining_eligible_approvers_sql()
+            ))
+            .bind(&request_ids)
+            .fetch_all(&self.pool)
+            .await,
+        )?;
+        Ok(rows
+            .into_iter()
+            .map(|row| (row.get::<Uuid, _>("id"), row.get::<i64, _>("remaining")))
+            .collect())
+    }
+
+    async fn list_capped_requests_ready_for_approval(&self) -> Result<Vec<ApprovalRequest>, Error> {
+        handle_error(
+            None,
+            sqlx::query(&format!(
+                r#"
+                SELECT r.*
+                FROM approval_requests r
+                JOIN approval_policies p ON p.id = r.policy_id
+                WHERE {ready}
+                ORDER BY r.created_at ASC
+                "#,
+                ready = capped_request_ready_sql()
+            ))
+            .map(Self::map_request_row)
+            .fetch_all(&self.pool)
+            .await,
+        )
+    }
+
     async fn cancel_request(
         &self,
         request_id: Uuid,
@@ -1051,6 +1213,34 @@ impl ApprovalRepositoryTx for ApprovalRepositoryImpl {
         executed_at: Option<DateTime<Utc>>,
     ) -> Result<ApprovalRequest, Error> {
         Self::update_request_status_internal(conn, request_id, status, executed_at).await
+    }
+
+    async fn approve_capped_request_tx(
+        &self,
+        conn: &mut PgConnection,
+        request_id: Uuid,
+    ) -> Result<Option<ApprovalRequest>, Error> {
+        handle_error(
+            Some(request_id),
+            sqlx::query(&format!(
+                r#"
+                UPDATE approval_requests r
+                SET status = 'approved', executed_at = NOW(), updated_at = NOW()
+                FROM approval_policies p
+                WHERE r.id = $1 AND p.id = r.policy_id AND {ready}
+                RETURNING r.id, r.policy_id, r.feature_id, r.environment_id, r.change_type,
+                          r.change_payload, r.change_description, r.requested_by,
+                          r.eligible_approver_ids, r.routing_reason, r.admin_override_enabled,
+                          r.status, r.approved_count, r.rejected_count, r.executed_at,
+                          r.created_at, r.updated_at, r.required_approvers_override
+                "#,
+                ready = capped_request_ready_sql()
+            ))
+            .bind(request_id)
+            .map(Self::map_request_row)
+            .fetch_optional(&mut *conn)
+            .await,
+        )
     }
 
     async fn add_vote_tx(

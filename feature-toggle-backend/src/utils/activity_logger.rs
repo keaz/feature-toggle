@@ -79,6 +79,10 @@ pub mod activity_types {
     pub const APPROVAL_POLICY_UPDATED: &str = "approval_policy_updated";
     pub const APPROVAL_POLICY_DELETED: &str = "approval_policy_deleted";
     pub const APPROVAL_RISK_ASSESSED: &str = "approval_risk_assessed";
+    /// A pending request approved because its AI-11 override could no longer
+    /// be reached (no remaining eligible approver can vote) and its approvals
+    /// meet the policy.
+    pub const APPROVAL_REQUIREMENT_RECONCILED: &str = "approval_requirement_reconciled";
 }
 
 /// Common entity types in the system

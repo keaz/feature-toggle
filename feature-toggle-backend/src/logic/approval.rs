@@ -1,7 +1,8 @@
 use crate::Error;
+use crate::database::activity_log::{CreateActivityLog, activity_log_repository};
 use crate::database::approval::{
     ApprovalRepository, ApprovalRepositoryTx, CreateApprovalRequestInput, CreateApprovalVoteInput,
-    approval_repository_tx,
+    approval_repository_tx, approver_qualifies_sql,
 };
 use crate::database::entity::{
     ApprovalPolicy, ApprovalRequest, ApprovalStatus, ApprovalVote, ApprovalVoteValue,
@@ -19,6 +20,7 @@ use crate::judgment::service::JudgmentService;
 use crate::judgment::{JudgmentKind, SubjectType, approval_risk};
 use crate::logic::environment::EnvironmentLogic;
 use crate::model::ID;
+use crate::utils::activity_logger::{activity_types, entity_types};
 use chrono::Utc;
 use feature_toggle_shared::constants::StageStatus;
 use log::warn;
@@ -28,6 +30,32 @@ use sqlx::PgPool;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use uuid::Uuid;
+
+/// Approvals a request needs. Without an AI-11 override it is the policy's
+/// `required_approvers`. With one, the override is capped at the approvals
+/// already given plus `remaining_eligible` (the request's eligible approvers
+/// who still qualify and have not voted; `None` when unknown, for example a
+/// request without a named eligible list), so it never needs more votes than
+/// can still be cast. The result is never below the policy: the override only
+/// ever adds.
+pub(crate) fn effective_required_approvals(
+    policy_required: i32,
+    required_approvers_override: Option<i32>,
+    approved_count: i32,
+    remaining_eligible: Option<i64>,
+) -> i32 {
+    let Some(raised) = required_approvers_override else {
+        return policy_required;
+    };
+    let reachable = remaining_eligible
+        .map(|remaining| i64::from(approved_count.max(0)).saturating_add(remaining.max(0)));
+    let capped = reachable.map_or(i64::from(raised), |reachable| {
+        i64::from(raised).min(reachable)
+    });
+    i32::try_from(capped)
+        .unwrap_or(i32::MAX)
+        .max(policy_required)
+}
 
 pub(crate) fn status_requires_interception(status: &str) -> bool {
     matches!(status, "DEPLOYMENT_REQUESTED" | "ROLLBACK_REQUESTED")
@@ -151,6 +179,18 @@ pub trait ApprovalLogic: Send + Sync {
         &self,
         request: ApprovalRequest,
     ) -> Result<ApprovalRequest, Error>;
+
+    /// Approves a pending request whose AI-11 override can no longer be
+    /// reached because no remaining eligible approver can vote, when its
+    /// approvals already meet the policy. Executes the change and records an
+    /// `approval_requirement_reconciled` activity. Re-checks the condition and
+    /// `status = 'pending'` in the same statement that approves; returns
+    /// `None` (and changes nothing) when it no longer holds or there is no
+    /// database pool.
+    async fn approve_capped_request(
+        &self,
+        request: ApprovalRequest,
+    ) -> Result<Option<ApprovalRequest>, Error>;
 
     async fn preview_stage_change_policy(
         &self,
@@ -452,49 +492,15 @@ impl ApprovalLogicImpl {
             });
         };
 
-        let eligible_approver_ids = sqlx::query_scalar::<_, Vec<Uuid>>(
+        let eligible_approver_ids = sqlx::query_scalar::<_, Vec<Uuid>>(&format!(
             r#"
-            SELECT COALESCE(ARRAY_AGG(DISTINCT u.id ORDER BY u.id), '{}'::uuid[])
+            SELECT COALESCE(ARRAY_AGG(DISTINCT u.id ORDER BY u.id), '{{}}'::uuid[])
             FROM users u
-            WHERE (
-                  EXISTS (
-                      SELECT 1 FROM user_teams ut
-                      WHERE ut.user_id = u.id AND ut.team_id = $1
-                  )
-                  -- A system client's shadow user is not a team member, but it
-                  -- belongs to its client's team while the client is active.
-                  OR EXISTS (
-                      SELECT 1 FROM system_clients sc
-                      WHERE sc.id = u.id
-                        AND sc.team_id = $1
-                        AND sc.enabled = TRUE
-                        AND sc.expires_at > NOW()
-                  )
-              )
-              AND u.enabled = TRUE
-              AND ($5::uuid IS NULL OR u.id <> $5)
-              AND EXISTS (
-                  SELECT 1
-                  FROM user_roles approver_ur
-                  JOIN roles approver_role ON approver_role.id = approver_ur.role_id
-                  WHERE approver_ur.user_id = u.id
-                    AND LOWER(approver_role.name) = LOWER('Approver')
-              )
-              AND (
-                  (cardinality($3::uuid[]) > 0 AND u.id = ANY($3))
-                  OR (
-                      ($4::boolean OR cardinality($3::uuid[]) = 0)
-                      AND cardinality($2::uuid[]) > 0
-                      AND EXISTS (
-                          SELECT 1
-                          FROM user_roles policy_ur
-                          WHERE policy_ur.user_id = u.id
-                            AND policy_ur.role_id = ANY($2)
-                      )
-                  )
-              )
+            WHERE {qualifies}
             "#,
-        )
+            qualifies =
+                approver_qualifies_sql("$1", "$2::uuid[]", "$3::uuid[]", "$4::boolean", "$5::uuid")
+        ))
         .bind(policy.team_id)
         .bind(&policy.approver_role_ids)
         .bind(&policy.approver_user_ids)
@@ -616,6 +622,31 @@ impl ApprovalLogicImpl {
         }
 
         Ok(())
+    }
+
+    /// Approvals the next vote is counted against: see
+    /// [`effective_required_approvals`]. Reads who can still vote only when the
+    /// request has an override and a named eligible list.
+    async fn required_approvals(
+        &self,
+        request: &ApprovalRequest,
+        policy: &ApprovalPolicy,
+    ) -> Result<i32, Error> {
+        let remaining = match request.required_approvers_override {
+            Some(_) if !request.eligible_approver_ids.is_empty() => self
+                .approval_repository
+                .count_remaining_eligible_approvers(vec![request.id])
+                .await?
+                .get(&request.id)
+                .copied(),
+            _ => None,
+        };
+        Ok(effective_required_approvals(
+            policy.required_approvers,
+            request.required_approvers_override,
+            request.approved_count,
+            remaining,
+        ))
     }
 
     async fn publish_event(&self, request: &ApprovalRequest, team_id: Uuid) -> Result<(), Error> {
@@ -1117,6 +1148,7 @@ impl ApprovalLogicImpl {
 
         self.ensure_user_can_vote(&request, &policy, approver_id, &vote)
             .await?;
+        let required = self.required_approvals(&request, &policy).await?;
 
         let updated = self
             .approval_repository
@@ -1127,9 +1159,7 @@ impl ApprovalLogicImpl {
                     vote,
                     comment,
                 },
-                request
-                    .required_approvers_override
-                    .unwrap_or(policy.required_approvers),
+                required,
             )
             .await?;
 
@@ -1213,6 +1243,7 @@ impl ApprovalLogicImpl {
 
         self.ensure_user_can_vote(&request, &policy, approver_id, &vote)
             .await?;
+        let required = self.required_approvals(&request, &policy).await?;
 
         let pool = self
             .db_pool
@@ -1231,9 +1262,7 @@ impl ApprovalLogicImpl {
                     vote,
                     comment,
                 },
-                request
-                    .required_approvers_override
-                    .unwrap_or(policy.required_approvers),
+                required,
             )
             .await?;
 
@@ -1726,6 +1755,75 @@ impl ApprovalLogic for ApprovalLogicImpl {
             .await;
 
         Ok(updated)
+    }
+
+    async fn approve_capped_request(
+        &self,
+        request: ApprovalRequest,
+    ) -> Result<Option<ApprovalRequest>, Error> {
+        let Some(pool) = &self.db_pool else {
+            return Ok(None);
+        };
+        let policy = self
+            .approval_repository
+            .get_policy_by_id(request.policy_id)
+            .await?
+            .ok_or(Error::NotFound(request.policy_id))?;
+        let mut tx = pool.begin().await.map_err(Error::DatabaseError)?;
+        let approval_repo_tx = approval_repository_tx(pool.clone());
+        let feature_repo_tx = feature_repository_tx(pool.clone());
+
+        // Guarded in SQL: still pending and still nobody left to vote.
+        let Some(approved) = approval_repo_tx
+            .approve_capped_request_tx(&mut tx, request.id)
+            .await?
+        else {
+            tx.rollback().await.map_err(Error::DatabaseError)?;
+            return Ok(None);
+        };
+        // An error here drops the transaction, so the request stays pending.
+        self.execute_change_tx(&feature_repo_tx, &mut tx, &approved, SENTINEL_UUID)
+            .await?;
+        let effective = effective_required_approvals(
+            policy.required_approvers,
+            approved.required_approvers_override,
+            approved.approved_count,
+            Some(0),
+        );
+        activity_log_repository(pool.clone())
+            .create_activity_tx(
+                &mut tx,
+                CreateActivityLog {
+                    activity_type: activity_types::APPROVAL_REQUIREMENT_RECONCILED.to_string(),
+                    entity_type: entity_types::FEATURE.to_string(),
+                    entity_id: approved.feature_id.to_string(),
+                    actor_id: None,
+                    actor_name: Some("Approval reconciliation".to_string()),
+                    description: format!(
+                        "Approval request approved with {} approval(s): no remaining eligible approver can vote for the {} the AI risk assessment asked for, and the policy requires {}",
+                        approved.approved_count,
+                        approved.required_approvers_override.unwrap_or(effective),
+                        policy.required_approvers
+                    ),
+                    metadata: Some(serde_json::json!({
+                        "approval_request_id": approved.id.to_string(),
+                        "reason": "no_remaining_eligible_approver",
+                        "approved_count": approved.approved_count,
+                        "required_approvers_override": approved.required_approvers_override,
+                        "policy_required_approvers": policy.required_approvers,
+                        "required_approvals_effective": effective,
+                    })),
+                },
+            )
+            .await
+            .map_err(Error::DatabaseError)?;
+        tx.commit().await.map_err(Error::DatabaseError)?;
+
+        self.publish_event(&approved, policy.team_id).await?;
+        self.notify_edge_servers(approved.feature_id).await;
+        self.dispatch_stage_change_approved_notification(&approved, policy.team_id, None)
+            .await;
+        Ok(Some(approved))
     }
 
     async fn preview_stage_change_policy(
@@ -3217,17 +3315,21 @@ mod ai_risk_trigger_tests {
     }
 
     /// Casts one approve vote with a policy needing `policy_required` approvals
-    /// and checks that `add_vote` receives `expected_required`. The vote leaves
-    /// the request pending, so no change is executed.
+    /// and checks that `add_vote` receives `expected_required`. The request
+    /// names the voter and one other eligible approver; `remaining` is how many
+    /// of them can still vote (the repository's count). The vote leaves the
+    /// request pending, so no change is executed.
     async fn vote_passes_required(
         policy_required: i32,
         request_override: Option<i32>,
         admin_override: bool,
+        remaining: i64,
         expected_required: i32,
     ) {
         let request_id = Uuid::new_v4();
         let policy_id = Uuid::new_v4();
         let approver_id = Uuid::new_v4();
+        let other_approver_id = Uuid::new_v4();
         let pending = ApprovalRequest {
             id: request_id,
             policy_id,
@@ -3237,7 +3339,7 @@ mod ai_risk_trigger_tests {
             change_payload: serde_json::json!({}),
             change_description: None,
             requested_by: Uuid::new_v4(),
-            eligible_approver_ids: vec![approver_id],
+            eligible_approver_ids: vec![approver_id, other_approver_id],
             routing_reason: None,
             admin_override_enabled: admin_override,
             status: ApprovalStatus::Pending,
@@ -3257,7 +3359,7 @@ mod ai_risk_trigger_tests {
             environment_ids: None,
             required_approvers: policy_required,
             approver_role_ids: vec![],
-            approver_user_ids: vec![approver_id],
+            approver_user_ids: vec![approver_id, other_approver_id],
             allow_admin_override: admin_override,
             fallback_to_roles: false,
             auto_approve_after_hours: None,
@@ -3278,6 +3380,12 @@ mod ai_risk_trigger_tests {
             approved_count: 1,
             ..pending.clone()
         };
+        // Only a request with an override asks who can still vote.
+        approval_repo
+            .expect_count_remaining_eligible_approvers()
+            .withf(move |ids| ids == &vec![request_id])
+            .times(usize::from(request_override.is_some()))
+            .returning(move |ids| Ok(ids.into_iter().map(|id| (id, remaining)).collect()));
         approval_repo
             .expect_add_vote()
             .withf(move |_, required| *required == expected_required)
@@ -3319,16 +3427,59 @@ mod ai_risk_trigger_tests {
 
     #[tokio::test]
     async fn vote_counts_against_the_request_override_when_set() {
-        vote_passes_required(1, Some(2), false, 2).await;
+        vote_passes_required(1, Some(2), false, 2, 2).await;
     }
 
     #[tokio::test]
     async fn vote_counts_against_the_policy_without_an_override() {
-        vote_passes_required(1, None, false, 1).await;
+        vote_passes_required(1, None, false, 2, 1).await;
     }
 
     #[tokio::test]
     async fn admin_override_does_not_lower_the_overridden_requirement() {
-        vote_passes_required(1, Some(2), true, 2).await;
+        vote_passes_required(1, Some(2), true, 2, 2).await;
+    }
+
+    /// The other eligible approver was disabled or lost the role after the
+    /// request was created: only the voter can still vote, so the override of
+    /// 2 is capped at 1 and this vote is enough.
+    #[tokio::test]
+    async fn vote_counts_against_the_approvers_who_can_still_vote() {
+        vote_passes_required(1, Some(2), false, 1, 1).await;
+    }
+
+    /// The cap never takes the requirement below the policy.
+    #[tokio::test]
+    async fn the_capped_requirement_never_drops_below_the_policy() {
+        vote_passes_required(2, Some(3), false, 1, 2).await;
+    }
+
+    #[test]
+    fn effective_requirement_is_the_policy_without_an_override() {
+        assert_eq!(effective_required_approvals(2, None, 0, Some(0)), 2);
+        assert_eq!(effective_required_approvals(2, None, 5, None), 2);
+    }
+
+    #[test]
+    fn effective_requirement_caps_the_override_at_who_can_still_approve() {
+        // (policy, override, approved so far, can still vote) -> needed.
+        let cases = [
+            (1, 2, 0, Some(2), 2),
+            (1, 2, 0, Some(1), 1),
+            (1, 2, 1, Some(1), 2),
+            (1, 2, 1, Some(0), 1),
+            (2, 3, 1, Some(0), 2),
+            (2, 3, 0, Some(0), 2),
+            (1, 2, 0, None, 2),
+            // The override only ever adds to the policy.
+            (3, 2, 0, None, 3),
+        ];
+        for (policy, raised, approved, remaining, expected) in cases {
+            assert_eq!(
+                effective_required_approvals(policy, Some(raised), approved, remaining),
+                expected,
+                "policy={policy} override={raised} approved={approved} remaining={remaining:?}"
+            );
+        }
     }
 }

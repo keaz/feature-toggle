@@ -54,3 +54,55 @@ async fn auto_approval_scheduler_processes_pending_requests() {
 
     scheduler.run_pending().await.unwrap();
 }
+
+/// The reconciliation step approves each pending request that the repository
+/// reports as ready: its approvals already meet the requirement because no
+/// remaining eligible approver can vote.
+#[tokio::test]
+async fn reconciliation_approves_each_ready_request() {
+    let mut mock_repo = MockApprovalRepository::new();
+    let mut mock_logic = MockApprovalLogic::new();
+    let ready = ApprovalRequest {
+        id: Uuid::new_v4(),
+        policy_id: Uuid::new_v4(),
+        feature_id: Uuid::new_v4(),
+        environment_id: None,
+        change_type: "stage_change".into(),
+        change_payload: json!({}),
+        change_description: None,
+        requested_by: Uuid::new_v4(),
+        eligible_approver_ids: vec![Uuid::new_v4(), Uuid::new_v4()],
+        routing_reason: None,
+        admin_override_enabled: false,
+        status: ApprovalStatus::Pending,
+        approved_count: 1,
+        rejected_count: 0,
+        executed_at: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        required_approvers_override: Some(2),
+    };
+    let ready_id = ready.id;
+    mock_repo
+        .expect_list_capped_requests_ready_for_approval()
+        .times(1)
+        .returning(move || Ok(vec![ready.clone()]));
+    mock_logic
+        .expect_approve_capped_request()
+        .withf(move |request| request.id == ready_id)
+        .times(1)
+        .returning(|request| {
+            Ok(Some(ApprovalRequest {
+                status: ApprovalStatus::Approved,
+                ..request
+            }))
+        });
+
+    let scheduler = AutoApprovalScheduler::new(
+        Box::new(mock_repo),
+        Box::new(mock_logic),
+        Duration::from_secs(0),
+    );
+
+    assert_eq!(scheduler.reconcile_capped_requests().await.unwrap(), 1);
+}
