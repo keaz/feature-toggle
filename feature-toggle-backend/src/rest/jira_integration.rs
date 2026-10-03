@@ -414,6 +414,7 @@ pub(crate) async fn get_jira_integration(
 pub(crate) async fn update_jira_integration(
     db_pool: web::Data<sqlx::PgPool>,
     activity_repo: web::Data<Box<dyn ActivityLogRepository>>,
+    jira_config: web::Data<JiraConfig>,
     req: HttpRequest,
     id: web::Path<String>,
     payload: web::Json<UpdateJiraIntegrationRequest>,
@@ -439,6 +440,7 @@ pub(crate) async fn update_jira_integration(
         activity_repo.as_ref().as_ref(),
         id,
         patch,
+        jira_config.get_ref(),
         actor,
     )
     .await
@@ -677,6 +679,7 @@ pub(crate) async fn update_jira_writeback(
 #[post("/jira-integrations/{id}/writeback/test")]
 pub(crate) async fn test_jira_writeback(
     repo: web::Data<Box<dyn JiraIntegrationRepository>>,
+    jira_config: web::Data<JiraConfig>,
     id: web::Path<String>,
 ) -> Result<impl Responder, RestError> {
     let id = parse_uuid(&id, "integration id")?;
@@ -687,7 +690,7 @@ pub(crate) async fn test_jira_writeback(
     if row.jira_credential_enc.is_some() && !secret_box::is_configured() {
         return Err(RestError::encryption_key_missing());
     }
-    let client = client_for(&row)?
+    let client = client_for(&row, jira_config.get_ref())?
         .ok_or_else(|| RestError::invalid_input("write-back is not configured"))?;
     let result = match client.myself_display_name().await {
         Ok((response, name)) if (200..300).contains(&response.status) => {
@@ -1581,7 +1584,9 @@ mod tests {
             .up_to_n_times(1)
             .mount(&server)
             .await;
-        let (status, ok) = fixture.call("POST", &test_uri, None).await;
+        let (status, ok) = fixture
+            .call_with(insecure(), None, "POST", &test_uri, None)
+            .await;
         assert_eq!(status, StatusCode::OK, "{ok}");
         assert_eq!(
             ok,
@@ -1593,7 +1598,9 @@ mod tests {
             .respond_with(ResponseTemplate::new(401).set_body_string(format!("bad {token}")))
             .mount(&server)
             .await;
-        let (status, denied) = fixture.call("POST", &test_uri, None).await;
+        let (status, denied) = fixture
+            .call_with(insecure(), None, "POST", &test_uri, None)
+            .await;
         assert_eq!(status, StatusCode::OK, "{denied}");
         assert_eq!(
             denied,
@@ -1601,15 +1608,34 @@ mod tests {
         );
 
         // Nothing listens on the port: a transport error, still HTTP 200.
-        let (status, _) = fixture
-            .call(
+        let (status, patched) = fixture
+            .call_with(
+                insecure(),
+                None,
                 "PATCH",
                 &format!("/jira-integrations/{id}"),
                 Some(serde_json::json!({"jiraBaseUrl": "http://127.0.0.1:1"})),
             )
             .await;
         assert_eq!(status, StatusCode::OK);
-        let (status, unreachable) = fixture.call("POST", &test_uri, None).await;
+        // A new host clears the stored credential: save it again.
+        assert_eq!(patched["writeback"]["hasCredential"], false);
+        let (status, body) = fixture
+            .call_with(
+                insecure(),
+                None,
+                "PUT",
+                &writeback,
+                Some(writeback_body(Some(&token))),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, refused) = fixture.call("POST", &test_uri, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+        assert!(refused.to_string().contains("Jira base URL must use https"));
+        let (status, unreachable) = fixture
+            .call_with(insecure(), None, "POST", &test_uri, None)
+            .await;
         assert_eq!(status, StatusCode::OK, "{unreachable}");
         assert_eq!(unreachable["ok"], false);
         assert_eq!(unreachable["status"], serde_json::Value::Null);
@@ -1673,6 +1699,183 @@ mod tests {
         assert!(!text.contains(&sealed));
         assert!(!text.contains(&account));
 
+        fixture.cleanup(&[]).await;
+    }
+
+    /// Write-back enabled on a Data Center integration at `base_url`.
+    async fn enabled_integration(fixture: &Fixture, base_url: &str, token: &str) -> String {
+        let created = fixture.create("Jira").await;
+        let id = created["integration"]["id"].as_str().unwrap().to_string();
+        let (status, _) = fixture
+            .call(
+                "PATCH",
+                &format!("/jira-integrations/{id}"),
+                Some(serde_json::json!({"jiraBaseUrl": base_url})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, body) = fixture
+            .call(
+                "PUT",
+                &format!("/jira-integrations/{id}/writeback"),
+                Some(writeback_body(Some(token))),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        id
+    }
+
+    #[actix_web::test]
+    #[serial]
+    async fn patch_to_http_while_writeback_enabled_is_400() {
+        ensure_encryption_key();
+        let fixture = Fixture::new().await;
+        let id = enabled_integration(&fixture, "https://jira.example.com", &test_token()).await;
+        let uri = format!("/jira-integrations/{id}");
+        let (status, body) = fixture
+            .call(
+                "PATCH",
+                &uri,
+                Some(serde_json::json!({"jiraBaseUrl": "http://jira.example.com"})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body.to_string()
+                .contains("jira base URL must be an https URL")
+        );
+        let allow = JiraConfig {
+            allow_insecure_http: true,
+            ui_base_url: None,
+        };
+        let (status, body) = fixture
+            .call_with(
+                allow,
+                None,
+                "PATCH",
+                &uri,
+                Some(serde_json::json!({"jiraBaseUrl": "http://jira.example.com"})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        fixture.cleanup(&[]).await;
+    }
+
+    #[actix_web::test]
+    #[serial]
+    async fn patch_clearing_base_url_while_enabled_is_400() {
+        ensure_encryption_key();
+        let fixture = Fixture::new().await;
+        let id = enabled_integration(&fixture, "https://jira.example.com", &test_token()).await;
+        let (status, body) = fixture
+            .call(
+                "PATCH",
+                &format!("/jira-integrations/{id}"),
+                Some(serde_json::json!({"jiraBaseUrl": ""})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body.to_string()
+                .contains("jira base URL is required while write-back is enabled")
+        );
+        fixture.cleanup(&[]).await;
+    }
+
+    #[actix_web::test]
+    #[serial]
+    async fn changing_jira_host_clears_the_credential_and_disables_writeback() {
+        ensure_encryption_key();
+        let fixture = Fixture::new().await;
+        let token = test_token();
+        let id = enabled_integration(&fixture, "https://jira.example.com", &token).await;
+        let uri = format!("/jira-integrations/{id}");
+
+        // Same origin (path and case differ): nothing is cleared.
+        let (status, body) = fixture
+            .call(
+                "PATCH",
+                &uri,
+                Some(serde_json::json!({"jiraBaseUrl": "https://JIRA.example.com/jira"})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["writeback"]["hasCredential"], true);
+        assert_eq!(body["writeback"]["enabled"], true);
+
+        let (status, body) = fixture
+            .call(
+                "PATCH",
+                &uri,
+                Some(serde_json::json!({"jiraBaseUrl": "https://other.example.com"})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["writeback"]["hasCredential"], false);
+        assert_eq!(body["writeback"]["enabled"], false);
+        assert_eq!(stored_credential(&fixture, &id).await, None);
+
+        let metadata: serde_json::Value = sqlx::query_scalar(
+            "SELECT metadata FROM activity_log WHERE entity_id = $1 \
+             AND activity_type = 'jira_integration_updated' ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(&id)
+        .fetch_one(&fixture.pool)
+        .await
+        .expect("activity row");
+        let changed = metadata["changed_fields"].to_string();
+        assert!(changed.contains("jira_base_url"), "{changed}");
+        assert!(changed.contains("jira_credential"), "{changed}");
+        assert!(changed.contains("writeback_enabled"), "{changed}");
+        assert!(!metadata.to_string().contains(&token));
+        fixture.cleanup(&[]).await;
+    }
+
+    #[actix_web::test]
+    #[serial]
+    async fn put_does_not_clobber_a_concurrent_pause() {
+        ensure_encryption_key();
+        let fixture = Fixture::new().await;
+        let id = enabled_integration(&fixture, "https://jira.example.com", &test_token()).await;
+        sqlx::query(
+            "UPDATE jira_integrations SET writeback_paused_reason = 'Jira returned 401' WHERE id = $1",
+        )
+        .bind(Uuid::parse_str(&id).unwrap())
+        .execute(&fixture.pool)
+        .await
+        .expect("pause");
+        let mut body = writeback_body(None);
+        body["comments"] = serde_json::json!(false);
+        let (status, response) = fixture
+            .call(
+                "PUT",
+                &format!("/jira-integrations/{id}/writeback"),
+                Some(body),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response["writeback"]["pausedReason"], "Jira returned 401");
+        fixture.cleanup(&[]).await;
+    }
+
+    #[actix_web::test]
+    #[serial]
+    async fn credential_with_control_characters_is_400() {
+        ensure_encryption_key();
+        let fixture = Fixture::new().await;
+        let created = fixture.create("Jira").await;
+        let id = created["integration"]["id"].as_str().unwrap().to_string();
+        let uri = format!("/jira-integrations/{id}/writeback");
+        for bad in ["tok\r\nX-Evil: 1", "tok en", "tok\u{7f}", "tök"] {
+            let (status, body) = fixture
+                .call("PUT", &uri, Some(writeback_body(Some(bad))))
+                .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad:?} {body}");
+            assert!(
+                body.to_string()
+                    .contains("credential contains invalid characters")
+            );
+        }
         fixture.cleanup(&[]).await;
     }
 }

@@ -165,6 +165,7 @@ pub async fn update_jira_integration_in_tx<R>(
     activity_repo: &dyn ActivityLogRepository,
     id: Uuid,
     patch: JiraIntegrationPatch,
+    jira_config: &JiraConfig,
     actor: ActorContext,
 ) -> Result<JiraIntegrationRow, Error>
 where
@@ -207,11 +208,43 @@ where
             .transpose()?,
         enabled: patch.enabled,
     };
-    let changed_fields = changed_field_names(&update);
-    let updated = repo
+    let mut changed_fields = changed_field_names(&update);
+    let host_changed = match &update.jira_base_url {
+        Some(new_url) => {
+            if current.writeback_enabled {
+                validate_writeback_base_url(new_url.as_deref(), jira_config)?;
+            }
+            origin_of(new_url.as_deref()) != origin_of(current.jira_base_url.as_deref())
+        }
+        None => false,
+    };
+    let mut updated = repo
         .update_tx(conn, id, update)
         .await?
         .ok_or(Error::NotFound(id))?;
+    if host_changed && updated.jira_credential_enc.is_some() {
+        // The stored token must not follow the integration to another host.
+        updated = repo
+            .set_writeback_tx(
+                conn,
+                id,
+                JiraWritebackColumns {
+                    enabled: false,
+                    comments: updated.writeback_comments,
+                    remote_link: updated.writeback_remote_link,
+                    auth_kind: updated.jira_auth_kind.clone(),
+                    account_email: updated.jira_account_email.clone(),
+                    credential_enc: None,
+                    clear_paused_reason: false,
+                },
+            )
+            .await?
+            .ok_or(Error::NotFound(id))?;
+        changed_fields.push("jira_credential");
+        if current.writeback_enabled {
+            changed_fields.push("writeback_enabled");
+        }
+    }
     let mut metadata = config_metadata(&updated);
     metadata["changed_fields"] = serde_json::json!(changed_fields);
     write_activity(
@@ -270,8 +303,15 @@ fn validate_account_email(email: &str) -> Result<(), Error> {
     Ok(())
 }
 
+/// Scheme, host and port of a base URL; `None` for no URL or an unparsable one.
+fn origin_of(base_url: Option<&str>) -> Option<String> {
+    let url = reqwest::Url::parse(base_url?).ok()?;
+    Some(url.origin().ascii_serialization())
+}
+
 fn validate_writeback_base_url(base_url: Option<&str>, config: &JiraConfig) -> Result<(), Error> {
-    let base_url = base_url.ok_or_else(|| invalid("jira base URL is required for write-back"))?;
+    let base_url =
+        base_url.ok_or_else(|| invalid("jira base URL is required while write-back is enabled"))?;
     let parsed =
         reqwest::Url::parse(base_url).map_err(|_| invalid("jira base URL must be a valid URL"))?;
     match parsed.scheme() {
@@ -328,6 +368,10 @@ where
         Some(value) if value.chars().count() > MAX_CREDENTIAL_CHARS => {
             return Err(invalid("credential must be at most 1000 characters"));
         }
+        // Tokens are sent in an Authorization header: no spaces, controls or non-ASCII.
+        Some(value) if !value.bytes().all(|byte| (0x21..=0x7e).contains(&byte)) => {
+            return Err(invalid("credential contains invalid characters"));
+        }
         Some(value) => Some(value),
     };
     let clears_credential = matches!(patch.credential.as_deref().map(str::trim), Some(""));
@@ -339,11 +383,7 @@ where
             None if clears_credential => None,
             None => current.jira_credential_enc.clone(),
         };
-    let paused_reason = if new_credential.is_some() {
-        None
-    } else {
-        current.writeback_paused_reason.clone()
-    };
+    let clear_paused_reason = new_credential.is_some();
 
     if patch.enabled {
         validate_writeback_base_url(current.jira_base_url.as_deref(), jira_config)?;
@@ -369,7 +409,7 @@ where
         auth_kind,
         account_email,
         credential_enc,
-        paused_reason,
+        clear_paused_reason,
     };
     let changed_fields: Vec<&'static str> = [
         (
@@ -395,7 +435,7 @@ where
         ("jira_credential", patch.credential.is_some()),
         (
             "writeback_paused_reason",
-            columns.paused_reason != current.writeback_paused_reason,
+            columns.clear_paused_reason && current.writeback_paused_reason.is_some(),
         ),
     ]
     .into_iter()

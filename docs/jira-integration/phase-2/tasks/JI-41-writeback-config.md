@@ -165,3 +165,12 @@ Produces (later tasks use these exact names):
 - Tests: 6 `jira_client` unit, 3 config, 8 REST DB tests (`rest::jira_integration`, `#[serial]`, random key set once via env), policy route lists extended (403 for plain users, other-team admins and system clients covered by the existing policy tests). Full `cargo test -p feature-toggle-backend`: 862 lib + 327 integration pass; one run flaked `database::feature_test::test_pending_approval_listing_maps_feature_metadata` (passes alone and on 2 reruns; unrelated).
 - `wiremock` dev dependency added; `Cargo.lock` also bumped hyper 1.6.0 to 1.11.1 and h2 0.4.12 to 0.4.19.
 - The secret_box key is cached in a `OnceLock` on first use: do not call `secret_box::is_configured()` in a test before setting the env key.
+
+Fix round 1 (controller rulings, binding, extend the brief):
+- `client_for(row, &JiraConfig)` now refuses an `http` base URL unless `allow_insecure_http` (`Error::InvalidInput("Jira base URL must use https")`, test connection answers 400). JI-42 must pass the `web::Data<JiraConfig>` it holds.
+- `update_jira_integration_in_tx` takes `&JiraConfig` (after `patch`). While `writeback_enabled`, PATCH of `jira_base_url` needs https (or `allow_insecure_http`) and cannot clear it (400 "jira base URL is required while write-back is enabled").
+- PATCH that changes the base URL origin (scheme+host+port) while a credential is stored clears `jira_credential_enc` and sets `writeback_enabled = false` in the same tx; `changed_fields` adds `jira_credential` and `writeback_enabled`, never values.
+- `JiraWritebackColumns.paused_reason` became `clear_paused_reason: bool`: the SQL only NULLs `writeback_paused_reason` (new credential saved); a sender pause survives an unrelated PUT.
+- PUT credential must be printable ASCII 0x21-0x7E after trim, else 400 "credential contains invalid characters".
+- Do not call `secret_box` (even `decrypt`) from a non-serial unit test: it caches the missing key for the process.
+

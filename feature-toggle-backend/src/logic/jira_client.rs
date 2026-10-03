@@ -5,6 +5,7 @@ use std::fmt;
 use std::time::Duration;
 
 use crate::Error;
+use crate::config::JiraConfig;
 use crate::database::entity::JiraIntegrationRow;
 use crate::logic::secret_box;
 
@@ -177,7 +178,12 @@ impl JiraClient {
 /// Decrypts the stored credential and builds the client. `None` when write-back is
 /// not configured: no base URL, auth kind or credential, or no account email on
 /// Cloud. It does not look at `writeback_enabled`; the sender checks that.
-pub fn client_for(row: &JiraIntegrationRow) -> Result<Option<JiraClient>, Error> {
+/// A plain `http` base URL is refused unless `allow_insecure_http`: the credential must
+/// not travel in cleartext, whatever route changed the URL.
+pub fn client_for(
+    row: &JiraIntegrationRow,
+    config: &JiraConfig,
+) -> Result<Option<JiraClient>, Error> {
     let (Some(base_url), Some(kind), Some(sealed)) = (
         row.jira_base_url.as_deref(),
         row.jira_auth_kind.as_deref(),
@@ -195,6 +201,14 @@ pub fn client_for(row: &JiraIntegrationRow) -> Result<Option<JiraClient>, Error>
         },
         JiraEdition::DataCenter => None,
     };
+    let insecure = reqwest::Url::parse(base_url)
+        .map(|url| url.scheme() != "https")
+        .unwrap_or(true);
+    if insecure && !(config.allow_insecure_http && base_url.starts_with("http://")) {
+        return Err(Error::InvalidInput(
+            "Jira base URL must use https".to_string(),
+        ));
+    }
     let token = secret_box::decrypt_with_aad(sealed, row.id.as_bytes()).map_err(|_| {
         Error::InvalidInput("stored Jira credential cannot be decrypted".to_string())
     })?;
@@ -208,6 +222,7 @@ pub fn client_for(row: &JiraIntegrationRow) -> Result<Option<JiraClient>, Error>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::JiraConfig;
     use base64::Engine;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -337,5 +352,45 @@ mod tests {
         assert_eq!(response.status, 500);
         assert_eq!(response.retry_after_secs, Some(7));
         assert_eq!(response.body_excerpt.chars().count(), 300);
+    }
+
+    fn row(base_url: &str) -> JiraIntegrationRow {
+        JiraIntegrationRow {
+            id: uuid::Uuid::new_v4(),
+            team_id: uuid::Uuid::new_v4(),
+            name: "Jira".to_string(),
+            jira_base_url: Some(base_url.to_string()),
+            secret_hash: "hash".to_string(),
+            environment_field: "labels".to_string(),
+            environment_aliases: sqlx::types::Json(Default::default()),
+            jira_approved_environment_ids: Vec::new(),
+            feature_key_field: None,
+            actor_user_id: uuid::Uuid::new_v4(),
+            enabled: true,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            writeback_enabled: true,
+            writeback_comments: true,
+            writeback_remote_link: true,
+            jira_auth_kind: Some("dc_pat".to_string()),
+            jira_account_email: None,
+            jira_credential_enc: Some("sealed".to_string()),
+            writeback_paused_reason: None,
+            native_webhook_secret_enc: None,
+        }
+    }
+
+    #[test]
+    fn client_for_refuses_http_without_allow_insecure_http() {
+        let strict = JiraConfig::default();
+        let err = client_for(&row("http://jira.example.com"), &strict).unwrap_err();
+        assert!(
+            err.to_string().contains("Jira base URL must use https"),
+            "{err}"
+        );
+        // Not configured stays None, also for http.
+        let mut unconfigured = row("http://jira.example.com");
+        unconfigured.jira_credential_enc = None;
+        assert!(client_for(&unconfigured, &strict).unwrap().is_none());
     }
 }

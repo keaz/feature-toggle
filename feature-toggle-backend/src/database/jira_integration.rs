@@ -50,8 +50,10 @@ pub struct UpdateJiraIntegration {
     pub enabled: Option<bool>,
 }
 
-/// The complete write-back configuration to store: every column is overwritten, so
-/// the caller merges the stored values it keeps (credential, paused reason) first.
+/// The write-back configuration to store. Every column is overwritten, so the caller
+/// merges the stored values it keeps (credential) first. The paused reason is only
+/// ever cleared here, never rewritten: a sender pause that lands between the caller's
+/// read and this write must survive.
 #[derive(Clone, PartialEq, Eq)]
 pub struct JiraWritebackColumns {
     pub enabled: bool,
@@ -61,7 +63,8 @@ pub struct JiraWritebackColumns {
     pub account_email: Option<String>,
     /// Already sealed with `secret_box`.
     pub credential_enc: Option<String>,
-    pub paused_reason: Option<String>,
+    /// Sets `writeback_paused_reason` to NULL; false leaves the stored value alone.
+    pub clear_paused_reason: bool,
 }
 
 impl std::fmt::Debug for JiraWritebackColumns {
@@ -76,7 +79,7 @@ impl std::fmt::Debug for JiraWritebackColumns {
                 "credential_enc",
                 &self.credential_enc.as_ref().map(|_| "***"),
             )
-            .field("paused_reason", &self.paused_reason)
+            .field("clear_paused_reason", &self.clear_paused_reason)
             .finish()
     }
 }
@@ -444,7 +447,9 @@ impl JiraIntegrationRepositoryImpl {
         let result = sqlx::query_as::<_, JiraIntegrationRow>(&format!(
             "UPDATE jira_integrations SET writeback_enabled = $2, writeback_comments = $3, \
              writeback_remote_link = $4, jira_auth_kind = $5, jira_account_email = $6, \
-             jira_credential_enc = $7, writeback_paused_reason = $8, updated_at = now() \
+             jira_credential_enc = $7, \
+             writeback_paused_reason = CASE WHEN $8 THEN NULL ELSE writeback_paused_reason END, \
+             updated_at = now() \
              WHERE id = $1 RETURNING {INTEGRATION_COLUMNS}"
         ))
         .bind(id)
@@ -454,7 +459,7 @@ impl JiraIntegrationRepositoryImpl {
         .bind(columns.auth_kind)
         .bind(columns.account_email)
         .bind(columns.credential_enc)
-        .bind(columns.paused_reason)
+        .bind(columns.clear_paused_reason)
         .fetch_optional(&mut *conn)
         .await;
         handle_error(None, result)

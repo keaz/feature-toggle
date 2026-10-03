@@ -314,6 +314,7 @@ async fn update_changes_only_the_given_fields() {
             feature_key_field: Some("customfield_10050".to_string()),
             enabled: Some(false),
         },
+        &feature_toggle_backend::config::JiraConfig::default(),
         actor(),
     )
     .await
@@ -347,6 +348,7 @@ async fn update_changes_only_the_given_fields() {
         activity.as_ref(),
         created.integration.id,
         JiraIntegrationPatch::default(),
+        &feature_toggle_backend::config::JiraConfig::default(),
         actor(),
     )
     .await
