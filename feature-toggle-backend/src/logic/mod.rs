@@ -40,6 +40,7 @@ pub mod external_link_tx;
 pub mod feature;
 pub mod feature_evaluation;
 pub mod feature_tx;
+pub mod jira_client;
 pub mod jira_events;
 pub mod jira_integration;
 pub mod jira_integration_tx;

@@ -434,6 +434,14 @@ mod tests {
             enabled: true,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            writeback_enabled: false,
+            writeback_comments: true,
+            writeback_remote_link: true,
+            jira_auth_kind: None,
+            jira_account_email: None,
+            jira_credential_enc: None,
+            writeback_paused_reason: None,
+            native_webhook_secret_enc: None,
         };
         EngineFixture {
             integration,

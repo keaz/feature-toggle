@@ -31,7 +31,24 @@ pub struct Config {
     /// `TYPESAFE_API_KEY` is set; the key is never read from this file.
     #[serde(default)]
     pub typesafe: TypesafeConfig,
+    /// Jira write-back settings. A missing `[jira]` section uses the defaults.
+    #[serde(default)]
+    pub jira: JiraConfig,
 }
+
+/// Jira write-back settings (`[jira]` section).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct JiraConfig {
+    /// Allow `http://` Jira base URLs for write-back (default false).
+    pub allow_insecure_http: bool,
+    /// UI origin for remote links; falls back to `allowed_origin`.
+    pub ui_base_url: Option<String>,
+}
+
+/// [`Config::jira_ui_base_url`] resolved at startup, shared as `web::Data`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JiraUiBaseUrl(pub Option<String>);
 
 /// Lifetimes of user session tokens (`[auth]` section).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -152,6 +169,7 @@ impl Default for Config {
             auth: AuthConfig::default(),
             public_base_url: None,
             typesafe: TypesafeConfig::default(),
+            jira: JiraConfig::default(),
         }
     }
 }
@@ -206,11 +224,30 @@ impl Config {
         let mut cfg: Config = toml::from_str(content)?;
         cfg.auth = cfg.auth.sanitized();
         cfg.typesafe = cfg.typesafe.sanitized();
+        cfg.jira.ui_base_url = cfg
+            .jira
+            .ui_base_url
+            .map(|url| url.trim().trim_end_matches('/').to_string())
+            .filter(|url| !url.is_empty());
         cfg.public_base_url = cfg
             .public_base_url
             .map(|url| url.trim().trim_end_matches('/').to_string())
             .filter(|url| !url.is_empty());
         Ok(cfg)
+    }
+
+    /// UI base URL for Jira remote links: `[jira] ui_base_url`, else `allowed_origin`
+    /// when it is one absolute `http(s)` URL. Trailing `/` trimmed.
+    pub fn jira_ui_base_url(&self) -> Option<String> {
+        let candidate = self
+            .jira
+            .ui_base_url
+            .as_deref()
+            .unwrap_or(&self.allowed_origin);
+        let candidate = candidate.trim().trim_end_matches('/');
+        let url = reqwest::Url::parse(candidate).ok()?;
+        (matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
+            .then(|| candidate.to_string())
     }
 
     pub fn grpc_socket_addr(&self) -> Result<SocketAddr, std::net::AddrParseError> {
@@ -331,5 +368,48 @@ grpc_addr = "0.0.0.0:50051"
         let content = include_str!("../config.toml");
         let cfg = Config::from_toml(content).unwrap();
         assert_eq!(cfg.typesafe, TypesafeConfig::default());
+    }
+
+    #[test]
+    fn jira_section_defaults() {
+        let cfg = Config::from_toml(BASE).unwrap();
+        assert!(!cfg.jira.allow_insecure_http);
+        assert_eq!(cfg.jira.ui_base_url, None);
+        let cfg =
+            Config::from_toml(&format!("{BASE}\n[jira]\nallow_insecure_http = true\n")).unwrap();
+        assert!(cfg.jira.allow_insecure_http);
+    }
+
+    #[test]
+    fn jira_ui_base_url_falls_back_to_allowed_origin() {
+        let cfg = Config::from_toml(BASE).unwrap();
+        assert_eq!(
+            cfg.jira_ui_base_url().as_deref(),
+            Some("http://localhost:8090")
+        );
+        let cfg = Config::from_toml(&format!(
+            "{BASE}\n[jira]\nui_base_url = \"https://ui.example.com/\"\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            cfg.jira_ui_base_url().as_deref(),
+            Some("https://ui.example.com")
+        );
+        let cfg = Config::from_toml(&format!("{BASE}\n[jira]\nui_base_url = \"  \"\n")).unwrap();
+        assert_eq!(
+            cfg.jira_ui_base_url().as_deref(),
+            Some("http://localhost:8090")
+        );
+    }
+
+    #[test]
+    fn jira_ui_base_url_none_for_a_non_url_origin() {
+        for origin in ["*", "a.com,b.com", "localhost:5173", ""] {
+            let cfg = Config {
+                allowed_origin: origin.to_string(),
+                ..Config::default()
+            };
+            assert_eq!(cfg.jira_ui_base_url(), None, "{origin:?}");
+        }
     }
 }

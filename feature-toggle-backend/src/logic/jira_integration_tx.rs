@@ -7,17 +7,20 @@ use sqlx::PgConnection;
 use uuid::Uuid;
 
 use crate::Error;
+use crate::config::JiraConfig;
 use crate::database::activity_log::{ActivityLogRepository, CreateActivityLog};
 use crate::database::entity::{JiraIntegrationRow, JiraStatusRuleRow};
 use crate::database::jira_integration::{
-    CreateJiraIntegration, JiraIntegrationRepositoryTx, UpdateJiraIntegration,
+    CreateJiraIntegration, JiraIntegrationRepositoryTx, JiraWritebackColumns, UpdateJiraIntegration,
 };
 use crate::logic::ActorContext;
 use crate::logic::external_link::validate_url;
+use crate::logic::jira_client::JiraEdition;
 use crate::logic::jira_integration::{
     JiraStatusRuleInput, generate_secret, hash_secret, validate_environment_aliases,
     validate_environment_ids, validate_field_name, validate_integration_name, validate_rules,
 };
+use crate::logic::secret_box;
 use crate::utils::activity_logger::activity_types::{
     JIRA_INTEGRATION_CREATED, JIRA_INTEGRATION_DELETED, JIRA_INTEGRATION_RULES_REPLACED,
     JIRA_INTEGRATION_SECRET_ROTATED, JIRA_INTEGRATION_UPDATED,
@@ -222,6 +225,254 @@ where
     )
     .await?;
     Ok(updated)
+}
+
+/// A write-back configuration as sent by a client.
+#[derive(Clone, Default)]
+pub struct WritebackPatch {
+    pub enabled: bool,
+    pub comments: bool,
+    pub remote_link: bool,
+    /// `None` keeps the stored value; blank clears it.
+    pub auth_kind: Option<String>,
+    /// `None` keeps the stored value; blank clears it.
+    pub account_email: Option<String>,
+    /// `None` keeps the stored credential; blank clears it (only with `enabled = false`).
+    pub credential: Option<String>,
+}
+
+impl std::fmt::Debug for WritebackPatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WritebackPatch")
+            .field("enabled", &self.enabled)
+            .field("comments", &self.comments)
+            .field("remote_link", &self.remote_link)
+            .field("auth_kind", &self.auth_kind)
+            .field("account_email", &self.account_email)
+            .field("credential", &self.credential.as_ref().map(|_| "***"))
+            .finish()
+    }
+}
+
+const MAX_CREDENTIAL_CHARS: usize = 1000;
+const MAX_EMAIL_CHARS: usize = 254;
+
+fn invalid(message: &str) -> Error {
+    Error::InvalidInput(message.to_string())
+}
+
+fn validate_account_email(email: &str) -> Result<(), Error> {
+    if email.chars().count() > MAX_EMAIL_CHARS || !email.contains('@') {
+        return Err(invalid(
+            "accountEmail must contain '@' and be at most 254 characters",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_writeback_base_url(base_url: Option<&str>, config: &JiraConfig) -> Result<(), Error> {
+    let base_url = base_url.ok_or_else(|| invalid("jira base URL is required for write-back"))?;
+    let parsed =
+        reqwest::Url::parse(base_url).map_err(|_| invalid("jira base URL must be a valid URL"))?;
+    match parsed.scheme() {
+        "https" => Ok(()),
+        "http" if config.allow_insecure_http => Ok(()),
+        _ => Err(invalid("jira base URL must be an https URL")),
+    }
+}
+
+/// Stores the write-back configuration and writes a `jira_integration_updated`
+/// activity row whose `changed_fields` name the columns, never the credential.
+/// Rules apply only when `patch.enabled`. `Error::NotFound(id)` when the integration
+/// does not exist.
+#[allow(clippy::too_many_arguments)]
+pub async fn update_jira_writeback_in_tx<R>(
+    conn: &mut PgConnection,
+    repo: &R,
+    activity_repo: &dyn ActivityLogRepository,
+    id: Uuid,
+    patch: WritebackPatch,
+    jira_config: &JiraConfig,
+    ui_base_url: Option<&str>,
+    actor: ActorContext,
+) -> Result<JiraIntegrationRow, Error>
+where
+    R: JiraIntegrationRepositoryTx + ?Sized,
+{
+    let current = existing(conn, repo, id).await?;
+
+    let auth_kind = match patch.auth_kind.as_deref().map(str::trim) {
+        None => current.jira_auth_kind.clone(),
+        Some("") => None,
+        Some(kind) if JiraEdition::from_auth_kind(kind).is_some() => Some(kind.to_string()),
+        Some(_) => return Err(invalid("authKind must be cloud_basic or dc_pat")),
+    };
+    let account_email = match patch.account_email.as_deref().map(str::trim) {
+        None => current.jira_account_email.clone(),
+        Some("") => None,
+        Some(email) => {
+            validate_account_email(email)?;
+            Some(email.to_string())
+        }
+    };
+    let new_credential = match patch.credential.as_deref().map(str::trim) {
+        None => None,
+        Some("") => {
+            if patch.enabled {
+                return Err(invalid(
+                    "credential cannot be cleared while write-back is enabled",
+                ));
+            }
+            None
+        }
+        Some(value) if value.chars().count() > MAX_CREDENTIAL_CHARS => {
+            return Err(invalid("credential must be at most 1000 characters"));
+        }
+        Some(value) => Some(value),
+    };
+    let clears_credential = matches!(patch.credential.as_deref().map(str::trim), Some(""));
+    let credential_enc =
+        match new_credential {
+            Some(value) => Some(secret_box::encrypt_with_aad(value, id.as_bytes()).map_err(
+                |_| invalid("FLUXGATE_ENCRYPTION_KEY must be set to store a credential"),
+            )?),
+            None if clears_credential => None,
+            None => current.jira_credential_enc.clone(),
+        };
+    let paused_reason = if new_credential.is_some() {
+        None
+    } else {
+        current.writeback_paused_reason.clone()
+    };
+
+    if patch.enabled {
+        validate_writeback_base_url(current.jira_base_url.as_deref(), jira_config)?;
+        let kind = auth_kind
+            .as_deref()
+            .ok_or_else(|| invalid("authKind is required for write-back"))?;
+        if credential_enc.is_none() {
+            return Err(invalid("a credential is required for write-back"));
+        }
+        if JiraEdition::from_auth_kind(kind) == Some(JiraEdition::Cloud) && account_email.is_none()
+        {
+            return Err(invalid("accountEmail is required for cloud_basic"));
+        }
+        if patch.remote_link && ui_base_url.is_none() {
+            return Err(invalid("ui base URL is not configured"));
+        }
+    }
+
+    let columns = JiraWritebackColumns {
+        enabled: patch.enabled,
+        comments: patch.comments,
+        remote_link: patch.remote_link,
+        auth_kind,
+        account_email,
+        credential_enc,
+        paused_reason,
+    };
+    let changed_fields: Vec<&'static str> = [
+        (
+            "writeback_enabled",
+            columns.enabled != current.writeback_enabled,
+        ),
+        (
+            "writeback_comments",
+            columns.comments != current.writeback_comments,
+        ),
+        (
+            "writeback_remote_link",
+            columns.remote_link != current.writeback_remote_link,
+        ),
+        (
+            "jira_auth_kind",
+            columns.auth_kind != current.jira_auth_kind,
+        ),
+        (
+            "jira_account_email",
+            columns.account_email != current.jira_account_email,
+        ),
+        ("jira_credential", patch.credential.is_some()),
+        (
+            "writeback_paused_reason",
+            columns.paused_reason != current.writeback_paused_reason,
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(field, changed)| changed.then_some(field))
+    .collect();
+
+    let updated = repo
+        .set_writeback_tx(conn, id, columns)
+        .await?
+        .ok_or(Error::NotFound(id))?;
+    write_writeback_activity(
+        conn,
+        activity_repo,
+        &updated,
+        "Updated write-back of Jira integration",
+        changed_fields,
+        actor,
+    )
+    .await?;
+    Ok(updated)
+}
+
+/// Clears the paused reason and writes a `jira_integration_updated` activity row.
+/// `Error::NotFound(id)` when the integration does not exist.
+pub async fn resume_jira_writeback_in_tx<R>(
+    conn: &mut PgConnection,
+    repo: &R,
+    activity_repo: &dyn ActivityLogRepository,
+    id: Uuid,
+    actor: ActorContext,
+) -> Result<JiraIntegrationRow, Error>
+where
+    R: JiraIntegrationRepositoryTx + ?Sized,
+{
+    let updated = repo
+        .set_writeback_paused_tx(conn, id, None)
+        .await?
+        .ok_or(Error::NotFound(id))?;
+    write_writeback_activity(
+        conn,
+        activity_repo,
+        &updated,
+        "Resumed write-back of Jira integration",
+        vec!["writeback_paused_reason"],
+        actor,
+    )
+    .await?;
+    Ok(updated)
+}
+
+/// Activity row for a write-back change. Carries flags and field names only, never
+/// the credential or its sealed form.
+async fn write_writeback_activity(
+    conn: &mut PgConnection,
+    activity_repo: &dyn ActivityLogRepository,
+    integration: &JiraIntegrationRow,
+    description: &str,
+    changed_fields: Vec<&'static str>,
+    actor: ActorContext,
+) -> Result<(), Error> {
+    let mut metadata = config_metadata(integration);
+    metadata["changed_fields"] = serde_json::json!(changed_fields);
+    metadata["writeback_enabled"] = integration.writeback_enabled.into();
+    metadata["writeback_comments"] = integration.writeback_comments.into();
+    metadata["writeback_remote_link"] = integration.writeback_remote_link.into();
+    metadata["jira_auth_kind"] = serde_json::json!(integration.jira_auth_kind);
+    metadata["has_credential"] = integration.jira_credential_enc.is_some().into();
+    write_activity(
+        conn,
+        activity_repo,
+        JIRA_INTEGRATION_UPDATED,
+        format!("{description} '{}'", integration.name),
+        integration,
+        Some(metadata),
+        actor,
+    )
+    .await
 }
 
 /// Replaces the secret and writes a `jira_integration_secret_rotated` activity row.

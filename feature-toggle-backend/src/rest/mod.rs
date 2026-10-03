@@ -98,7 +98,8 @@ use crate::rest::jira_events::{JiraEventLogItem, JiraEventResponse, JiraEventsRe
 use crate::rest::jira_integration::{
     CreateJiraIntegrationRequest, JiraIntegrationResponse, JiraIntegrationWithSecretResponse,
     JiraIntegrationsResponse, JiraStatusRuleRequest, JiraStatusRuleResponse,
-    JiraStatusRulesResponse, ReplaceJiraStatusRulesRequest, UpdateJiraIntegrationRequest,
+    JiraStatusRulesResponse, JiraWritebackResponse, JiraWritebackTestResponse,
+    ReplaceJiraStatusRulesRequest, UpdateJiraIntegrationRequest, UpdateJiraWritebackRequest,
 };
 use crate::rest::jwt_secret::JwtSecretResponse;
 use crate::rest::metrics::{
@@ -227,6 +228,9 @@ async fn health() -> impl Responder {
         jira_integration::rotate_jira_integration_secret,
         jira_integration::list_jira_status_rules,
         jira_integration::replace_jira_status_rules,
+        jira_integration::update_jira_writeback,
+        jira_integration::test_jira_writeback,
+        jira_integration::resume_jira_writeback,
         jira_events::receive_jira_event,
         jira_events::list_jira_events,
         feature::create_feature,
@@ -414,6 +418,9 @@ async fn health() -> impl Responder {
         ReplaceJiraStatusRulesRequest,
         JiraStatusRuleResponse,
         JiraStatusRulesResponse,
+        UpdateJiraWritebackRequest,
+        JiraWritebackResponse,
+        JiraWritebackTestResponse,
         JiraEventResponse,
         JiraEventLogItem,
         JiraEventsResponse,

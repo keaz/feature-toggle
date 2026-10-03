@@ -1282,6 +1282,18 @@ mod tests {
                 Method::GET,
                 format!("/api/v1/jira-integrations/{integration_id}/events"),
             ),
+            (
+                Method::PUT,
+                format!("/api/v1/jira-integrations/{integration_id}/writeback"),
+            ),
+            (
+                Method::POST,
+                format!("/api/v1/jira-integrations/{integration_id}/writeback/test"),
+            ),
+            (
+                Method::POST,
+                format!("/api/v1/jira-integrations/{integration_id}/writeback/resume"),
+            ),
         ]
     }
 
@@ -1303,6 +1315,9 @@ mod tests {
                 format!("/api/v1/jira-integrations/{id}/rules"),
                 format!("/api/v1/jira-integrations/{id}/rotate-secret"),
                 format!("/api/v1/jira-integrations/{id}/events"),
+                format!("/api/v1/jira-integrations/{id}/writeback"),
+                format!("/api/v1/jira-integrations/{id}/writeback/test"),
+                format!("/api/v1/jira-integrations/{id}/writeback/resume"),
                 // A route added later under the prefix is guarded by default.
                 format!("/api/v1/jira-integrations/{id}/events"),
             ] {

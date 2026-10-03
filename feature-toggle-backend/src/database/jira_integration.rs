@@ -14,7 +14,9 @@ use crate::database::handle_error;
 
 const INTEGRATION_COLUMNS: &str = "id, team_id, name, jira_base_url, secret_hash, environment_field, \
      environment_aliases, jira_approved_environment_ids, feature_key_field, actor_user_id, enabled, \
-     created_at, updated_at";
+     created_at, updated_at, writeback_enabled, writeback_comments, writeback_remote_link, \
+     jira_auth_kind, jira_account_email, jira_credential_enc, writeback_paused_reason, \
+     native_webhook_secret_enc";
 const RULE_COLUMNS: &str =
     "id, integration_id, jira_status, action, environment_ids, enabled, position";
 const NAME_UNIQUE_CONSTRAINT: &str = "jira_integrations_team_name_unique";
@@ -46,6 +48,37 @@ pub struct UpdateJiraIntegration {
     pub jira_approved_environment_ids: Option<Vec<Uuid>>,
     pub feature_key_field: Option<Option<String>>,
     pub enabled: Option<bool>,
+}
+
+/// The complete write-back configuration to store: every column is overwritten, so
+/// the caller merges the stored values it keeps (credential, paused reason) first.
+#[derive(Clone, PartialEq, Eq)]
+pub struct JiraWritebackColumns {
+    pub enabled: bool,
+    pub comments: bool,
+    pub remote_link: bool,
+    pub auth_kind: Option<String>,
+    pub account_email: Option<String>,
+    /// Already sealed with `secret_box`.
+    pub credential_enc: Option<String>,
+    pub paused_reason: Option<String>,
+}
+
+impl std::fmt::Debug for JiraWritebackColumns {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JiraWritebackColumns")
+            .field("enabled", &self.enabled)
+            .field("comments", &self.comments)
+            .field("remote_link", &self.remote_link)
+            .field("auth_kind", &self.auth_kind)
+            .field("account_email", &self.account_email)
+            .field(
+                "credential_enc",
+                &self.credential_enc.as_ref().map(|_| "***"),
+            )
+            .field("paused_reason", &self.paused_reason)
+            .finish()
+    }
 }
 
 /// A validated status rule; its `position` is its index in the list.
@@ -90,6 +123,18 @@ pub trait JiraIntegrationRepository: Send + Sync {
         &self,
         id: Uuid,
         secret_hash: String,
+    ) -> Result<Option<JiraIntegrationRow>, Error>;
+    /// Overwrites the write-back columns. `None` when the integration does not exist.
+    async fn set_writeback(
+        &self,
+        id: Uuid,
+        columns: JiraWritebackColumns,
+    ) -> Result<Option<JiraIntegrationRow>, Error>;
+    /// Sets or clears (`None`) the paused reason. `None` when the integration does not exist.
+    async fn set_writeback_paused(
+        &self,
+        id: Uuid,
+        reason: Option<String>,
     ) -> Result<Option<JiraIntegrationRow>, Error>;
     /// Ids of every environment of the team (active or not); `None` when the team
     /// does not exist.
@@ -137,6 +182,18 @@ pub trait JiraIntegrationRepositoryTx: JiraIntegrationRepository {
         conn: &mut PgConnection,
         id: Uuid,
         secret_hash: String,
+    ) -> Result<Option<JiraIntegrationRow>, Error>;
+    async fn set_writeback_tx(
+        &self,
+        conn: &mut PgConnection,
+        id: Uuid,
+        columns: JiraWritebackColumns,
+    ) -> Result<Option<JiraIntegrationRow>, Error>;
+    async fn set_writeback_paused_tx(
+        &self,
+        conn: &mut PgConnection,
+        id: Uuid,
+        reason: Option<String>,
     ) -> Result<Option<JiraIntegrationRow>, Error>;
     async fn team_environment_ids_tx(
         &self,
@@ -379,6 +436,46 @@ impl JiraIntegrationRepositoryImpl {
         handle_error(None, result)
     }
 
+    async fn set_writeback_conn(
+        conn: &mut PgConnection,
+        id: Uuid,
+        columns: JiraWritebackColumns,
+    ) -> Result<Option<JiraIntegrationRow>, Error> {
+        let result = sqlx::query_as::<_, JiraIntegrationRow>(&format!(
+            "UPDATE jira_integrations SET writeback_enabled = $2, writeback_comments = $3, \
+             writeback_remote_link = $4, jira_auth_kind = $5, jira_account_email = $6, \
+             jira_credential_enc = $7, writeback_paused_reason = $8, updated_at = now() \
+             WHERE id = $1 RETURNING {INTEGRATION_COLUMNS}"
+        ))
+        .bind(id)
+        .bind(columns.enabled)
+        .bind(columns.comments)
+        .bind(columns.remote_link)
+        .bind(columns.auth_kind)
+        .bind(columns.account_email)
+        .bind(columns.credential_enc)
+        .bind(columns.paused_reason)
+        .fetch_optional(&mut *conn)
+        .await;
+        handle_error(None, result)
+    }
+
+    async fn set_writeback_paused_conn(
+        conn: &mut PgConnection,
+        id: Uuid,
+        reason: Option<String>,
+    ) -> Result<Option<JiraIntegrationRow>, Error> {
+        let result = sqlx::query_as::<_, JiraIntegrationRow>(&format!(
+            "UPDATE jira_integrations SET writeback_paused_reason = $2, updated_at = now() \
+             WHERE id = $1 RETURNING {INTEGRATION_COLUMNS}"
+        ))
+        .bind(id)
+        .bind(reason)
+        .fetch_optional(&mut *conn)
+        .await;
+        handle_error(None, result)
+    }
+
     async fn team_environment_ids_conn(
         conn: &mut PgConnection,
         team_id: Uuid,
@@ -462,6 +559,24 @@ impl JiraIntegrationRepository for JiraIntegrationRepositoryImpl {
         Self::set_secret_hash_conn(&mut conn, id, secret_hash).await
     }
 
+    async fn set_writeback(
+        &self,
+        id: Uuid,
+        columns: JiraWritebackColumns,
+    ) -> Result<Option<JiraIntegrationRow>, Error> {
+        let mut conn = self.pool.acquire().await.map_err(Error::DatabaseError)?;
+        Self::set_writeback_conn(&mut conn, id, columns).await
+    }
+
+    async fn set_writeback_paused(
+        &self,
+        id: Uuid,
+        reason: Option<String>,
+    ) -> Result<Option<JiraIntegrationRow>, Error> {
+        let mut conn = self.pool.acquire().await.map_err(Error::DatabaseError)?;
+        Self::set_writeback_paused_conn(&mut conn, id, reason).await
+    }
+
     async fn team_environment_ids(&self, team_id: Uuid) -> Result<Option<Vec<Uuid>>, Error> {
         let mut conn = self.pool.acquire().await.map_err(Error::DatabaseError)?;
         Self::team_environment_ids_conn(&mut conn, team_id).await
@@ -523,6 +638,24 @@ impl JiraIntegrationRepositoryTx for JiraIntegrationRepositoryImpl {
         secret_hash: String,
     ) -> Result<Option<JiraIntegrationRow>, Error> {
         Self::set_secret_hash_conn(conn, id, secret_hash).await
+    }
+
+    async fn set_writeback_tx(
+        &self,
+        conn: &mut PgConnection,
+        id: Uuid,
+        columns: JiraWritebackColumns,
+    ) -> Result<Option<JiraIntegrationRow>, Error> {
+        Self::set_writeback_conn(conn, id, columns).await
+    }
+
+    async fn set_writeback_paused_tx(
+        &self,
+        conn: &mut PgConnection,
+        id: Uuid,
+        reason: Option<String>,
+    ) -> Result<Option<JiraIntegrationRow>, Error> {
+        Self::set_writeback_paused_conn(conn, id, reason).await
     }
 
     async fn team_environment_ids_tx(

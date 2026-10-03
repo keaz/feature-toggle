@@ -346,6 +346,8 @@ pub async fn run() -> std::io::Result<()> {
         public_base_url: cfg.public_base_url.clone(),
     };
 
+    let jira_ui_base_url = config::JiraUiBaseUrl(cfg.jira_ui_base_url());
+
     HttpServer::new(move || {
         let admin_state = AdminState::new();
 
@@ -394,6 +396,8 @@ pub async fn run() -> std::io::Result<()> {
             .app_data(web::Data::new(jwt_token_logic_for_server.clone()))
             .app_data(web::Data::new(jwt_secret_logic_for_server.clone()))
             .app_data(web::Data::new(cfg.auth))
+            .app_data(web::Data::new(cfg.jira.clone()))
+            .app_data(web::Data::new(jira_ui_base_url.clone()))
             .app_data(web::Data::new(evaluation_events_tx.clone()))
             .app_data(web::Data::new(approval_events_tx.clone()))
             .app_data(web::Data::new(admin_state.clone()))

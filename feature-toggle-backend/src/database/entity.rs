@@ -658,7 +658,7 @@ pub struct ExternalLinkRow {
 }
 
 /// A team's Jira integration (`jira_integrations`). Never serialize it to a
-/// client: it holds `secret_hash`.
+/// client: it holds `secret_hash` and sealed credentials.
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
 pub struct JiraIntegrationRow {
     pub id: Uuid,
@@ -675,6 +675,17 @@ pub struct JiraIntegrationRow {
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub writeback_enabled: bool,
+    pub writeback_comments: bool,
+    pub writeback_remote_link: bool,
+    /// `cloud_basic` or `dc_pat`.
+    pub jira_auth_kind: Option<String>,
+    pub jira_account_email: Option<String>,
+    /// Sealed with `secret_box` (AAD = integration id). Never serialize.
+    pub jira_credential_enc: Option<String>,
+    pub writeback_paused_reason: Option<String>,
+    /// Sealed with `secret_box`. Never serialize.
+    pub native_webhook_secret_enc: Option<String>,
 }
 
 /// A Jira status -> rollout action rule (`jira_status_rules`).
