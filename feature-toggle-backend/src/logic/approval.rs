@@ -94,6 +94,68 @@ fn policy_scope_rank(policy: &ApprovalPolicy, env_id: Uuid, env_type: &str) -> u
     }
 }
 
+/// Stage facts for a decision activity row (JI-40).
+struct StageContext {
+    feature_key: String,
+    team_id: Uuid,
+    stage_id: Uuid,
+    environment_id: Uuid,
+    environment_name: Option<String>,
+}
+
+/// Activity row for an approval decision that changed a stage (JI-40).
+fn stage_decision_activity(
+    request: &ApprovalRequest,
+    activity_type: &str,
+    final_status: &str,
+    stage: &StageContext,
+    actor_id: Option<Uuid>,
+    actor_name: Option<String>,
+) -> CreateActivityLog {
+    let verb = match activity_type {
+        activity_types::STAGE_APPROVED => "Approved",
+        activity_types::STAGE_REJECTED => "Rejected",
+        activity_types::APPROVAL_REQUEST_CANCELLED => "Cancelled",
+        _ => "Decided",
+    };
+    let kind = ApprovalLogicImpl::stage_change_request_kind(request).unwrap_or("stage change");
+    let description = match stage.environment_name.as_deref() {
+        Some(environment_name) => format!(
+            "{verb} the {kind} request for feature '{}' in environment '{environment_name}'",
+            stage.feature_key
+        ),
+        None => format!(
+            "{verb} the {kind} request for feature '{}'",
+            stage.feature_key
+        ),
+    };
+    let mut metadata = serde_json::json!({
+        "feature_id": request.feature_id.to_string(),
+        "feature_key": stage.feature_key,
+        "team_id": stage.team_id.to_string(),
+        "stage_id": stage.stage_id.to_string(),
+        "environment_id": stage.environment_id.to_string(),
+        "environment_name": stage.environment_name,
+        "status": final_status,
+        "approval_request_id": request.id.to_string(),
+    });
+    if let Some(external_ref) = &request.external_ref {
+        metadata["external_ref"] = serde_json::json!(external_ref);
+    }
+    if let Some(reason) = &request.request_reason {
+        metadata["reason"] = serde_json::json!(reason);
+    }
+    CreateActivityLog {
+        activity_type: activity_type.to_string(),
+        entity_type: entity_types::STAGE.to_string(),
+        entity_id: stage.stage_id.to_string(),
+        actor_id,
+        actor_name,
+        description,
+        metadata: Some(metadata),
+    }
+}
+
 #[derive(Clone)]
 pub struct ApprovalRequestEvent {
     pub request: ApprovalRequest,
@@ -1219,6 +1281,93 @@ impl ApprovalLogicImpl {
         Some(approver_id.to_string())
     }
 
+    /// Username for an activity row's `actor_name`; the id when the user is gone.
+    async fn resolve_username(&self, user_id: Uuid) -> String {
+        if let Some(pool) = &self.db_pool
+            && let Ok(user) = crate::database::user::user_repository(pool.clone())
+                .get_user_by_id(user_id)
+                .await
+            && !user.username.trim().is_empty()
+        {
+            return user.username;
+        }
+        user_id.to_string()
+    }
+
+    /// Loads the stage facts for a decision row from the `stage_id` in the
+    /// request's `change_payload`. `None` for a request that is not a stage
+    /// change.
+    async fn load_stage_context(
+        &self,
+        request: &ApprovalRequest,
+    ) -> Result<Option<StageContext>, Error> {
+        if request.change_type != "stage_change" {
+            return Ok(None);
+        }
+        let Some(stage_id) = request
+            .change_payload
+            .get("stage_id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok())
+        else {
+            return Ok(None);
+        };
+        let stage = self
+            .feature_repository
+            .get_stage_by_id(stage_id)
+            .await?
+            .ok_or(Error::NotFound(stage_id))?;
+        let feature = self
+            .feature_repository
+            .get_feature_by_id(stage.feature_id)
+            .await?;
+        let environment_name = self
+            .environment_logic
+            .get_environment_by_id(ID::from(stage.environment_id))
+            .await
+            .ok()
+            .map(|environment| environment.name);
+        Ok(Some(StageContext {
+            feature_key: feature.key,
+            team_id: feature.team_id,
+            stage_id,
+            environment_id: stage.environment_id,
+            environment_name,
+        }))
+    }
+
+    /// Writes the `stage_decision_activity` row in `conn`'s transaction.
+    /// Nothing is written when `final_status` is `None` (no stage changed).
+    async fn record_stage_decision_tx(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        request: &ApprovalRequest,
+        activity_type: &str,
+        final_status: Option<&str>,
+        actor_id: Option<Uuid>,
+        actor_name: Option<String>,
+    ) -> Result<(), Error> {
+        let (Some(pool), Some(final_status)) = (&self.db_pool, final_status) else {
+            return Ok(());
+        };
+        let Some(stage) = self.load_stage_context(request).await? else {
+            return Ok(());
+        };
+        let activity = stage_decision_activity(
+            request,
+            activity_type,
+            final_status,
+            &stage,
+            actor_id,
+            actor_name,
+        );
+        activity_log_repository(pool.clone())
+            .create_activity_tx(conn, activity)
+            .await
+            .map_err(Error::DatabaseError)?;
+        Ok(())
+    }
+
     async fn dispatch_stage_change_approved_notification(
         &self,
         request: &ApprovalRequest,
@@ -1442,17 +1591,35 @@ impl ApprovalLogicImpl {
             .await?;
 
         if matches!(updated.status, ApprovalStatus::Approved) {
-            if let Err(exec_err) = self
+            let final_status = match self
                 .execute_change_tx(&feature_repo_tx, &mut tx, &updated, approver_id)
                 .await
             {
-                let pending = approval_repo_tx
-                    .update_request_status_tx(&mut tx, request_id, ApprovalStatus::Pending, None)
-                    .await?;
-                tx.commit().await.map_err(Error::DatabaseError)?;
-                self.publish_event(&pending, team_id).await?;
-                return Err(exec_err);
-            }
+                Ok(final_status) => final_status,
+                Err(exec_err) => {
+                    let pending = approval_repo_tx
+                        .update_request_status_tx(
+                            &mut tx,
+                            request_id,
+                            ApprovalStatus::Pending,
+                            None,
+                        )
+                        .await?;
+                    tx.commit().await.map_err(Error::DatabaseError)?;
+                    self.publish_event(&pending, team_id).await?;
+                    return Err(exec_err);
+                }
+            };
+            let approver_name = self.resolve_username(approver_id).await;
+            self.record_stage_decision_tx(
+                &mut tx,
+                &updated,
+                activity_types::STAGE_APPROVED,
+                final_status.as_deref(),
+                Some(approver_id),
+                Some(approver_name),
+            )
+            .await?;
 
             let final_request = approval_repo_tx
                 .update_request_status_tx(
@@ -1479,17 +1646,35 @@ impl ApprovalLogicImpl {
         }
 
         if matches!(updated.status, ApprovalStatus::Rejected) {
-            if let Err(exec_err) = self
+            let final_status = match self
                 .execute_change_tx(&feature_repo_tx, &mut tx, &updated, approver_id)
                 .await
             {
-                let pending = approval_repo_tx
-                    .update_request_status_tx(&mut tx, request_id, ApprovalStatus::Pending, None)
-                    .await?;
-                tx.commit().await.map_err(Error::DatabaseError)?;
-                self.publish_event(&pending, team_id).await?;
-                return Err(exec_err);
-            }
+                Ok(final_status) => final_status,
+                Err(exec_err) => {
+                    let pending = approval_repo_tx
+                        .update_request_status_tx(
+                            &mut tx,
+                            request_id,
+                            ApprovalStatus::Pending,
+                            None,
+                        )
+                        .await?;
+                    tx.commit().await.map_err(Error::DatabaseError)?;
+                    self.publish_event(&pending, team_id).await?;
+                    return Err(exec_err);
+                }
+            };
+            let approver_name = self.resolve_username(approver_id).await;
+            self.record_stage_decision_tx(
+                &mut tx,
+                &updated,
+                activity_types::STAGE_REJECTED,
+                final_status.as_deref(),
+                Some(approver_id),
+                Some(approver_name),
+            )
+            .await?;
 
             let final_request = approval_repo_tx
                 .update_request_status_tx(&mut tx, request_id, ApprovalStatus::Rejected, None)
@@ -1556,12 +1741,12 @@ impl ApprovalLogicImpl {
         conn: &mut sqlx::PgConnection,
         request: &ApprovalRequest,
         actor_id: Uuid,
-    ) -> Result<(), Error>
+    ) -> Result<Option<String>, Error>
     where
         R: FeatureRepositoryTx,
     {
         if request.change_type != "stage_change" {
-            return Ok(());
+            return Ok(None);
         }
 
         let stage_id = request
@@ -1591,14 +1776,14 @@ impl ApprovalLogicImpl {
                 approval_target_status.unwrap_or(next_status)
             }
             ApprovalStatus::Rejected => rejection_target_status.unwrap_or(next_status),
-            _ => return Ok(()),
+            _ => return Ok(None),
         };
 
         feature_repo
             .approve_or_reject_stage_change_tx(conn, stage_id, final_status, actor_id)
             .await?;
 
-        Ok(())
+        Ok(Some(final_status.to_string()))
     }
 }
 
@@ -1825,6 +2010,21 @@ impl ApprovalLogic for ApprovalLogicImpl {
                 let _ = feature_repo_tx
                     .reset_stage_status_tx(&mut tx, stage_id, status.as_str())
                     .await;
+                let canceller_name = self.resolve_username(cancelled_by).await;
+                let recorded = self
+                    .record_stage_decision_tx(
+                        &mut tx,
+                        &updated,
+                        activity_types::APPROVAL_REQUEST_CANCELLED,
+                        Some(status.as_str()),
+                        Some(cancelled_by),
+                        Some(canceller_name),
+                    )
+                    .await;
+                // A stage deleted meanwhile has nothing to report; the cancel stands.
+                if !matches!(recorded, Err(Error::NotFound(_))) {
+                    recorded?;
+                }
             }
 
             tx.commit().await.map_err(Error::DatabaseError)?;
@@ -1918,8 +2118,18 @@ impl ApprovalLogic for ApprovalLogicImpl {
                     tx.rollback().await.map_err(Error::DatabaseError)?;
                     return Err(Error::InvalidInput("Request is already resolved".into()));
                 };
-                self.execute_change_tx(&feature_repo_tx, &mut tx, &updated, SENTINEL_UUID)
+                let final_status = self
+                    .execute_change_tx(&feature_repo_tx, &mut tx, &updated, SENTINEL_UUID)
                     .await?;
+                self.record_stage_decision_tx(
+                    &mut tx,
+                    &updated,
+                    activity_types::STAGE_APPROVED,
+                    final_status.as_deref(),
+                    None,
+                    Some("Auto-approval".to_string()),
+                )
+                .await?;
                 tx.commit().await.map_err(Error::DatabaseError)?;
                 self.publish_event(&updated, team_id).await?;
                 self.notify_edge_servers(request.feature_id).await;
@@ -1999,8 +2209,18 @@ impl ApprovalLogic for ApprovalLogicImpl {
                 return Ok(None);
             };
             // An error here drops the transaction, so the request stays pending.
-            self.execute_change_tx(&feature_repo_tx, &mut tx, &approved, SENTINEL_UUID)
+            let final_status = self
+                .execute_change_tx(&feature_repo_tx, &mut tx, &approved, SENTINEL_UUID)
                 .await?;
+            self.record_stage_decision_tx(
+                &mut tx,
+                &approved,
+                activity_types::STAGE_APPROVED,
+                final_status.as_deref(),
+                None,
+                Some("Approval reconciliation".to_string()),
+            )
+            .await?;
             let effective = effective_required_approvals(
                 policy.required_approvers,
                 approved.required_approvers_override,

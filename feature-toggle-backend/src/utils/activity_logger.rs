@@ -62,6 +62,8 @@ pub mod activity_types {
     pub const PIPELINE_DELETED: &str = "pipeline_deleted";
     pub const STAGE_APPROVED: &str = "stage_approved";
     pub const STAGE_REJECTED: &str = "stage_rejected";
+    /// A gated stage change was requested and an approval request created (JI-40).
+    pub const STAGE_CHANGE_REQUESTED: &str = "stage_change_requested";
     pub const STAGE_DEPLOYED: &str = "stage_deployed";
     pub const STAGE_ROLLBACKED: &str = "stage_rollbacked";
 
@@ -92,6 +94,8 @@ pub mod activity_types {
     /// be reached (no remaining eligible approver can vote) and its approvals
     /// meet the policy.
     pub const APPROVAL_REQUIREMENT_RECONCILED: &str = "approval_requirement_reconciled";
+    /// A pending approval request was cancelled and its stage reset (JI-40).
+    pub const APPROVAL_REQUEST_CANCELLED: &str = "approval_request_cancelled";
     /// An external system (Jira, JI-14) approved a stage change; no vote.
     pub const APPROVAL_REQUEST_APPROVED_EXTERNALLY: &str = "approval_request_approved_externally";
     /// The reconciliation could not approve a request (its change failed)

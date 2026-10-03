@@ -820,6 +820,64 @@ impl FeatureLogicImpl {
         None
     }
 
+    /// Best-effort `stage_change_requested` row for a gated request (JI-40).
+    /// Same metadata keys as the direct branch, plus `approval_request_id`.
+    async fn log_gated_stage_change_requested(
+        &self,
+        db_feature: &crate::database::entity::Feature,
+        stage: &crate::database::entity::FeaturePipelineStage,
+        next_status: &str,
+        user_id: Uuid,
+        request: &crate::database::entity::ApprovalRequest,
+        meta: &crate::model::StageChangeMeta,
+    ) {
+        let environment_name = self
+            .resolve_environment_name(Some(stage.environment_id))
+            .await;
+        let requester_name = self
+            .user_repository
+            .get_user_by_id(user_id)
+            .await
+            .ok()
+            .map(|user| user.username);
+        let description = match environment_name.as_deref() {
+            Some(environment_name) => format!(
+                "Requested {next_status} for feature '{}' environment '{environment_name}'",
+                db_feature.key
+            ),
+            None => format!(
+                "Requested {next_status} for feature '{}' stage '{}'",
+                db_feature.key, stage.id
+            ),
+        };
+        let mut metadata = serde_json::json!({
+            "feature_id": db_feature.id.to_string(),
+            "feature_key": db_feature.key.clone(),
+            "stage_id": stage.id.to_string(),
+            "status": next_status,
+            "team_id": db_feature.team_id.to_string(),
+            "teamId": db_feature.team_id.to_string(),
+            "environment_id": stage.environment_id.to_string(),
+            "environment_name": environment_name,
+            "approval_request_id": request.id.to_string(),
+        });
+        add_external_ref(&mut metadata, meta);
+        if let Some(reason) = &meta.reason {
+            metadata["reason"] = serde_json::json!(reason);
+        }
+        let _ = crate::utils::activity_logger::log_activity(
+            &self.activity_log_repository,
+            crate::utils::activity_logger::activity_types::STAGE_CHANGE_REQUESTED,
+            crate::utils::activity_logger::entity_types::STAGE,
+            &stage.id.to_string(),
+            Some(user_id),
+            requester_name,
+            description,
+            Some(metadata),
+        )
+        .await;
+    }
+
     async fn resolve_environment_name(&self, environment_id: Option<Uuid>) -> Option<String> {
         let environment_id = environment_id?;
         self.environment_logic
@@ -1803,6 +1861,15 @@ impl DeploymentLogic for FeatureLogicImpl {
                         return Err(Error::NotFound(stage_uuid));
                     }
                 }
+                self.log_gated_stage_change_requested(
+                    &db_feature,
+                    &stage,
+                    next_status,
+                    user_id,
+                    &request,
+                    &meta,
+                )
+                .await;
                 let notification_feature_id = db_feature.id;
                 let notification_feature_key = db_feature.key.clone();
                 let notification_team_id = db_feature.team_id;
@@ -1995,7 +2062,10 @@ impl DeploymentLogic for FeatureLogicImpl {
                         next_status, db_feature.key, stage_id
                     )
                 };
-                ("stage_change_requested", desc)
+                (
+                    crate::utils::activity_logger::activity_types::STAGE_CHANGE_REQUESTED,
+                    desc,
+                )
             }
         };
 
