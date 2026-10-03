@@ -14,12 +14,12 @@ Read this after [`README.md`](README.md) and [`design.md`](design.md). It record
 | JI-14 external approval path | Done | backend `0751c25` |
 | JI-15 inbound events + rules | Done | backend `120b73d` |
 | JI-12 by-key endpoints (optional) | Done (built before JI-13, at the user's request) | backend `513f393` |
-| JI-20 UI Jira links | Open, **next** (needs JI-10) | — |
-| JI-21 UI ref/reason, Jira approval | Open (needs JI-11, JI-14) | — |
+| JI-20 UI Jira links | Done | UI `3366750`, backend `a95d30c` |
+| JI-21 UI ref/reason, Jira approval | Open, **next** (needs JI-11, JI-14) | — |
 | JI-22 UI Jira settings | Open (needs JI-13, JI-15) | — |
 | JI-30 setup guide + e2e test | Open (needs JI-15) | — |
 
-**Next task: [JI-20](tasks/JI-20-ui-feature-jira-links.md).**
+**Next task: [JI-21](tasks/JI-21-ui-external-ref-on-stage-changes.md).**
 
 ## 2. Planning log (2026-10-03)
 
@@ -138,3 +138,12 @@ New tasks JI-13, JI-14, JI-15, JI-22; JI-12 became optional; JI-21 and JI-30 cha
 - For JI-30's guide: a Jira webhook acts only on events whose changelog has a `status` item; Automation bodies always count as a status change (the rule decides when to send). The environment comes from `environmentField` (`labels` or a custom field; option objects and multi-selects work). Repeats within 10 minutes (same issue, status, environments and changelog id / `fields.updated`) return the first result.
 - Open point: no rate limit on the public route (the repo has none). Add one at the proxy before exposing it to the internet.
 - Manual curl script used for verification: see the JI-15 handoff log (setup by SQL + API, then three curls).
+
+### From JI-20 (UI `3366750`, backend `a95d30c`)
+
+- UI API module `src/api/externalLinks.ts` (`listExternalLinks`, `createExternalLink`, `deleteExternalLink`, type `ExternalLink`). JI-21 can use `listExternalLinks` to decide whether an `externalRef` is a linked Jira key (design §3.3: link it only then, using the link's `url`).
+- `JiraLinksCard` shares the `useSharedQuery` key `feature-external-links:<featureId>`; another component that changes links should `invalidateSharedQuery` that key.
+- UI permission for link writes: `canAccessTeamsManagement()` (admin or Team Admin), matching the backend rule.
+- Duplicate link 409 message is now `<KEY> is already linked to this feature`.
+- The UI repo had an unrelated uncommitted change in `src/pages/FeatureDetail.tsx` (stage label); it is still in the working tree, not committed. Do not commit it with a task unless the user asks.
+- Manual UI checks: Chrome extension was not connected; the Chrome DevTools MCP (`new_page` with `isolatedContext`) works. Backend on `:8080` + `pnpm dev --port 8090` needs no config change (`public/config.js` points at `:8080`).

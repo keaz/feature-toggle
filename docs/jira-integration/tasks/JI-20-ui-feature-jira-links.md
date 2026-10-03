@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Type | Feature |
-| Status | Open |
+| Status | Done in UI `3366750` (backend `a95d30c`) |
 | Repo | UI (`../feature-toggle-ui/`) |
 | Depends on | JI-10 |
 | Behavior change | New card on the feature detail page. |
@@ -46,4 +46,28 @@ Show the Jira issues linked to a feature, and let users who can edit the feature
 
 ## Handoff log
 
-(empty)
+### 2026-10-03: done in UI `3366750`, backend `a95d30c`
+
+**What changed (UI, `feature-toggle-ui/`)**
+
+- `src/api/externalLinks.ts`: `ExternalLink`, `listExternalLinks(featureId) -> ExternalLink[]` (unwraps `items`), `createExternalLink(featureId, {system: 'jira', externalKey, url?})`, `deleteExternalLink(featureId, linkId)`.
+- `src/components/features/JiraLinksCard.tsx`: `JiraLinksCard({featureId, canEdit})`. Data through `useSharedQuery` key `feature-external-links:<featureId>` (staleTime 15 s); refetched after add and remove. List: key as a link (new tab, `rel="noopener noreferrer"`, external-link icon) when `url` is set, plain text otherwise. Editors: "Add" (accessible name "Add Jira issue") opens an inline form (key upper-cased as typed, optional URL, URL left out of the request when blank); the server message is shown in a `role="alert"` under the form, which stays open. Remove: "Remove <KEY>" button → inline confirm group ("Confirm removing <KEY>") with Cancel / Remove. Empty: "No Jira issues linked."; error: "Jira links unavailable: <message>"; loading: skeleton.
+- `src/pages/FeatureDetail.tsx`: the card sits on the overview grid right after the Lifecycle card (which holds reference URL and tags).
+
+**Edit permission**
+
+- `FeatureDetail.tsx` has no edit rule of its own (the Edit link is shown to everyone; the server enforces). The backend allows link writes for admins and Team Admins (`authorize_feature_update`), so the card uses the existing `canAccessTeamsManagement()` from `src/utils/auth.ts` (`is_admin` or the `Team Admin` role). It does not check the team of the role; the server still does.
+
+**Backend change found during the manual check (`a95d30c`)**
+
+- A duplicate link returned 409 with `external link jira PROJ-1` (the repository's `RecordAlreadyExists` text). `rest/external_link.rs::create_external_link` now maps it to `PROJ-1 is already linked to this feature`. `create_duplicate_returns_409` asserts the message. No contract change.
+
+**Not committed**
+
+- The UI working tree had an unrelated uncommitted change in `src/pages/FeatureDetail.tsx` (stage label "Rollout stage N" instead of "Position … · order …"). It was left in the working tree and is not part of `3366750`.
+
+**Verified**
+
+- UI: `pnpm lint` (no issues), `pnpm build` (ok), `pnpm test:run` (83 files, 674 tests, design token guard included). New tests: `components/features/__tests__/JiraLinksCard.test.tsx` (9: list with/without URL, empty, load error, add with upper-cased key and refresh, blank URL left out, 409 inline, remove after confirm, cancel remove, no controls for non-editors).
+- Backend: `cargo test -p feature-toggle-backend` all pass; clippy no warnings in the changed file; contract hashes unchanged.
+- Manual (backend on `127.0.0.1:8080` with the test DB, Vite on `localhost:8090`, Chrome DevTools, admin `api-test-admin`): empty state; add `proj-123` + URL → shown as `PROJ-123` link; add again → "PROJ-123 is already linked to this feature"; `not a key` → "externalKey must be a Jira issue key such as PROJ-123"; remove → confirm → empty state. The temporary feature was deleted afterwards.
