@@ -3199,7 +3199,9 @@ impl FeatureRepository for FeatureRepositoryImpl {
         )
         .bind(status)
         .bind(enabled)
-        .bind(user_id)
+        // The nil (system) actor of auto-approval and reconciliation is not a
+        // user row; store no approver instead of violating the foreign key.
+        .bind((!user_id.is_nil()).then_some(user_id))
         .bind(now)
         .bind(stage_id)
         .execute(&self.pool)
@@ -4688,7 +4690,9 @@ impl FeatureRepositoryTx for FeatureRepositoryImpl {
         )
         .bind(status)
         .bind(enabled)
-        .bind(user_id)
+        // The nil (system) actor of auto-approval and reconciliation is not a
+        // user row; store no approver instead of violating the foreign key.
+        .bind((!user_id.is_nil()).then_some(user_id))
         .bind(now)
         .bind(stage_id)
         .execute(&mut *conn)

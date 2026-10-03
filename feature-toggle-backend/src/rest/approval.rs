@@ -781,11 +781,12 @@ pub(crate) async fn load_ai_risk(
     }
 }
 
-/// Loads, with one query, how many eligible approvers can still vote on each
-/// request whose requirement depends on it: pending, with an AI risk override
+/// Loads, with one query, the approvals each request can still reach
+/// (approvals given plus eligible approvers who can still vote) for the
+/// requests whose requirement depends on it: pending, with an AI risk override
 /// and a named eligible list. Other requests are not read. Fails open: a read
 /// error is logged and the override is shown uncapped.
-pub(crate) async fn load_remaining_approvers<'a>(
+pub(crate) async fn load_reachable_approvals<'a>(
     repo: &dyn ApprovalRepository,
     requests: impl IntoIterator<Item = &'a ApprovalRequest>,
 ) -> HashMap<Uuid, i64> {
@@ -801,10 +802,10 @@ pub(crate) async fn load_remaining_approvers<'a>(
     if request_ids.is_empty() {
         return HashMap::new();
     }
-    match repo.count_remaining_eligible_approvers(request_ids).await {
-        Ok(remaining) => remaining,
+    match repo.count_reachable_approvals(request_ids).await {
+        Ok(reachable) => reachable,
         Err(err) => {
-            warn!("Could not count remaining eligible approvers: {err}");
+            warn!("Could not count reachable approvals: {err}");
             HashMap::new()
         }
     }
@@ -812,15 +813,14 @@ pub(crate) async fn load_remaining_approvers<'a>(
 
 /// Approvals needed. The policy applies, falling back to the snapshot in the
 /// request payload when the policy row is gone. An AI risk override raises it,
-/// capped at the approvals given plus `remaining_approvers` (eligible
-/// approvers who can still vote) and never below the policy; see
+/// capped at `reachable_approvals` (approvals given plus eligible approvers
+/// who can still vote) and never below the policy; see
 /// [`effective_required_approvals`].
 fn required_approvals_effective(
     required_approvers_override: Option<i32>,
     policy: Option<&ApprovalPolicy>,
     change_payload: &serde_json::Value,
-    approved_count: i32,
-    remaining_approvers: Option<i64>,
+    reachable_approvals: Option<i64>,
 ) -> i32 {
     let policy_required = policy
         .map(|policy| policy.required_approvers)
@@ -835,27 +835,34 @@ fn required_approvals_effective(
     effective_required_approvals(
         policy_required,
         required_approvers_override,
-        approved_count,
-        remaining_approvers,
+        reachable_approvals,
     )
 }
 
-/// `remaining_approvers` comes from [`load_remaining_approvers`].
+/// `reachable_approvals` comes from [`load_reachable_approvals`]. An approved
+/// or auto-approved request can get no more approvals, so its reachable count
+/// is the approvals it got: it shows the requirement it met (never below the
+/// policy), not an override that the cap or the auto-approval made moot.
 pub(crate) fn map_request_with_policy(
     request: ApprovalRequest,
     votes: Vec<ApprovalVote>,
     policy: Option<&ApprovalPolicy>,
     ai_risk: Option<AiRiskSummary>,
-    remaining_approvers: Option<i64>,
+    reachable_approvals: Option<i64>,
 ) -> ApprovalRequestResponse {
     let reviewed_snapshot_id = snapshot_id_from_payload(&request.change_payload, request.id);
     let change_diff = build_change_diff(request.id, &request.change_payload, policy);
+    let reachable_approvals = match request.status {
+        ApprovalStatus::Approved | ApprovalStatus::AutoApproved => {
+            Some(i64::from(request.approved_count))
+        }
+        _ => reachable_approvals,
+    };
     let required_approvals_effective = required_approvals_effective(
         request.required_approvers_override,
         policy,
         &request.change_payload,
-        request.approved_count,
-        remaining_approvers,
+        reachable_approvals,
     );
     let policy = policy.map(map_policy_summary);
 
@@ -1037,7 +1044,7 @@ pub(crate) async fn list_approval_requests(
         requests.iter().map(|request| request.policy_id),
     )
     .await;
-    let remaining = load_remaining_approvers(repo.get_ref().as_ref(), &requests).await;
+    let reachable = load_reachable_approvals(repo.get_ref().as_ref(), &requests).await;
 
     let mut items = Vec::with_capacity(requests.len());
     for request in requests {
@@ -1047,9 +1054,9 @@ pub(crate) async fn list_approval_requests(
             .map_err(RestError::from)?;
         let summary = ai_risk.remove(&request.id);
         let policy = policies.get(&request.policy_id);
-        let remaining = remaining.get(&request.id).copied();
+        let reachable = reachable.get(&request.id).copied();
         items.push(map_request_with_policy(
-            request, votes, policy, summary, remaining,
+            request, votes, policy, summary, reachable,
         ));
     }
 
@@ -1106,7 +1113,7 @@ pub(crate) async fn approve_request(
     let ai_risk = load_ai_risk(ai_judgments.get_ref().as_ref(), vec![updated.id])
         .await
         .remove(&updated.id);
-    let remaining = load_remaining_approvers(repo.get_ref().as_ref(), [&updated])
+    let reachable = load_reachable_approvals(repo.get_ref().as_ref(), [&updated])
         .await
         .remove(&updated.id);
 
@@ -1115,7 +1122,7 @@ pub(crate) async fn approve_request(
         votes,
         policy.as_ref(),
         ai_risk,
-        remaining,
+        reachable,
     )))
 }
 
@@ -1162,7 +1169,7 @@ pub(crate) async fn reject_request(
     let ai_risk = load_ai_risk(ai_judgments.get_ref().as_ref(), vec![updated.id])
         .await
         .remove(&updated.id);
-    let remaining = load_remaining_approvers(repo.get_ref().as_ref(), [&updated])
+    let reachable = load_reachable_approvals(repo.get_ref().as_ref(), [&updated])
         .await
         .remove(&updated.id);
 
@@ -1171,7 +1178,7 @@ pub(crate) async fn reject_request(
         votes,
         policy.as_ref(),
         ai_risk,
-        remaining,
+        reachable,
     )))
 }
 
@@ -1216,7 +1223,7 @@ pub(crate) async fn cancel_request(
     let ai_risk = load_ai_risk(ai_judgments.get_ref().as_ref(), vec![updated.id])
         .await
         .remove(&updated.id);
-    let remaining = load_remaining_approvers(repo.get_ref().as_ref(), [&updated])
+    let reachable = load_reachable_approvals(repo.get_ref().as_ref(), [&updated])
         .await
         .remove(&updated.id);
 
@@ -1225,7 +1232,7 @@ pub(crate) async fn cancel_request(
         votes,
         policy.as_ref(),
         ai_risk,
-        remaining,
+        reachable,
     )))
 }
 
@@ -2069,15 +2076,12 @@ mod tests {
         let payload = serde_json::json!({ "policy": { "required_approvers": 4 } });
 
         assert_eq!(
-            required_approvals_effective(None, Some(&policy), &payload, 0, None),
+            required_approvals_effective(None, Some(&policy), &payload, None),
             2
         );
+        assert_eq!(required_approvals_effective(None, None, &payload, None), 4);
         assert_eq!(
-            required_approvals_effective(None, None, &payload, 0, None),
-            4
-        );
-        assert_eq!(
-            required_approvals_effective(None, None, &serde_json::json!({}), 0, None),
+            required_approvals_effective(None, None, &serde_json::json!({}), None),
             1
         );
     }
@@ -2088,11 +2092,11 @@ mod tests {
         let payload = serde_json::json!({ "policy": { "required_approvers": 4 } });
 
         assert_eq!(
-            required_approvals_effective(Some(3), Some(&policy), &payload, 0, None),
+            required_approvals_effective(Some(3), Some(&policy), &payload, None),
             3
         );
         assert_eq!(
-            required_approvals_effective(Some(5), None, &payload, 0, None),
+            required_approvals_effective(Some(5), None, &payload, None),
             5
         );
     }
@@ -2106,32 +2110,79 @@ mod tests {
         let payload = serde_json::json!({ "policy": { "required_approvers": 4 } });
 
         assert_eq!(
-            required_approvals_effective(Some(3), Some(&policy), &payload, 2, Some(0)),
+            required_approvals_effective(Some(3), Some(&policy), &payload, Some(2)),
             2
         );
         assert_eq!(
-            required_approvals_effective(Some(3), Some(&policy), &payload, 1, Some(1)),
+            required_approvals_effective(Some(3), Some(&policy), &payload, Some(1)),
             2
         );
         assert_eq!(
-            required_approvals_effective(Some(3), Some(&policy), &payload, 1, Some(2)),
+            required_approvals_effective(Some(3), Some(&policy), &payload, Some(3)),
             3
         );
         assert_eq!(
-            required_approvals_effective(Some(3), Some(&policy), &payload, 0, Some(0)),
+            required_approvals_effective(Some(3), Some(&policy), &payload, Some(0)),
             2,
             "never below the policy"
         );
         assert_eq!(
-            required_approvals_effective(Some(5), None, &payload, 0, Some(0)),
+            required_approvals_effective(Some(5), None, &payload, Some(0)),
             4,
             "never below the payload snapshot when the policy row is gone"
         );
         assert_eq!(
-            required_approvals_effective(None, Some(&policy), &payload, 0, Some(0)),
+            required_approvals_effective(None, Some(&policy), &payload, Some(0)),
             2,
             "no override: the policy applies unchanged"
         );
+    }
+
+    /// A closed approved request shows a met requirement: nobody can add an
+    /// approval any more, so the override is capped at the approvals it got
+    /// (never below the policy). Rejected or cancelled requests keep the
+    /// requirement they were held to.
+    #[actix_web::test]
+    async fn an_approved_request_shows_the_requirement_it_met() {
+        let policy_id = Uuid::new_v4();
+        let mut policy = sample_policy(policy_id);
+        policy.required_approvers = 1;
+        let request = |status: ApprovalStatus, approved_count: i32| ApprovalRequest {
+            policy_id,
+            status,
+            approved_count,
+            required_approvers_override: Some(2),
+            eligible_approver_ids: vec![Uuid::new_v4(), Uuid::new_v4()],
+            ..sample_request(Uuid::new_v4())
+        };
+
+        let approved = map_request_with_policy(
+            request(ApprovalStatus::Approved, 1),
+            vec![],
+            Some(&policy),
+            None,
+            None,
+        );
+        assert_eq!(approved.required_approvals_effective, 1);
+        let auto = map_request_with_policy(
+            request(ApprovalStatus::AutoApproved, 0),
+            vec![],
+            Some(&policy),
+            None,
+            None,
+        );
+        assert_eq!(
+            auto.required_approvals_effective, 1,
+            "never below the policy"
+        );
+        let rejected = map_request_with_policy(
+            request(ApprovalStatus::Rejected, 1),
+            vec![],
+            Some(&policy),
+            None,
+            None,
+        );
+        assert_eq!(rejected.required_approvals_effective, 2);
     }
 
     /// Only pending requests with an override and a named eligible list need
@@ -2161,29 +2212,29 @@ mod tests {
         let capped_id = capped.id;
 
         let mut repo = MockApprovalRepository::new();
-        repo.expect_count_remaining_eligible_approvers()
+        repo.expect_count_reachable_approvals()
             .withf(move |ids| ids == &vec![capped_id])
             .times(1)
             .returning(|ids| Ok(ids.into_iter().map(|id| (id, 0)).collect()));
         let loaded =
-            load_remaining_approvers(&repo, [&capped, &no_override, &unlisted, &closed]).await;
+            load_reachable_approvals(&repo, [&capped, &no_override, &unlisted, &closed]).await;
         assert_eq!(loaded.get(&capped_id), Some(&0));
         assert_eq!(loaded.len(), 1);
 
         let mut quiet = MockApprovalRepository::new();
-        quiet.expect_count_remaining_eligible_approvers().times(0);
+        quiet.expect_count_reachable_approvals().times(0);
         assert!(
-            load_remaining_approvers(&quiet, [&no_override, &closed])
+            load_reachable_approvals(&quiet, [&no_override, &closed])
                 .await
                 .is_empty()
         );
 
         let mut failing = MockApprovalRepository::new();
         failing
-            .expect_count_remaining_eligible_approvers()
+            .expect_count_reachable_approvals()
             .returning(|_| Err(crate::Error::InvalidInput("db down".into())));
         assert!(
-            load_remaining_approvers(&failing, [&capped])
+            load_reachable_approvals(&failing, [&capped])
                 .await
                 .is_empty()
         );

@@ -8,6 +8,14 @@ use uuid::Uuid;
 
 pub const DEFAULT_APPROVAL_PAGE_SIZE: i32 = 20;
 
+/// Failed reconciliation attempts after which a request is left for a person
+/// to decide (admin override or cancel); see `reconcile_failures`.
+pub const MAX_RECONCILE_FAILURES: i32 = 3;
+
+/// Returned when a vote or status change reaches a request that is no longer
+/// pending. Same message the vote logic uses for a closed request.
+const ALREADY_RESOLVED: &str = "Request is already resolved";
+
 /// SQL condition: user `u` (a `users u` row in scope) may approve under a
 /// policy with the given team, approver roles, named approvers and role
 /// fallback, and is not the requester. Each argument is a SQL expression
@@ -97,8 +105,10 @@ fn capped_request_ready_sql() -> String {
           AND cardinality(r.eligible_approver_ids) > 0
           AND r.approved_count >= p.required_approvers
           AND r.approved_count < r.required_approvers_override
+          AND r.reconcile_failures < {max_failures}
           AND {remaining} = 0"#,
-        remaining = remaining_eligible_approvers_sql()
+        remaining = remaining_eligible_approvers_sql(),
+        max_failures = MAX_RECONCILE_FAILURES,
     )
 }
 
@@ -216,18 +226,31 @@ pub trait ApprovalRepository: Send + Sync {
         request_id: Uuid,
         required_approvers: i32,
     ) -> Result<bool, Error>;
-    /// For each given request that lists eligible approvers: how many of them
-    /// still qualify under the request's policy (enabled, team member, Approver
-    /// role, named or role-routed as routing checks it, not the requester) and
-    /// have not voted yet. Requests with an empty list are left out.
-    async fn count_remaining_eligible_approvers(
+    /// For each given request that lists eligible approvers: the approvals it
+    /// can still reach, that is its `approved_count` plus the eligible
+    /// approvers who still qualify under the request's policy (enabled, team
+    /// member, Approver role, named or role-routed as routing checks it, not
+    /// the requester) and have not voted yet. Both parts come from one
+    /// statement (one snapshot), so a vote committing meanwhile moves one
+    /// approver from "can vote" to "approved" and never drops out of both.
+    /// Requests with an empty list are left out.
+    async fn count_reachable_approvals(
         &self,
         request_ids: Vec<Uuid>,
     ) -> Result<std::collections::HashMap<Uuid, i64>, Error>;
+    /// Whether `user_id` is on the request's eligible list and still qualifies
+    /// under its policy today (the same check as the reachable count).
+    async fn is_eligible_voter(&self, request_id: Uuid, user_id: Uuid) -> Result<bool, Error>;
     /// Pending requests whose AI-11 override can no longer be reached because
     /// no remaining eligible approver can vote, while their approvals already
     /// meet the policy's `required_approvers`. The reconciliation approves them.
     async fn list_capped_requests_ready_for_approval(&self) -> Result<Vec<ApprovalRequest>, Error>;
+    /// Counts one failed reconciliation of a pending request. Returns the new
+    /// failure count, or `None` when the request is no longer pending.
+    async fn record_reconciliation_failure(&self, request_id: Uuid) -> Result<Option<i32>, Error>;
+    /// Marks a pending request auto-approved. `None` when it is no longer
+    /// pending (nothing changed).
+    async fn mark_auto_approved(&self, request_id: Uuid) -> Result<Option<ApprovalRequest>, Error>;
 
     fn clone_box(&self) -> Box<dyn ApprovalRepository>;
 }
@@ -285,6 +308,12 @@ pub trait ApprovalRepositoryTx: ApprovalRepository {
         conn: &mut PgConnection,
         request_id: Uuid,
     ) -> Result<Option<ApprovalRequest>, Error>;
+    /// [`ApprovalRepository::mark_auto_approved`] inside a transaction.
+    async fn mark_auto_approved_tx(
+        &self,
+        conn: &mut PgConnection,
+        request_id: Uuid,
+    ) -> Result<Option<ApprovalRequest>, Error>;
 }
 
 pub fn approval_repository(pool: PgPool) -> Box<dyn ApprovalRepository> {
@@ -304,6 +333,31 @@ pub struct ApprovalRepositoryImpl {
 impl ApprovalRepositoryImpl {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// Guarded by `status = 'pending'`: a closed request is never changed.
+    async fn mark_auto_approved_internal(
+        conn: &mut PgConnection,
+        request_id: Uuid,
+    ) -> Result<Option<ApprovalRequest>, Error> {
+        handle_error(
+            Some(request_id),
+            sqlx::query(
+                r#"
+                UPDATE approval_requests
+                SET status = 'auto_approved', executed_at = NOW(), updated_at = NOW()
+                WHERE id = $1 AND status = 'pending'
+                RETURNING id, policy_id, feature_id, environment_id, change_type, change_payload,
+                          change_description, requested_by, eligible_approver_ids, routing_reason,
+                          admin_override_enabled, status, approved_count, rejected_count,
+                          executed_at, created_at, updated_at, required_approvers_override
+                "#,
+            )
+            .bind(request_id)
+            .map(Self::map_request_row)
+            .fetch_optional(&mut *conn)
+            .await,
+        )
     }
 
     fn map_request_row(row: sqlx::postgres::PgRow) -> ApprovalRequest {
@@ -604,7 +658,7 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
                     ELSE status
                 END,
                 updated_at = NOW()
-            WHERE id = $1
+            WHERE id = $1 AND status = 'pending'
             RETURNING id, policy_id, feature_id, environment_id, change_type, change_payload,
                       change_description, requested_by, eligible_approver_ids, routing_reason,
                       admin_override_enabled, status, approved_count, rejected_count, executed_at,
@@ -615,10 +669,15 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
         .bind(input.vote.as_str())
         .bind(required_approvers)
         .map(Self::map_request_row)
-        .fetch_one(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await;
 
-        let updated = handle_error(Some(input.request_id), result)?;
+        // A request closed since the caller read it takes no more votes;
+        // rolling back also removes the vote row.
+        let Some(updated) = handle_error(Some(input.request_id), result)? else {
+            tx.rollback().await.ok();
+            return Err(Error::InvalidInput(ALREADY_RESOLVED.into()));
+        };
         tx.commit().await.map_err(Error::DatabaseError)?;
         Ok(updated)
     }
@@ -906,7 +965,7 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
         Ok(result.rows_affected() > 0)
     }
 
-    async fn count_remaining_eligible_approvers(
+    async fn count_reachable_approvals(
         &self,
         request_ids: Vec<Uuid>,
     ) -> Result<std::collections::HashMap<Uuid, i64>, Error> {
@@ -917,7 +976,7 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
             None,
             sqlx::query(&format!(
                 r#"
-                SELECT r.id, {remaining} AS remaining
+                SELECT r.id, r.approved_count::BIGINT + {remaining} AS reachable
                 FROM approval_requests r
                 JOIN approval_policies p ON p.id = r.policy_id
                 WHERE r.id = ANY($1) AND cardinality(r.eligible_approver_ids) > 0
@@ -930,8 +989,38 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
         )?;
         Ok(rows
             .into_iter()
-            .map(|row| (row.get::<Uuid, _>("id"), row.get::<i64, _>("remaining")))
+            .map(|row| (row.get::<Uuid, _>("id"), row.get::<i64, _>("reachable")))
             .collect())
+    }
+
+    async fn is_eligible_voter(&self, request_id: Uuid, user_id: Uuid) -> Result<bool, Error> {
+        handle_error(
+            Some(request_id),
+            sqlx::query_scalar::<_, bool>(&format!(
+                r#"
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM approval_requests r
+                    JOIN approval_policies p ON p.id = r.policy_id
+                    JOIN users u ON u.id = $2
+                    WHERE r.id = $1
+                      AND u.id = ANY(r.eligible_approver_ids)
+                      AND {qualifies}
+                )
+                "#,
+                qualifies = approver_qualifies_sql(
+                    "p.team_id",
+                    "p.approver_role_ids",
+                    "p.approver_user_ids",
+                    "p.fallback_to_roles",
+                    "r.requested_by",
+                )
+            ))
+            .bind(request_id)
+            .bind(user_id)
+            .fetch_one(&self.pool)
+            .await,
+        )
     }
 
     async fn list_capped_requests_ready_for_approval(&self) -> Result<Vec<ApprovalRequest>, Error> {
@@ -951,6 +1040,28 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
             .fetch_all(&self.pool)
             .await,
         )
+    }
+
+    async fn record_reconciliation_failure(&self, request_id: Uuid) -> Result<Option<i32>, Error> {
+        handle_error(
+            Some(request_id),
+            sqlx::query_scalar::<_, i32>(
+                r#"
+                UPDATE approval_requests
+                SET reconcile_failures = reconcile_failures + 1
+                WHERE id = $1 AND status = 'pending'
+                RETURNING reconcile_failures
+                "#,
+            )
+            .bind(request_id)
+            .fetch_optional(&self.pool)
+            .await,
+        )
+    }
+
+    async fn mark_auto_approved(&self, request_id: Uuid) -> Result<Option<ApprovalRequest>, Error> {
+        let mut conn = self.pool.acquire().await.map_err(Error::DatabaseError)?;
+        Self::mark_auto_approved_internal(&mut conn, request_id).await
     }
 
     async fn cancel_request(
@@ -1215,6 +1326,14 @@ impl ApprovalRepositoryTx for ApprovalRepositoryImpl {
         Self::update_request_status_internal(conn, request_id, status, executed_at).await
     }
 
+    async fn mark_auto_approved_tx(
+        &self,
+        conn: &mut PgConnection,
+        request_id: Uuid,
+    ) -> Result<Option<ApprovalRequest>, Error> {
+        Self::mark_auto_approved_internal(conn, request_id).await
+    }
+
     async fn approve_capped_request_tx(
         &self,
         conn: &mut PgConnection,
@@ -1282,7 +1401,7 @@ impl ApprovalRepositoryTx for ApprovalRepositoryImpl {
                     ELSE status
                 END,
                 updated_at = NOW()
-            WHERE id = $1
+            WHERE id = $1 AND status = 'pending'
             RETURNING id, policy_id, feature_id, environment_id, change_type, change_payload,
                       change_description, requested_by, eligible_approver_ids, routing_reason,
                       admin_override_enabled, status, approved_count, rejected_count, executed_at,
@@ -1293,9 +1412,12 @@ impl ApprovalRepositoryTx for ApprovalRepositoryImpl {
         .bind(input.vote.as_str())
         .bind(required_approvers)
         .map(Self::map_request_row)
-        .fetch_one(&mut *conn)
+        .fetch_optional(&mut *conn)
         .await;
 
-        handle_error(Some(input.request_id), result)
+        // The caller's transaction is rolled back on this error, which also
+        // removes the vote row.
+        handle_error(Some(input.request_id), result)?
+            .ok_or_else(|| Error::InvalidInput(ALREADY_RESOLVED.into()))
     }
 }

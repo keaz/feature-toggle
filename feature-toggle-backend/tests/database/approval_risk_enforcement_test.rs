@@ -1,9 +1,10 @@
 //! AI-11: approval risk enforcement against a real database.
 
 use feature_toggle_backend::database::approval::{
-    CreateApprovalPolicyInput, CreateApprovalRequestInput,
+    ApprovalRepositoryTx, CreateApprovalPolicyInput, CreateApprovalRequestInput,
+    CreateApprovalVoteInput,
 };
-use feature_toggle_backend::database::entity::FeatureType;
+use feature_toggle_backend::database::entity::{ApprovalVoteValue, FeatureType};
 use feature_toggle_backend::database::feature::CreateFeature;
 use feature_toggle_backend::database::{approval, feature, init_pg_pool, role};
 use feature_toggle_backend::grpc::pb::FeatureUpdate;
@@ -569,6 +570,27 @@ async fn insert_capped_request(
     approver_count: usize,
     required_override: Option<i32>,
 ) -> CapFixture {
+    insert_capped_request_with(
+        pool,
+        mode,
+        policy_required,
+        approver_count,
+        required_override,
+        "cap_test",
+        serde_json::json!({}),
+    )
+    .await
+}
+
+async fn insert_capped_request_with(
+    pool: &PgPool,
+    mode: &str,
+    policy_required: i32,
+    approver_count: usize,
+    required_override: Option<i32>,
+    change_type: &str,
+    change_payload: serde_json::Value,
+) -> CapFixture {
     let team_id = insert_team(pool, Some(true)).await;
     let feature_id = feature::feature_repository(pool.clone())
         .create_feature(CreateFeature {
@@ -620,8 +642,8 @@ async fn insert_capped_request(
             policy_id: policy.id,
             feature_id,
             environment_id: None,
-            change_type: "cap_test".to_string(),
-            change_payload: serde_json::json!({}),
+            change_type: change_type.to_string(),
+            change_payload,
             change_description: None,
             requested_by: requester,
             eligible_approver_ids: approvers.clone(),
@@ -747,8 +769,8 @@ async fn a_removed_approver_lowers_the_requirement_for_the_next_vote(use_pool: b
         .await
         .unwrap();
 
-    let remaining = approval::approval_repository(pool.clone())
-        .count_remaining_eligible_approvers(vec![fixture.request_id])
+    let reachable = approval::approval_repository(pool.clone())
+        .count_reachable_approvals(vec![fixture.request_id])
         .await
         .unwrap();
     let voted = logic_for(&pool, use_pool)
@@ -757,7 +779,7 @@ async fn a_removed_approver_lowers_the_requirement_for_the_next_vote(use_pool: b
     let status = status_of(&pool, fixture.request_id).await;
     cleanup_cap(&pool, &fixture).await;
 
-    assert_eq!(remaining.get(&fixture.request_id), Some(&1));
+    assert_eq!(reachable.get(&fixture.request_id), Some(&1));
     let voted = voted.expect("vote should succeed");
     assert_eq!(voted.approved_count, 1);
     assert_eq!(status, "approved");
@@ -909,4 +931,421 @@ async fn reconciliation_never_touches_a_closed_request() {
     assert!(!ready);
     assert!(reconciled.expect("reconciliation should succeed").is_none());
     assert_eq!(status, "cancelled");
+}
+
+// --- Fix round 1 (2026-10-03) ---
+
+async fn reachable(pool: &PgPool, request_id: Uuid) -> Option<i64> {
+    approval::approval_repository(pool.clone())
+        .count_reachable_approvals(vec![request_id])
+        .await
+        .unwrap()
+        .get(&request_id)
+        .copied()
+}
+
+/// Review race: approvals given plus approvers who can still vote is one
+/// figure from one statement, so a vote moves one from "can vote" to "given"
+/// and the cap does not change. Policy 2, override 3, eligible A, B, D, E with
+/// E disabled: 3 before and after B votes, so A's vote does not approve.
+#[tokio::test]
+async fn reachable_approvals_do_not_change_when_someone_votes() {
+    let pool = init_pg_pool().await;
+    let fixture = insert_capped_request(&pool, "require_extra_approver", 2, 4, Some(3)).await;
+    let [a, b, _d, e] = [
+        fixture.approvers[0],
+        fixture.approvers[1],
+        fixture.approvers[2],
+        fixture.approvers[3],
+    ];
+    disable_user(&pool, e).await;
+    let logic = logic_for(&pool, true);
+
+    let before = reachable(&pool, fixture.request_id).await;
+    logic
+        .approve_request(fixture.request_id, b, None)
+        .await
+        .expect("B votes");
+    let after = reachable(&pool, fixture.request_id).await;
+    let second = logic.approve_request(fixture.request_id, a, None).await;
+    cleanup_cap(&pool, &fixture).await;
+
+    assert_eq!(before, Some(3));
+    assert_eq!(after, Some(3));
+    assert_eq!(
+        second.expect("A votes").status.as_str(),
+        "pending",
+        "D can still vote, so the override of 3 still applies"
+    );
+}
+
+async fn vote_count(pool: &PgPool, request_id: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM approval_votes WHERE request_id = $1")
+        .bind(request_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// A vote that reaches the repository after the request closed changes
+/// nothing on both vote paths: no vote row, no status flip, an error.
+#[tokio::test]
+async fn a_vote_on_a_closed_request_changes_nothing() {
+    let pool = init_pg_pool().await;
+    let fixture = insert_capped_request(&pool, "advisory", 1, 2, None).await;
+    sqlx::query("UPDATE approval_requests SET status = 'approved' WHERE id = $1")
+        .bind(fixture.request_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let repository = approval::approval_repository(pool.clone());
+    let vote = |approver_id: Uuid| CreateApprovalVoteInput {
+        request_id: fixture.request_id,
+        approver_id,
+        vote: ApprovalVoteValue::Reject,
+        comment: None,
+    };
+
+    let plain = repository.add_vote(vote(fixture.approvers[0]), 1).await;
+    let tx_repository = approval::approval_repository_tx(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+    let in_tx = tx_repository
+        .add_vote_tx(&mut tx, vote(fixture.approvers[1]), 1)
+        .await;
+    drop(tx);
+    let status = status_of(&pool, fixture.request_id).await;
+    let votes = vote_count(&pool, fixture.request_id).await;
+    cleanup_cap(&pool, &fixture).await;
+
+    for (path, result) in [("plain", plain), ("tx", in_tx)] {
+        let error = result.expect_err(path).to_string();
+        assert!(error.contains("already resolved"), "{path}: {error}");
+    }
+    assert_eq!(status, "approved");
+    assert_eq!(votes, 0);
+}
+
+/// Who may vote matches who counts as able to vote: a snapshot approver who
+/// left the team, or whom the policy no longer names, is refused.
+#[tokio::test]
+async fn a_snapshot_approver_who_no_longer_qualifies_cannot_vote() {
+    let pool = init_pg_pool().await;
+    let fixture = insert_capped_request(&pool, "advisory", 1, 3, None).await;
+    let [a, b, c] = [
+        fixture.approvers[0],
+        fixture.approvers[1],
+        fixture.approvers[2],
+    ];
+    sqlx::query("DELETE FROM user_teams WHERE user_id = $1")
+        .bind(a)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE approval_policies SET approver_user_ids = $2 WHERE id = $1")
+        .bind(fixture.policy_id)
+        .bind(vec![a, c])
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut refused = Vec::new();
+    for use_pool in [true, false] {
+        let logic = logic_for(&pool, use_pool);
+        for voter in [a, b] {
+            refused.push(logic.approve_request(fixture.request_id, voter, None).await);
+        }
+    }
+    let allowed = logic_for(&pool, true)
+        .approve_request(fixture.request_id, c, None)
+        .await;
+    let status = status_of(&pool, fixture.request_id).await;
+    cleanup_cap(&pool, &fixture).await;
+
+    for result in refused {
+        let error = result.expect_err("must be refused").to_string();
+        assert!(error.contains("not an eligible approver"), "{error}");
+    }
+    assert_eq!(allowed.expect("C still qualifies").approved_count, 1);
+    assert_eq!(status, "approved");
+}
+
+/// A reconciliation whose change cannot be applied stops after 3 failures:
+/// the request stays pending, is no longer listed, and an activity entry
+/// says a person has to decide.
+#[tokio::test]
+async fn a_failing_reconciliation_stops_after_three_tries() {
+    let pool = init_pg_pool().await;
+    // A stage change without a stage id cannot be executed.
+    let fixture = insert_capped_request_with(
+        &pool,
+        "require_extra_approver",
+        1,
+        2,
+        Some(2),
+        "stage_change",
+        serde_json::json!({ "next_status": "DEPLOYED" }),
+    )
+    .await;
+    let logic = logic_for(&pool, true);
+    logic
+        .approve_request(fixture.request_id, fixture.approvers[0], None)
+        .await
+        .expect("A votes");
+    disable_user(&pool, fixture.approvers[1]).await;
+    let request = approval::approval_repository(pool.clone())
+        .get_request_by_id(fixture.request_id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let mut outcomes = Vec::new();
+    let mut listed = Vec::new();
+    for _ in 0..3 {
+        listed.push(ready_ids(&pool).await.contains(&fixture.request_id));
+        outcomes.push(logic.approve_capped_request(request.clone()).await);
+    }
+    let listed_after = ready_ids(&pool).await.contains(&fixture.request_id);
+    let fourth = logic.approve_capped_request(request).await;
+    let status = status_of(&pool, fixture.request_id).await;
+    let stopped: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM activity_log
+         WHERE activity_type = 'approval_reconciliation_stopped'
+           AND metadata->>'approval_request_id' = $1",
+    )
+    .bind(fixture.request_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    cleanup_cap(&pool, &fixture).await;
+
+    assert_eq!(listed, vec![true, true, true]);
+    assert!(outcomes.iter().all(Result::is_err), "{outcomes:?}");
+    assert!(!listed_after, "not listed after 3 failures");
+    assert!(fourth.expect("no error once stopped").is_none());
+    assert_eq!(status, "pending");
+    assert_eq!(stopped, 1);
+}
+
+/// A request created by a real stage change on the seeded policy (2
+/// approvals, role-routed), with `approvers` fresh team approvers.
+struct StageFixture {
+    logic: Box<dyn approval_logic::ApprovalLogic>,
+    feature_id: Uuid,
+    stage_id: Uuid,
+    request_id: Uuid,
+    requester: Uuid,
+    approvers: Vec<Uuid>,
+}
+
+async fn stage_change_request(pool: &PgPool, use_pool: bool, approvers: usize) -> StageFixture {
+    let feature_repository = feature::feature_repository(pool.clone());
+    let activity_log_repository =
+        feature_toggle_backend::database::activity_log::activity_log_repository(pool.clone());
+    let environment_logic = environment::environment_logic(
+        feature_toggle_backend::database::environment::environment_repository(pool.clone()),
+        activity_log_repository.clone_box(),
+    );
+    let logic = logic_for(pool, use_pool);
+    let feature_logic = feature_logic::feature_logic_with_approval(
+        feature_repository.clone_box(),
+        environment_logic,
+        activity_log_repository.clone_box(),
+        feature_toggle_backend::database::user::user_repository(pool.clone()),
+        Some(logic.clone()),
+    );
+    let stage_id = Uuid::new_v4();
+    let feature_id = feature_repository
+        .create_feature(CreateFeature {
+            team_id: Uuid::parse_str(SEEDED_TEAM_ID).unwrap(),
+            key: format!("fix1-stage-feature-{}", Uuid::new_v4()),
+            description: None,
+            feature_type: FeatureType::Simple,
+            lifecycle_stage: "active".to_string(),
+            owner: None,
+            purpose: None,
+            reference_url: None,
+            expires_at: None,
+            cleanup_reason: None,
+            tags: vec![],
+            stages: vec![
+                feature_toggle_backend::database::feature::CreateFeatureStage {
+                    id: stage_id,
+                    environment_id: Uuid::parse_str(POLICY_ENVIRONMENT_ID).unwrap(),
+                    order_index: 0,
+                    parent_stage: None,
+                    position: "{ \"x\": 640, \"y\": 240 }".to_string(),
+                    enabled: true,
+                },
+            ],
+            dependencies: vec![],
+            variants: None,
+            flag_kind: None,
+        })
+        .await
+        .expect("feature setup should succeed");
+    let requester = insert_user(pool, "stage_requester").await;
+    let mut fresh = Vec::new();
+    for _ in 0..approvers {
+        fresh.push(insert_approver(pool).await);
+    }
+    sqlx::query("UPDATE features_pipeline_stages SET status = 'NOT_DEPLOYED' WHERE id = $1")
+        .bind(stage_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    let feature = feature_logic
+        .request_stage_change(
+            ID::from(stage_id),
+            StageChangeRequestType::DeploymentRequested,
+            requester,
+        )
+        .await
+        .expect("stage change should be intercepted by approval policy");
+    let request_id = feature
+        .pending_approval_request_id
+        .clone()
+        .and_then(|id| Uuid::try_from(id).ok())
+        .expect("pending approval id should be set");
+    StageFixture {
+        logic,
+        feature_id,
+        stage_id,
+        request_id,
+        requester,
+        approvers: fresh,
+    }
+}
+
+async fn cleanup_stage(pool: &PgPool, fixture: &StageFixture) {
+    let _ = sqlx::query("DELETE FROM activity_log WHERE metadata->>'approval_request_id' = $1")
+        .bind(fixture.request_id.to_string())
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM features WHERE id = $1")
+        .bind(fixture.feature_id)
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM approval_requests WHERE id = $1")
+        .bind(fixture.request_id)
+        .execute(pool)
+        .await;
+    let mut users = fixture.approvers.clone();
+    users.push(fixture.requester);
+    let _ = sqlx::query("DELETE FROM users WHERE id = ANY($1)")
+        .bind(users)
+        .execute(pool)
+        .await;
+}
+
+async fn stage_status(pool: &PgPool, stage_id: Uuid) -> String {
+    sqlx::query_scalar("SELECT status FROM features_pipeline_stages WHERE id = $1")
+        .bind(stage_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// The status the stage must reach when the request is approved.
+async fn approval_target(pool: &PgPool, request_id: Uuid) -> String {
+    let payload: serde_json::Value =
+        sqlx::query_scalar("SELECT change_payload FROM approval_requests WHERE id = $1")
+            .bind(request_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    payload
+        .get("approval_target_status")
+        .and_then(|value| value.as_str())
+        .or_else(|| payload.get("next_status").and_then(|value| value.as_str()))
+        .expect("payload names a target status")
+        .to_string()
+}
+
+/// Pre-existing bug (since 7bf3cdb): auto-approval marked the request
+/// auto_approved without applying the stage change.
+async fn auto_approval_applies_the_stage_change(use_pool: bool) {
+    let pool = init_pg_pool().await;
+    let fixture = stage_change_request(&pool, use_pool, 0).await;
+    let requested = stage_status(&pool, fixture.stage_id).await;
+    let target = approval_target(&pool, fixture.request_id).await;
+    let request = approval::approval_repository(pool.clone())
+        .get_request_by_id(fixture.request_id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let approved = fixture.logic.auto_approve_request(request.clone()).await;
+    let after = stage_status(&pool, fixture.stage_id).await;
+    let again = fixture.logic.auto_approve_request(request).await;
+    let status = status_of(&pool, fixture.request_id).await;
+    cleanup_stage(&pool, &fixture).await;
+
+    assert_ne!(requested, target);
+    assert_eq!(
+        approved
+            .expect("auto-approval should succeed")
+            .status
+            .as_str(),
+        "auto_approved"
+    );
+    assert_eq!(after, target, "the stage change must be applied");
+    assert!(
+        again.is_err(),
+        "a closed request is not auto-approved twice"
+    );
+    assert_eq!(status, "auto_approved");
+}
+
+#[tokio::test]
+async fn auto_approval_applies_the_stage_change_on_the_transaction_path() {
+    auto_approval_applies_the_stage_change(true).await;
+}
+
+#[tokio::test]
+async fn auto_approval_applies_the_stage_change_on_the_plain_path() {
+    auto_approval_applies_the_stage_change(false).await;
+}
+
+/// The reconciliation applies a real stage change. The request is narrowed to
+/// three fresh approvers with an override of 3; two approve, the third is
+/// disabled, and the reconciliation approves with 2 (the policy's count).
+#[tokio::test]
+async fn reconciliation_applies_the_stage_change() {
+    let pool = init_pg_pool().await;
+    let fixture = stage_change_request(&pool, true, 3).await;
+    sqlx::query(
+        "UPDATE approval_requests
+         SET eligible_approver_ids = $2, required_approvers_override = 3
+         WHERE id = $1",
+    )
+    .bind(fixture.request_id)
+    .bind(fixture.approvers.clone())
+    .execute(&pool)
+    .await
+    .unwrap();
+    let target = approval_target(&pool, fixture.request_id).await;
+    for approver in &fixture.approvers[..2] {
+        fixture
+            .logic
+            .approve_request(fixture.request_id, *approver, None)
+            .await
+            .expect("vote should succeed");
+    }
+    let pending = status_of(&pool, fixture.request_id).await;
+    disable_user(&pool, fixture.approvers[2]).await;
+    let request = approval::approval_repository(pool.clone())
+        .get_request_by_id(fixture.request_id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let reconciled = fixture.logic.approve_capped_request(request).await;
+    let after = stage_status(&pool, fixture.stage_id).await;
+    let status = status_of(&pool, fixture.request_id).await;
+    cleanup_stage(&pool, &fixture).await;
+
+    assert_eq!(pending, "pending");
+    assert!(reconciled.expect("reconciliation should succeed").is_some());
+    assert_eq!(status, "approved");
+    assert_eq!(after, target, "the stage change must be applied");
 }

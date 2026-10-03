@@ -2,7 +2,7 @@ use crate::Error;
 use crate::database::activity_log::{CreateActivityLog, activity_log_repository};
 use crate::database::approval::{
     ApprovalRepository, ApprovalRepositoryTx, CreateApprovalRequestInput, CreateApprovalVoteInput,
-    approval_repository_tx, approver_qualifies_sql,
+    MAX_RECONCILE_FAILURES, approval_repository_tx, approver_qualifies_sql,
 };
 use crate::database::entity::{
     ApprovalPolicy, ApprovalRequest, ApprovalStatus, ApprovalVote, ApprovalVoteValue,
@@ -32,25 +32,23 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 /// Approvals a request needs. Without an AI-11 override it is the policy's
-/// `required_approvers`. With one, the override is capped at the approvals
-/// already given plus `remaining_eligible` (the request's eligible approvers
-/// who still qualify and have not voted; `None` when unknown, for example a
-/// request without a named eligible list), so it never needs more votes than
-/// can still be cast. The result is never below the policy: the override only
-/// ever adds.
+/// `required_approvers`. With one, the override is capped at
+/// `reachable_approvals`: approvals already given plus the request's eligible
+/// approvers who still qualify and have not voted, read in one snapshot
+/// (`ApprovalRepository::count_reachable_approvals`); `None` when unknown, for
+/// example a request without a named eligible list. So it never needs more
+/// votes than can still be cast. The result is never below the policy: the
+/// override only ever adds.
 pub(crate) fn effective_required_approvals(
     policy_required: i32,
     required_approvers_override: Option<i32>,
-    approved_count: i32,
-    remaining_eligible: Option<i64>,
+    reachable_approvals: Option<i64>,
 ) -> i32 {
     let Some(raised) = required_approvers_override else {
         return policy_required;
     };
-    let reachable = remaining_eligible
-        .map(|remaining| i64::from(approved_count.max(0)).saturating_add(remaining.max(0)));
-    let capped = reachable.map_or(i64::from(raised), |reachable| {
-        i64::from(raised).min(reachable)
+    let capped = reachable_approvals.map_or(i64::from(raised), |reachable| {
+        i64::from(raised).min(reachable.max(0))
     });
     i32::try_from(capped)
         .unwrap_or(i32::MAX)
@@ -598,7 +596,19 @@ impl ApprovalLogicImpl {
             // right to reject their own request.
             let rejecting_own_request =
                 *vote == ApprovalVoteValue::Reject && request.requested_by == approver_id;
-            if rejecting_own_request || request.eligible_approver_ids.contains(&approver_id) {
+            if rejecting_own_request {
+                return Ok(());
+            }
+            // On the snapshot and still qualified today (enabled, team member,
+            // named or role-routed by the current policy): the same check the
+            // reachable-approvals count uses, so "may vote" and "can still
+            // vote" agree.
+            if request.eligible_approver_ids.contains(&approver_id)
+                && self
+                    .approval_repository
+                    .is_eligible_voter(request.id, approver_id)
+                    .await?
+            {
                 return Ok(());
             }
 
@@ -624,18 +634,74 @@ impl ApprovalLogicImpl {
         Ok(())
     }
 
+    /// Counts a failed reconciliation. After `MAX_RECONCILE_FAILURES` the
+    /// request is no longer listed for reconciliation, and an
+    /// `approval_reconciliation_stopped` activity says a person has to decide
+    /// (admin override or cancel). Errors here are only logged.
+    async fn record_reconciliation_failure(
+        &self,
+        pool: &PgPool,
+        request: &ApprovalRequest,
+        error: &Error,
+    ) {
+        let failures = match self
+            .approval_repository
+            .record_reconciliation_failure(request.id)
+            .await
+        {
+            Ok(Some(failures)) => failures,
+            Ok(None) => return,
+            Err(err) => {
+                warn!(
+                    "Could not count reconciliation failure for approval request {}: {err}",
+                    request.id
+                );
+                return;
+            }
+        };
+        if failures < MAX_RECONCILE_FAILURES {
+            return;
+        }
+        let entry = CreateActivityLog {
+            activity_type: activity_types::APPROVAL_RECONCILIATION_STOPPED.to_string(),
+            entity_type: entity_types::FEATURE.to_string(),
+            entity_id: request.feature_id.to_string(),
+            actor_id: None,
+            actor_name: Some("Approval reconciliation".to_string()),
+            description: format!(
+                "Approval request could not be approved after {failures} attempts; an admin override or cancel is needed"
+            ),
+            metadata: Some(serde_json::json!({
+                "approval_request_id": request.id.to_string(),
+                "failures": failures,
+                "last_error": error.to_string(),
+            })),
+        };
+        if let Err(err) = activity_log_repository(pool.clone())
+            .create_activity(entry)
+            .await
+        {
+            warn!(
+                "Could not record stopped reconciliation for approval request {}: {err}",
+                request.id
+            );
+        }
+    }
+
     /// Approvals the next vote is counted against: see
-    /// [`effective_required_approvals`]. Reads who can still vote only when the
-    /// request has an override and a named eligible list.
+    /// [`effective_required_approvals`]. Reads the reachable approvals only
+    /// when the request has an override and a named eligible list. The
+    /// request's own `approved_count` (read earlier) is not used: it and the
+    /// voter count must come from one snapshot.
     async fn required_approvals(
         &self,
         request: &ApprovalRequest,
         policy: &ApprovalPolicy,
     ) -> Result<i32, Error> {
-        let remaining = match request.required_approvers_override {
+        let reachable = match request.required_approvers_override {
             Some(_) if !request.eligible_approver_ids.is_empty() => self
                 .approval_repository
-                .count_remaining_eligible_approvers(vec![request.id])
+                .count_reachable_approvals(vec![request.id])
                 .await?
                 .get(&request.id)
                 .copied(),
@@ -644,8 +710,7 @@ impl ApprovalLogicImpl {
         Ok(effective_required_approvals(
             policy.required_approvers,
             request.required_approvers_override,
-            request.approved_count,
-            remaining,
+            reachable,
         ))
     }
 
@@ -1361,7 +1426,9 @@ impl ApprovalLogicImpl {
             .and_then(|v| v.as_str());
 
         let final_status = match request.status {
-            ApprovalStatus::Approved => approval_target_status.unwrap_or(next_status),
+            ApprovalStatus::Approved | ApprovalStatus::AutoApproved => {
+                approval_target_status.unwrap_or(next_status)
+            }
             ApprovalStatus::Rejected => rejection_target_status.unwrap_or(next_status),
             _ => return Ok(()),
         };
@@ -1410,7 +1477,9 @@ impl ApprovalLogicImpl {
             .and_then(|v| v.as_str());
 
         let final_status = match request.status {
-            ApprovalStatus::Approved => approval_target_status.unwrap_or(next_status),
+            ApprovalStatus::Approved | ApprovalStatus::AutoApproved => {
+                approval_target_status.unwrap_or(next_status)
+            }
             ApprovalStatus::Rejected => rejection_target_status.unwrap_or(next_status),
             _ => return Ok(()),
         };
@@ -1719,16 +1788,18 @@ impl ApprovalLogic for ApprovalLogicImpl {
             let approval_repo_tx = approval_repository_tx(pool.clone());
             let feature_repo_tx = feature_repository_tx(pool.clone());
 
-            self.execute_change_tx(&feature_repo_tx, &mut tx, &request, SENTINEL_UUID)
-                .await?;
-
-            let updated = approval_repo_tx
-                .update_request_status_tx(
-                    &mut tx,
-                    request.id,
-                    ApprovalStatus::AutoApproved,
-                    Some(Utc::now()),
-                )
+            // Close the request first (guarded by status = 'pending'), then
+            // apply the change for the auto-approved row in the same
+            // transaction. Before, the pending row was passed to
+            // `execute_change_tx`, which applies nothing for a pending status.
+            let Some(updated) = approval_repo_tx
+                .mark_auto_approved_tx(&mut tx, request.id)
+                .await?
+            else {
+                tx.rollback().await.map_err(Error::DatabaseError)?;
+                return Err(Error::InvalidInput("Request is already resolved".into()));
+            };
+            self.execute_change_tx(&feature_repo_tx, &mut tx, &updated, SENTINEL_UUID)
                 .await?;
             tx.commit().await.map_err(Error::DatabaseError)?;
             self.publish_event(&updated, team_id).await?;
@@ -1741,11 +1812,21 @@ impl ApprovalLogic for ApprovalLogicImpl {
         }
 
         let team_id = self.policy_team_id(request.policy_id).await?;
-        self.execute_change(&request, SENTINEL_UUID).await?;
-        let updated = self
+        let Some(updated) = self
             .approval_repository
-            .update_request_status(request.id, ApprovalStatus::AutoApproved, Some(Utc::now()))
-            .await?;
+            .mark_auto_approved(request.id)
+            .await?
+        else {
+            return Err(Error::InvalidInput("Request is already resolved".into()));
+        };
+        if let Err(exec_err) = self.execute_change(&updated, SENTINEL_UUID).await {
+            // Put the request back so the next scheduler run retries it.
+            let _ = self
+                .approval_repository
+                .update_request_status(request.id, ApprovalStatus::Pending, None)
+                .await;
+            return Err(exec_err);
+        }
         self.publish_event(&updated, team_id).await?;
 
         // Notify edge servers about the feature update after auto-approval
@@ -1764,66 +1845,75 @@ impl ApprovalLogic for ApprovalLogicImpl {
         let Some(pool) = &self.db_pool else {
             return Ok(None);
         };
-        let policy = self
-            .approval_repository
-            .get_policy_by_id(request.policy_id)
-            .await?
-            .ok_or(Error::NotFound(request.policy_id))?;
-        let mut tx = pool.begin().await.map_err(Error::DatabaseError)?;
-        let approval_repo_tx = approval_repository_tx(pool.clone());
-        let feature_repo_tx = feature_repository_tx(pool.clone());
+        // An async block so every failure below (including a change that
+        // cannot be applied) is counted; see `record_reconciliation_failure`.
+        let result: Result<Option<ApprovalRequest>, Error> = async {
+            let policy = self
+                .approval_repository
+                .get_policy_by_id(request.policy_id)
+                .await?
+                .ok_or(Error::NotFound(request.policy_id))?;
+            let mut tx = pool.begin().await.map_err(Error::DatabaseError)?;
+            let approval_repo_tx = approval_repository_tx(pool.clone());
+            let feature_repo_tx = feature_repository_tx(pool.clone());
 
-        // Guarded in SQL: still pending and still nobody left to vote.
-        let Some(approved) = approval_repo_tx
-            .approve_capped_request_tx(&mut tx, request.id)
-            .await?
-        else {
-            tx.rollback().await.map_err(Error::DatabaseError)?;
-            return Ok(None);
-        };
-        // An error here drops the transaction, so the request stays pending.
-        self.execute_change_tx(&feature_repo_tx, &mut tx, &approved, SENTINEL_UUID)
-            .await?;
-        let effective = effective_required_approvals(
-            policy.required_approvers,
-            approved.required_approvers_override,
-            approved.approved_count,
-            Some(0),
-        );
-        activity_log_repository(pool.clone())
-            .create_activity_tx(
-                &mut tx,
-                CreateActivityLog {
-                    activity_type: activity_types::APPROVAL_REQUIREMENT_RECONCILED.to_string(),
-                    entity_type: entity_types::FEATURE.to_string(),
-                    entity_id: approved.feature_id.to_string(),
-                    actor_id: None,
-                    actor_name: Some("Approval reconciliation".to_string()),
-                    description: format!(
-                        "Approval request approved with {} approval(s): no remaining eligible approver can vote for the {} the AI risk assessment asked for, and the policy requires {}",
-                        approved.approved_count,
-                        approved.required_approvers_override.unwrap_or(effective),
-                        policy.required_approvers
-                    ),
-                    metadata: Some(serde_json::json!({
-                        "approval_request_id": approved.id.to_string(),
-                        "reason": "no_remaining_eligible_approver",
-                        "approved_count": approved.approved_count,
-                        "required_approvers_override": approved.required_approvers_override,
-                        "policy_required_approvers": policy.required_approvers,
-                        "required_approvals_effective": effective,
-                    })),
-                },
-            )
-            .await
-            .map_err(Error::DatabaseError)?;
-        tx.commit().await.map_err(Error::DatabaseError)?;
+            // Guarded in SQL: still pending and still nobody left to vote.
+            let Some(approved) = approval_repo_tx
+                .approve_capped_request_tx(&mut tx, request.id)
+                .await?
+            else {
+                tx.rollback().await.map_err(Error::DatabaseError)?;
+                return Ok(None);
+            };
+            // An error here drops the transaction, so the request stays pending.
+            self.execute_change_tx(&feature_repo_tx, &mut tx, &approved, SENTINEL_UUID)
+                .await?;
+            let effective = effective_required_approvals(
+                policy.required_approvers,
+                approved.required_approvers_override,
+                Some(i64::from(approved.approved_count)),
+            );
+            activity_log_repository(pool.clone())
+                .create_activity_tx(
+                    &mut tx,
+                    CreateActivityLog {
+                        activity_type: activity_types::APPROVAL_REQUIREMENT_RECONCILED.to_string(),
+                        entity_type: entity_types::FEATURE.to_string(),
+                        entity_id: approved.feature_id.to_string(),
+                        actor_id: None,
+                        actor_name: Some("Approval reconciliation".to_string()),
+                        description: format!(
+                            "Approval request approved with {} approval(s): no remaining eligible approver can vote for the {} the AI risk assessment asked for, and the policy requires {}",
+                            approved.approved_count,
+                            approved.required_approvers_override.unwrap_or(effective),
+                            policy.required_approvers
+                        ),
+                        metadata: Some(serde_json::json!({
+                            "approval_request_id": approved.id.to_string(),
+                            "reason": "no_remaining_eligible_approver",
+                            "approved_count": approved.approved_count,
+                            "required_approvers_override": approved.required_approvers_override,
+                            "policy_required_approvers": policy.required_approvers,
+                            "required_approvals_effective": effective,
+                        })),
+                    },
+                )
+                .await
+                .map_err(Error::DatabaseError)?;
+            tx.commit().await.map_err(Error::DatabaseError)?;
 
-        self.publish_event(&approved, policy.team_id).await?;
-        self.notify_edge_servers(approved.feature_id).await;
-        self.dispatch_stage_change_approved_notification(&approved, policy.team_id, None)
-            .await;
-        Ok(Some(approved))
+            self.publish_event(&approved, policy.team_id).await?;
+            self.notify_edge_servers(approved.feature_id).await;
+            self.dispatch_stage_change_approved_notification(&approved, policy.team_id, None)
+                .await;
+            Ok(Some(approved))
+        }
+        .await;
+        if let Err(err) = &result {
+            self.record_reconciliation_failure(pool, &request, err)
+                .await;
+        }
+        result
     }
 
     async fn preview_stage_change_policy(
@@ -3316,14 +3406,17 @@ mod ai_risk_trigger_tests {
 
     /// Casts one approve vote with a policy needing `policy_required` approvals
     /// and checks that `add_vote` receives `expected_required`. The request
-    /// names the voter and one other eligible approver; `remaining` is how many
-    /// of them can still vote (the repository's count). The vote leaves the
-    /// request pending, so no change is executed.
+    /// names the voter and one other eligible approver; `reachable` is the
+    /// repository's one-snapshot count of approvals given plus eligible
+    /// approvers who can still vote. The request as read says
+    /// `read_approved_count`; the logic must not add it to `reachable`. The
+    /// vote leaves the request pending, so no change is executed.
     async fn vote_passes_required(
         policy_required: i32,
         request_override: Option<i32>,
         admin_override: bool,
-        remaining: i64,
+        read_approved_count: i32,
+        reachable: i64,
         expected_required: i32,
     ) {
         let request_id = Uuid::new_v4();
@@ -3343,7 +3436,7 @@ mod ai_risk_trigger_tests {
             routing_reason: None,
             admin_override_enabled: admin_override,
             status: ApprovalStatus::Pending,
-            approved_count: 0,
+            approved_count: read_approved_count,
             rejected_count: 0,
             executed_at: None,
             created_at: Utc::now(),
@@ -3377,15 +3470,21 @@ mod ai_risk_trigger_tests {
             .expect_get_policy_by_id()
             .returning(move |_| Ok(Some(policy.clone())));
         let after_vote = ApprovalRequest {
-            approved_count: 1,
+            approved_count: read_approved_count + 1,
             ..pending.clone()
         };
         // Only a request with an override asks who can still vote.
         approval_repo
-            .expect_count_remaining_eligible_approvers()
+            .expect_count_reachable_approvals()
             .withf(move |ids| ids == &vec![request_id])
             .times(usize::from(request_override.is_some()))
-            .returning(move |ids| Ok(ids.into_iter().map(|id| (id, remaining)).collect()));
+            .returning(move |ids| Ok(ids.into_iter().map(|id| (id, reachable)).collect()));
+        // A voter outside the admin override must still qualify today.
+        approval_repo
+            .expect_is_eligible_voter()
+            .withf(move |request, user| *request == request_id && *user == approver_id)
+            .times(usize::from(!admin_override))
+            .returning(|_, _| Ok(true));
         approval_repo
             .expect_add_vote()
             .withf(move |_, required| *required == expected_required)
@@ -3427,17 +3526,17 @@ mod ai_risk_trigger_tests {
 
     #[tokio::test]
     async fn vote_counts_against_the_request_override_when_set() {
-        vote_passes_required(1, Some(2), false, 2, 2).await;
+        vote_passes_required(1, Some(2), false, 0, 2, 2).await;
     }
 
     #[tokio::test]
     async fn vote_counts_against_the_policy_without_an_override() {
-        vote_passes_required(1, None, false, 2, 1).await;
+        vote_passes_required(1, None, false, 0, 2, 1).await;
     }
 
     #[tokio::test]
     async fn admin_override_does_not_lower_the_overridden_requirement() {
-        vote_passes_required(1, Some(2), true, 2, 2).await;
+        vote_passes_required(1, Some(2), true, 0, 2, 2).await;
     }
 
     /// The other eligible approver was disabled or lost the role after the
@@ -3445,40 +3544,50 @@ mod ai_risk_trigger_tests {
     /// 2 is capped at 1 and this vote is enough.
     #[tokio::test]
     async fn vote_counts_against_the_approvers_who_can_still_vote() {
-        vote_passes_required(1, Some(2), false, 1, 1).await;
+        vote_passes_required(1, Some(2), false, 0, 1, 1).await;
     }
 
     /// The cap never takes the requirement below the policy.
     #[tokio::test]
     async fn the_capped_requirement_never_drops_below_the_policy() {
-        vote_passes_required(2, Some(3), false, 1, 2).await;
+        vote_passes_required(2, Some(3), false, 0, 1, 2).await;
+    }
+
+    /// Review race: policy 2, override 3, eligible A, B, D (E disabled). The
+    /// request was read before B's vote committed (approved 0), but the count
+    /// runs after it: approved 1 + {A, D} = 3. The cap must come from that one
+    /// snapshot (3), not the stale read plus the later count (0 + 2 = 2, which
+    /// would let A's vote approve while D can still vote).
+    #[tokio::test]
+    async fn the_cap_uses_one_snapshot_of_approvals_and_remaining_voters() {
+        vote_passes_required(2, Some(3), false, 0, 3, 3).await;
     }
 
     #[test]
     fn effective_requirement_is_the_policy_without_an_override() {
-        assert_eq!(effective_required_approvals(2, None, 0, Some(0)), 2);
-        assert_eq!(effective_required_approvals(2, None, 5, None), 2);
+        assert_eq!(effective_required_approvals(2, None, Some(0)), 2);
+        assert_eq!(effective_required_approvals(2, None, None), 2);
     }
 
     #[test]
-    fn effective_requirement_caps_the_override_at_who_can_still_approve() {
-        // (policy, override, approved so far, can still vote) -> needed.
+    fn effective_requirement_caps_the_override_at_reachable_approvals() {
+        // (policy, override, approvals given + eligible who can still vote) -> needed.
         let cases = [
-            (1, 2, 0, Some(2), 2),
-            (1, 2, 0, Some(1), 1),
-            (1, 2, 1, Some(1), 2),
-            (1, 2, 1, Some(0), 1),
-            (2, 3, 1, Some(0), 2),
-            (2, 3, 0, Some(0), 2),
-            (1, 2, 0, None, 2),
+            (1, 2, Some(2), 2),
+            (1, 2, Some(1), 1),
+            (1, 2, Some(3), 2),
+            (2, 3, Some(1), 2),
+            (2, 3, Some(0), 2),
+            (2, 3, Some(3), 3),
+            (1, 2, None, 2),
             // The override only ever adds to the policy.
-            (3, 2, 0, None, 3),
+            (3, 2, None, 3),
         ];
-        for (policy, raised, approved, remaining, expected) in cases {
+        for (policy, raised, reachable, expected) in cases {
             assert_eq!(
-                effective_required_approvals(policy, Some(raised), approved, remaining),
+                effective_required_approvals(policy, Some(raised), reachable),
                 expected,
-                "policy={policy} override={raised} approved={approved} remaining={remaining:?}"
+                "policy={policy} override={raised} reachable={reachable:?}"
             );
         }
     }

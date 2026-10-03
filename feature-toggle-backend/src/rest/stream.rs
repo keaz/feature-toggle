@@ -20,7 +20,7 @@ use crate::logic::feature_evaluation::{FeatureEvaluationEvent, FeatureEvaluation
 use crate::logic::pipeline::PipelineLogic;
 use crate::model::ID;
 use crate::rest::approval::{
-    ApprovalRequestsResponse, load_ai_risk, load_policies, load_remaining_approvers,
+    ApprovalRequestsResponse, load_ai_risk, load_policies, load_reachable_approvals,
     map_request_with_policy,
 };
 use crate::rest::error::ErrorResponse;
@@ -869,7 +869,7 @@ async fn send_approval_requests(
         requests.iter().map(|request| request.policy_id),
     )
     .await;
-    let remaining = load_remaining_approvers(repo.as_ref(), &requests).await;
+    let reachable = load_reachable_approvals(repo.as_ref(), &requests).await;
 
     let mut items = Vec::with_capacity(requests.len());
     for request in requests {
@@ -879,9 +879,9 @@ async fn send_approval_requests(
             .map_err(|e| format!("Failed to load approval votes: {e}"))?;
         let summary = ai_risk.remove(&request.id);
         let policy = policies.get(&request.policy_id);
-        let remaining = remaining.get(&request.id).copied();
+        let reachable = reachable.get(&request.id).copied();
         items.push(map_request_with_policy(
-            request, votes, policy, summary, remaining,
+            request, votes, policy, summary, reachable,
         ));
     }
 
