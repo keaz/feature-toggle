@@ -726,6 +726,30 @@ pub(crate) fn map_ai_risk_at(
     })
 }
 
+/// Loads each distinct policy once, for a list of requests. Fails open per
+/// policy: a read error is logged and that policy is left out, so its rows map
+/// without a policy instead of failing the whole list.
+pub(crate) async fn load_policies(
+    repo: &dyn ApprovalRepository,
+    policy_ids: impl IntoIterator<Item = Uuid>,
+) -> HashMap<Uuid, ApprovalPolicy> {
+    let mut policies = HashMap::new();
+    let mut seen = std::collections::HashSet::new();
+    for policy_id in policy_ids {
+        if !seen.insert(policy_id) {
+            continue;
+        }
+        match repo.get_policy_by_id(policy_id).await {
+            Ok(Some(policy)) => {
+                policies.insert(policy_id, policy);
+            }
+            Ok(None) => {}
+            Err(err) => warn!("Could not load approval policy {policy_id}: {err}"),
+        }
+    }
+    policies
+}
+
 /// Loads the AI risk summaries of many requests with one query. Fails open: a
 /// read error is logged and every request shows no assessment.
 pub(crate) async fn load_ai_risk(
@@ -962,23 +986,21 @@ pub(crate) async fn list_approval_requests(
     )
     .await;
 
+    let policies = load_policies(
+        repo.get_ref().as_ref(),
+        requests.iter().map(|request| request.policy_id),
+    )
+    .await;
+
     let mut items = Vec::with_capacity(requests.len());
     for request in requests {
-        let policy = repo
-            .get_policy_by_id(request.policy_id)
-            .await
-            .map_err(RestError::from)?;
         let votes = repo
             .list_votes_for_request(request.id)
             .await
             .map_err(RestError::from)?;
         let summary = ai_risk.remove(&request.id);
-        items.push(map_request_with_policy(
-            request,
-            votes,
-            policy.as_ref(),
-            summary,
-        ));
+        let policy = policies.get(&request.policy_id);
+        items.push(map_request_with_policy(request, votes, policy, summary));
     }
 
     Ok(HttpResponse::Ok().json(ApprovalRequestsResponse {
@@ -1671,6 +1693,78 @@ mod tests {
         assert_eq!(json["meta"]["total"], 1);
         assert_eq!(json["items"][0]["aiRisk"], serde_json::Value::Null);
         assert_eq!(json["items"][0]["requiredApprovalsEffective"], 2);
+    }
+
+    #[actix_web::test]
+    async fn load_policies_reads_each_policy_once_and_fails_open_per_policy() {
+        let shared = Uuid::new_v4();
+        let broken = Uuid::new_v4();
+        let mut repo = MockApprovalRepository::new();
+        repo.expect_get_policy_by_id()
+            .withf(move |id| *id == shared)
+            .times(1)
+            .returning(move |id| Ok(Some(sample_policy(id))));
+        repo.expect_get_policy_by_id()
+            .withf(move |id| *id == broken)
+            .times(1)
+            .returning(|_| Err(crate::Error::InvalidInput("db down".into())));
+
+        let policies = load_policies(&repo, [shared, broken, shared, broken]).await;
+
+        assert_eq!(policies.len(), 1);
+        assert_eq!(policies[&shared].id, shared);
+        assert!(!policies.contains_key(&broken));
+    }
+
+    #[actix_web::test]
+    async fn list_approval_requests_reads_a_shared_policy_once() {
+        let team_id = Uuid::new_v4();
+        let first = sample_request(Uuid::new_v4());
+        let second = ApprovalRequest {
+            id: Uuid::new_v4(),
+            ..first.clone()
+        };
+        let policy_id = first.policy_id;
+        let requests = vec![first, second];
+
+        let mut mock_repo = MockApprovalRepository::new();
+        mock_repo
+            .expect_list_requests_for_team_with_offset()
+            .returning(move |_, _, _, _| Ok((requests.clone(), 2)));
+        mock_repo
+            .expect_get_policy_by_id()
+            .withf(move |id| *id == policy_id)
+            .times(1)
+            .returning(move |id| Ok(Some(sample_policy(id))));
+        mock_repo
+            .expect_list_votes_for_request()
+            .times(2)
+            .returning(|_| Ok(vec![]));
+        let mut ai_repo = MockAiJudgmentRepository::new();
+        ai_repo
+            .expect_get_for_subjects()
+            .returning(|_, _, _| Ok(vec![]));
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(
+                    Box::new(mock_repo) as Box<dyn ApprovalRepository>
+                ))
+                .app_data(web::Data::new(
+                    Box::new(ai_repo) as Box<dyn AiJudgmentRepository>
+                ))
+                .service(web::scope("/api/v1").configure(super::configure)),
+        )
+        .await;
+        let req = test::TestRequest::get()
+            .uri(&format!("/api/v1/teams/{team_id}/approval-requests"))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(json["items"].as_array().unwrap().len(), 2);
+        assert_eq!(json["items"][1]["policy"]["name"], "Production approval");
     }
 
     #[actix_web::test]

@@ -19,7 +19,9 @@ use crate::logic::feature::FeatureLogic;
 use crate::logic::feature_evaluation::{FeatureEvaluationEvent, FeatureEvaluationLogic};
 use crate::logic::pipeline::PipelineLogic;
 use crate::model::ID;
-use crate::rest::approval::{ApprovalRequestsResponse, load_ai_risk, map_request_with_policy};
+use crate::rest::approval::{
+    ApprovalRequestsResponse, load_ai_risk, load_policies, map_request_with_policy,
+};
 use crate::rest::error::ErrorResponse;
 use crate::rest::metrics::{
     ActivityEntityDetailsResponse, ActivityLogPageResponse, ActivityLogResponse,
@@ -859,23 +861,23 @@ async fn send_approval_requests(
     )
     .await;
 
+    // One read per distinct policy; a failed read leaves only its rows
+    // without a policy instead of aborting the whole send.
+    let policies = load_policies(
+        repo.as_ref(),
+        requests.iter().map(|request| request.policy_id),
+    )
+    .await;
+
     let mut items = Vec::with_capacity(requests.len());
     for request in requests {
         let votes = repo
             .list_votes_for_request(request.id)
             .await
             .map_err(|e| format!("Failed to load approval votes: {e}"))?;
-        let policy = repo
-            .get_policy_by_id(request.policy_id)
-            .await
-            .map_err(|e| format!("Failed to load approval policy: {e}"))?;
         let summary = ai_risk.remove(&request.id);
-        items.push(map_request_with_policy(
-            request,
-            votes,
-            policy.as_ref(),
-            summary,
-        ));
+        let policy = policies.get(&request.policy_id);
+        items.push(map_request_with_policy(request, votes, policy, summary));
     }
 
     let response = ApprovalRequestsResponse {
