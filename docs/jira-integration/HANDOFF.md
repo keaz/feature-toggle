@@ -12,14 +12,14 @@ Read this after [`README.md`](README.md) and [`design.md`](design.md). It record
 | JI-11 `externalRef`/`reason` backend | Done | backend `e251f9e` |
 | JI-13 integration config | Done | backend `4b66d36` |
 | JI-14 external approval path | Done | backend `0751c25` |
-| JI-15 inbound events + rules | Open, **next** | — |
+| JI-15 inbound events + rules | Done | backend `120b73d` |
 | JI-12 by-key endpoints (optional) | Done (built before JI-13, at the user's request) | backend `513f393` |
-| JI-20 UI Jira links | Open (needs JI-10) | — |
+| JI-20 UI Jira links | Open, **next** (needs JI-10) | — |
 | JI-21 UI ref/reason, Jira approval | Open (needs JI-11, JI-14) | — |
 | JI-22 UI Jira settings | Open (needs JI-13, JI-15) | — |
 | JI-30 setup guide + e2e test | Open (needs JI-15) | — |
 
-**Next task: [JI-15](tasks/JI-15-jira-inbound-events-backend.md).**
+**Next task: [JI-20](tasks/JI-20-ui-feature-jira-links.md).**
 
 ## 2. Planning log (2026-10-03)
 
@@ -61,7 +61,7 @@ New tasks JI-13, JI-14, JI-15, JI-22; JI-12 became optional; JI-21 and JI-30 cha
 - **Run the backend end to end** without clashing with a dev server: a TOML outside the repo with `http_addr = "127.0.0.1:18180"` and `grpc_addr = "127.0.0.1:15151"`, then `FEATURE_TOGGLE_CONFIG=<file> ./target/debug/feature-toggle-backend` from `feature-toggle/` (needs `log4rs.yaml` in the working directory). On an empty DB create the admin with `POST /api/v1/admins` (`api-test-admin` / `password123`), then `POST /api/v1/auth/login`.
 - **System client for manual checks:** `POST /api/v1/teams/{teamId}/system-clients` as a team admin returns `{systemClient, token}`. Use the token as `Authorization: Bearer <token>`. Never paste it into a file or commit.
 - **Contracts:** after a DTO or endpoint change run `./scripts/export-contracts.sh`, copy `feature-toggle-backend/contracts/generated/contract-hashes.json` to `contracts/baseline/`, then `./scripts/check-contract-compat.sh`. Only the baseline file is tracked.
-- **Migrations:** latest is `20261004030000_approval_request_source.sql` (JI-14). Later tasks use later `20261004...` timestamps, in task order.
+- **Migrations:** latest is `20261004040000_jira_integration_events.sql` (JI-15). Later tasks use later `20261004...` timestamps, in task order.
 - **UI:** `../feature-toggle-ui/` on `main` (last commit at planning: `dc16a2f`). pnpm only: `pnpm lint`, `pnpm build`, `pnpm test:run`.
 - After code changes run `graphify update .` in the repo you changed.
 
@@ -129,3 +129,12 @@ New tasks JI-13, JI-14, JI-15, JI-22; JI-12 became optional; JI-21 and JI-30 cha
 - `approval_requests.approval_source` (`fluxgate`, `jira`, `auto`) and `external_approver` JSON (`system`, `account_id`, `display_name`, `issue_key`, `status`); API `approvalSource`, `externalApprover` (JI-21 shows "Approved by Jira (<display name>, <issue key>)" from these).
 - `ApprovalLogic::approve_stage_change_externally` needs the pool; `approval_logic(...)` without a pool returns `InvalidInput("Transaction pool not configured")`.
 - The shadow user needs no `user_teams` row: the logic request path does not check team membership.
+
+### From JI-15 (`120b73d`)
+
+- Inbound endpoint: `POST /api/v1/integrations/jira/{integrationId}/events`, no JWT (`middleware::is_public_jira_event_path`), secret in `Authorization: Bearer <secret>` or `X-FluxGate-Jira-Secret`. Body ≤ 1 MiB: Jira webhook (Cloud/DC) or Automation "Issue data (Jira format)", bare or `{issue, user}`. Response 200 `{eventId, results, unknownEnvironments, unknownFeatures, ignored?, duplicate}`; 400 bad body; 401 any auth failure (one message); 413 too large; 500 database error (event stored with `error`).
+- Event log for the UI (JI-22): `GET /api/v1/jira-integrations/{id}/events?offset&limit` → `{items: [JiraEventLogItem], meta}`; item: `id`, `integrationId`, `receivedAt`, `issueKey`, `jiraStatus`, `jiraActor {accountId, displayName}`, `results` (`RuleResult` list), `unknownEnvironments`, `unknownFeatures`, `ignored`, `error`. Events are kept 30 days.
+- `RuleResult` fields: `featureId`, `featureKey`, `environmentId`, `environment`, `ruleId`, `ruleStatus`, `action`, `outcome` (`applied`/`no_op`/`refused`/`error`), `from`, `to`, `reason`, `approvalRequestId`.
+- For JI-30's guide: a Jira webhook acts only on events whose changelog has a `status` item; Automation bodies always count as a status change (the rule decides when to send). The environment comes from `environmentField` (`labels` or a custom field; option objects and multi-selects work). Repeats within 10 minutes (same issue, status, environments and changelog id / `fields.updated`) return the first result.
+- Open point: no rate limit on the public route (the repo has none). Add one at the proxy before exposing it to the internet.
+- Manual curl script used for verification: see the JI-15 handoff log (setup by SQL + API, then three curls).
