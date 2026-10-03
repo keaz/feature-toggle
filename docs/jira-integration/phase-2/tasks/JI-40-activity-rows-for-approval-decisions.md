@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Type | Feature (audit gap) |
-| Status | Open |
+| Status | Done in c79fc64 |
 | Repo | backend (`feature-toggle/`) |
 | Crate | `feature-toggle-backend` |
 | Depends on | — |
@@ -119,4 +119,9 @@ JI-43 learns about stage changes from `activity_log`. Several approval paths cha
 
 ## Handoff log
 
-(empty)
+- Rows written in the same transaction as the status change in `apply_vote_tx`, `auto_approve_request`, `approve_capped_request` and the `cancel_request` tx branch, through `record_stage_decision_tx` and `stage_decision_activity` in `logic/approval.rs`. `execute_change_tx` now returns `Result<Option<String>, Error>`; the external path ignores the value.
+- Gated request row: `log_gated_stage_change_requested` in `logic/feature.rs` (best effort, pool). Constants `STAGE_CHANGE_REQUESTED` and `APPROVAL_REQUEST_CANCELLED` added; the direct branch uses the constant.
+- Non-transaction `apply_vote`, the non-tx `cancel_request` branch and the non-tx `auto_approve_request` branch write no row: `ApprovalLogicImpl` has no activity repository without a pool, and production always wires a pool (`approval_logic_with_pool`). Only the pool-less constructor used by mock unit tests reaches them.
+- `actor_name` for vote and cancel is the username (not the full name the notifications use).
+- A cancel for a stage deleted meanwhile still succeeds and writes no row.
+- No existing test count changed. New tests: `tests/database/approval_activity_test.rs` (7).

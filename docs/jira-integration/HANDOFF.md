@@ -21,11 +21,11 @@ Read this after [`README.md`](README.md) and [`design.md`](design.md). It record
 
 **Phase 1 is complete (2026-10-03).**
 
-**Phase 2 is planned (2026-10-03):** write-back to Jira (comments + live remote link), inbound rate limit, signed native webhooks, reason hint. Design [`phase-2/design.md`](phase-2/design.md), tasks [`phase-2/README.md`](phase-2/README.md). **Next task: [JI-40](phase-2/tasks/JI-40-activity-rows-for-approval-decisions.md).**
+**Phase 2 is planned (2026-10-03):** write-back to Jira (comments + live remote link), inbound rate limit, signed native webhooks, reason hint. Design [`phase-2/design.md`](phase-2/design.md), tasks [`phase-2/README.md`](phase-2/README.md). **Next task: [JI-41](phase-2/tasks/JI-41-writeback-config.md).**
 
 | Phase 2 task | Status | Commit |
 |---|---|---|
-| JI-40 activity rows for approval decisions | Open | |
+| JI-40 activity rows for approval decisions | Done | backend `c79fc64` |
 | JI-41 write-back config | Open | |
 | JI-42 outbound jobs + sender | Open | |
 | JI-43 capture | Open | |
