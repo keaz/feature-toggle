@@ -11,15 +11,15 @@ Read this after [`README.md`](README.md) and [`design.md`](design.md). It record
 | JI-10 external links backend | Done | backend `f3941e4` |
 | JI-11 `externalRef`/`reason` backend | Done | backend `e251f9e` |
 | JI-13 integration config | Done | backend `4b66d36` |
-| JI-14 external approval path | Open, **next** | — |
-| JI-15 inbound events + rules | Open (needs JI-13, JI-14) | — |
+| JI-14 external approval path | Done | backend `0751c25` |
+| JI-15 inbound events + rules | Open, **next** | — |
 | JI-12 by-key endpoints (optional) | Done (built before JI-13, at the user's request) | backend `513f393` |
 | JI-20 UI Jira links | Open (needs JI-10) | — |
 | JI-21 UI ref/reason, Jira approval | Open (needs JI-11, JI-14) | — |
 | JI-22 UI Jira settings | Open (needs JI-13, JI-15) | — |
 | JI-30 setup guide + e2e test | Open (needs JI-15) | — |
 
-**Next task: [JI-14](tasks/JI-14-external-approval-path-backend.md).**
+**Next task: [JI-15](tasks/JI-15-jira-inbound-events-backend.md).**
 
 ## 2. Planning log (2026-10-03)
 
@@ -61,7 +61,7 @@ New tasks JI-13, JI-14, JI-15, JI-22; JI-12 became optional; JI-21 and JI-30 cha
 - **Run the backend end to end** without clashing with a dev server: a TOML outside the repo with `http_addr = "127.0.0.1:18180"` and `grpc_addr = "127.0.0.1:15151"`, then `FEATURE_TOGGLE_CONFIG=<file> ./target/debug/feature-toggle-backend` from `feature-toggle/` (needs `log4rs.yaml` in the working directory). On an empty DB create the admin with `POST /api/v1/admins` (`api-test-admin` / `password123`), then `POST /api/v1/auth/login`.
 - **System client for manual checks:** `POST /api/v1/teams/{teamId}/system-clients` as a team admin returns `{systemClient, token}`. Use the token as `Authorization: Bearer <token>`. Never paste it into a file or commit.
 - **Contracts:** after a DTO or endpoint change run `./scripts/export-contracts.sh`, copy `feature-toggle-backend/contracts/generated/contract-hashes.json` to `contracts/baseline/`, then `./scripts/check-contract-compat.sh`. Only the baseline file is tracked.
-- **Migrations:** latest is `20261004020000_jira_integrations.sql` (JI-13). Later tasks use later `20261004...` timestamps, in task order.
+- **Migrations:** latest is `20261004030000_approval_request_source.sql` (JI-14). Later tasks use later `20261004...` timestamps, in task order.
 - **UI:** `../feature-toggle-ui/` on `main` (last commit at planning: `dc16a2f`). pnpm only: `pnpm lint`, `pnpm build`, `pnpm test:run`.
 - After code changes run `graphify update .` in the repo you changed.
 
@@ -118,3 +118,14 @@ New tasks JI-13, JI-14, JI-15, JI-22; JI-12 became optional; JI-21 and JI-30 cha
 - `logic::policy::is_system_client_management_route` was replaced by `is_team_admin_management_route`.
 - Activity types `jira_integration_created/updated/secret_rotated/rules_replaced/deleted`, `entity_type = 'jira_integration'`, `entity_id` = integration id, metadata `{integration_id, team_id, name, actor_user_id, ...}`; never the secret or hash.
 - REST: create and rotate return `JiraIntegrationWithSecretResponse {integration, secret}`; the secret is 43 characters (32 bytes base64url).
+
+### From JI-14 (`0751c25`)
+
+- Entry point for JI-15: `web::Data<Box<dyn ExternalChangeLogic>>` (`logic/external_change.rs`), `apply_external_action(feature_id, environment_id, ExternalAction, &ExternalChangeContext) -> Result<ExternalOutcome, Error>`. Map rule actions with `ACTION_REQUEST/APPROVE/DEPLOY/ROLLBACK` → `ExternalAction::Request/Approve/Deploy/Rollback`. `MockExternalChangeLogic` exists for the handler tests.
+- `ExternalChangeContext { actor_user_id: integration.actor_user_id, external_ref: issue key, external_status: Jira status, reason: "Jira status '<status>'", external_actor: ExternalActor { system: "jira", account_id, display_name }, trusted_approval: environment ∈ jira_approved_environment_ids }`. `external_actor.system` becomes `approval_source`, so it must be `jira` (DB `CHECK`).
+- `ExternalOutcome` serializes as `{"outcome": "applied", "from", "to", "approval_request_id"}`, `{"outcome": "no_op", "status"}`, `{"outcome": "refused", "reason"}`; JI-15 can store it in `results` as is, or map it to the design's `{outcome, from, to, reason}`. `Err` means infrastructure only: log it for that target and continue with the others.
+- The call does its own freeze check (logs `freeze_blocked`), dependency check, approval request creation, broadcast and activity rows. JI-15 does not broadcast or log per target.
+- No-policy finding: no path but JI-14's reaches `DEPLOYMENT_APPROVED` without a policy (details in the JI-14 handoff log). Untrusted `request` in a no-policy environment leaves the stage at `DEPLOYMENT_REQUESTED`, where only a trusted Jira `approve` (or a reject) moves it on. Mention this in JI-30's guide.
+- `approval_requests.approval_source` (`fluxgate`, `jira`, `auto`) and `external_approver` JSON (`system`, `account_id`, `display_name`, `issue_key`, `status`); API `approvalSource`, `externalApprover` (JI-21 shows "Approved by Jira (<display name>, <issue key>)" from these).
+- `ApprovalLogic::approve_stage_change_externally` needs the pool; `approval_logic(...)` without a pool returns `InvalidInput("Transaction pool not configured")`.
+- The shadow user needs no `user_teams` row: the logic request path does not check team membership.

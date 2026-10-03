@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Type | Feature |
-| Status | Open |
+| Status | Done in `0751c25` |
 | Repo | backend (`feature-toggle/`) |
 | Crate | `feature-toggle-backend` |
 | Depends on | JI-11 |
@@ -60,4 +60,40 @@ Give the rule engine one logic call that requests, approves, deploys or rolls ba
 
 ## Handoff log
 
-(empty)
+### 2026-10-03: done in `0751c25`
+
+**No-policy finding (checked first, as asked)**
+
+- Without an approval policy, no code path moves a stage to `DEPLOYMENT_APPROVED` (or `ROLLBACK_APPROVED`). `StageChangeRequestType` has no `DeploymentApproved`; `request_stage_change(DeploymentRequested)` with no policy sets the stage to `DEPLOYMENT_REQUESTED` directly, and from there `DEPLOYED` is an invalid transition (`validate_stage_transition`). The UI (`FeatureCreate.tsx` `getAvailableActions`) offers no action on `DEPLOYMENT_REQUESTED`, and `api-tests/.../advanced/stage-deployment.test.ts` only requests (it accepts 200/400/403). Only the approval path (`execute_change[_tx]` with `approval_target_status`) writes `*_APPROVED`.
+- So a human-driven stage in a no-policy environment stays at `DEPLOYMENT_REQUESTED` (pre-existing gap, not fixed here; a person can only reject and re-request). The JI-14 path closes it for Jira only: when a trusted approval finds no pending request, it locks the stage (`SELECT ... FOR UPDATE`) and moves `DEPLOYMENT_REQUESTED → DEPLOYMENT_APPROVED` (or `ROLLBACK_REQUESTED → ROLLBACK_APPROVED`) with `approve_or_reject_stage_change_tx`.
+
+**What changed**
+
+- Migration `20261004030000_approval_request_source.sql`: `approval_requests.approval_source VARCHAR(20) NOT NULL DEFAULT 'fluxgate' CHECK (IN ('fluxgate','jira','auto'))`, `external_approver JSONB NULL`. Backfill `auto` for `status = 'auto_approved'` (cheap, done).
+- `ApprovalRequest.approval_source: String`, `.external_approver: Option<JsonValue>`; constants `APPROVAL_SOURCE_FLUXGATE/AUTO/JIRA` in `database/entity.rs`. Every request select and `REQUEST_RETURNING` reads them. Auto-approval (`mark_auto_approved*`) now sets `approval_source = 'auto'`; `revert_auto_approval` puts back `'fluxgate'`.
+- `ApprovalRepository::find_pending_stage_change_request(stage_id)` (newest pending `stage_change` whose payload `stage_id` matches). `ApprovalRepositoryTx::approve_externally_tx(conn, request_id, source, external_approver)`: guarded by `status = 'pending'`, sets `approved`, source, approver, `executed_at`; no vote row.
+- `ApprovalLogic::approve_stage_change_externally(stage_id, ExternalApproval) -> ExternalApprovalResult { Approved { approval_request_id: Option<Uuid> }, AlreadyResolved }`. With a pending request: guarded close + `execute_change_tx` + activity row in one transaction, then `publish_event`, `notify_edge_servers`, "approved" notification. Without one: the direct move above, activity row, edge notify. Needs the pool (`approval_logic_with_pool*`). Mocks: `MockApprovalLogic` gained the method.
+- `logic/external_change.rs`: `ExternalAction`, `ExternalActor`, `ExternalChangeContext` (design §3.8 plus `external_status`, the Jira status for `external_approver`), `ExternalOutcome` (`Serialize`, tag `outcome`, snake case), trait `ExternalChangeLogic` (`#[automock]`) with `apply_external_action`, factory `external_change_logic(pool, feature_logic, approval_logic, feature_repository, activity_log_repository, updates_tx)`. The state table is the pure `plan(action, status, trusted) -> Plan` (crate-private). Refusal constants: `REFUSED_NOT_TRUSTED`, `REFUSED_NOT_APPROVED`, `REFUSED_NO_STAGE`, `REFUSED_ALREADY_RESOLVED`.
+- Wired in `lib.rs::run` as `web::Data<Box<dyn ExternalChangeLogic>>`.
+- Activity type `approval_request_approved_externally` (`activity_types::APPROVAL_REQUEST_APPROVED_EXTERNALLY`), `entity_type = 'feature'`, actor = shadow user, actor name "Jira (<display name>)". Metadata: `feature_id`, `feature_key`, `team_id`, `stage_id`, `environment_id`, `environment_name`, `approval_source`, `approval_request_id` (null without a request), `status` (the stage status reached), `issue_key`, `external_status`, `external_actor {system, account_id, display_name}`, and `ai_risk_mode_skipped: "<mode>"` when the policy's AI mode is not `off`.
+- A freeze refusal writes a `freeze_blocked` activity row (same type as REST) with `external_ref` and `external_status`.
+- REST: `ApprovalRequestResponse.approvalSource` (enum `ApprovalSource`: `fluxgate`, `jira`, `auto`, registered in `ApiDoc`) and `.externalApprover` (JSON or null). Contract baseline updated.
+
+**Decisions taken in this task**
+
+- The state table follows design §3.8 with two readings where it was silent: `ROLLBACK_REJECTED` counts as deployed (`deploy` → `NoOp`, `rollback` → request again, like `DEPLOYED`); `approve` on any rollback status (trusted) is `NoOp`. Untrusted `approve` is `Refused` whatever the status.
+- Freeze is checked once, before the first step of any non-`NoOp` plan, for every action (approve included).
+- Errors: `Error::DatabaseError` is `Err`; every other error from a step (invalid transition, dependency, no eligible approver, not found) is `Refused(<message>)`. When a later step is refused after an earlier one applied (for example request ok, approve refused), the outcome is `Refused("<reason> (stage now <STATUS>)")` and the feature is still broadcast.
+- A Jira approval that loses the race to a vote (or finds the stage changed) is `Refused("approval request already resolved")`, never a second close.
+- The executor broadcasts a `FeatureUpdate` after any applied step (the logic request path does not broadcast; REST handlers do). The approval close also notifies edge servers, so a deploy-adjacent approve may broadcast twice; harmless upsert.
+- Team membership: the request path (`DeploymentLogic::request_stage_change`, `maybe_create_stage_change_request`) does **not** check that the requester is a team member (only REST does, through `RoleAuthorizer`). The shadow user still has no `user_teams` row; none was added.
+- `logic` reuses `rest::operational_safety::active_freeze_for_environment` (as the scheduler already does) instead of copying the query.
+
+**Verified**
+
+- `cargo fmt`; `cargo clippy --all-targets`: no warnings in changed files (remaining warnings are pre-existing).
+- `cargo test -p feature-toggle-backend` on `feture_toggle_test`: all pass (lib 816, integration_test 317, others).
+- `SQLX_OFFLINE=true cargo build --all-targets`: ok (no new `query!` macros, no `.sqlx` change).
+- `./scripts/check-contract-compat.sh`: ok after the baseline update.
+- New tests: `logic::external_change::tests` (3, every action × status × trust), `rest::approval::tests::map_request_returns_the_approval_source_and_external_approver`, `tests/database/external_change_test.rs` (12: request, trusted approve under a policy, approve of a pending request, untrusted approve, no-policy approve, deploy before/after approval with broadcast, trusted and untrusted rollback, freeze, missing stage, vote vs Jira race ×5). `auto_approval_applies_the_stage_change_*` now also asserts `approval_source = 'auto'`.
+- Mutation checks: removing the freeze check, the final broadcast, the `status = 'pending'` guard or the `'auto'` source each makes the matching test fail.
