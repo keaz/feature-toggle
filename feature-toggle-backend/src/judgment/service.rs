@@ -2,12 +2,14 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
 use log::{error, warn};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 
 use super::client::JudgmentClient;
@@ -39,7 +41,27 @@ pub enum RunOutcome {
     Stale,
     /// Stored as failed (or could not be stored); the sweep may retry it.
     Failed,
+    /// Not started: no background permit within the queue limit. The row
+    /// stays pending and the retry sweep runs it later.
+    Deferred,
 }
+
+/// How long a run started by `submit` waits for a background permit before
+/// it leaves the row pending for the retry sweep. Shorter than the sweep's
+/// 2-minute pending threshold, so a row the sweep may claim is never also
+/// started here (which would call the API twice).
+pub const SUBMIT_QUEUE_WAIT: Duration = Duration::from_secs(60);
+
+/// Concurrent API calls the background pipeline may make: half of
+/// `typesafe.max_in_flight` (at least 1). The rest stay free for the sync
+/// endpoints (justification check, flag kind suggestions, NL search), so a
+/// backfill or an approval burst cannot starve them. `max_in_flight` is still
+/// the global cap, enforced by the HTTP client.
+pub fn async_in_flight(max_in_flight: usize) -> usize {
+    (max_in_flight / 2).max(1)
+}
+
+const DEFAULT_ASYNC_IN_FLIGHT: usize = 8;
 
 /// SHA-256 hex of the input JSON. `serde_json::Value` objects are
 /// `BTreeMap`-backed, so key order does not change the hash.
@@ -60,6 +82,8 @@ pub struct JudgmentService {
     judgments: Box<dyn AiJudgmentRepository>,
     settings: Box<dyn TeamAiSettingsRepository>,
     handlers: HashMap<JudgmentKind, Arc<dyn JudgmentHandler>>,
+    /// Limits this pipeline's concurrent API calls; see [`async_in_flight`].
+    pub(crate) async_permits: Arc<Semaphore>,
 }
 
 impl JudgmentService {
@@ -73,7 +97,15 @@ impl JudgmentService {
             judgments,
             settings,
             handlers: HashMap::new(),
+            async_permits: Arc::new(Semaphore::new(DEFAULT_ASYNC_IN_FLIGHT)),
         }
+    }
+
+    /// Sets how many API calls background runs may make at once (at least 1).
+    /// Pass [`async_in_flight`] of the configured `max_in_flight`.
+    pub fn with_async_in_flight(mut self, permits: usize) -> Self {
+        self.async_permits = Arc::new(Semaphore::new(permits.max(1)));
+        self
     }
 
     /// Registers the handler for its kind. Call before wrapping in `Arc`.
@@ -143,7 +175,9 @@ impl JudgmentService {
         let id = row.id;
         let service = Arc::clone(self);
         tokio::spawn(async move {
-            service.run(row).await;
+            service
+                .run_with_queue_limit(row, Some(SUBMIT_QUEUE_WAIT))
+                .await;
         });
         Ok(id)
     }
@@ -223,7 +257,28 @@ impl JudgmentService {
         }
     }
 
+    /// Runs one judgment, waiting as long as needed for a background permit.
+    /// The retry sweep uses it: it has already claimed the row.
     pub async fn run(&self, row: AiJudgment) -> RunOutcome {
+        self.run_with_queue_limit(row, None).await
+    }
+
+    /// Waits for a background API permit, at most `limit` when given.
+    async fn background_permit(&self, limit: Option<Duration>) -> Option<OwnedSemaphorePermit> {
+        let acquire = self.async_permits.clone().acquire_owned();
+        match limit {
+            None => acquire.await.ok(),
+            Some(limit) => tokio::time::timeout(limit, acquire).await.ok()?.ok(),
+        }
+    }
+
+    /// [`run`](Self::run), but gives up with [`RunOutcome::Deferred`] when no
+    /// background permit is free within `limit`, leaving the row pending.
+    pub(crate) async fn run_with_queue_limit(
+        &self,
+        row: AiJudgment,
+        limit: Option<Duration>,
+    ) -> RunOutcome {
         let handler = row
             .kind
             .parse::<JudgmentKind>()
@@ -236,7 +291,16 @@ impl JudgmentService {
         };
 
         let parts = handler.build(&row.input);
-        let response = match self.client.evaluate(parts.state, parts.questions).await {
+        let Some(permit) = self.background_permit(limit).await else {
+            warn!(
+                "AI judgment {} ({}) not started: background queue full; left for the retry sweep",
+                row.id, row.kind
+            );
+            return RunOutcome::Deferred;
+        };
+        let response = self.client.evaluate(parts.state, parts.questions).await;
+        drop(permit);
+        let response = match response {
             Ok(response) => response,
             Err(err) => {
                 self.fail(&row, err.to_string()).await;
@@ -666,5 +730,99 @@ mod tests {
             AiFeature::JustificationCheck
         );
         assert_eq!(JudgmentKind::FlagKind.feature(), AiFeature::FlagKind);
+    }
+
+    /// Records the peak number of concurrent `evaluate` calls.
+    struct SlowClient {
+        in_flight: AtomicUsize,
+        peak: AtomicUsize,
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl JudgmentClient for SlowClient {
+        async fn evaluate(
+            &self,
+            _state: Value,
+            _questions: BTreeMap<String, Question>,
+        ) -> Result<SystemOneResponse, JudgmentError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            Ok(ok_response())
+        }
+
+        fn model(&self) -> String {
+            "jev-1.13.0".into()
+        }
+    }
+
+    fn slow_service(async_in_flight: usize) -> (Arc<JudgmentService>, Arc<SlowClient>) {
+        let client = Arc::new(SlowClient {
+            in_flight: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+            calls: AtomicUsize::new(0),
+        });
+        let mut repo = MockAiJudgmentRepository::new();
+        repo.expect_mark_done().returning(|_, _, _| Ok(true));
+        repo.expect_mark_failed().times(0);
+        let handler = FakeHandler {
+            applied: Arc::new(AtomicUsize::new(0)),
+            notify: Arc::new(Notify::new()),
+        };
+        let service = JudgmentService::new(
+            client.clone(),
+            Box::new(repo),
+            Box::new(MockTeamAiSettingsRepository::new()),
+        )
+        .with_handler(Arc::new(handler))
+        .with_async_in_flight(async_in_flight);
+        (Arc::new(service), client)
+    }
+
+    #[test]
+    fn async_runs_get_half_of_the_api_permits() {
+        assert_eq!(async_in_flight(16), 8);
+        assert_eq!(async_in_flight(3), 1);
+        assert_eq!(async_in_flight(1), 1);
+        assert_eq!(async_in_flight(0), 1);
+    }
+
+    /// Background runs never hold more than their share of API calls, so a
+    /// backfill or an approval burst leaves permits for sync endpoints.
+    #[tokio::test]
+    async fn background_runs_are_capped_at_their_share() {
+        let (service, client) = slow_service(2);
+        let runs = (0..6).map(|i| {
+            let service = service.clone();
+            async move { service.run(row(&format!("h{i}"))).await }
+        });
+        let outcomes = futures_util::future::join_all(runs).await;
+
+        assert!(
+            outcomes
+                .iter()
+                .all(|outcome| *outcome == RunOutcome::Applied)
+        );
+        assert_eq!(client.calls.load(Ordering::SeqCst), 6);
+        assert_eq!(client.peak.load(Ordering::SeqCst), 2);
+    }
+
+    /// A submitted run that cannot start within its queue limit leaves the row
+    /// pending for the sweep instead of starting after the sweep may have
+    /// claimed it (which would call the API twice).
+    #[tokio::test]
+    async fn a_submitted_run_that_waits_too_long_is_left_for_the_sweep() {
+        let (service, client) = slow_service(1);
+        let _held = service.async_permits.clone().acquire_owned().await.unwrap();
+
+        let outcome = service
+            .run_with_queue_limit(row("h1"), Some(Duration::from_millis(50)))
+            .await;
+
+        assert_eq!(outcome, RunOutcome::Deferred);
+        assert_eq!(client.calls.load(Ordering::SeqCst), 0);
     }
 }

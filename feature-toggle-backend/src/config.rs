@@ -99,7 +99,8 @@ pub struct TypesafeConfig {
     pub model: String,
     /// Timeout per HTTP attempt.
     pub timeout_ms: u64,
-    /// Concurrent requests allowed across all callers.
+    /// Concurrent requests allowed across all callers. The async judgment
+    /// pipeline may use half of them (`judgment::service::async_in_flight`).
     pub max_in_flight: usize,
 }
 

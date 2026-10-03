@@ -121,7 +121,10 @@ pub struct HttpJudgmentClient {
     api_key: String,
     pub(crate) endpoint: String,
     model: String,
+    /// Global cap on concurrent API calls (`typesafe.max_in_flight`).
     permits: Arc<Semaphore>,
+    /// Longest wait for a permit: the per-attempt timeout.
+    permit_wait: Duration,
 }
 
 impl HttpJudgmentClient {
@@ -136,6 +139,7 @@ impl HttpJudgmentClient {
             endpoint: format!("{}/v1/systemone", config.base_url.trim_end_matches('/')),
             model: config.model.clone(),
             permits: Arc::new(Semaphore::new(config.max_in_flight.max(1))),
+            permit_wait: Duration::from_millis(config.timeout_ms.max(1)),
         })
     }
 
@@ -194,11 +198,19 @@ impl JudgmentClient for HttpJudgmentClient {
             model: self.model.clone(),
             questions,
         };
-        let _permit = self
-            .permits
-            .acquire()
-            .await
-            .map_err(|_| JudgmentError::Unavailable)?;
+        // Bounded: a sync endpoint must not hang behind other calls. A full
+        // queue fails like a timed-out call; async callers retry via the sweep.
+        let _permit = match tokio::time::timeout(self.permit_wait, self.permits.acquire()).await {
+            Ok(Ok(permit)) => permit,
+            Ok(Err(_)) => return Err(JudgmentError::Unavailable),
+            Err(_) => {
+                warn!(
+                    "TypeSafe call not sent: no permit within {} ms (max_in_flight reached)",
+                    self.permit_wait.as_millis()
+                );
+                return Err(JudgmentError::Timeout);
+            }
+        };
         let started = Instant::now();
         let mut attempt = 0;
         loop {
@@ -360,6 +372,33 @@ mod tests {
             connections.load(std::sync::atomic::Ordering::SeqCst),
             1 + MAX_RETRIES as usize
         );
+    }
+
+    /// A caller never waits behind a full set of permits for longer than the
+    /// configured timeout: it fails like a timed-out call and sends nothing.
+    #[tokio::test]
+    async fn waiting_for_a_permit_is_bounded_by_the_timeout() {
+        let (base_url, connections) = stalling_body_server().await;
+        let cfg = TypesafeConfig {
+            base_url,
+            timeout_ms: 100,
+            max_in_flight: 2,
+            ..TypesafeConfig::default()
+        };
+        let client = HttpJudgmentClient::new(&cfg, "key".into()).unwrap();
+        let _held = client.permits.clone().acquire_many_owned(2).await.unwrap();
+
+        let started = Instant::now();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(2),
+            client.evaluate(Value::from("state"), BTreeMap::new()),
+        )
+        .await
+        .expect("evaluate must not wait for a permit past its timeout");
+
+        assert_eq!(outcome.unwrap_err(), JudgmentError::Timeout);
+        assert!(started.elapsed() < Duration::from_millis(1000));
+        assert_eq!(connections.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     #[test]

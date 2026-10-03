@@ -121,7 +121,10 @@ pub async fn run() -> std::io::Result<()> {
             ))
             .with_handler(Arc::new(judgment::flag_kind::FlagKindHandler::new(
                 feature_repository.clone_box(),
-            ))),
+            )))
+            .with_async_in_flight(judgment::service::async_in_flight(
+                cfg.typesafe.max_in_flight,
+            )),
         )
     });
     if let Some(service) = judgment_service.clone() {
