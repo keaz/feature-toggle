@@ -392,6 +392,11 @@ describe('Jira write-back flow', () => {
         );
         expect(link.body.globalId).toBe(`fluxgate:feature:${featureId}`);
         expect(String(link.body.object.url)).toContain(featureId);
+        // Test 4 counts comments from its own baseline: wait for this test's event
+        // comment too, so it cannot arrive after that baseline.
+        await waitFor('event comment for the prod request', () =>
+            comments().find((r) => commentText(r.body).includes('prod: request applied'))
+        );
     }, 60_000);
 
     it('a Jira-made deploy gives no second comment', async () => {

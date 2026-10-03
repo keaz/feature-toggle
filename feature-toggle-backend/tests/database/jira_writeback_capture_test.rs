@@ -195,11 +195,24 @@ async fn list_window_is_ascending_and_bounded() {
     let pool = init_pg_pool().await;
     let team = team_with_integration(&pool, false).await;
     let feature_id = feature(&pool, team.team_id, None).await;
+    // Activity types only this run uses: rows other tests left in the shared DB
+    // cannot fall into the window.
+    // `list_window` takes `&'static str`; leaking four short strings in a test is fine.
+    let run = Uuid::new_v4().simple().to_string();
+    let unique =
+        |kind: &str| -> &'static str { Box::leak(format!("ct_{kind}_{run}").into_boxed_str()) };
+    let (approved, rejected, deployed, other) = (
+        unique("approved"),
+        unique("rejected"),
+        unique("deployed"),
+        unique("other"),
+    );
+    let types = [approved, rejected, deployed];
     let base = Utc::now() - Duration::hours(3);
     // Inserted out of order; one of another type; one outside the window.
     let c = activity(
         &pool,
-        "stage_deployed",
+        deployed,
         feature_id,
         None,
         base + Duration::seconds(30),
@@ -207,7 +220,7 @@ async fn list_window_is_ascending_and_bounded() {
     .await;
     let a = activity(
         &pool,
-        "stage_approved",
+        approved,
         feature_id,
         None,
         base + Duration::seconds(10),
@@ -215,23 +228,16 @@ async fn list_window_is_ascending_and_bounded() {
     .await;
     let b = activity(
         &pool,
-        "stage_rejected",
+        rejected,
         feature_id,
         None,
         base + Duration::seconds(10),
     )
     .await;
+    activity(&pool, other, feature_id, None, base + Duration::seconds(20)).await;
     activity(
         &pool,
-        "user_logged_in",
-        feature_id,
-        None,
-        base + Duration::seconds(20),
-    )
-    .await;
-    activity(
-        &pool,
-        "stage_deployed",
+        deployed,
         feature_id,
         None,
         base + Duration::seconds(90),
@@ -239,7 +245,7 @@ async fn list_window_is_ascending_and_bounded() {
     .await;
     activity(
         &pool,
-        "stage_deployed",
+        deployed,
         feature_id,
         None,
         base - Duration::seconds(5),
@@ -249,15 +255,14 @@ async fn list_window_is_ascending_and_bounded() {
     let repo = activity_log_repository(pool.clone());
     let from = base;
     let to = base + Duration::seconds(30);
-    let rows = repo
-        .list_window(
-            &["stage_approved", "stage_rejected", "stage_deployed"],
-            from,
-            to,
-            10,
-        )
-        .await
-        .unwrap();
+    let rows = repo.list_window(&types, from, to, 10).await;
+    let limited = repo.list_window(&types, from, to, 2).await;
+    // Bounds are inclusive.
+    let edge = repo.list_window(&[deployed], to, to, 10).await;
+    // Clean up before asserting, so a failure leaves nothing behind.
+    cleanup(&pool, &[&team], &[feature_id]).await;
+
+    let rows = rows.unwrap();
     let ids: Vec<Uuid> = rows.iter().map(|row| row.id).collect();
     let (first, second) = if a < b { (a, b) } else { (b, a) };
     assert_eq!(
@@ -265,26 +270,9 @@ async fn list_window_is_ascending_and_bounded() {
         vec![first, second, c],
         "ascending by created_at, then id"
     );
-    assert!(rows.iter().all(|row| row.activity_type != "user_logged_in"));
-
-    let limited = repo
-        .list_window(
-            &["stage_approved", "stage_rejected", "stage_deployed"],
-            from,
-            to,
-            2,
-        )
-        .await
-        .unwrap();
-    assert_eq!(limited.len(), 2);
-    // Bounds are inclusive.
-    let edge = repo
-        .list_window(&["stage_deployed"], to, to, 10)
-        .await
-        .unwrap();
-    assert_eq!(edge.len(), 1);
-
-    cleanup(&pool, &[&team], &[feature_id]).await;
+    assert!(rows.iter().all(|row| row.activity_type != other));
+    assert_eq!(limited.unwrap().len(), 2);
+    assert_eq!(edge.unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -331,9 +319,10 @@ async fn human_deploy_enqueues_comment_and_remote_link() {
     )
     .await;
 
-    let offered = capture(&pool).run_once().await.unwrap();
+    // The run reads the whole shared DB, so its total is not asserted: only this
+    // integration's jobs are.
+    capture(&pool).run_once().await.unwrap();
 
-    assert_eq!(offered, 2);
     let stored = jobs(&pool, team.integration_id).await;
     let kinds: Vec<&str> = stored.iter().map(|job| job.0.as_str()).collect();
     assert_eq!(kinds, vec!["comment", "remote_link"], "comment first");
@@ -412,7 +401,7 @@ async fn rows_of_unlinked_features_are_skipped() {
     set_cursor(&pool, Utc::now() - Duration::minutes(1)).await;
     activity(&pool, "stage_deployed", feature_id, None, Utc::now()).await;
 
-    assert_eq!(capture(&pool).run_once().await.unwrap(), 0);
+    capture(&pool).run_once().await.unwrap();
 
     assert!(jobs(&pool, team.integration_id).await.is_empty());
     cleanup(&pool, &[&team], &[feature_id]).await;
