@@ -90,6 +90,8 @@ JI-01 ─► JI-10 ─► JI-11 ─► JI-13 ─► JI-14 ─► JI-15 ─► JI
 
 The work runs one task at a time, in this order. JI-12 is optional: skip it if the inbound rules cover every flow, and say so in `HANDOFF.md`.
 
-## Later phases (not planned here)
+## Later phases
 
-From the investigation, in order: outbound webhooks (`webhook_endpoints`, HMAC signing, retry scheduler) so Jira gets status pushed; a bridge service for two-way sync; a Forge issue panel (Cloud only). Plan them as new task files in this folder when they are picked up.
+**Phase 2** (write-back to Jira, inbound hardening): [`phase-2/README.md`](phase-2/README.md).
+
+Not planned yet, from the investigation, in order: outbound webhooks (`webhook_endpoints`, HMAC signing, retry scheduler) so Jira gets status pushed; a bridge service for two-way sync; a Forge issue panel (Cloud only). Plan them as new task files in this folder when they are picked up.

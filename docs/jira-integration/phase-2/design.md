@@ -24,7 +24,7 @@ Out of scope: moving the Jira issue to another status (transitions), generic out
 | J18 | The credential is encrypted with `secret_box` (`FLUXGATE_ENCRYPTION_KEY`), with the integration id as AAD. It is write-only in the API and never appears in a response, a log line, `last_error`, a test fixture or a commit. |
 | J19 | Write-back is **opt-in per integration** and off by default. |
 | J20 | Jobs are **only** created for issues linked to the feature (`feature_external_links`, system `jira`), plus the issue that sent an inbound event. |
-| J21 | Results are captured from two sources: the inbound event transaction, and an **`activity_log` cursor** for every other change. Every write path already writes an activity row in its own transaction, so the capture does not touch each path. |
+| J21 | Results are captured from two sources: the inbound event (stored with its jobs in one transaction), and an **`activity_log` cursor** for every other change. *Revised 2026-10-03 after a code check:* approval decisions (vote, auto-approval, capped reconciliation, cancel) and approval-gated requests write **no** activity row today, and several stage paths write theirs best effort after the change. JI-40 adds the missing rows. A best-effort row that fails to write means a missed comment; the next change refreshes the remote link. This is accepted. |
 | J22 | On 401 or 403 from Jira, write-back for that integration **pauses** until an admin saves a new credential or resumes. FluxGate does not retry a bad token. |
 | J23 | The public inbound route gets an **in-process rate limit** (single-server backend, see project memory). Events over the limit are not stored. |
 | J24 | Native Jira webhooks are accepted when signed with **HMAC-SHA256** (`X-Hub-Signature: sha256=<hex>`). A secret in the URL is not supported, because URLs end up in proxy and access logs. |
@@ -47,6 +47,8 @@ New columns on `jira_integrations` (new migration; never edit an applied one):
 | `native_webhook_secret_enc` | `TEXT NULL` | Used by §3.5. Encrypted, not hashed, because HMAC needs the plaintext. |
 
 `jira_base_url` already exists. It is required when `writeback_enabled` is true.
+
+UI base URL for links: new optional config `[jira] ui_base_url`. When it is not set, use `allowed_origin` if that is one absolute `http(s)` URL (`public_base_url` is the backend URL, not the UI). If neither gives a URL, enabling the remote link returns 400 `ui base URL is not configured`.
 
 Validation when write-back is enabled:
 - `jira_base_url` must be an absolute `https` URL. `http` is allowed only when the backend config has `[jira] allow_insecure_http = true`.
@@ -104,7 +106,7 @@ CREATE UNIQUE INDEX ON jira_outbound_jobs (integration_id, issue_key, feature_id
 2. Decrypt the credential once per integration per tick. Do not cache it across ticks.
 3. Send with `reqwest`: timeout 10 s, **redirects disabled** (the credential must not follow a redirect to another host).
    - Comment: `POST {base}/rest/api/3/issue/{key}/comment` (Cloud, ADF body) or `POST {base}/rest/api/2/issue/{key}/comment` (DC, `{"body": text}`).
-   - Remote link: `POST {base}/rest/api/{v}/issue/{key}/remotelink` with `globalId = fluxgate:feature:<featureId>`, `object.url` = the FluxGate feature page (from `public_base_url`), `object.title` = `FluxGate: <featureKey> · <env> <STATUS> · ...` in pipeline order. Same `globalId` means Jira updates the existing link.
+   - Remote link: `POST {base}/rest/api/{v}/issue/{key}/remotelink` with `globalId = fluxgate:feature:<featureId>`, `object.url` = the FluxGate UI feature page `<ui base>/features/<featureId>` (see §3.1 for the UI base), `object.title` = `FluxGate: <featureKey> · <env> <STATUS> · ...` in pipeline order. Same `globalId` means Jira updates the existing link.
    - Remote link delete: `DELETE {base}/rest/api/{v}/issue/{key}/remotelink?globalId=...`.
 4. Classify the result:
 
@@ -123,27 +125,28 @@ Endpoints (team admin):
 
 | Method and path | Purpose |
 |---|---|
-| `GET /api/v1/jira-integrations/{id}/outbound-jobs?status=&page=&pageSize=` | Paged list, newest first. |
+| `GET /api/v1/jira-integrations/{id}/outbound-jobs?status=&offset=&limit=` | Paged list, newest first. Uses `offset` and `limit` (default 50, at most 200), like the JI-15 event log. |
 | `POST /api/v1/jira-integrations/{id}/outbound-jobs/{jobId}/retry` | `dead` to `pending`, `attempts = 0`, `next_attempt_at = now()`. 409 when the job is not `dead`. |
 
 ### 3.3 Capture (JI-43)
 
-**Source 1: inbound events.** In `receive_jira_event` (`rest/jira_events.rs`), in the same transaction that stores the `jira_integration_events` row, enqueue one `comment` job for the event's issue when write-back and comments are on. No job for duplicates (`duplicate: true`), ignored events, or events with no per-environment result. The comment lists each result: `"qa: approve applied"`, `"prod: deploy refused: not approved"`, plus unknown environments and features. The issue that sent the event gets the comment even without a link row. Also enqueue a `remote_link` job for each linked feature that has at least one applied result.
+**Source 1: inbound events.** In `receive_jira_event` (`rest/jira_events.rs`), in the same transaction that stores the `jira_integration_events` row, enqueue one `comment` job for the event's issue when write-back and comments are on. No job for duplicates (`duplicate: true`), ignored events, or events with no per-environment result. The comment lists each result: `"qa: approve applied"`, `"prod: deploy refused: not approved"`, plus unknown environments and features. The issue that sent the event gets the comment even without a link row. Source 1 enqueues only this comment. The remote link refresh for applied results comes from Source 2, because every applied Jira action writes an activity row (`stage_deployed`, `stage_rollbacked`, `stage_change_requested` or `approval_request_approved_externally`). To store the event and its job in one transaction, the handler generates the event id before the insert (`NewJiraEvent.id`), and `dedupe_key = event:<eventId>`.
 
 **Source 2: the activity cursor** (`scheduler/jira_writeback_capture.rs`, every 5 s):
 
 - A one-row table `jira_writeback_cursor(id BOOL PRIMARY KEY DEFAULT TRUE CHECK (id), last_created_at TIMESTAMPTZ NOT NULL)`. The first run inserts `now()` (no backfill).
-- Each tick reads `activity_log` rows with `created_at` in `[last_created_at - 60 s, now() - 2 s]` and these types: `stage_approved`, `stage_rejected`, `stage_deployed`, `stage_rollbacked`, `kill_switch_activated`, `kill_switch_deactivated`, `external_link_added`, `external_link_removed`. The overlap catches transactions that committed late. `dedupe_key` makes re-reads harmless.
-- For each row, resolve the feature, then its `jira` links, then the enabled integrations of the feature's team with write-back on.
+- Each tick reads `activity_log` rows with `created_at` in `[last_created_at - 60 s, now() - 2 s]`, oldest first, of the types in the mapping table below. The overlap catches transactions that committed late. `dedupe_key` makes re-reads harmless.
+- Every row of these types carries `metadata.feature_id` (stage rows use `entity_type = 'stage'`, so read the feature from metadata, not from `entity_id`). For each row, resolve the feature's `jira` links, then the enabled integrations of the feature's team with write-back on.
 - Mapping:
 
 | Activity | Jobs |
 |---|---|
-| approve, reject, deploy, rollback, kill switch | `comment` (if comments are on) + `remote_link` (if the remote link is on) |
+| `stage_approved`, `stage_rejected` (added by JI-40), `stage_deployed`, `stage_rollbacked`, `approval_request_cancelled` (added by JI-40), `kill_switch_activated`, `kill_switch_deactivated` | `comment` (if comments are on) + `remote_link` (if the remote link is on) |
+| `stage_change_requested`, `approval_request_approved_externally`, `feature_updated` with `metadata.target_version_id` (version rollback restores stage statuses) | `remote_link` only |
 | `external_link_added` | `remote_link` only |
 | `external_link_removed` | `remote_link_delete` only |
 
-- Rows whose metadata has `approval_source = jira` came from an inbound event. Source 1 already commented, so these produce no `comment`, only the `remote_link` refresh.
+- **Jira-made rows get no comment.** A row whose `actor_id` is the `actor_user_id` of any Jira integration came from an inbound event, and Source 1 already commented. These rows produce only the `remote_link` refresh. (Only `approval_request_approved_externally` carries `approval_source`; the Jira-made `stage_deployed` and `stage_rollbacked` rows do not, so the actor is the reliable marker.)
 - Comment text uses the activity actor name and environment, for example `"Approved for prod by Jane Doe in FluxGate"`, `"Deployed to qa (scheduled change)"`. It never includes metadata fields other than environment, status, actor name, `externalRef` and `reason`.
 - After the batch commits, set `last_created_at` to the newest row's `created_at` read in this tick (or leave it when there were none).
 
@@ -173,7 +176,7 @@ JI-46, in the Jira integration settings page from JI-22:
 - New "Outbound" tab next to the event log: status filter, issue key, kind, attempts, `last_error`, next attempt, "Retry" on `dead` rows.
 - Design tokens only (`__tests__/designTokenGuard.test.ts`).
 
-JI-47: attach `components/ai/ReasonQualityHint.tsx` to the stage change reason field from JI-21, the way `FeatureEmergencyActionModal.tsx` uses it. Advisory only; it never blocks submit.
+JI-47: attach `components/ai/ReasonQualityHint.tsx` to the stage change reason field from JI-21, the way `FeatureEmergencyActionModal.tsx` uses it. Advisory only; it never blocks submit. The justification check has no stage-change kind today, so the backend gets `ReasonKind::StageChange` (`stage_change`) first (contract update), then the UI `ReasonKind` type.
 
 ### 3.7 Setup guide and end-to-end test (JI-50)
 
@@ -201,14 +204,14 @@ Same rules as phase 1 ([`../README.md`](../README.md#rules-for-agents)): one tas
 
 | ID | Title | Repo | Depends on |
 |---|---|---|---|
-| JI-40 | Audit: every stage-status write path writes an activity row; add missing rows and a test | backend | — |
+| JI-40 | Activity rows for approval decisions (vote, auto-approval, capped reconciliation), cancel and gated requests | backend | — |
 | JI-41 | Write-back configuration, encrypted credential, test connection | backend | — |
 | JI-42 | Outbound jobs table, sender, retry and pause, job endpoints | backend | JI-41 |
 | JI-43 | Capture from inbound events and the activity cursor | backend | JI-40, JI-42 |
 | JI-44 | Inbound rate limit | backend | — |
 | JI-45 | Native webhook HMAC auth | backend | JI-41 |
 | JI-46 | UI: write-back settings, native secret, Outbound tab, paused banner | UI | JI-42, JI-45 |
-| JI-47 | UI: `ReasonQualityHint` on the reason field | UI | — |
+| JI-47 | `ReasonQualityHint` on the stage change reason field (backend `stage_change` kind, then UI) | backend + UI | — |
 | JI-50 | Setup guide update and end-to-end write-back test | docs + api-tests | JI-43, JI-44, JI-45 |
 
 Order: JI-40, JI-41, JI-42, JI-43, JI-44, JI-45, JI-46, JI-47, JI-50.
@@ -218,4 +221,6 @@ Order: JI-40, JI-41, JI-42, JI-43, JI-44, JI-45, JI-46, JI-47, JI-50.
 - Data Center webhook signing is not confirmed (§3.5).
 - Cloud comment ADF and the remote link payload were taken from Atlassian docs, not run against a real site. JI-50 notes this for the first team.
 - Jira Cloud API rate limits: the sender's 50 jobs per 5 s tick and 429 handling should be enough for one team. Revisit if many teams share one Jira site.
-- The capture cursor relies on `activity_log.created_at`. The 60 s overlap covers transactions shorter than 60 s. A longer transaction that writes a stage activity could be missed; JI-40 should confirm none exists.
+- The capture cursor relies on `activity_log.created_at`. The 60 s overlap covers transactions shorter than 60 s. A longer transaction that writes a stage activity could be missed.
+- Best-effort activity rows (`let _ = log_activity(...)` in `request_stage_change`, the kill-switch scheduler, canary) can fail silently; that change then gets no comment.
+- Deleting a feature cascades its links without an `external_link_removed` row, so the remote link stays on the issue, pointing to a missing page.

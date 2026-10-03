@@ -19,7 +19,28 @@ Read this after [`README.md`](README.md) and [`design.md`](design.md). It record
 | JI-22 UI Jira settings | Done | UI `131060d` |
 | JI-30 setup guide + e2e test | Done | backend `1ba9d09` |
 
-**Phase 1 is complete (2026-10-03).** No open task. Later phases (outbound webhooks, write-back to Jira, bridge, Forge) are listed in the README and are not planned yet.
+**Phase 1 is complete (2026-10-03).**
+
+**Phase 2 is planned (2026-10-03):** write-back to Jira (comments + live remote link), inbound rate limit, signed native webhooks, reason hint. Design [`phase-2/design.md`](phase-2/design.md), tasks [`phase-2/README.md`](phase-2/README.md). **Next task: [JI-40](phase-2/tasks/JI-40-activity-rows-for-approval-decisions.md).**
+
+| Phase 2 task | Status | Commit |
+|---|---|---|
+| JI-40 activity rows for approval decisions | Open | |
+| JI-41 write-back config | Open | |
+| JI-42 outbound jobs + sender | Open | |
+| JI-43 capture | Open | |
+| JI-44 inbound rate limit | Open | |
+| JI-45 native webhook HMAC | Open | |
+| JI-46 UI write-back settings | Open | |
+| JI-47 reason hint on stage change | Open | |
+| JI-50 guide + e2e | Open | |
+
+Facts found while planning phase 2 (backend `b276078`):
+- Approval decisions (vote, auto-approval, capped reconciliation), cancel and approval-gated requests write no activity row today; the `stage_approved` constant is never written (JI-40 fixes this).
+- Stage rows from `request_stage_change` are best effort on the pool (`let _ = log_activity`), entity `stage`, with `metadata.feature_id`.
+- Jira-made `stage_deployed`/`stage_rollbacked` rows carry no `approval_source`; the reliable marker is `actor_id` = the integration's `actor_user_id`.
+- `receive_jira_event` uses no transaction; `JiraEventRepository::insert` is pool only.
+- `public_base_url` is the backend URL; the UI origin is `allowed_origin`.
 
 ## 2. Planning log (2026-10-03)
 
