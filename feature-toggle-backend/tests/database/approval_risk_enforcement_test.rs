@@ -1349,3 +1349,146 @@ async fn reconciliation_applies_the_stage_change() {
     assert_eq!(status, "approved");
     assert_eq!(after, target, "the stage change must be applied");
 }
+
+// --- Fix round 2 (2026-10-03) ---
+
+async fn delete_request_activity(pool: &PgPool, request_id: Uuid) {
+    let _ = sqlx::query("DELETE FROM activity_log WHERE metadata->>'approval_request_id' = $1")
+        .bind(request_id.to_string())
+        .execute(pool)
+        .await;
+}
+
+async fn stop_entries(pool: &PgPool, activity_type: &str, request_id: Uuid) -> i64 {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM activity_log
+         WHERE activity_type = $1 AND metadata->>'approval_request_id' = $2",
+    )
+    .bind(activity_type)
+    .bind(request_id.to_string())
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// `insert_due_request` stores a stage change without a stage id, so its
+/// change can never be applied. Auto-approval stops after 3 failures: the
+/// request stays pending, is no longer due, and one activity entry says a
+/// person has to decide.
+#[tokio::test]
+async fn a_failing_auto_approval_stops_after_three_tries() {
+    let pool = init_pg_pool().await;
+    let fixture = insert_due_request(&pool, "advisory", Some(true)).await;
+    let logic = logic_for(&pool, true);
+    let request = approval::approval_repository(pool.clone())
+        .get_request_by_id(fixture.request_id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let mut due = Vec::new();
+    let mut outcomes = Vec::new();
+    for _ in 0..3 {
+        due.push(is_due(&pool, fixture.request_id).await);
+        outcomes.push(logic.auto_approve_request(request.clone()).await);
+    }
+    let due_after = is_due(&pool, fixture.request_id).await;
+    let status = status_of(&pool, fixture.request_id).await;
+    let stopped = stop_entries(&pool, "auto_approval_stopped", fixture.request_id).await;
+    delete_request_activity(&pool, fixture.request_id).await;
+    cleanup(&pool, &fixture).await;
+
+    assert_eq!(due, vec![true, true, true]);
+    assert!(outcomes.iter().all(Result::is_err), "{outcomes:?}");
+    assert!(!due_after, "no longer due after 3 failures");
+    assert_eq!(status, "pending");
+    assert_eq!(stopped, 1);
+}
+
+async fn executed_at_is_set(pool: &PgPool, request_id: Uuid) -> bool {
+    sqlx::query_scalar("SELECT executed_at IS NOT NULL FROM approval_requests WHERE id = $1")
+        .bind(request_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// The plain path reopens a failed auto-approval with a guard: only a row it
+/// auto-approved goes back to pending (with `executed_at` cleared); a row
+/// cancelled meanwhile stays cancelled.
+#[tokio::test]
+async fn a_failed_plain_auto_approval_reopens_only_its_own_row() {
+    let pool = init_pg_pool().await;
+    let fixture = insert_due_request(&pool, "advisory", Some(true)).await;
+    let repository = approval::approval_repository(pool.clone());
+    let request = repository
+        .get_request_by_id(fixture.request_id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let failed = logic_for(&pool, false).auto_approve_request(request).await;
+    let status_after_failure = status_of(&pool, fixture.request_id).await;
+    let executed_after_failure = executed_at_is_set(&pool, fixture.request_id).await;
+
+    sqlx::query("UPDATE approval_requests SET status = 'cancelled' WHERE id = $1")
+        .bind(fixture.request_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let reopened = repository
+        .revert_auto_approval(fixture.request_id)
+        .await
+        .unwrap();
+    let status_after_revert = status_of(&pool, fixture.request_id).await;
+    delete_request_activity(&pool, fixture.request_id).await;
+    cleanup(&pool, &fixture).await;
+
+    assert!(failed.is_err());
+    assert_eq!(status_after_failure, "pending");
+    assert!(!executed_after_failure, "executed_at is cleared on revert");
+    assert!(reopened.is_none(), "a cancelled request is not reopened");
+    assert_eq!(status_after_revert, "cancelled");
+}
+
+/// Behavior change: cancelling a request that is no longer pending fails and
+/// changes nothing. Before, it set `cancelled` and reset the stage, silently
+/// undoing an applied deployment.
+async fn cancelling_a_resolved_request_changes_nothing(use_pool: bool) {
+    let pool = init_pg_pool().await;
+    let fixture = stage_change_request(&pool, use_pool, 0).await;
+    let target = approval_target(&pool, fixture.request_id).await;
+    let request = approval::approval_repository(pool.clone())
+        .get_request_by_id(fixture.request_id)
+        .await
+        .unwrap()
+        .unwrap();
+    fixture
+        .logic
+        .auto_approve_request(request)
+        .await
+        .expect("auto-approval should succeed");
+
+    let cancelled = fixture
+        .logic
+        .cancel_request(fixture.request_id, fixture.requester)
+        .await;
+    let status = status_of(&pool, fixture.request_id).await;
+    let stage = stage_status(&pool, fixture.stage_id).await;
+    cleanup_stage(&pool, &fixture).await;
+
+    let error = cancelled.expect_err("a resolved request cannot be cancelled");
+    assert!(error.to_string().contains("already resolved"), "{error}");
+    assert_eq!(status, "auto_approved");
+    assert_eq!(stage, target, "the applied stage change stays");
+}
+
+#[tokio::test]
+async fn cancelling_a_resolved_request_changes_nothing_on_the_transaction_path() {
+    cancelling_a_resolved_request_changes_nothing(true).await;
+}
+
+#[tokio::test]
+async fn cancelling_a_resolved_request_changes_nothing_on_the_plain_path() {
+    cancelling_a_resolved_request_changes_nothing(false).await;
+}

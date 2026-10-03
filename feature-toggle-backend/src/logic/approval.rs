@@ -2,7 +2,8 @@ use crate::Error;
 use crate::database::activity_log::{CreateActivityLog, activity_log_repository};
 use crate::database::approval::{
     ApprovalRepository, ApprovalRepositoryTx, CreateApprovalRequestInput, CreateApprovalVoteInput,
-    MAX_RECONCILE_FAILURES, approval_repository_tx, approver_qualifies_sql,
+    MAX_AUTO_APPROVE_FAILURES, MAX_RECONCILE_FAILURES, approval_repository_tx,
+    approver_qualifies_sql,
 };
 use crate::database::entity::{
     ApprovalPolicy, ApprovalRequest, ApprovalStatus, ApprovalVote, ApprovalVoteValue,
@@ -307,6 +308,50 @@ struct ApprovalLogicImpl {
     notification_logic: Option<Box<dyn crate::logic::notification::NotificationLogic>>,
     /// Present only when TypeSafe judgments are available (`TYPESAFE_API_KEY` set).
     judgments: Option<Arc<JudgmentService>>,
+}
+
+/// A path that approves a request without a vote and counts its failures.
+#[derive(Clone, Copy, Debug)]
+enum SystemApproval {
+    Reconciliation,
+    AutoApproval,
+}
+
+impl SystemApproval {
+    fn max_failures(self) -> i32 {
+        match self {
+            Self::Reconciliation => MAX_RECONCILE_FAILURES,
+            Self::AutoApproval => MAX_AUTO_APPROVE_FAILURES,
+        }
+    }
+
+    fn stopped_activity(self) -> &'static str {
+        match self {
+            Self::Reconciliation => activity_types::APPROVAL_RECONCILIATION_STOPPED,
+            Self::AutoApproval => activity_types::AUTO_APPROVAL_STOPPED,
+        }
+    }
+
+    fn actor_name(self) -> &'static str {
+        match self {
+            Self::Reconciliation => "Approval reconciliation",
+            Self::AutoApproval => "Auto-approval",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Reconciliation => "reconciliation",
+            Self::AutoApproval => "auto-approval",
+        }
+    }
+
+    fn verb(self) -> &'static str {
+        match self {
+            Self::Reconciliation => "approved",
+            Self::AutoApproval => "auto-approved",
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -634,42 +679,55 @@ impl ApprovalLogicImpl {
         Ok(())
     }
 
-    /// Counts a failed reconciliation. After `MAX_RECONCILE_FAILURES` the
-    /// request is no longer listed for reconciliation, and an
-    /// `approval_reconciliation_stopped` activity says a person has to decide
-    /// (admin override or cancel). Errors here are only logged.
-    async fn record_reconciliation_failure(
+    /// Counts a failed system approval (reconciliation or auto-approval) of a
+    /// pending request. At the limit the request is no longer picked up by
+    /// that path, and an activity entry says a person has to decide (admin
+    /// override or cancel). Errors here are only logged.
+    async fn record_system_approval_failure(
         &self,
-        pool: &PgPool,
+        kind: SystemApproval,
         request: &ApprovalRequest,
         error: &Error,
     ) {
-        let failures = match self
-            .approval_repository
-            .record_reconciliation_failure(request.id)
-            .await
-        {
+        let counted = match kind {
+            SystemApproval::Reconciliation => {
+                self.approval_repository
+                    .record_reconciliation_failure(request.id)
+                    .await
+            }
+            SystemApproval::AutoApproval => {
+                self.approval_repository
+                    .record_auto_approval_failure(request.id)
+                    .await
+            }
+        };
+        let failures = match counted {
             Ok(Some(failures)) => failures,
             Ok(None) => return,
             Err(err) => {
                 warn!(
-                    "Could not count reconciliation failure for approval request {}: {err}",
+                    "Could not count {} failure for approval request {}: {err}",
+                    kind.label(),
                     request.id
                 );
                 return;
             }
         };
-        if failures < MAX_RECONCILE_FAILURES {
+        if failures < kind.max_failures() {
             return;
         }
+        let Some(pool) = &self.db_pool else {
+            return;
+        };
         let entry = CreateActivityLog {
-            activity_type: activity_types::APPROVAL_RECONCILIATION_STOPPED.to_string(),
+            activity_type: kind.stopped_activity().to_string(),
             entity_type: entity_types::FEATURE.to_string(),
             entity_id: request.feature_id.to_string(),
             actor_id: None,
-            actor_name: Some("Approval reconciliation".to_string()),
+            actor_name: Some(kind.actor_name().to_string()),
             description: format!(
-                "Approval request could not be approved after {failures} attempts; an admin override or cancel is needed"
+                "Approval request could not be {} after {failures} attempts; an admin override or cancel is needed",
+                kind.verb()
             ),
             metadata: Some(serde_json::json!({
                 "approval_request_id": request.id.to_string(),
@@ -682,7 +740,8 @@ impl ApprovalLogicImpl {
             .await
         {
             warn!(
-                "Could not record stopped reconciliation for approval request {}: {err}",
+                "Could not record stopped {} for approval request {}: {err}",
+                kind.label(),
                 request.id
             );
         }
@@ -1669,7 +1728,7 @@ impl ApprovalLogic for ApprovalLogicImpl {
     async fn cancel_request(
         &self,
         request_id: Uuid,
-        _cancelled_by: Uuid,
+        cancelled_by: Uuid,
     ) -> Result<ApprovalRequest, Error> {
         if let Some(pool) = &self.db_pool {
             let existing = self
@@ -1702,8 +1761,10 @@ impl ApprovalLogic for ApprovalLogicImpl {
             let approval_repo_tx = approval_repository_tx(pool.clone());
             let feature_repo_tx = feature_repository_tx(pool.clone());
 
+            // Only a pending request is cancelled (guarded in SQL). Resetting
+            // the stage of an approved request would undo an applied change.
             let updated = approval_repo_tx
-                .update_request_status_tx(&mut tx, request_id, ApprovalStatus::Cancelled, None)
+                .cancel_request_tx(&mut tx, request_id)
                 .await?;
 
             if let Some((stage_id, status)) = stage_reset {
@@ -1743,9 +1804,10 @@ impl ApprovalLogic for ApprovalLogicImpl {
             None
         };
 
+        // Guarded in SQL like the transaction path: pending requests only.
         let updated = self
             .approval_repository
-            .update_request_status(request_id, ApprovalStatus::Cancelled, None)
+            .cancel_request(request_id, cancelled_by)
             .await?;
 
         if let Some((stage_id, status)) = stage_reset {
@@ -1782,60 +1844,77 @@ impl ApprovalLogic for ApprovalLogicImpl {
         &self,
         request: ApprovalRequest,
     ) -> Result<ApprovalRequest, Error> {
-        if let Some(pool) = &self.db_pool {
-            let team_id = self.policy_team_id(request.policy_id).await?;
-            let mut tx = pool.begin().await.map_err(Error::DatabaseError)?;
-            let approval_repo_tx = approval_repository_tx(pool.clone());
-            let feature_repo_tx = feature_repository_tx(pool.clone());
+        // An async block so every failure below (including a change that
+        // cannot be applied) is counted; see `record_system_approval_failure`.
+        let result: Result<ApprovalRequest, Error> = async {
+            if let Some(pool) = &self.db_pool {
+                let team_id = self.policy_team_id(request.policy_id).await?;
+                let mut tx = pool.begin().await.map_err(Error::DatabaseError)?;
+                let approval_repo_tx = approval_repository_tx(pool.clone());
+                let feature_repo_tx = feature_repository_tx(pool.clone());
 
-            // Close the request first (guarded by status = 'pending'), then
-            // apply the change for the auto-approved row in the same
-            // transaction. Before, the pending row was passed to
-            // `execute_change_tx`, which applies nothing for a pending status.
-            let Some(updated) = approval_repo_tx
-                .mark_auto_approved_tx(&mut tx, request.id)
+                // Close the request first (guarded by status = 'pending'), then
+                // apply the change for the auto-approved row in the same
+                // transaction. Before, the pending row was passed to
+                // `execute_change_tx`, which applies nothing for a pending status.
+                let Some(updated) = approval_repo_tx
+                    .mark_auto_approved_tx(&mut tx, request.id)
+                    .await?
+                else {
+                    tx.rollback().await.map_err(Error::DatabaseError)?;
+                    return Err(Error::InvalidInput("Request is already resolved".into()));
+                };
+                self.execute_change_tx(&feature_repo_tx, &mut tx, &updated, SENTINEL_UUID)
+                    .await?;
+                tx.commit().await.map_err(Error::DatabaseError)?;
+                self.publish_event(&updated, team_id).await?;
+                self.notify_edge_servers(request.feature_id).await;
+
+                self.dispatch_stage_change_approved_notification(&updated, team_id, None)
+                    .await;
+
+                return Ok(updated);
+            }
+
+            let team_id = self.policy_team_id(request.policy_id).await?;
+            let Some(updated) = self
+                .approval_repository
+                .mark_auto_approved(request.id)
                 .await?
             else {
-                tx.rollback().await.map_err(Error::DatabaseError)?;
                 return Err(Error::InvalidInput("Request is already resolved".into()));
             };
-            self.execute_change_tx(&feature_repo_tx, &mut tx, &updated, SENTINEL_UUID)
-                .await?;
-            tx.commit().await.map_err(Error::DatabaseError)?;
+            if let Err(exec_err) = self.execute_change(&updated, SENTINEL_UUID).await {
+                // Put the request back so the next scheduler run retries it. Only
+                // while it is still auto_approved: a concurrent cancel stays.
+                if let Err(err) = self
+                    .approval_repository
+                    .revert_auto_approval(request.id)
+                    .await
+                {
+                    warn!(
+                        "Could not reopen approval request {} after a failed auto-approval: {err}",
+                        request.id
+                    );
+                }
+                return Err(exec_err);
+            }
             self.publish_event(&updated, team_id).await?;
+
+            // Notify edge servers about the feature update after auto-approval
             self.notify_edge_servers(request.feature_id).await;
 
             self.dispatch_stage_change_approved_notification(&updated, team_id, None)
                 .await;
 
-            return Ok(updated);
+            Ok(updated)
         }
-
-        let team_id = self.policy_team_id(request.policy_id).await?;
-        let Some(updated) = self
-            .approval_repository
-            .mark_auto_approved(request.id)
-            .await?
-        else {
-            return Err(Error::InvalidInput("Request is already resolved".into()));
-        };
-        if let Err(exec_err) = self.execute_change(&updated, SENTINEL_UUID).await {
-            // Put the request back so the next scheduler run retries it.
-            let _ = self
-                .approval_repository
-                .update_request_status(request.id, ApprovalStatus::Pending, None)
+        .await;
+        if let Err(err) = &result {
+            self.record_system_approval_failure(SystemApproval::AutoApproval, &request, err)
                 .await;
-            return Err(exec_err);
         }
-        self.publish_event(&updated, team_id).await?;
-
-        // Notify edge servers about the feature update after auto-approval
-        self.notify_edge_servers(request.feature_id).await;
-
-        self.dispatch_stage_change_approved_notification(&updated, team_id, None)
-            .await;
-
-        Ok(updated)
+        result
     }
 
     async fn approve_capped_request(
@@ -1910,7 +1989,7 @@ impl ApprovalLogic for ApprovalLogicImpl {
         }
         .await;
         if let Err(err) = &result {
-            self.record_reconciliation_failure(pool, &request, err)
+            self.record_system_approval_failure(SystemApproval::Reconciliation, &request, err)
                 .await;
         }
         result

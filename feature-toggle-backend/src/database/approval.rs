@@ -12,6 +12,16 @@ pub const DEFAULT_APPROVAL_PAGE_SIZE: i32 = 20;
 /// to decide (admin override or cancel); see `reconcile_failures`.
 pub const MAX_RECONCILE_FAILURES: i32 = 3;
 
+/// Failed auto-approval attempts after which a due request is left for a
+/// person to decide; see `auto_approve_failures`.
+pub const MAX_AUTO_APPROVE_FAILURES: i32 = 3;
+
+/// `RETURNING` list that `map_request_row` reads.
+const REQUEST_RETURNING: &str = "RETURNING id, policy_id, feature_id, environment_id, change_type, \
+     change_payload, change_description, requested_by, eligible_approver_ids, routing_reason, \
+     admin_override_enabled, status, approved_count, rejected_count, executed_at, created_at, \
+     updated_at, required_approvers_override";
+
 /// Returned when a vote or status change reaches a request that is no longer
 /// pending. Same message the vote logic uses for a closed request.
 const ALREADY_RESOLVED: &str = "Request is already resolved";
@@ -248,9 +258,20 @@ pub trait ApprovalRepository: Send + Sync {
     /// Counts one failed reconciliation of a pending request. Returns the new
     /// failure count, or `None` when the request is no longer pending.
     async fn record_reconciliation_failure(&self, request_id: Uuid) -> Result<Option<i32>, Error>;
+    /// Counts one failed auto-approval of a pending request. Returns the new
+    /// failure count, or `None` when the request is no longer pending.
+    async fn record_auto_approval_failure(&self, request_id: Uuid) -> Result<Option<i32>, Error>;
     /// Marks a pending request auto-approved. `None` when it is no longer
     /// pending (nothing changed).
     async fn mark_auto_approved(&self, request_id: Uuid) -> Result<Option<ApprovalRequest>, Error>;
+    /// Reopens a request this process just auto-approved when its change
+    /// could not be applied: back to `pending` with `executed_at` cleared, but
+    /// only while it is still `auto_approved` (a concurrent cancel wins).
+    /// `None` when nothing changed.
+    async fn revert_auto_approval(
+        &self,
+        request_id: Uuid,
+    ) -> Result<Option<ApprovalRequest>, Error>;
 
     fn clone_box(&self) -> Box<dyn ApprovalRepository>;
 }
@@ -308,6 +329,13 @@ pub trait ApprovalRepositoryTx: ApprovalRepository {
         conn: &mut PgConnection,
         request_id: Uuid,
     ) -> Result<Option<ApprovalRequest>, Error>;
+    /// [`ApprovalRepository::cancel_request`] inside a transaction: only a
+    /// pending request is cancelled; otherwise "Request is already resolved".
+    async fn cancel_request_tx(
+        &self,
+        conn: &mut PgConnection,
+        request_id: Uuid,
+    ) -> Result<ApprovalRequest, Error>;
     /// [`ApprovalRepository::mark_auto_approved`] inside a transaction.
     async fn mark_auto_approved_tx(
         &self,
@@ -333,6 +361,31 @@ pub struct ApprovalRepositoryImpl {
 impl ApprovalRepositoryImpl {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// Cancels a pending request. A request that is already approved,
+    /// auto-approved, rejected or cancelled is not changed: cancelling it would
+    /// let the caller reset a stage change that was already applied.
+    async fn cancel_pending_internal(
+        conn: &mut PgConnection,
+        request_id: Uuid,
+    ) -> Result<ApprovalRequest, Error> {
+        handle_error(
+            Some(request_id),
+            sqlx::query(&format!(
+                r#"
+                UPDATE approval_requests
+                SET status = 'cancelled', updated_at = NOW()
+                WHERE id = $1 AND status = 'pending'
+                {REQUEST_RETURNING}
+                "#
+            ))
+            .bind(request_id)
+            .map(Self::map_request_row)
+            .fetch_optional(&mut *conn)
+            .await,
+        )?
+        .ok_or_else(|| Error::InvalidInput(ALREADY_RESOLVED.into()))
     }
 
     /// Guarded by `status = 'pending'`: a closed request is never changed.
@@ -652,7 +705,6 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
             SET approved_count = approved_count + CASE WHEN $2 = 'approve' THEN 1 ELSE 0 END,
                 rejected_count = rejected_count + CASE WHEN $2 = 'reject' THEN 1 ELSE 0 END,
                 status = CASE
-                    WHEN status = 'cancelled' THEN status
                     WHEN $2 = 'reject' THEN 'rejected'
                     WHEN approved_count + CASE WHEN $2 = 'approve' THEN 1 ELSE 0 END >= $3 THEN 'approved'
                     ELSE status
@@ -928,6 +980,7 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
                 WHERE r.status = 'pending'
                   AND p.auto_approve_after_hours IS NOT NULL
                   AND r.created_at + make_interval(hours => p.auto_approve_after_hours) <= NOW()
+                  AND r.auto_approve_failures < $1
                   AND NOT (
                     p.ai_risk_mode IN ('gate_auto_approve', 'require_extra_approver')
                     AND EXISTS (
@@ -939,6 +992,7 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
                 ORDER BY r.created_at ASC
                 "#,
             )
+            .bind(MAX_AUTO_APPROVE_FAILURES)
             .map(Self::map_request_row)
             .fetch_all(&self.pool)
             .await,
@@ -1059,9 +1113,47 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
         )
     }
 
+    async fn record_auto_approval_failure(&self, request_id: Uuid) -> Result<Option<i32>, Error> {
+        handle_error(
+            Some(request_id),
+            sqlx::query_scalar::<_, i32>(
+                r#"
+                UPDATE approval_requests
+                SET auto_approve_failures = auto_approve_failures + 1
+                WHERE id = $1 AND status = 'pending'
+                RETURNING auto_approve_failures
+                "#,
+            )
+            .bind(request_id)
+            .fetch_optional(&self.pool)
+            .await,
+        )
+    }
+
     async fn mark_auto_approved(&self, request_id: Uuid) -> Result<Option<ApprovalRequest>, Error> {
         let mut conn = self.pool.acquire().await.map_err(Error::DatabaseError)?;
         Self::mark_auto_approved_internal(&mut conn, request_id).await
+    }
+
+    async fn revert_auto_approval(
+        &self,
+        request_id: Uuid,
+    ) -> Result<Option<ApprovalRequest>, Error> {
+        handle_error(
+            Some(request_id),
+            sqlx::query(&format!(
+                r#"
+                UPDATE approval_requests
+                SET status = 'pending', executed_at = NULL, updated_at = NOW()
+                WHERE id = $1 AND status = 'auto_approved'
+                {REQUEST_RETURNING}
+                "#
+            ))
+            .bind(request_id)
+            .map(Self::map_request_row)
+            .fetch_optional(&self.pool)
+            .await,
+        )
     }
 
     async fn cancel_request(
@@ -1070,8 +1162,8 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
         _cancelled_by: Uuid,
     ) -> Result<ApprovalRequest, Error> {
         // We track cancelled_by in audits later; for now just flip status.
-        self.update_request_status(request_id, ApprovalStatus::Cancelled, None)
-            .await
+        let mut conn = self.pool.acquire().await.map_err(Error::DatabaseError)?;
+        Self::cancel_pending_internal(&mut conn, request_id).await
     }
 
     fn clone_box(&self) -> Box<dyn ApprovalRepository> {
@@ -1334,6 +1426,14 @@ impl ApprovalRepositoryTx for ApprovalRepositoryImpl {
         Self::mark_auto_approved_internal(conn, request_id).await
     }
 
+    async fn cancel_request_tx(
+        &self,
+        conn: &mut PgConnection,
+        request_id: Uuid,
+    ) -> Result<ApprovalRequest, Error> {
+        Self::cancel_pending_internal(conn, request_id).await
+    }
+
     async fn approve_capped_request_tx(
         &self,
         conn: &mut PgConnection,
@@ -1395,7 +1495,6 @@ impl ApprovalRepositoryTx for ApprovalRepositoryImpl {
             SET approved_count = approved_count + CASE WHEN $2 = 'approve' THEN 1 ELSE 0 END,
                 rejected_count = rejected_count + CASE WHEN $2 = 'reject' THEN 1 ELSE 0 END,
                 status = CASE
-                    WHEN status = 'cancelled' THEN status
                     WHEN $2 = 'reject' THEN 'rejected'
                     WHEN approved_count + CASE WHEN $2 = 'approve' THEN 1 ELSE 0 END >= $3 THEN 'approved'
                     ELSE status

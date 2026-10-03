@@ -86,6 +86,9 @@ pub mod activity_types {
     /// The reconciliation could not approve a request (its change failed)
     /// `MAX_RECONCILE_FAILURES` times and stopped retrying it.
     pub const APPROVAL_RECONCILIATION_STOPPED: &str = "approval_reconciliation_stopped";
+    /// Auto-approval could not apply a due request's change
+    /// `MAX_AUTO_APPROVE_FAILURES` times and stopped retrying it.
+    pub const AUTO_APPROVAL_STOPPED: &str = "auto_approval_stopped";
 }
 
 /// Common entity types in the system
