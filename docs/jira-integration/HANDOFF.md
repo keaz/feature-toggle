@@ -21,7 +21,14 @@ Read this after [`README.md`](README.md) and [`design.md`](design.md). It record
 
 **Phase 1 is complete (2026-10-03).**
 
-**Phase 2 is planned (2026-10-03):** write-back to Jira (comments + live remote link), inbound rate limit, signed native webhooks, reason hint. Design [`phase-2/design.md`](phase-2/design.md), tasks [`phase-2/README.md`](phase-2/README.md). **Next task: [JI-50](phase-2/tasks/JI-50-guide-and-e2e.md).**
+**Phase 2 is complete (2026-10-04):** write-back to Jira (comments + live remote link), inbound rate limit, signed native webhooks, reason hint. Design [`phase-2/design.md`](phase-2/design.md), tasks [`phase-2/README.md`](phase-2/README.md). The setup guide covers all of it and `api-tests/src/tests/advanced/jira-writeback.test.ts` proves the loop against a fake Jira. No next task.
+
+Open points after phase 2:
+- No real Jira site was tested (Cloud or Data Center). Only the fake Jira, the mock-Jira sender tests and the Cloud webhook fixture have run. Do one pass against a test site before relying on it.
+- Data Center native webhook signing: Atlassian docs describe `X-Hub-Signature` for DC 11.3 but name no first version (JI-45). The guide words it as "recent versions with a Secret field; else Automation".
+- `test:docker` was not run (no Docker on the dev machine). The compose file now mounts `api-tests/backend-config.toml` and sets `FLUXGATE_ENCRYPTION_KEY`, `extra_hosts` and `FAKE_JIRA_HOST`; run it once where Docker exists.
+- The rate limit runs before the secret check, so anyone who knows an integration id can use up its budget (guide section 4 says to keep the URL private and limit per IP at the proxy).
+- Known flaky tests, not fixed: `feature_test::test_pending_approval_listing_maps_feature_metadata`; `jira_writeback_capture_test::list_window_is_ascending_and_bounded` (depends on shared test DB state).
 
 | Phase 2 task | Status | Commit |
 |---|---|---|
@@ -33,7 +40,7 @@ Read this after [`README.md`](README.md) and [`design.md`](design.md). It record
 | JI-45 native webhook HMAC | Done | backend `088c2b2` |
 | JI-46 UI write-back settings | Done | UI `b4479f9` |
 | JI-47 reason hint on stage change | Done | backend `d5d6faf`, UI `56042f8` |
-| JI-50 guide + e2e | Open | |
+| JI-50 guide + e2e | Done | backend `b75c9a9` (test), `e3321e3` (guide) |
 
 Facts from JI-41 (backend `3de0dec`): `logic::jira_client::{JiraClient, client_for}` build a client from a row but do not check `writeback_enabled` (the sender must); credential AAD is the integration id bytes; turning write-back off does not yet dead the pending jobs (JI-42 adds it); `web::Data<config::JiraUiBaseUrl>` carries the UI base URL. Details in the JI-41 handoff log.
 

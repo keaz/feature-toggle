@@ -61,7 +61,7 @@ The five inputs most likely to break write-back in real use, each pinned by a te
 | [x] | [JI-45](tasks/JI-45-native-webhook-hmac.md) | Native webhook HMAC auth | backend | JI-41 |
 | [x] | [JI-46](tasks/JI-46-ui-writeback-settings.md) | UI: write-back settings, native secret, Outbound tab, paused banner | UI | JI-42, JI-45 |
 | [x] | [JI-47](tasks/JI-47-reason-hint-on-stage-change.md) | `ReasonQualityHint` on the stage change reason field | backend + UI | — |
-| [ ] | [JI-50](tasks/JI-50-guide-and-e2e.md) | Setup guide update and end-to-end write-back test | docs + api-tests | JI-43, JI-44, JI-45 |
+| [x] | [JI-50](tasks/JI-50-guide-and-e2e.md) | Setup guide update and end-to-end write-back test | docs + api-tests | JI-43, JI-44, JI-45 |
 
 ```
 JI-40 ─► JI-41 ─► JI-42 ─► JI-43 ─► JI-44 ─► JI-45 ─► JI-46 ─► JI-47 ─► JI-50

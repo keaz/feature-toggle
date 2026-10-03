@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Type | Docs + test |
-| Status | Open |
+| Status | Done in b75c9a9 (test), e3321e3 (guide) |
 | Repo | backend repo (`feature-toggle/`): `docs/` and `api-tests/` |
 | Depends on | JI-43, JI-44, JI-45 (JI-46 for the UI wording in the guide) |
 | Behavior change | None |
@@ -82,4 +82,14 @@ An admin can set up write-back, native webhooks and the rate limit from the guid
 
 ## Handoff log
 
-(empty)
+2026-10-04, backend `b75c9a9` (test and infrastructure), `e3321e3` (guide):
+- Tests: `api-tests/src/tests/advanced/jira-writeback.test.ts`, 7 tests, all pass against the local backend on `feture_toggle_test` (two full runs, about 45 s each). Test 4 waits for the event comment and the remote link refresh, then 8 s more, and asserts exactly +1 comment. Tests 3 to 5 have a 60 s timeout (test 5 took up to 22 s because it also resumes and drains the queue). Test 5 goes beyond the brief: it resumes write-back and waits until no job is pending.
+- Environment names in the test are exactly `qa` and `prod` (the comment text uses the environment name).
+- Backend config for the test stack: new `api-tests/backend-config.toml` (`[jira] allow_insecure_http = true`, `ui_base_url`), mounted by `docker-compose.api-tests.yml` at `/app/config/config.toml`. The compose backend also gets `extra_hosts: host.docker.internal:host-gateway` and `FLUXGATE_ENCRYPTION_KEY`; `scripts/run-api-tests-docker.sh` generates the key per run (`openssl rand -base64 32`, exported, never stored) and sets `FAKE_JIRA_HOST` (default `host.docker.internal`).
+- Local run: binary `feature-toggle-backend` (not `fluxgate`, which is the CLI), `FEATURE_TOGGLE_CONFIG` pointing at a scratch copy of the api-test config with `127.0.0.1:18080` and gRPC `127.0.0.1:50061`, a runtime key, test DB. The backend was stopped afterwards.
+- Mutation check: removed `&& !jira_made` in `plan_jobs` (`jira_capture.rs`), rebuilt, restarted. Test 4 failed (`Expected: 4, Received: 5`); the other 6 passed. File restored with `git checkout`; `git diff` shows no backend change. A final full run with the restored code passed 7 of 7.
+- `pnpm --dir api-tests exec tsc --noEmit` is clean. `test:docker` was not run: Docker is not installed here.
+- Guide: new section "Write-back: show results in Jira" (after section 1), option C "Native webhook" (2.4, with Cloud confirmed and Data Center worded per JI-45), network section with the built-in rate limit (429, `Retry-After`, the keep-the-URL-private and per-IP proxy advice), `[jira]` key table, 429, native signature and outbound job status tables, "Not supported" updated.
+- Manual steps from the guide: the guide's API calls for write-back (PUT writeback, test connection, resume, outbound jobs list), native secret generation and the signed webhook request, and the event and rate limit behavior were all exercised by the api-test against the fake Jira. The `openssl` signing snippet and the Jira UI steps (Automation, webhook form, Cloud token page) were not run: no Jira site was available.
+- Deferred manual checks now covered by this run: JI-43 step 10 (fake Jira end to end), JI-44 step 9 (200 then 429), JI-45 step 9 (signed webhook and bad signature), JI-46 step 6 only for the API behind it (the UI itself was not clicked).
+- Not covered: real Jira Cloud or Data Center; the UI paused banner in a browser.
