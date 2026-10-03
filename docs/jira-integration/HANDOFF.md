@@ -17,9 +17,9 @@ Read this after [`README.md`](README.md) and [`design.md`](design.md). It record
 | JI-20 UI Jira links | Done | UI `3366750`, backend `a95d30c` |
 | JI-21 UI ref/reason, Jira approval | Done | UI `b603188` |
 | JI-22 UI Jira settings | Done | UI `131060d` |
-| JI-30 setup guide + e2e test | Open, **next** (needs JI-15) | — |
+| JI-30 setup guide + e2e test | Done | backend `1ba9d09` |
 
-**Next task: [JI-30](tasks/JI-30-jira-automation-recipe-and-e2e.md).**
+**Phase 1 is complete (2026-10-03).** No open task. Later phases (outbound webhooks, write-back to Jira, bridge, Forge) are listed in the README and are not planned yet.
 
 ## 2. Planning log (2026-10-03)
 
@@ -162,3 +162,11 @@ New tasks JI-13, JI-14, JI-15, JI-22; JI-12 became optional; JI-21 and JI-30 cha
 - UI API module `src/api/jiraIntegrations.ts`; helpers in `src/utils/jiraIntegrations.ts` (`jiraInboundEventsUrl`, `ruleWarnings`). The events URL is built from the UI's `REST_HTTP_URL`; if the backend is public under another host, the guide should say to use the public URL.
 - Integration delete removes the integration row (rules and events cascade); the JI-13 note "Delete sets `enabled = false`" is about the shadow user. To pause an integration, use the Enabled switch.
 - Test DB now holds integration `JI-22 Jira` (team `JI-21 check 1791039213`, rules "Ready for Release" → approve, "Done" → deploy, no Jira-approved environment) and four events for `PROJ-12`.
+
+### From JI-30 (`1ba9d09`)
+
+- End-to-end test: `api-tests/src/tests/advanced/jira-flow.test.ts`. Run it against a local backend: `API_BASE_URL=http://127.0.0.1:18180/api/v1 pnpm --dir api-tests exec jest --runInBand jira-flow`. Its helpers `webhookBody` / `automationBody` / `sendJiraEvent` are the reference Jira bodies for later tests.
+- A feature with two stages needs a relationship (`Pipeline must have at least 1 relationships` otherwise).
+- Admin guide: `docs/jira-integration/setup-guide.md`. It recommends Jira Automation "Send web request" only, because Jira's native webhooks cannot send the secret header. If a later phase adds HMAC or URL-token authentication for native webhooks, update section 2 of the guide.
+- The guide's Jira smart values were not run against a real Jira site. The first team that sets it up should confirm them and fix the guide if needed.
+- Open for phase 2: rate limit on the public inbound route, write-back to Jira, `ReasonQualityHint` on the stage change reason field.

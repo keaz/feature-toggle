@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Type | Docs + test |
-| Status | Open |
+| Status | Done in `1ba9d09` |
 | Repo | backend (`feature-toggle/`): `docs/jira-integration/`, `api-tests/` |
 | Depends on | JI-15 (and JI-12 if it was built) |
 | Behavior change | None |
@@ -55,4 +55,35 @@ Give teams a copy-paste setup for Jira Automation, and prove the whole flow with
 
 ## Handoff log
 
-(empty)
+### 2026-10-03: done in `1ba9d09`
+
+**What changed**
+
+- `api-tests/src/tests/advanced/jira-flow.test.ts` (8 tests). Setup: team, environments `qa` (Staging) and `prod` (Production), one policy (`specific_environments`, both), a human approver, a feature with stages qa → prod (a two-stage feature needs a relationship), integration with `environmentField = customfield_10042`, aliases `QA`/`Prod`, Jira approves in qa only, rules `Ready for Release → approve`, `Done → deploy`, `Ready for Release → request` (prod only), link `PROJ-<random>`. Jira is simulated with axios posts of a Cloud webhook body (status changelog, option-object custom field) and an Automation `{issue, user}` body with the `X-FluxGate-Jira-Secret` header.
+- Assertions follow the task list 1-9: qa approved as Jira (`approvalSource = 'jira'`, `externalApprover` snake_case keys, `externalRef`), qa deployed, prod `deploy` refused `not approved` with the stage unchanged, prod `approve` refused `environment not approved by Jira` and `request` leaves a pending `fluxgate` request, human approves, prod deployed, wrong and missing secret 401, a repeated delivery returns `duplicate: true` with the same `eventId` and results and no new feature activity (`GET /activity/recent?entityType=feature&entityId=`), event log total 6 (the replay and the 401s are not stored), newest first.
+- `docs/jira-integration/setup-guide.md`: FluxGate side (integration, secret, Events URL, aliases, Jira-approved environments with the security note, rules with the policy / no-policy note, links), Jira side (Automation "Send web request" on Cloud and Data Center; body option A "Issue data (Jira format)", option B custom body with `initiator`), finding the field id, network, reading results, HTTP status and outcome tables, not supported, by-key alternative (JI-12). Linked from the README.
+
+**Decisions taken in this task**
+
+- The guide recommends Automation only. Jira's native webhooks cannot add an `Authorization` header (they only sign the body with their own secret), and the inbound endpoint has no other way to authenticate. A header-adding proxy is mentioned as possible, not documented.
+- "Issue data (Jira format)" does not include the user who moved the issue, so the guide offers a custom body with `{{initiator.accountId}}` / `{{initiator.displayName}}` (Data Center: `{{initiator.key}}`). The Jira smart values in the guide were written from Atlassian's documentation, not run against a real Jira site; the backend accepts the shapes they render to (checked by the parser tests and the manual run).
+- `design.md` §3.10 named the page `automation-recipe.md`; the task file names it `setup-guide.md`, which was used.
+
+**Verified**
+
+- Backend `cf2213e` built, run on `127.0.0.1:18180` against `feture_toggle_test` (HANDOFF §3). `API_BASE_URL=http://127.0.0.1:18180/api/v1 pnpm --dir api-tests exec jest --runInBand jira-flow`: 8 passed. `pnpm --dir api-tests exec tsc --noEmit -p .`: clean. Docker is still not installed, so `test:docker` was not run.
+- Mutation check: adding prod to `jiraApprovedEnvironmentIds` fails 3 tests (untrusted approve, human approval step, event log).
+- Manual run of the guide with curl standing in for Jira (no tokens recorded; the secret stayed in a shell variable):
+  ```bash
+  # as api-test-admin: team, environment "qa" (no policy), feature with a qa stage, then
+  POST /teams/$TEAM/jira-integrations  {"name":"Jira PROJ","environmentField":"customfield_10042","environmentAliases":{"QA":"$QA"},"jiraApprovedEnvironmentIds":["$QA"]}
+  PUT  /jira-integrations/$ID/rules     {"rules":[{"jiraStatus":"Ready for Release","action":"approve"},{"jiraStatus":"Done","action":"deploy"}]}
+  POST /features/$FEATURE/external-links {"system":"jira","externalKey":"PROJ-30","url":"https://acme.atlassian.net/browse/PROJ-30"}
+  # Jira: POST /integrations/jira/$ID/events with an Automation body {issue:{key,fields:{status,customfield_10042:{value}}},user}
+  ```
+  Results: wrong secret 401; "Done" first → `deploy refused "not approved"`; "Ready for Release" → `approve applied NOT_DEPLOYED → DEPLOYMENT_APPROVED` (no policy: trusted approve moves the stage directly); "Done" with `X-FluxGate-Jira-Secret` → `DEPLOYED`; value `Staging-EU` → `results: []`, `unknownEnvironments: ["Staging-EU"]`; body `not json` → 400, stored with `error`; event log total 5.
+
+**Open points (phase 2)**
+
+- No rate limit on the public inbound route (from JI-15); the guide tells admins to add one at the proxy.
+- No write-back to Jira; `ReasonQualityHint` on the stage change reason field (from JI-21).
