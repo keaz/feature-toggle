@@ -85,6 +85,17 @@ pub trait ActivityLogRepository: Send + Sync {
         limit: i64,
     ) -> Result<Vec<ActivityLogRow>, sqlx::Error>;
 
+    /// Like [`Self::list_window`], but only entries after `after` in
+    /// `(created_at, id)` order (keyset paging).
+    async fn list_window_after(
+        &self,
+        types: &[&'static str],
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+        after: Option<(DateTime<Utc>, Uuid)>,
+        limit: i64,
+    ) -> Result<Vec<ActivityLogRow>, sqlx::Error>;
+
     /// Sets one top-level key of the entry's metadata, keeping the other keys.
     /// Updates nothing when the entry does not exist.
     async fn merge_activity_metadata(
@@ -319,16 +330,34 @@ impl ActivityLogRepository for PgActivityLogRepository {
         to: DateTime<Utc>,
         limit: i64,
     ) -> Result<Vec<ActivityLogRow>, sqlx::Error> {
+        self.list_window_after(types, from, to, None, limit).await
+    }
+
+    async fn list_window_after(
+        &self,
+        types: &[&'static str],
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+        after: Option<(DateTime<Utc>, Uuid)>,
+        limit: i64,
+    ) -> Result<Vec<ActivityLogRow>, sqlx::Error> {
         let types: Vec<String> = types.iter().map(|t| t.to_string()).collect();
+        let (after_at, after_id) = match after {
+            Some((at, id)) => (Some(at), Some(id)),
+            None => (None, None),
+        };
         sqlx::query_as::<_, ActivityLogRow>(
             "SELECT * FROM activity_log \
              WHERE created_at >= $1 AND created_at <= $2 AND activity_type = ANY($3) \
+               AND ($5::timestamptz IS NULL OR (created_at, id) > ($5, $6)) \
              ORDER BY created_at, id LIMIT $4",
         )
         .bind(from)
         .bind(to)
         .bind(types)
         .bind(limit)
+        .bind(after_at)
+        .bind(after_id)
         .fetch_all(&self.pool)
         .await
     }

@@ -221,7 +221,9 @@ pub fn plan_jobs(row: &ActivityLogRow, ctx: &CaptureContext) -> Vec<NewOutboundJ
                     jobs.push(NewOutboundJob {
                         integration_id: integration,
                         issue_key: issue.clone(),
-                        feature_id: Some(feature_id),
+                        // None: the feature may be deleted by now (foreign key); the
+                        // sender reads `payload.featureId`.
+                        feature_id: None,
                         kind: OutboundKind::RemoteLinkDelete,
                         payload: json!({"featureId": feature_id.to_string()}),
                         dedupe_key: format!("unlink:{}:{integration}", row.id),

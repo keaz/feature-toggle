@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use log::{error, warn};
-use sqlx::{PgConnection, PgPool};
+use sqlx::{Acquire, PgConnection, PgPool};
 use tokio::time;
 use uuid::Uuid;
 
@@ -106,31 +106,64 @@ impl JiraWritebackCapture {
         };
         drop(conn);
 
-        let to = Utc::now() - self.lag;
-        let mut from = cursor - chrono::Duration::seconds(OVERLAP_SECONDS);
+        // The database clock, so app/DB clock skew cannot eat the overlap.
+        let to: DateTime<Utc> = sqlx::query_scalar("SELECT now() - make_interval(secs => $1)")
+            .bind(self.lag.num_milliseconds() as f64 / 1000.0)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(Error::DatabaseError)?;
+        let from = cursor - chrono::Duration::seconds(OVERLAP_SECONDS);
+        let mut after: Option<(DateTime<Utc>, Uuid)> = None;
         let mut caches = Caches::default();
         let mut offered = 0;
         loop {
             let rows = self
                 .activity
-                .list_window(CAPTURE_TYPES, from, to, BATCH_SIZE)
+                .list_window_after(CAPTURE_TYPES, from, to, after, BATCH_SIZE)
                 .await
                 .map_err(Error::DatabaseError)?;
-            if rows.is_empty() {
+            let Some(last) = rows.last() else {
                 break;
-            }
-            let newest = rows.iter().map(|row| row.created_at).max().unwrap_or(from);
+            };
+            // Keyset paging: the next batch starts after the last row of this one.
+            after = Some((last.created_at, last.id));
+            let newest = last.created_at;
             let full = rows.len() as i64 >= BATCH_SIZE;
 
-            let mut jobs = Vec::new();
+            let mut planned = Vec::new();
             for row in rows.iter().filter(|row| is_capturable(row)) {
-                jobs.extend(self.jobs_for(row, &mut caches).await?);
+                planned.push((row.id, self.jobs_for(row, &mut caches).await?));
             }
             let mut tx = self.pool.begin().await.map_err(Error::DatabaseError)?;
             let outbox = jira_outbound_job_repository_tx(self.pool.clone());
-            for job in jobs {
-                outbox.enqueue_tx(&mut tx, job).await?;
-                offered += 1;
+            for (row_id, jobs) in planned {
+                // One savepoint per row: a row whose jobs cannot be stored is skipped
+                // and must not block the cursor.
+                let mut savepoint = (&mut tx).begin().await.map_err(Error::DatabaseError)?;
+                let mut count = 0;
+                let mut failure = None;
+                for job in jobs {
+                    match outbox.enqueue_tx(&mut savepoint, job).await {
+                        Ok(_) => count += 1,
+                        Err(err) => {
+                            failure = Some(err);
+                            break;
+                        }
+                    }
+                }
+                match failure {
+                    None => {
+                        savepoint.commit().await.map_err(Error::DatabaseError)?;
+                        offered += count;
+                    }
+                    Some(err) => {
+                        warn!(
+                            "Jira write-back capture skipped activity row {row_id}: {}",
+                            error_kind(&err)
+                        );
+                        savepoint.rollback().await.map_err(Error::DatabaseError)?;
+                    }
+                }
             }
             // Never moves back: a window of only overlap rows leaves the cursor.
             sqlx::query(
@@ -145,16 +178,6 @@ impl JiraWritebackCapture {
             if !full {
                 break;
             }
-            // Next batch starts at the newest row read (inclusive; re-reads are
-            // harmless). When a whole batch shares one timestamp, step past it.
-            from = if newest > from {
-                newest
-            } else {
-                warn!(
-                    "Jira write-back capture: {BATCH_SIZE} rows share one timestamp; skipping the rest of it"
-                );
-                newest + chrono::Duration::microseconds(1)
-            };
         }
         Ok(offered)
     }
@@ -313,4 +336,15 @@ async fn read_cursor(conn: &mut PgConnection) -> Result<Option<DateTime<Utc>>, E
         .fetch_optional(conn)
         .await
         .map_err(Error::DatabaseError)
+}
+
+/// What failed, without any value from the row.
+fn error_kind(err: &Error) -> String {
+    match err {
+        Error::DatabaseError(sqlx::Error::Database(db)) => {
+            format!("database error {}", db.code().unwrap_or_default())
+        }
+        Error::DatabaseError(_) => "database error".to_string(),
+        _ => "error".to_string(),
+    }
 }

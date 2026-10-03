@@ -544,6 +544,156 @@ async fn more_than_500_rows_are_drained_in_one_run() {
     cleanup(&pool, &[&team], &[feature_id]).await;
 }
 
+#[tokio::test]
+#[serial(jira_capture)]
+async fn link_removed_after_feature_deleted_enqueues_delete_without_feature_id() {
+    let pool = init_pg_pool().await;
+    let team = team_with_integration(&pool, true).await;
+    let feature_id = feature(&pool, team.team_id, Some("PROJ-1")).await;
+    set_cursor(&pool, Utc::now() - Duration::minutes(1)).await;
+    sqlx::query(
+        "INSERT INTO activity_log (activity_type, entity_type, entity_id, description, \
+         metadata, created_at) VALUES ('external_link_removed', 'feature', $1, 'link', $2, now())",
+    )
+    .bind(feature_id.to_string())
+    .bind(serde_json::json!({
+        "feature_id": feature_id.to_string(),
+        "feature_key": "gone",
+        "team_id": team.team_id.to_string(),
+        "system": "jira",
+        "external_key": "PROJ-1",
+    }))
+    .execute(&pool)
+    .await
+    .unwrap();
+    // The feature is deleted before the next capture tick.
+    sqlx::query("DELETE FROM features WHERE id = $1")
+        .bind(feature_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let before = cursor(&pool).await.unwrap();
+    capture(&pool)
+        .run_once()
+        .await
+        .expect("capture does not fail");
+
+    let rows: Vec<(String, Option<Uuid>, serde_json::Value)> = sqlx::query_as(
+        "SELECT kind, feature_id, payload FROM jira_outbound_jobs WHERE integration_id = $1",
+    )
+    .bind(team.integration_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, "remote_link_delete");
+    assert_eq!(rows[0].1, None);
+    assert_eq!(rows[0].2["featureId"], feature_id.to_string());
+    assert!(cursor(&pool).await.unwrap() > before);
+    cleanup(&pool, &[&team], &[feature_id]).await;
+}
+
+#[tokio::test]
+#[serial(jira_capture)]
+async fn failing_row_does_not_block_the_cursor() {
+    let pool = init_pg_pool().await;
+    let team = team_with_integration(&pool, true).await;
+    let bad = feature(&pool, team.team_id, Some("BAD-1")).await;
+    let good = feature(&pool, team.team_id, Some("PROJ-1")).await;
+    // Force the outbox insert of the bad issue to fail.
+    sqlx::query("DROP TRIGGER IF EXISTS capture_test_fail ON jira_outbound_jobs")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE OR REPLACE FUNCTION capture_test_fail() RETURNS trigger AS $$ BEGIN \
+         IF NEW.issue_key = 'BAD-1' THEN RAISE EXCEPTION 'forced failure'; END IF; \
+         RETURN NEW; END $$ LANGUAGE plpgsql",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER capture_test_fail BEFORE INSERT ON jira_outbound_jobs \
+         FOR EACH ROW EXECUTE FUNCTION capture_test_fail()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let start = Utc::now() - Duration::minutes(1);
+    set_cursor(&pool, start).await;
+    let now = Utc::now();
+    activity(
+        &pool,
+        "stage_deployed",
+        bad,
+        None,
+        now - Duration::seconds(2),
+    )
+    .await;
+    let last = now - Duration::seconds(1);
+    activity(&pool, "stage_deployed", good, None, last).await;
+
+    let result = capture(&pool).run_once().await;
+
+    sqlx::query("DROP TRIGGER capture_test_fail ON jira_outbound_jobs")
+        .execute(&pool)
+        .await
+        .unwrap();
+    result.expect("a failing row does not fail the run");
+    assert_eq!(
+        jobs(&pool, team.integration_id).await.len(),
+        2,
+        "only the good row"
+    );
+    assert!(
+        jobs(&pool, team.integration_id)
+            .await
+            .iter()
+            .all(|job| job.1 == "PROJ-1")
+    );
+    assert!(
+        cursor(&pool).await.unwrap() >= last,
+        "the cursor advanced past both rows"
+    );
+    cleanup(&pool, &[&team], &[bad, good]).await;
+}
+
+#[tokio::test]
+#[serial(jira_capture)]
+async fn more_than_500_rows_with_the_same_created_at_are_all_captured() {
+    let pool = init_pg_pool().await;
+    let team = team_with_integration(&pool, true).await;
+    let feature_id = feature(&pool, team.team_id, Some("PROJ-1")).await;
+    set_cursor(&pool, Utc::now() - Duration::minutes(30)).await;
+    // One transaction: every row gets the same created_at.
+    sqlx::query(
+        "INSERT INTO activity_log (activity_type, entity_type, entity_id, actor_name, \
+         description, metadata, created_at) \
+         SELECT 'stage_deployed', 'stage', gen_random_uuid()::text, 'Jane Doe', 'bulk', \
+                jsonb_build_object('feature_id', $1::text, 'environment_name', 'prod'), \
+                now() - interval '10 minutes' \
+         FROM generate_series(1, 1300) g",
+    )
+    .bind(feature_id.to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    capture(&pool).run_once().await.unwrap();
+
+    let comments: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM jira_outbound_jobs WHERE integration_id = $1 AND kind = 'comment'",
+    )
+    .bind(team.integration_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(comments, 1300);
+    cleanup(&pool, &[&team], &[feature_id]).await;
+}
+
 #[test]
 fn capture_types_are_the_twelve_of_the_design() {
     assert_eq!(CAPTURE_TYPES.len(), 12);
