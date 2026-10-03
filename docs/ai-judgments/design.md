@@ -290,11 +290,11 @@ Rules: keep at most 30 diff entries (in order), and truncate `before`/`after` va
 
 - Write an activity log entry `approval_risk_assessed` (new constant in `utils/activity_logger.rs`) with metadata `{approval_request_id, feature_id, level, reasons, model}`.
 - Only in AI-11, and only if the request is still `pending`, `policy.ai_risk_mode = 'require_extra_approver'`, and `level = high`:
-  `UPDATE approval_requests SET required_approvers_override = <policy.required_approvers + 1> WHERE id = $1 AND status = 'pending' AND required_approvers_override IS NULL`.
+  `UPDATE approval_requests SET required_approvers_override = <n> WHERE id = $1 AND status = 'pending' AND required_approvers_override IS NULL`, where `n = min(policy.required_approvers + 1, len(request.eligible_approver_ids))` when the request's eligible approver list is non-empty, and `policy.required_approvers + 1` when it is empty (role-routed; the count is not known). If the cap leaves `n <= policy.required_approvers`, no override is written and the activity metadata gets `"extra_approver_skipped": "no_additional_eligible_approver"` instead. (User decision 2026-10-03: without the cap, a policy with exactly `required_approvers` eligible approvers could never approve a high-risk request by votes, and a later policy edit does not clear the override already stored on the request.)
 
 **Policy enforcement (AI-11).**
 
-- `gate_auto_approve`: `list_requests_due_for_auto_approval` (`database/approval.rs`) excludes a request when a `done` approval-risk judgment for it has `derived->>'level' = 'high'` and the team's `approval_risk` setting is on. A missing, pending, or failed judgment does **not** exclude it (fail open, D3).
+- `gate_auto_approve` and `require_extra_approver`: `list_requests_due_for_auto_approval` (`database/approval.rs`) excludes a request when a `done` approval-risk judgment for it has `derived->>'level' = 'high'` and the team's `approval_risk` setting is on. A missing, pending, or failed judgment does **not** exclude it (fail open, D3). (User decision 2026-10-03: `require_extra_approver` blocks auto-approval too, so a high-risk request cannot auto-approve past the extra approver it needs.)
 - `require_extra_approver`: `apply_vote` and `apply_vote_tx` (`logic/approval.rs`) pass `request.required_approvers_override.unwrap_or(policy.required_approvers)` as the `required_approvers` argument of `record_vote` (`database/approval.rs`). The SQL there does not change.
 - An assessment never reopens a request that is already approved, rejected, or cancelled.
 - Admin override behavior does not change.

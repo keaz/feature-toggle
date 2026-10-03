@@ -198,11 +198,13 @@ async fn is_due(pool: &PgPool, request_id: Uuid) -> bool {
 }
 
 #[tokio::test]
-async fn gate_auto_approve_excludes_only_done_high_risk_with_the_team_setting_on() {
+async fn enforcing_modes_exclude_only_done_high_risk_with_the_team_setting_on() {
     let pool = init_pg_pool().await;
 
-    // (mode, team setting, judgment as (status, level), expected due)
-    let cases: [(&str, Option<bool>, Option<(&str, &str)>, bool); 9] = [
+    // (mode, team setting, judgment as (status, level), expected due).
+    // User decision 2026-10-03: require_extra_approver also blocks
+    // auto-approval for a done high-risk assessment, like gate_auto_approve.
+    let cases: [(&str, Option<bool>, Option<(&str, &str)>, bool); 13] = [
         (
             "gate_auto_approve",
             Some(true),
@@ -240,8 +242,27 @@ async fn gate_auto_approve_excludes_only_done_high_risk_with_the_team_setting_on
             "require_extra_approver",
             Some(true),
             Some(("done", "high")),
+            false,
+        ),
+        (
+            "require_extra_approver",
+            Some(true),
+            Some(("pending", "high")),
             true,
         ),
+        (
+            "require_extra_approver",
+            Some(true),
+            Some(("done", "medium")),
+            true,
+        ),
+        (
+            "require_extra_approver",
+            Some(false),
+            Some(("done", "high")),
+            true,
+        ),
+        ("off", Some(true), Some(("done", "high")), true),
     ];
 
     for (mode, setting, judgment, expected_due) in cases {

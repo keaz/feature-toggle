@@ -97,9 +97,18 @@ Maintainer sign-off: the maintainer approved implementing and committing this ta
 
 **Open questions and notes:**
 
-- The override is `required_approvers + 1` without checking eligible approvers. If a policy has exactly `required_approvers` eligible approvers, a high-risk request cannot reach the override by votes alone. An admin override voter, a policy edit, or cancel still works. A cap at the eligible count was not added because the brief fixes the value; raise it if this matters.
+- The override is `required_approvers + 1` without checking eligible approvers. If a policy has exactly `required_approvers` eligible approvers, a high-risk request cannot reach the override by votes alone. An admin override voter or cancel still works; a policy edit does **not**, because the override is stored on the request row and is never cleared (corrected 2026-10-03). Superseded by the 2026-10-03 entry below: the override is now capped.
 - The override is read at apply time from the policy's current mode. Changing a policy to `require_extra_approver` later does not affect requests already assessed.
 - `gate_auto_approve` re-evaluates on every scheduler run, so switching the policy mode makes the held request eligible again.
 - The test DB must have the new migration applied (`sqlx migrate run`); `init_pg_pool` does not migrate.
 
 **For later tasks:** AI-12 UI needs no change; it already shows the hint once `requiredApprovalsEffective` exceeds the policy's `requiredApprovers`.
+
+### 2026-10-03: final-review fixes (user decisions)
+
+Two user decisions, both dated 2026-10-03, change this task's behavior:
+
+1. **Override capped at the eligible approver count.** `ApprovalRiskHandler::enforce_extra_approver` now sets `required_approvers_override = min(policy.required_approvers + 1, len(request.eligible_approver_ids))` when the request's eligible approver list is non-empty. When the list is empty (role-routed request), it keeps `required_approvers + 1`. When the cap leaves the value at or below `required_approvers`, no override is written (it never lowers the requirement) and the `approval_risk_assessed` metadata gets `"extra_approver_skipped": "no_additional_eligible_approver"`. Pure helper `extra_approver_requirement`; unit tests `the_extra_approver_is_capped_at_the_eligible_approver_count`, `no_override_when_no_additional_approver_is_eligible`, `a_role_routed_request_gets_required_plus_one`.
+2. **`require_extra_approver` also blocks auto-approval.** `list_requests_due_for_auto_approval` now excludes a request when its policy mode is `gate_auto_approve` **or** `require_extra_approver` and a `done` approval-risk judgment has `level = high` with the team setting on. The DB matrix test (`enforcing_modes_exclude_only_done_high_risk_with_the_team_setting_on`, 13 cases) covers both modes, pending/medium/setting-off for `require_extra_approver`, and `off`.
+
+The earlier note that "a policy edit still works" as an escape was wrong: the override lives on the request and a policy edit does not clear it. With the cap, votes alone can always approve a request whose eligible approvers are listed. A role-routed request can still need one more approver than the role currently has; admin override and cancel remain the escapes there.

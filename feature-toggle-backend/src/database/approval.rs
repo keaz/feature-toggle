@@ -755,7 +755,7 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
                   AND p.auto_approve_after_hours IS NOT NULL
                   AND r.created_at + make_interval(hours => p.auto_approve_after_hours) <= NOW()
                   AND NOT (
-                    p.ai_risk_mode = 'gate_auto_approve'
+                    p.ai_risk_mode IN ('gate_auto_approve', 'require_extra_approver')
                     AND EXISTS (
                       SELECT 1 FROM ai_judgments j
                       JOIN team_ai_settings s ON s.team_id = j.team_id AND s.approval_risk

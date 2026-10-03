@@ -262,33 +262,68 @@ impl ApprovalRiskHandler {
     }
 }
 
+/// What `require_extra_approver` did for one request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExtraApprover {
+    /// Not applicable (mode, level, closed request) or a lost update race.
+    None,
+    /// The request needs this many approvals.
+    Required(i32),
+    /// The level asked for an extra approver, but no additional eligible
+    /// approver exists, so the requirement stays as the policy says.
+    NotPossible,
+}
+
+/// The approvals a high-risk request needs under `require_extra_approver`:
+/// the policy's count plus one, capped at the request's named eligible
+/// approvers so votes alone can still approve it. An empty list means the
+/// request is role-routed and its approver count is not known here, so no cap
+/// applies. `None` when the cap leaves nothing to add.
+fn extra_approver_requirement(required_approvers: i32, eligible_approvers: usize) -> Option<i32> {
+    let raised = required_approvers.saturating_add(1);
+    let target = if eligible_approvers == 0 {
+        raised
+    } else {
+        raised.min(i32::try_from(eligible_approvers).unwrap_or(i32::MAX))
+    };
+    (target > required_approvers).then_some(target)
+}
+
 impl ApprovalRiskHandler {
-    /// The approvals needed now that `level` is known, when that differs from
-    /// the policy: `Some(n)` if this request carries the `require_extra_approver`
-    /// override, `None` otherwise.
+    /// Applies `require_extra_approver` once `level` is known (user decision
+    /// 2026-10-03: cap at the eligible approver count).
     async fn enforce_extra_approver(
         &self,
         request: &ApprovalRequest,
         level: &str,
-    ) -> Result<Option<i32>, crate::Error> {
+    ) -> Result<ExtraApprover, crate::Error> {
         if level != "high" || !matches!(request.status, ApprovalStatus::Pending) {
-            return Ok(None);
+            return Ok(ExtraApprover::None);
         }
         if let Some(existing) = request.required_approvers_override {
-            return Ok(Some(existing));
+            return Ok(ExtraApprover::Required(existing));
         }
         let Some(policy) = self.approvals.get_policy_by_id(request.policy_id).await? else {
-            return Ok(None);
+            return Ok(ExtraApprover::None);
         };
         if policy.ai_risk_mode != "require_extra_approver" {
-            return Ok(None);
+            return Ok(ExtraApprover::None);
         }
-        let required = policy.required_approvers.saturating_add(1);
+        let Some(required) = extra_approver_requirement(
+            policy.required_approvers,
+            request.eligible_approver_ids.len(),
+        ) else {
+            return Ok(ExtraApprover::NotPossible);
+        };
         let changed = self
             .approvals
             .set_required_approvers_override(request.id, required)
             .await?;
-        Ok(changed.then_some(required))
+        Ok(if changed {
+            ExtraApprover::Required(required)
+        } else {
+            ExtraApprover::None
+        })
     }
 }
 
@@ -333,7 +368,10 @@ impl JudgmentHandler for ApprovalRiskHandler {
     /// assessment is history, not a decision.
     ///
     /// Enforcement (AI-11): for a `high` level on a still-pending request under
-    /// a `require_extra_approver` policy, raises the approvals needed by one.
+    /// a `require_extra_approver` policy, raises the approvals needed by one,
+    /// capped at the request's named eligible approvers (no cap when the list
+    /// is empty). When the cap leaves nothing to add, no override is written
+    /// and the entry says `extra_approver_skipped`.
     /// The update is guarded in SQL by `status = 'pending'`, so a closed request
     /// is never changed, and by `required_approvers_override IS NULL`, so a
     /// repeated apply keeps the first value.
@@ -351,7 +389,7 @@ impl JudgmentHandler for ApprovalRiskHandler {
             .and_then(Value::as_str)
             .unwrap_or("unknown");
         let reasons = derived.get("reasons").cloned().unwrap_or_else(|| json!([]));
-        let required_approvers_override = self.enforce_extra_approver(&request, level).await?;
+        let extra_approver = self.enforce_extra_approver(&request, level).await?;
 
         let mut metadata = json!({
             "approval_request_id": request.id.to_string(),
@@ -360,8 +398,14 @@ impl JudgmentHandler for ApprovalRiskHandler {
             "reasons": reasons,
             "model": judgment.model,
         });
-        if let Some(required) = required_approvers_override {
-            metadata["required_approvers_override"] = json!(required);
+        match extra_approver {
+            ExtraApprover::Required(required) => {
+                metadata["required_approvers_override"] = json!(required);
+            }
+            ExtraApprover::NotPossible => {
+                metadata["extra_approver_skipped"] = json!("no_additional_eligible_approver");
+            }
+            ExtraApprover::None => {}
         }
 
         self.activity
@@ -1044,11 +1088,39 @@ mod tests {
         override_calls: usize,
         update_changes_row: bool,
     ) -> Value {
+        apply_enforcement_with_eligible(
+            mode,
+            level,
+            status,
+            existing_override,
+            0,
+            3,
+            override_calls,
+            update_changes_row,
+        )
+        .await
+    }
+
+    /// [`apply_enforcement`] for a request routed to `eligible` named
+    /// approvers (0 = role-routed, empty list). `expected_override` is the
+    /// value the override update must be called with.
+    #[allow(clippy::too_many_arguments)]
+    async fn apply_enforcement_with_eligible(
+        mode: &str,
+        level: &str,
+        status: ApprovalStatus,
+        existing_override: Option<i32>,
+        eligible: usize,
+        expected_override: i32,
+        override_calls: usize,
+        update_changes_row: bool,
+    ) -> Value {
         let request_id = Uuid::new_v4();
         let feature_id = Uuid::new_v4();
         let mut stored = request(request_id, feature_id);
         stored.status = status;
         stored.required_approvers_override = existing_override;
+        stored.eligible_approver_ids = (0..eligible).map(|_| Uuid::new_v4()).collect();
         let policy = policy(mode, 2);
 
         let mut approvals = MockApprovalRepository::new();
@@ -1060,7 +1132,7 @@ mod tests {
             .returning(move |_| Ok(Some(policy.clone())));
         approvals
             .expect_set_required_approvers_override()
-            .withf(move |id, required| *id == request_id && *required == 3)
+            .withf(move |id, required| *id == request_id && *required == expected_override)
             .times(override_calls)
             .returning(move |_, _| Ok(update_changes_row));
 
@@ -1096,6 +1168,73 @@ mod tests {
         )
         .await;
         assert_eq!(metadata["required_approvers_override"], 3);
+    }
+
+    #[tokio::test]
+    async fn the_extra_approver_is_capped_at_the_eligible_approver_count() {
+        // Policy needs 2. (eligible approvers, override written)
+        for (eligible, expected) in [(5, 3), (3, 3)] {
+            let metadata = apply_enforcement_with_eligible(
+                "require_extra_approver",
+                "high",
+                ApprovalStatus::Pending,
+                None,
+                eligible,
+                expected,
+                1,
+                true,
+            )
+            .await;
+            assert_eq!(
+                metadata["required_approvers_override"], expected,
+                "{eligible} eligible"
+            );
+            assert!(metadata.get("extra_approver_skipped").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn no_override_when_no_additional_approver_is_eligible() {
+        // 2 eligible for a policy that needs 2: the cap leaves the requirement
+        // unchanged. 1 eligible: the cap must never lower it either.
+        for eligible in [2, 1] {
+            let metadata = apply_enforcement_with_eligible(
+                "require_extra_approver",
+                "high",
+                ApprovalStatus::Pending,
+                None,
+                eligible,
+                0,
+                0,
+                false,
+            )
+            .await;
+            assert!(
+                metadata.get("required_approvers_override").is_none(),
+                "{eligible} eligible"
+            );
+            assert_eq!(
+                metadata["extra_approver_skipped"], "no_additional_eligible_approver",
+                "{eligible} eligible"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_role_routed_request_gets_required_plus_one() {
+        let metadata = apply_enforcement_with_eligible(
+            "require_extra_approver",
+            "high",
+            ApprovalStatus::Pending,
+            None,
+            0,
+            3,
+            1,
+            true,
+        )
+        .await;
+        assert_eq!(metadata["required_approvers_override"], 3);
+        assert!(metadata.get("extra_approver_skipped").is_none());
     }
 
     #[tokio::test]
