@@ -20,7 +20,7 @@ pub const MAX_AUTO_APPROVE_FAILURES: i32 = 3;
 const REQUEST_RETURNING: &str = "RETURNING id, policy_id, feature_id, environment_id, change_type, \
      change_payload, change_description, requested_by, eligible_approver_ids, routing_reason, \
      admin_override_enabled, status, approved_count, rejected_count, executed_at, created_at, \
-     updated_at, required_approvers_override";
+     updated_at, required_approvers_override, external_ref, request_reason";
 
 /// Returned when a vote or status change reaches a request that is no longer
 /// pending. Same message the vote logic uses for a closed request.
@@ -157,6 +157,8 @@ pub struct CreateApprovalRequestInput {
     pub eligible_approver_ids: Vec<Uuid>,
     pub routing_reason: Option<String>,
     pub admin_override_enabled: bool,
+    pub external_ref: Option<String>,
+    pub request_reason: Option<String>,
 }
 
 pub struct CreateApprovalVoteInput {
@@ -399,7 +401,8 @@ impl ApprovalRepositoryImpl {
                 RETURNING id, policy_id, feature_id, environment_id, change_type, change_payload,
                           change_description, requested_by, eligible_approver_ids, routing_reason,
                           admin_override_enabled, status, approved_count, rejected_count,
-                          executed_at, created_at, updated_at, required_approvers_override
+                          executed_at, created_at, updated_at, required_approvers_override,
+                      external_ref, request_reason
                 "#,
             )
             .bind(request_id)
@@ -430,6 +433,8 @@ impl ApprovalRepositoryImpl {
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
             required_approvers_override: row.get("required_approvers_override"),
+            external_ref: row.get("external_ref"),
+            request_reason: row.get("request_reason"),
         }
     }
 }
@@ -618,13 +623,14 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
             INSERT INTO approval_requests (
                 policy_id, feature_id, environment_id, change_type, change_payload,
                 change_description, requested_by, eligible_approver_ids, routing_reason,
-                admin_override_enabled
+                admin_override_enabled, external_ref, request_reason
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
             RETURNING id, policy_id, feature_id, environment_id, change_type, change_payload,
                       change_description, requested_by, eligible_approver_ids, routing_reason,
                       admin_override_enabled, status, approved_count, rejected_count, executed_at,
-                      created_at, updated_at, required_approvers_override
+                      created_at, updated_at, required_approvers_override,
+                      external_ref, request_reason
             "#,
         )
         .bind(input.policy_id)
@@ -637,6 +643,8 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
         .bind(&input.eligible_approver_ids)
         .bind(input.routing_reason)
         .bind(input.admin_override_enabled)
+        .bind(input.external_ref)
+        .bind(input.request_reason)
         .map(Self::map_request_row)
         .fetch_one(&self.pool)
         .await;
@@ -650,7 +658,8 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
             SELECT id, policy_id, feature_id, environment_id, change_type, change_payload,
                    change_description, requested_by, eligible_approver_ids, routing_reason,
                    admin_override_enabled, status, approved_count, rejected_count, executed_at,
-                   created_at, updated_at, required_approvers_override
+                   created_at, updated_at, required_approvers_override,
+                      external_ref, request_reason
             FROM approval_requests WHERE id = $1
             "#,
         )
@@ -710,7 +719,8 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
             RETURNING id, policy_id, feature_id, environment_id, change_type, change_payload,
                       change_description, requested_by, eligible_approver_ids, routing_reason,
                       admin_override_enabled, status, approved_count, rejected_count, executed_at,
-                      created_at, updated_at, required_approvers_override
+                      created_at, updated_at, required_approvers_override,
+                      external_ref, request_reason
             "#,
         )
         .bind(input.request_id)
@@ -746,7 +756,8 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
             RETURNING id, policy_id, feature_id, environment_id, change_type, change_payload,
                       change_description, requested_by, eligible_approver_ids, routing_reason,
                       admin_override_enabled, status, approved_count, rejected_count, executed_at,
-                      created_at, updated_at, required_approvers_override
+                      created_at, updated_at, required_approvers_override,
+                      external_ref, request_reason
             "#,
         )
         .bind(request_id)
@@ -1230,13 +1241,14 @@ impl ApprovalRepositoryImpl {
             INSERT INTO approval_requests (
                 policy_id, feature_id, environment_id, change_type, change_payload,
                 change_description, requested_by, eligible_approver_ids, routing_reason,
-                admin_override_enabled
+                admin_override_enabled, external_ref, request_reason
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
             RETURNING id, policy_id, feature_id, environment_id, change_type, change_payload,
                       change_description, requested_by, eligible_approver_ids, routing_reason,
                       admin_override_enabled, status, approved_count, rejected_count, executed_at,
-                      created_at, updated_at, required_approvers_override
+                      created_at, updated_at, required_approvers_override,
+                      external_ref, request_reason
             "#,
         )
         .bind(input.policy_id)
@@ -1249,6 +1261,8 @@ impl ApprovalRepositoryImpl {
         .bind(&input.eligible_approver_ids)
         .bind(input.routing_reason)
         .bind(input.admin_override_enabled)
+        .bind(input.external_ref)
+        .bind(input.request_reason)
         .map(Self::map_request_row)
         .fetch_one(&mut *conn)
         .await;
@@ -1272,7 +1286,8 @@ impl ApprovalRepositoryImpl {
             RETURNING id, policy_id, feature_id, environment_id, change_type, change_payload,
                       change_description, requested_by, eligible_approver_ids, routing_reason,
                       admin_override_enabled, status, approved_count, rejected_count, executed_at,
-                      created_at, updated_at, required_approvers_override
+                      created_at, updated_at, required_approvers_override,
+                      external_ref, request_reason
             "#,
         )
         .bind(request_id)
@@ -1455,7 +1470,8 @@ impl ApprovalRepositoryTx for ApprovalRepositoryImpl {
                           r.change_payload, r.change_description, r.requested_by,
                           r.eligible_approver_ids, r.routing_reason, r.admin_override_enabled,
                           r.status, r.approved_count, r.rejected_count, r.executed_at,
-                          r.created_at, r.updated_at, r.required_approvers_override
+                          r.created_at, r.updated_at, r.required_approvers_override,
+                          r.external_ref, r.request_reason
                 "#,
                 ready = capped_request_ready_sql()
             ))
@@ -1508,7 +1524,8 @@ impl ApprovalRepositoryTx for ApprovalRepositoryImpl {
             RETURNING id, policy_id, feature_id, environment_id, change_type, change_payload,
                       change_description, requested_by, eligible_approver_ids, routing_reason,
                       admin_override_enabled, status, approved_count, rejected_count, executed_at,
-                      created_at, updated_at, required_approvers_override
+                      created_at, updated_at, required_approvers_override,
+                      external_ref, request_reason
             "#,
         )
         .bind(input.request_id)

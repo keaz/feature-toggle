@@ -2,7 +2,7 @@ use crate::database::activity_log::{ActivityLogRepository, CreateActivityLog};
 use crate::logic::ActorContext;
 use crate::logic::feature::FeatureLogic;
 use crate::logic::policy::PolicyError;
-use crate::model::ID;
+use crate::model::{ID, StageChangeMeta};
 use crate::rest::operational_safety::{
     ScheduledChangeRow, ScheduledChangeStatus, authorize_scheduled_action,
     claim_due_scheduled_changes, load_scheduled_change_creator, mark_scheduled_change_status,
@@ -165,7 +165,16 @@ impl ScheduledChangeScheduler {
                 })?;
                 let user_id = change.requested_by.unwrap_or_else(uuid::Uuid::nil);
                 self.feature_logic
-                    .request_stage_change(ID::from(stage_id), request, user_id)
+                    .request_stage_change(
+                        ID::from(stage_id),
+                        request,
+                        user_id,
+                        StageChangeMeta {
+                            external_ref: None,
+                            reason: Some(change.reason.trim().to_string())
+                                .filter(|reason| !reason.is_empty()),
+                        },
+                    )
                     .await?;
             }
             "ARCHIVE_FEATURE" => {

@@ -20,7 +20,7 @@ use crate::database::role::RoleRepository;
 use crate::judgment::service::JudgmentService;
 use crate::judgment::{JudgmentKind, SubjectType, approval_risk};
 use crate::logic::environment::EnvironmentLogic;
-use crate::model::ID;
+use crate::model::{ID, StageChangeMeta};
 use crate::utils::activity_logger::{activity_types, entity_types};
 use chrono::Utc;
 use feature_toggle_shared::constants::StageStatus;
@@ -142,6 +142,7 @@ pub trait ApprovalLogic: Send + Sync {
         stage: &FeaturePipelineStage,
         next_status: &str,
         requested_by: Uuid,
+        meta: &StageChangeMeta,
     ) -> Result<Option<ApprovalRequest>, Error>;
 
     async fn approve_request(
@@ -1569,6 +1570,7 @@ impl ApprovalLogic for ApprovalLogicImpl {
         stage: &FeaturePipelineStage,
         next_status: &str,
         requested_by: Uuid,
+        meta: &StageChangeMeta,
     ) -> Result<Option<ApprovalRequest>, Error> {
         if !status_requires_interception(next_status) {
             return Ok(None);
@@ -1686,6 +1688,8 @@ impl ApprovalLogic for ApprovalLogicImpl {
                 eligible_approver_ids: routing.eligible_approver_ids.clone(),
                 routing_reason: Some(routing.reason.clone()),
                 admin_override_enabled: policy.allow_admin_override,
+                external_ref: meta.external_ref.clone(),
+                request_reason: meta.reason.clone(),
             })
             .await?;
 
@@ -2307,6 +2311,8 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             required_approvers_override: None,
+            external_ref: None,
+            request_reason: None,
         };
 
         // Mock the policy - requires "Senior Engineer" role
@@ -2500,6 +2506,8 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             required_approvers_override: None,
+            external_ref: None,
+            request_reason: None,
         };
 
         logic
@@ -2555,6 +2563,8 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             required_approvers_override: None,
+            external_ref: None,
+            request_reason: None,
         };
 
         // Policy requires "Senior Engineer" role
@@ -2672,6 +2682,8 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             required_approvers_override: None,
+            external_ref: None,
+            request_reason: None,
         };
         let policy = ApprovalPolicy {
             id: policy_id,
@@ -2772,6 +2784,8 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             required_approvers_override: None,
+            external_ref: None,
+            request_reason: None,
         };
 
         let policy = ApprovalPolicy {
@@ -2935,6 +2949,8 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             required_approvers_override: None,
+            external_ref: None,
+            request_reason: None,
         };
 
         env_logic
@@ -2995,6 +3011,8 @@ mod tests {
                         .as_array()
                         .is_some_and(|entries| !entries.is_empty())
                 );
+                assert_eq!(input.external_ref.as_deref(), Some("PROJ-123"));
+                assert_eq!(input.request_reason.as_deref(), Some("Ready for QA"));
                 Ok(created_request.clone())
             });
 
@@ -3020,6 +3038,10 @@ mod tests {
                 &stage,
                 "DEPLOYMENT_REQUESTED",
                 requested_by,
+                &StageChangeMeta {
+                    external_ref: Some("PROJ-123".to_string()),
+                    reason: Some("Ready for QA".to_string()),
+                },
             )
             .await
             .unwrap();
@@ -3070,6 +3092,8 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             required_approvers_override: None,
+            external_ref: None,
+            request_reason: None,
         };
 
         let policy = ApprovalPolicy {
@@ -3439,6 +3463,8 @@ mod ai_risk_trigger_tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             required_approvers_override: None,
+            external_ref: None,
+            request_reason: None,
         };
 
         env_logic
@@ -3489,6 +3515,7 @@ mod ai_risk_trigger_tests {
                 &stage,
                 "DEPLOYMENT_REQUESTED",
                 requested_by,
+                &StageChangeMeta::default(),
             )
             .await
     }
@@ -3637,6 +3664,8 @@ mod ai_risk_trigger_tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             required_approvers_override: request_override,
+            external_ref: None,
+            request_reason: None,
         };
         let policy = ApprovalPolicy {
             id: policy_id,

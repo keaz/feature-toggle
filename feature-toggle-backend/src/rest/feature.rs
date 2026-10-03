@@ -2013,6 +2013,9 @@ pub(crate) async fn request_stage_change(
 
     RoleAuthorizer::authorize_stage_change_request(&jwt_user.roles, payload.request.as_str())
         .map_err(|e| RestError::forbidden(e.to_string()))?;
+    let payload = payload.into_inner();
+    let meta = types::validate_stage_change_meta(payload.external_ref, payload.reason)
+        .map_err(RestError::invalid_input)?;
 
     let freeze_override = crate::rest::operational_safety::enforce_freeze_for_stage(
         db_pool.get_ref(),
@@ -2025,7 +2028,7 @@ pub(crate) async fn request_stage_change(
 
     let request_type = StageChangeRequestType::from(payload.request);
     let feature = feature_logic
-        .request_stage_change(ID::from(stage_uuid), request_type, jwt_user.id)
+        .request_stage_change(ID::from(stage_uuid), request_type, jwt_user.id, meta)
         .await
         .map_err(RestError::from)?;
 
@@ -3814,6 +3817,167 @@ mod tests {
             assert_eq!(response["flagKindSource"], "user");
             assert!(upserts.lock().unwrap().is_empty());
             fixture.cleanup().await;
+        }
+    }
+
+    mod stage_change_meta {
+        use super::*;
+        use crate::database::feature::{CreateFeature, CreateFeatureStage};
+        use crate::model::StageChangeMeta;
+        use serde_json::json;
+
+        fn requester(team_id: Uuid) -> JwtUser {
+            JwtUser {
+                id: Uuid::new_v4(),
+                username: "ji11-requester".to_string(),
+                is_admin: true,
+                roles: vec!["Requester".to_string()],
+                team_id: Some(team_id),
+                token_hash: "hash".to_string(),
+            }
+        }
+
+        async fn send(
+            pool: sqlx::PgPool,
+            mock_logic: MockFeatureLogic,
+            jwt: JwtUser,
+            stage_id: Uuid,
+            body: serde_json::Value,
+        ) -> (StatusCode, serde_json::Value) {
+            let (updates_tx, _updates_rx) =
+                tokio::sync::broadcast::channel::<crate::grpc::pb::FeatureUpdate>(8);
+            let new_env_logic = || {
+                environment_logic(
+                    environment_repository(pool.clone()),
+                    Box::new(PgActivityLogRepository::new(pool.clone())),
+                )
+            };
+            let app = test::init_service(
+                App::new()
+                    .app_data(web::Data::new(pool.clone()))
+                    .app_data(web::Data::new(
+                        Box::new(PgActivityLogRepository::new(pool.clone()))
+                            as Box<dyn ActivityLogRepository>,
+                    ))
+                    .app_data(web::Data::new(Box::new(mock_logic) as Box<dyn FeatureLogic>))
+                    .app_data(web::Data::new(feature_repository(pool.clone())))
+                    .app_data(web::Data::new(new_env_logic()))
+                    .app_data(web::Data::new(updates_tx))
+                    .service(web::scope("/api/v1").configure(super::super::configure)),
+            )
+            .await;
+            let req = test::TestRequest::post()
+                .uri(&format!("/api/v1/stages/{stage_id}/request-change"))
+                .set_json(body)
+                .to_request();
+            req.extensions_mut().insert(jwt);
+            let resp = test::call_service(&app, req).await;
+            let status = resp.status();
+            let bytes = test::read_body(resp).await;
+            (status, serde_json::from_slice(&bytes).unwrap_or_default())
+        }
+
+        #[actix_web::test]
+        async fn request_change_passes_external_ref_and_reason_to_the_logic() {
+            let pool = test_pool().await;
+            let team_id = insert_team(&pool).await;
+            let env_id = insert_environment(&pool, team_id).await;
+            let stage_id = Uuid::new_v4();
+            let feature_id = feature_repository(pool.clone())
+                .create_feature(CreateFeature {
+                    team_id,
+                    key: format!("ji11-{}", Uuid::new_v4()),
+                    description: None,
+                    feature_type: crate::database::entity::FeatureType::Simple,
+                    lifecycle_stage: "active".to_string(),
+                    owner: None,
+                    purpose: None,
+                    reference_url: None,
+                    expires_at: None,
+                    cleanup_reason: None,
+                    tags: vec![],
+                    stages: vec![CreateFeatureStage {
+                        id: stage_id,
+                        environment_id: env_id,
+                        order_index: 0,
+                        parent_stage: None,
+                        position: "{\"x\":0,\"y\":0}".to_string(),
+                        enabled: true,
+                    }],
+                    dependencies: vec![],
+                    variants: None,
+                    flag_kind: None,
+                })
+                .await
+                .expect("seed feature");
+            let jwt = requester(team_id);
+            let user_id = jwt.id;
+
+            let feature = sample_feature(feature_id, team_id);
+            let mut mock_logic = MockFeatureLogic::new();
+            mock_logic
+                .expect_request_stage_change()
+                .withf(move |stage, request, user, meta| {
+                    stage.to_string() == stage_id.to_string()
+                        && *request == StageChangeRequestType::DeploymentRequested
+                        && *user == user_id
+                        && *meta
+                            == StageChangeMeta {
+                                external_ref: Some("PROJ-123".to_string()),
+                                reason: Some("Ready for QA".to_string()),
+                            }
+                })
+                .times(1)
+                .returning(move |_, _, _, _| Ok(feature.clone()));
+
+            let (status, body) = send(
+                pool.clone(),
+                mock_logic,
+                jwt,
+                stage_id,
+                json!({
+                    "request": "DEPLOYMENT_REQUESTED",
+                    "externalRef": " PROJ-123 ",
+                    "reason": "Ready for QA ",
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+
+            sqlx::query("DELETE FROM features WHERE team_id = $1")
+                .bind(team_id)
+                .execute(&pool)
+                .await
+                .expect("delete features");
+            sqlx::query("DELETE FROM teams WHERE id = $1")
+                .bind(team_id)
+                .execute(&pool)
+                .await
+                .expect("delete team");
+        }
+
+        #[actix_web::test]
+        async fn request_change_rejects_an_invalid_external_ref() {
+            let pool = test_pool().await;
+            let mut mock_logic = MockFeatureLogic::new();
+            mock_logic.expect_request_stage_change().times(0);
+
+            let (status, body) = send(
+                pool,
+                mock_logic,
+                requester(Uuid::new_v4()),
+                Uuid::new_v4(),
+                json!({
+                    "request": "DEPLOYMENT_REQUESTED",
+                    "externalRef": "A".repeat(101),
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                body["message"],
+                "externalRef must be at most 100 characters"
+            );
         }
     }
 }

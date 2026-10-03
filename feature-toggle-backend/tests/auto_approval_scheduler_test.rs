@@ -34,6 +34,8 @@ async fn auto_approval_scheduler_processes_pending_requests() {
         created_at: Utc::now(),
         updated_at: Utc::now(),
         required_approvers_override: None,
+        external_ref: None,
+        request_reason: None,
     };
 
     let pending_clone = pending_request.clone();
@@ -81,6 +83,8 @@ async fn reconciliation_approves_each_ready_request() {
         created_at: Utc::now(),
         updated_at: Utc::now(),
         required_approvers_override: Some(2),
+        external_ref: None,
+        request_reason: None,
     };
     let ready_id = ready.id;
     mock_repo

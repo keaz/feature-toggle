@@ -2,7 +2,8 @@ use crate::database::entity::VariantValueType as DbVariantValueType;
 use crate::logic::feature::StageChangeRequestType;
 use crate::model::{
     FeatureType as ModelFeatureType, FlagKind, FlagKindSource,
-    LifecycleStage as ModelLifecycleStage, VariantValueType as ModelVariantValueType,
+    LifecycleStage as ModelLifecycleStage, StageChangeMeta,
+    VariantValueType as ModelVariantValueType,
 };
 use crate::rest::environment::EnvironmentResponse;
 use crate::rest::pagination::PageMeta;
@@ -409,6 +410,59 @@ impl From<StageChangeRequest> for StageChangeRequestType {
 pub struct StageChangeRequestBody {
     pub request: StageChangeRequest,
     pub freeze_override_reason: Option<String>,
+    /// Ticket or change id that asked for this change, for example a Jira
+    /// issue key. Trimmed; 1-100 characters, no control characters.
+    pub external_ref: Option<String>,
+    /// Why the change is requested. Trimmed; 1-1000 characters, no control
+    /// characters except newlines.
+    pub reason: Option<String>,
+}
+
+const MAX_EXTERNAL_REF_CHARS: usize = 100;
+const MAX_STAGE_CHANGE_REASON_CHARS: usize = 1000;
+
+/// Trims both values, turns blank ones into `None` and checks their length
+/// and characters. The error is the message for a 400 response.
+pub(crate) fn validate_stage_change_meta(
+    external_ref: Option<String>,
+    reason: Option<String>,
+) -> Result<StageChangeMeta, String> {
+    fn trimmed(value: Option<String>) -> Option<String> {
+        value
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
+
+    let external_ref = trimmed(external_ref);
+    if let Some(external_ref) = &external_ref {
+        if external_ref.chars().count() > MAX_EXTERNAL_REF_CHARS {
+            return Err(format!(
+                "externalRef must be at most {MAX_EXTERNAL_REF_CHARS} characters"
+            ));
+        }
+        if external_ref.chars().any(char::is_control) {
+            return Err("externalRef must not contain control characters".to_string());
+        }
+    }
+
+    let reason = trimmed(reason);
+    if let Some(reason) = &reason {
+        if reason.chars().count() > MAX_STAGE_CHANGE_REASON_CHARS {
+            return Err(format!(
+                "reason must be at most {MAX_STAGE_CHANGE_REASON_CHARS} characters"
+            ));
+        }
+        if reason.chars().any(|c| c.is_control() && c != '\n') {
+            return Err(
+                "reason must not contain control characters other than newlines".to_string(),
+            );
+        }
+    }
+
+    Ok(StageChangeMeta {
+        external_ref,
+        reason,
+    })
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -597,5 +651,89 @@ mod tests {
         let with: CreateFeatureRequest =
             serde_json::from_str(&format!(r#"{base},"flagKind":"release"}}"#)).unwrap();
         assert_eq!(with.flag_kind, Some(FlagKind::Release));
+    }
+
+    #[test]
+    fn stage_change_body_reads_external_ref_and_reason() {
+        let body: StageChangeRequestBody = serde_json::from_str(
+            r#"{"request":"DEPLOYMENT_REQUESTED","externalRef":"PROJ-1","reason":"Ready"}"#,
+        )
+        .unwrap();
+        assert_eq!(body.external_ref.as_deref(), Some("PROJ-1"));
+        assert_eq!(body.reason.as_deref(), Some("Ready"));
+
+        let without: StageChangeRequestBody =
+            serde_json::from_str(r#"{"request":"DEPLOYMENT_REQUESTED"}"#).unwrap();
+        assert_eq!(without.external_ref, None);
+        assert_eq!(without.reason, None);
+    }
+
+    #[test]
+    fn stage_change_meta_validation() {
+        let some = |s: &str| Some(s.to_string());
+        let meta = |external_ref: Option<&str>, reason: Option<&str>| StageChangeMeta {
+            external_ref: external_ref.map(str::to_string),
+            reason: reason.map(str::to_string),
+        };
+        let long_ref = "A".repeat(101);
+        let max_ref = "A".repeat(100);
+        let long_reason = "r".repeat(1001);
+        let max_reason = "é".repeat(1000);
+
+        let cases: Vec<(
+            Option<String>,
+            Option<String>,
+            Result<StageChangeMeta, &str>,
+        )> = vec![
+            (None, None, Ok(StageChangeMeta::default())),
+            (some(""), some("   "), Ok(StageChangeMeta::default())),
+            (
+                some("  PROJ-1 "),
+                some(" Ready\n"),
+                Ok(meta(Some("PROJ-1"), Some("Ready"))),
+            ),
+            (
+                some("CHG0012345"),
+                some("line one\nline two"),
+                Ok(meta(Some("CHG0012345"), Some("line one\nline two"))),
+            ),
+            (Some(max_ref.clone()), None, Ok(meta(Some(&max_ref), None))),
+            (
+                None,
+                Some(max_reason.clone()),
+                Ok(meta(None, Some(&max_reason))),
+            ),
+            (
+                Some(long_ref),
+                None,
+                Err("externalRef must be at most 100 characters"),
+            ),
+            (
+                None,
+                Some(long_reason),
+                Err("reason must be at most 1000 characters"),
+            ),
+            (
+                some("PROJ-1\n2"),
+                None,
+                Err("externalRef must not contain control characters"),
+            ),
+            (
+                None,
+                some("tab\there"),
+                Err("reason must not contain control characters other than newlines"),
+            ),
+            (
+                None,
+                some("bell\u{7}"),
+                Err("reason must not contain control characters other than newlines"),
+            ),
+        ];
+
+        for (external_ref, reason, expected) in cases {
+            let input = format!("{external_ref:?} / {reason:?}");
+            let result = validate_stage_change_meta(external_ref, reason);
+            assert_eq!(result, expected.map_err(str::to_string), "input: {input}");
+        }
     }
 }

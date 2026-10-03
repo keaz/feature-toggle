@@ -226,6 +226,7 @@ pub trait DeploymentLogic: Send + Sync {
         stage_id: ID,
         request: StageChangeRequestType,
         user_id: Uuid,
+        meta: crate::model::StageChangeMeta,
     ) -> Result<Feature, Error>;
 
     // Helper for broadcasting: get owning feature id by stage id
@@ -377,6 +378,7 @@ mockall::mock! {
             stage_id: ID,
             request: StageChangeRequestType,
             user_id: Uuid,
+            meta: crate::model::StageChangeMeta,
         ) -> Result<Feature, Error>;
         async fn get_feature_id_by_stage_id(&self, stage_id: ID) -> Result<Option<Uuid>, Error>;
     }
@@ -1695,6 +1697,22 @@ impl StageLogic for FeatureLogicImpl {
     }
 }
 
+/// Adds `external_ref` to activity or notification metadata when the stage
+/// change has one; without it the key is left out.
+fn add_external_ref(metadata: &mut serde_json::Value, meta: &crate::model::StageChangeMeta) {
+    if let Some(external_ref) = &meta.external_ref {
+        metadata["external_ref"] = serde_json::json!(external_ref);
+    }
+}
+
+/// Appends " Ref: <externalRef>." to a stage change notification message.
+fn with_external_ref(message: String, meta: &crate::model::StageChangeMeta) -> String {
+    match &meta.external_ref {
+        Some(external_ref) => format!("{message} Ref: {external_ref}."),
+        None => message,
+    }
+}
+
 #[async_trait::async_trait]
 impl DeploymentLogic for FeatureLogicImpl {
     async fn request_stage_change(
@@ -1702,6 +1720,7 @@ impl DeploymentLogic for FeatureLogicImpl {
         stage_id: ID,
         request: StageChangeRequestType,
         user_id: Uuid,
+        meta: crate::model::StageChangeMeta,
     ) -> Result<Feature, Error> {
         let stage_uuid = id_to_uuid(stage_id.clone())?;
         let next_status = match request {
@@ -1769,7 +1788,7 @@ impl DeploymentLogic for FeatureLogicImpl {
             }
 
             if let Some(request) = approval_logic
-                .maybe_create_stage_change_request(&db_feature, &stage, next_status, user_id)
+                .maybe_create_stage_change_request(&db_feature, &stage, next_status, user_id, &meta)
                 .await?
             {
                 if pending_status == "DEPLOYMENT_REQUESTED"
@@ -1832,6 +1851,26 @@ impl DeploymentLogic for FeatureLogicImpl {
                             notification_feature_key
                         ),
                     };
+                    let message = with_external_ref(message, &meta);
+                    let mut metadata = serde_json::json!({
+                        "feature_id": notification_feature_id.to_string(),
+                        "feature_key": notification_feature_key,
+                        "stage_id": stage_id.to_string(),
+                        "status": next_status,
+                        "team_id": notification_team_id.to_string(),
+                        "environment_id": environment_id.to_string(),
+                        "environment_name": environment_name,
+                        "requested_by": requester_name,
+                        "approval_request_id": request.id.to_string(),
+                        "eligible_approver_ids": request
+                            .eligible_approver_ids
+                            .iter()
+                            .map(|id| id.to_string())
+                            .collect::<Vec<_>>(),
+                        "routing_reason": request.routing_reason,
+                        "admin_override_enabled": request.admin_override_enabled,
+                    });
+                    add_external_ref(&mut metadata, &meta);
 
                     self.dispatch_notification(crate::logic::notification::NotificationEvent {
                         notification_type:
@@ -1842,24 +1881,7 @@ impl DeploymentLogic for FeatureLogicImpl {
                         recipient_user_ids: Some(request.eligible_approver_ids.clone()),
                         subject,
                         message,
-                        metadata: Some(serde_json::json!({
-                            "feature_id": notification_feature_id.to_string(),
-                            "feature_key": notification_feature_key,
-                            "stage_id": stage_id.to_string(),
-                            "status": next_status,
-                            "team_id": notification_team_id.to_string(),
-                            "environment_id": environment_id.to_string(),
-                            "environment_name": environment_name,
-                            "requested_by": requester_name,
-                            "approval_request_id": request.id.to_string(),
-                            "eligible_approver_ids": request
-                                .eligible_approver_ids
-                                .iter()
-                                .map(|id| id.to_string())
-                                .collect::<Vec<_>>(),
-                            "routing_reason": request.routing_reason,
-                            "admin_override_enabled": request.admin_override_enabled,
-                        })),
+                        metadata: Some(metadata),
                     });
                 }
 
@@ -1994,6 +2016,10 @@ impl DeploymentLogic for FeatureLogicImpl {
         if let Some(environment_id) = environment_id {
             metadata["environment_id"] = serde_json::json!(environment_id.to_string());
         }
+        add_external_ref(&mut metadata, &meta);
+        if let Some(reason) = &meta.reason {
+            metadata["reason"] = serde_json::json!(reason);
+        }
 
         let _ = crate::utils::activity_logger::log_activity(
             &self.activity_log_repository,
@@ -2045,6 +2071,18 @@ impl DeploymentLogic for FeatureLogicImpl {
                     db_feature.key
                 ),
             };
+            let message = with_external_ref(message, &meta);
+            let mut metadata = serde_json::json!({
+                "feature_id": db_feature.id.to_string(),
+                "feature_key": db_feature.key.clone(),
+                "stage_id": stage_id.to_string(),
+                "status": next_status,
+                "team_id": db_feature.team_id.to_string(),
+                "environment_id": environment_id.map(|id| id.to_string()),
+                "environment_name": environment_name.clone(),
+                "requested_by": actor_display_name.clone(),
+            });
+            add_external_ref(&mut metadata, &meta);
             self.dispatch_notification(crate::logic::notification::NotificationEvent {
                 notification_type:
                     crate::logic::notification::NOTIFICATION_TYPE_STAGE_CHANGE_REQUESTED
@@ -2054,16 +2092,7 @@ impl DeploymentLogic for FeatureLogicImpl {
                 recipient_user_ids: None,
                 subject,
                 message,
-                metadata: Some(serde_json::json!({
-                    "feature_id": db_feature.id.to_string(),
-                    "feature_key": db_feature.key.clone(),
-                    "stage_id": stage_id.to_string(),
-                    "status": next_status,
-                    "team_id": db_feature.team_id.to_string(),
-                    "environment_id": environment_id.map(|id| id.to_string()),
-                    "environment_name": environment_name.clone(),
-                    "requested_by": actor_display_name.clone(),
-                })),
+                metadata: Some(metadata),
             });
         }
 
@@ -2327,7 +2356,7 @@ mod test {
 
     #[derive(Clone)]
     struct RecordingNotificationLogic {
-        sender: mpsc::UnboundedSender<String>,
+        sender: mpsc::UnboundedSender<crate::logic::notification::NotificationEvent>,
     }
 
     #[async_trait::async_trait]
@@ -2356,7 +2385,7 @@ mod test {
             &self,
             event: crate::logic::notification::NotificationEvent,
         ) -> Result<(), Error> {
-            let _ = self.sender.send(event.notification_type);
+            let _ = self.sender.send(event);
             Ok(())
         }
 
@@ -2946,6 +2975,7 @@ mod test {
                 ID::from(stage_id),
                 StageChangeRequestType::DeploymentRequested,
                 user_id,
+                crate::model::StageChangeMeta::default(),
             )
             .await;
 
@@ -3053,16 +3083,17 @@ mod test {
                 ID::from(stage_id),
                 StageChangeRequestType::DeploymentRequested,
                 user_id,
+                crate::model::StageChangeMeta::default(),
             )
             .await
             .expect("stage change should succeed");
 
-        let notification_type = timeout(Duration::from_secs(1), receiver.recv())
+        let notification = timeout(Duration::from_secs(1), receiver.recv())
             .await
             .expect("notification task should complete")
             .expect("notification channel should receive an event");
         assert_eq!(
-            notification_type,
+            notification.notification_type,
             crate::logic::notification::NOTIFICATION_TYPE_STAGE_CHANGE_REQUESTED
         );
     }
@@ -3147,6 +3178,7 @@ mod test {
                 ID::from(stage_id),
                 StageChangeRequestType::DeploymentRejected,
                 user_id,
+                crate::model::StageChangeMeta::default(),
             )
             .await;
 
@@ -3248,6 +3280,7 @@ mod test {
                 ID::from(stage_id),
                 StageChangeRequestType::Deployed,
                 user_id,
+                crate::model::StageChangeMeta::default(),
             )
             .await;
 
@@ -3330,6 +3363,7 @@ mod test {
                 ID::from(stage_id),
                 StageChangeRequestType::RollbackRequested,
                 user_id,
+                crate::model::StageChangeMeta::default(),
             )
             .await;
 
@@ -3413,6 +3447,7 @@ mod test {
                 ID::from(stage_id),
                 StageChangeRequestType::RollbackRejected,
                 user_id,
+                crate::model::StageChangeMeta::default(),
             )
             .await;
 
@@ -3496,6 +3531,7 @@ mod test {
                 ID::from(stage_id),
                 StageChangeRequestType::Rollbacked,
                 user_id,
+                crate::model::StageChangeMeta::default(),
             )
             .await;
 
@@ -3540,6 +3576,7 @@ mod test {
                 ID::from(stage_id),
                 StageChangeRequestType::Deployed, // Invalid: can't go from NOT_DEPLOYED to DEPLOYED
                 user_id,
+                crate::model::StageChangeMeta::default(),
             )
             .await;
 
@@ -3582,6 +3619,7 @@ mod test {
                 ID::from(stage_id),
                 StageChangeRequestType::DeploymentRequested,
                 user_id,
+                crate::model::StageChangeMeta::default(),
             )
             .await;
 
@@ -3669,6 +3707,7 @@ mod test {
                 ID::from(stage_id),
                 StageChangeRequestType::DeploymentRequested,
                 user_id,
+                crate::model::StageChangeMeta::default(),
             )
             .await;
 
@@ -4103,6 +4142,261 @@ mod test {
             .await;
 
         assert!(matches!(result, Err(Error::InvalidInput(_))));
+    }
+    type RecordedActivities =
+        std::sync::Arc<std::sync::Mutex<Vec<crate::database::activity_log::CreateActivityLog>>>;
+
+    fn recording_activity_log(
+        recorded: RecordedActivities,
+    ) -> Box<dyn crate::database::activity_log::ActivityLogRepository> {
+        let mut mock = MockActivityLogRepository::new();
+        mock.expect_create_activity().returning(move |activity| {
+            recorded.lock().unwrap().push(activity.clone());
+            Ok(crate::database::activity_log::ActivityLogRow {
+                id: uuid::Uuid::new_v4(),
+                activity_type: activity.activity_type,
+                entity_type: activity.entity_type,
+                entity_id: activity.entity_id,
+                actor_id: activity.actor_id,
+                actor_name: activity.actor_name,
+                description: activity.description,
+                metadata: activity.metadata,
+                created_at: chrono::Utc::now(),
+            })
+        });
+        mock.expect_clone_box()
+            .returning(|| create_mock_activity_log());
+        Box::new(mock)
+    }
+
+    /// Repository and environment mocks for a `DEPLOYMENT_REQUESTED` on a
+    /// `NOT_DEPLOYED` stage. Call counts are not checked: these tests are
+    /// about the metadata that reaches the approval request, activity and
+    /// notification.
+    fn stage_change_mocks(
+        stage_id: Uuid,
+        feature_id: Uuid,
+    ) -> (MockFeatureRepository, MockEnvironmentLogic) {
+        let mut repository = MockFeatureRepository::new();
+        let mut environment_logic = MockEnvironmentLogic::new();
+        let stage = create_pipeline_stage_with_status(stage_id, feature_id, "NOT_DEPLOYED");
+        let stage_for_lookup = stage.clone();
+        repository
+            .expect_get_stage_by_id()
+            .returning(move |_| Ok(Some(stage_for_lookup.clone())));
+        repository
+            .expect_get_feature_stages()
+            .returning(move |_| Ok(vec![stage.clone()]));
+        repository
+            .expect_get_feature_id_by_stage_id()
+            .returning(move |_| Ok(Some(feature_id)));
+        repository.expect_get_feature_by_id().returning(move |_| {
+            Ok(create_entity_feature_with_stage_status(
+                feature_id,
+                stage_id,
+                "NOT_DEPLOYED",
+            ))
+        });
+        repository.expect_get_features().returning(move |_, _, _| {
+            Ok(vec![create_entity_feature_with_stage_status(
+                feature_id,
+                stage_id,
+                "NOT_DEPLOYED",
+            )])
+        });
+        repository
+            .expect_request_stage_change()
+            .returning(|_, _, _, _| Ok(true));
+        environment_logic
+            .expect_get_environment_by_id()
+            .returning(|_| {
+                Ok(crate::model::Environment {
+                    id: ID::from("3eef17bc-9e06-411d-b5f4-7a786e68bb96"),
+                    name: "QA".to_string(),
+                    active: true,
+                    team_id: ID::from(Uuid::new_v4()),
+                    environment_type: "Development".to_string(),
+                })
+            });
+        (repository, environment_logic)
+    }
+
+    fn jira_meta() -> crate::model::StageChangeMeta {
+        crate::model::StageChangeMeta {
+            external_ref: Some("PROJ-123".to_string()),
+            reason: Some("Ready for QA".to_string()),
+        }
+    }
+
+    async fn next_notification(
+        receiver: &mut mpsc::UnboundedReceiver<crate::logic::notification::NotificationEvent>,
+    ) -> crate::logic::notification::NotificationEvent {
+        timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("notification task should complete")
+            .expect("notification channel should receive an event")
+    }
+
+    #[tokio::test]
+    async fn direct_stage_change_records_external_ref_and_reason() {
+        let stage_id = Uuid::new_v4();
+        let feature_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let (repository, environment_logic) = stage_change_mocks(stage_id, feature_id);
+        let recorded = RecordedActivities::default();
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let logic = feature_logic_with_approval_and_notifications(
+            Box::new(repository),
+            Box::new(environment_logic),
+            recording_activity_log(recorded.clone()),
+            create_mock_user_repository(),
+            None,
+            Some(Box::new(RecordingNotificationLogic { sender })),
+        );
+
+        logic
+            .request_stage_change(
+                ID::from(stage_id),
+                StageChangeRequestType::DeploymentRequested,
+                user_id,
+                jira_meta(),
+            )
+            .await
+            .expect("stage change should succeed");
+
+        let activities = recorded.lock().unwrap().clone();
+        assert_eq!(activities.len(), 1);
+        let metadata = activities[0].metadata.clone().expect("activity metadata");
+        assert_eq!(metadata["external_ref"], "PROJ-123");
+        assert_eq!(metadata["reason"], "Ready for QA");
+
+        let notification = next_notification(&mut receiver).await;
+        let metadata = notification.metadata.expect("notification metadata");
+        assert_eq!(metadata["external_ref"], "PROJ-123");
+        assert!(
+            notification.message.ends_with(" Ref: PROJ-123."),
+            "message: {}",
+            notification.message
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_stage_change_without_meta_adds_no_keys() {
+        let stage_id = Uuid::new_v4();
+        let feature_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let (repository, environment_logic) = stage_change_mocks(stage_id, feature_id);
+        let recorded = RecordedActivities::default();
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let logic = feature_logic_with_approval_and_notifications(
+            Box::new(repository),
+            Box::new(environment_logic),
+            recording_activity_log(recorded.clone()),
+            create_mock_user_repository(),
+            None,
+            Some(Box::new(RecordingNotificationLogic { sender })),
+        );
+
+        logic
+            .request_stage_change(
+                ID::from(stage_id),
+                StageChangeRequestType::DeploymentRequested,
+                user_id,
+                crate::model::StageChangeMeta::default(),
+            )
+            .await
+            .expect("stage change should succeed");
+
+        let activities = recorded.lock().unwrap().clone();
+        assert_eq!(activities.len(), 1);
+        let metadata = activities[0].metadata.clone().expect("activity metadata");
+        assert!(metadata.get("external_ref").is_none());
+        assert!(metadata.get("reason").is_none());
+
+        let notification = next_notification(&mut receiver).await;
+        let metadata = notification.metadata.expect("notification metadata");
+        assert!(metadata.get("external_ref").is_none());
+        assert!(!notification.message.contains("Ref:"));
+    }
+
+    #[tokio::test]
+    async fn gated_stage_change_passes_meta_to_the_approval_request() {
+        let stage_id = Uuid::new_v4();
+        let feature_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+        let (repository, environment_logic) = stage_change_mocks(stage_id, feature_id);
+
+        let mut approval_logic = crate::logic::approval::MockApprovalLogic::new();
+        approval_logic
+            .expect_maybe_create_stage_change_request()
+            .withf(move |feature, stage, next_status, requested_by, meta| {
+                feature.id == feature_id
+                    && stage.id == stage_id
+                    && next_status == "DEPLOYMENT_REQUESTED"
+                    && *requested_by == user_id
+                    && *meta == jira_meta()
+            })
+            .times(1)
+            .returning(move |feature, stage, _, requested_by, meta| {
+                let now = chrono::Utc::now();
+                Ok(Some(crate::database::entity::ApprovalRequest {
+                    id: request_id,
+                    policy_id: Uuid::new_v4(),
+                    feature_id: feature.id,
+                    environment_id: Some(stage.environment_id),
+                    change_type: "stage_change".to_string(),
+                    change_payload: serde_json::json!({}),
+                    change_description: None,
+                    requested_by,
+                    eligible_approver_ids: vec![],
+                    routing_reason: None,
+                    admin_override_enabled: false,
+                    status: crate::database::entity::ApprovalStatus::Pending,
+                    approved_count: 0,
+                    rejected_count: 0,
+                    executed_at: None,
+                    created_at: now,
+                    updated_at: now,
+                    required_approvers_override: None,
+                    external_ref: meta.external_ref.clone(),
+                    request_reason: meta.reason.clone(),
+                }))
+            });
+
+        let recorded = RecordedActivities::default();
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let logic = feature_logic_with_approval_and_notifications(
+            Box::new(repository),
+            Box::new(environment_logic),
+            recording_activity_log(recorded.clone()),
+            create_mock_user_repository(),
+            Some(Box::new(approval_logic)),
+            Some(Box::new(RecordingNotificationLogic { sender })),
+        );
+
+        let feature = logic
+            .request_stage_change(
+                ID::from(stage_id),
+                StageChangeRequestType::DeploymentRequested,
+                user_id,
+                jira_meta(),
+            )
+            .await
+            .expect("stage change should be intercepted");
+        assert_eq!(
+            feature.pending_approval_request_id,
+            Some(ID::from(request_id))
+        );
+
+        let notification = next_notification(&mut receiver).await;
+        let metadata = notification.metadata.expect("notification metadata");
+        assert_eq!(metadata["external_ref"], "PROJ-123");
+        assert!(
+            notification.message.ends_with(" Ref: PROJ-123."),
+            "message: {}",
+            notification.message
+        );
     }
 }
 

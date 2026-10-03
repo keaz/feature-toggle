@@ -15,7 +15,7 @@ use feature_toggle_backend::database::entity::{Feature, FeaturePipelineStage, Fe
 use feature_toggle_backend::judgment::approval_risk::{ApprovalRiskHandler, build_input};
 use feature_toggle_backend::judgment::build_client;
 use feature_toggle_backend::judgment::service::JudgmentHandler;
-use feature_toggle_backend::model::{Environment, ID};
+use feature_toggle_backend::model::{Environment, ID, StageChangeMeta};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -317,6 +317,7 @@ async fn live_stage_change_request_gets_a_done_assessment() {
                 ID::from(stage_id),
                 StageChangeRequestType::DeploymentRequested,
                 requester,
+                StageChangeMeta::default(),
             )
             .await
             .expect("stage change is intercepted by the seeded policy");

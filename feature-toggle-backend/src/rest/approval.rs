@@ -212,6 +212,10 @@ pub struct ApprovalRequestResponse {
     /// Approvals needed to approve the request. The policy's `requiredApprovers`
     /// until AI risk enforcement raises it.
     pub required_approvals_effective: i32,
+    /// Ticket or change id that asked for the change, e.g. a Jira issue key.
+    pub external_ref: Option<String>,
+    /// Why the requester asked for the change.
+    pub request_reason: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -896,6 +900,8 @@ pub(crate) fn map_request_with_policy(
         policy,
         ai_risk,
         required_approvals_effective,
+        external_ref: request.external_ref,
+        request_reason: request.request_reason,
     }
 }
 
@@ -1603,6 +1609,8 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             required_approvers_override: None,
+            external_ref: None,
+            request_reason: None,
         }
     }
 
@@ -1834,6 +1842,34 @@ mod tests {
         let json: serde_json::Value = test::read_body_json(resp).await;
         assert_eq!(json["items"].as_array().unwrap().len(), 2);
         assert_eq!(json["items"][1]["policy"]["name"], "Production approval");
+    }
+
+    #[actix_web::test]
+    async fn map_request_returns_external_ref_and_request_reason() {
+        let request_id = Uuid::new_v4();
+        let request = ApprovalRequest {
+            external_ref: Some("PROJ-123".to_string()),
+            request_reason: Some("Ready for QA".to_string()),
+            ..sample_request(request_id)
+        };
+        let policy = sample_policy(request.policy_id);
+
+        let response = map_request_with_policy(request, vec![], Some(&policy), None, None);
+        let json = serde_json::to_value(&response).unwrap();
+
+        assert_eq!(json["externalRef"], "PROJ-123");
+        assert_eq!(json["requestReason"], "Ready for QA");
+
+        let without = map_request_with_policy(
+            sample_request(Uuid::new_v4()),
+            vec![],
+            Some(&policy),
+            None,
+            None,
+        );
+        let json = serde_json::to_value(&without).unwrap();
+        assert!(json["externalRef"].is_null());
+        assert!(json["requestReason"].is_null());
     }
 
     #[actix_web::test]
@@ -2152,6 +2188,8 @@ mod tests {
             status,
             approved_count,
             required_approvers_override: Some(2),
+            external_ref: None,
+            request_reason: None,
             eligible_approver_ids: vec![Uuid::new_v4(), Uuid::new_v4()],
             ..sample_request(Uuid::new_v4())
         };
@@ -2191,6 +2229,8 @@ mod tests {
     async fn remaining_approvers_are_loaded_only_for_overridden_pending_requests() {
         let capped = ApprovalRequest {
             required_approvers_override: Some(3),
+            external_ref: None,
+            request_reason: None,
             eligible_approver_ids: vec![Uuid::new_v4()],
             ..sample_request(Uuid::new_v4())
         };
@@ -2200,11 +2240,15 @@ mod tests {
         };
         let unlisted = ApprovalRequest {
             required_approvers_override: Some(3),
+            external_ref: None,
+            request_reason: None,
             eligible_approver_ids: vec![],
             ..sample_request(Uuid::new_v4())
         };
         let closed = ApprovalRequest {
             required_approvers_override: Some(3),
+            external_ref: None,
+            request_reason: None,
             eligible_approver_ids: vec![Uuid::new_v4()],
             status: ApprovalStatus::Approved,
             ..sample_request(Uuid::new_v4())

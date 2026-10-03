@@ -743,3 +743,12 @@ pub struct CreateVariantAllocationInput {
 pub struct UpdateVariantAllocationInput {
     pub weight: i32,
 }
+
+/// Who asked for a stage change and why (JI-11). Both are optional free text,
+/// validated at the REST layer. `external_ref` is a ticket or change id from
+/// another system, for example a Jira issue key.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StageChangeMeta {
+    pub external_ref: Option<String>,
+    pub reason: Option<String>,
+}

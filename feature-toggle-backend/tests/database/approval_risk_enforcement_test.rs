@@ -11,7 +11,7 @@ use feature_toggle_backend::grpc::pb::FeatureUpdate;
 use feature_toggle_backend::logic::approval::{self as approval_logic, ApprovalRequestEvent};
 use feature_toggle_backend::logic::feature::StageChangeRequestType;
 use feature_toggle_backend::logic::{environment, feature as feature_logic};
-use feature_toggle_backend::model::ID;
+use feature_toggle_backend::model::{ID, StageChangeMeta};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -134,6 +134,8 @@ async fn insert_due_request(
             eligible_approver_ids: vec![],
             routing_reason: None,
             admin_override_enabled: false,
+            external_ref: None,
+            request_reason: None,
         })
         .await
         .expect("request creation should succeed");
@@ -456,6 +458,7 @@ async fn two_approvals_leave_an_overridden_request_pending(use_pool: bool) {
             ID::from(stage_id),
             StageChangeRequestType::DeploymentRequested,
             requester,
+            StageChangeMeta::default(),
         )
         .await
         .expect("stage change should be intercepted by approval policy");
@@ -649,6 +652,8 @@ async fn insert_capped_request_with(
             eligible_approver_ids: approvers.clone(),
             routing_reason: None,
             admin_override_enabled: false,
+            external_ref: None,
+            request_reason: None,
         })
         .await
         .expect("request creation should succeed");
@@ -1198,6 +1203,7 @@ async fn stage_change_request(pool: &PgPool, use_pool: bool, approvers: usize) -
             ID::from(stage_id),
             StageChangeRequestType::DeploymentRequested,
             requester,
+            StageChangeMeta::default(),
         )
         .await
         .expect("stage change should be intercepted by approval policy");

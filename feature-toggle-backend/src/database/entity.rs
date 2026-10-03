@@ -423,6 +423,10 @@ pub struct ApprovalRequest {
     /// Approvals needed when AI risk enforcement raised the policy's
     /// `required_approvers` for this request. `None` means the policy applies.
     pub required_approvers_override: Option<i32>,
+    /// Ticket or change id that asked for the change (JI-11), e.g. a Jira key.
+    pub external_ref: Option<String>,
+    /// Why the requester asked for the change (JI-11).
+    pub request_reason: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]

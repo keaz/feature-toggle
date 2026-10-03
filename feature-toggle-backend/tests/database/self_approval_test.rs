@@ -11,7 +11,7 @@ use feature_toggle_backend::logic::feature::StageChangeRequestType;
 use feature_toggle_backend::logic::{
     approval as approval_logic, environment, feature as feature_logic,
 };
-use feature_toggle_backend::model::ID;
+use feature_toggle_backend::model::{ID, StageChangeMeta};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -143,6 +143,7 @@ impl Fixture {
                 ID::from(self.stage_id),
                 StageChangeRequestType::DeploymentRequested,
                 self.requester_id,
+                StageChangeMeta::default(),
             )
             .await?;
         Ok(feature
