@@ -310,6 +310,18 @@ pub(crate) mod test_support {
     /// being recorded. The API client always times out, so a submitted
     /// judgment ends as failed and nothing needs a real model.
     pub(crate) fn recording_runtime(on: bool, fail_store: bool, recorded: Recorded) -> AiRuntime {
+        recording_runtime_with_probe(on, fail_store, recorded, Arc::new(|| {}))
+    }
+
+    /// Like [`recording_runtime`], and calls `probe` at the start of every
+    /// upsert, so a test can observe what had happened by the time a reason
+    /// was submitted (for example, whether the edge broadcast already went out).
+    pub(crate) fn recording_runtime_with_probe(
+        on: bool,
+        fail_store: bool,
+        recorded: Recorded,
+        probe: Arc<dyn Fn() + Send + Sync>,
+    ) -> AiRuntime {
         let mut settings = MockTeamAiSettingsRepository::new();
         settings.expect_get().returning(move |_| {
             Ok(StoredTeamAiSettings {
@@ -322,6 +334,7 @@ pub(crate) mod test_support {
         });
         let mut judgments = MockAiJudgmentRepository::new();
         judgments.expect_upsert_pending().returning(move |new| {
+            probe();
             recorded
                 .lock()
                 .unwrap()
@@ -354,12 +367,15 @@ pub(crate) mod test_support {
         client
             .expect_evaluate()
             .returning(|_, _| Err(JudgmentError::Timeout));
+        // A reason the rule passes (a ticket reference) is applied at once.
+        let mut activity = MockActivityLogRepository::new();
+        activity
+            .expect_merge_activity_metadata()
+            .returning(|_, _, _| Ok(()));
         let client: Arc<dyn JudgmentClient> = Arc::new(client);
         let service = Arc::new(
             JudgmentService::new(client.clone(), Box::new(judgments), Box::new(settings))
-                .with_handler(Arc::new(JustificationHandler::new(Box::new(
-                    MockActivityLogRepository::new(),
-                )))),
+                .with_handler(Arc::new(JustificationHandler::new(Box::new(activity)))),
         );
         AiRuntime::new(Some(client), "jev-1.13.0").with_judgments(Some(service))
     }
@@ -522,7 +538,7 @@ mod tests {
             AiJudgment, MockAiJudgmentRepository, MockTeamAiSettingsRepository,
             StoredTeamAiSettings, TeamAiSettings,
         };
-        use crate::judgment::client::{JudgmentError, MockJudgmentClient};
+        use crate::judgment::client::MockJudgmentClient;
         use crate::judgment::service::RULE_MODEL;
         use crate::judgment::types::{SystemOneResponse, Usage};
 
@@ -784,7 +800,6 @@ mod tests {
                 .await;
             }
             assert_eq!(calls.load(Ordering::SeqCst), 2);
-            let _ = JudgmentError::Timeout;
         }
 
         #[tokio::test]

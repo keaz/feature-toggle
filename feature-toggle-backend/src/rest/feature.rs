@@ -1661,6 +1661,9 @@ pub(crate) async fn update_feature(
         .ok_or_else(|| RestError::unauthorized("User authentication not found"))?;
     let team_uuid = Uuid::try_from(existing_feature.team_id.clone())
         .map_err(|_| RestError::invalid_input("invalid feature team id"))?;
+    // Reasons are handed to the justification check only after the change
+    // has committed and the edge broadcast went out.
+    let mut freeze_overrides = Vec::new();
     for stage in &payload.stages {
         let environment_uuid = parse_uuid(&stage.environment_id, "environment_id")?;
         let freeze_override =
@@ -1675,9 +1678,7 @@ pub(crate) async fn update_feature(
                 payload.freeze_override_reason.as_deref(),
             )
             .await?;
-        if let Some(freeze_override) = freeze_override {
-            freeze_override.record(&ai).await;
-        }
+        freeze_overrides.extend(freeze_override);
     }
 
     let input = UpdateFeatureInput {
@@ -1730,16 +1731,6 @@ pub(crate) async fn update_feature(
         }
     };
     let updated = outcome.feature;
-    if let Some(cleanup_reason) = outcome.cleanup_reason.as_deref() {
-        record_feature_reason(
-            &ai,
-            &updated,
-            outcome.activity_id,
-            crate::judgment::justification::ReasonKind::ArchiveCleanup,
-            cleanup_reason,
-        )
-        .await;
-    }
 
     if updated.key != existing_feature.key {
         // Edges cache by key, so a rename must drop the old key. Send it before
@@ -1754,6 +1745,19 @@ pub(crate) async fn update_feature(
     }
 
     // After the broadcast so edge propagation is not delayed.
+    for freeze_override in &freeze_overrides {
+        freeze_override.record(&ai).await;
+    }
+    if let Some(cleanup_reason) = outcome.cleanup_reason.as_deref() {
+        record_feature_reason(
+            &ai,
+            &updated,
+            outcome.activity_id,
+            crate::judgment::justification::ReasonKind::ArchiveCleanup,
+            cleanup_reason,
+        )
+        .await;
+    }
     crate::rest::ai::record_flag_kind(&ai, team_uuid, &updated).await;
 
     let response = build_feature_response(
@@ -1838,19 +1842,20 @@ pub(crate) async fn emergency_disable_feature(
         }
     };
 
+    broadcast_feature_update(
+        feature_repo.as_ref().as_ref(),
+        updates_tx.get_ref(),
+        feature_uuid,
+    )
+    .await;
+
+    // After the broadcast: the kill switch must reach edges as fast as before.
     record_feature_reason(
         &ai,
         &feature,
         activity_id,
         crate::judgment::justification::ReasonKind::EmergencyDisable,
         &reason,
-    )
-    .await;
-
-    broadcast_feature_update(
-        feature_repo.as_ref().as_ref(),
-        updates_tx.get_ref(),
-        feature_uuid,
     )
     .await;
 
@@ -1933,19 +1938,20 @@ pub(crate) async fn emergency_enable_feature(
         }
     };
 
+    broadcast_feature_update(
+        feature_repo.as_ref().as_ref(),
+        updates_tx.get_ref(),
+        feature_uuid,
+    )
+    .await;
+
+    // After the broadcast: the kill switch must reach edges as fast as before.
     record_feature_reason(
         &ai,
         &feature,
         activity_id,
         crate::judgment::justification::ReasonKind::EmergencyEnable,
         &reason,
-    )
-    .await;
-
-    broadcast_feature_update(
-        feature_repo.as_ref().as_ref(),
-        updates_tx.get_ref(),
-        feature_uuid,
     )
     .await;
 
@@ -2009,9 +2015,6 @@ pub(crate) async fn request_stage_change(
         payload.freeze_override_reason.as_deref(),
     )
     .await?;
-    if let Some(freeze_override) = freeze_override {
-        freeze_override.record(&ai).await;
-    }
 
     let request_type = StageChangeRequestType::from(payload.request);
     let feature = feature_logic
@@ -2021,6 +2024,10 @@ pub(crate) async fn request_stage_change(
 
     if let Ok(fid) = Uuid::try_from(feature.id.clone()) {
         broadcast_feature_update(feature_repo.as_ref().as_ref(), updates_tx.get_ref(), fid).await;
+    }
+    // After the change and its broadcast, as for every other recorded reason.
+    if let Some(freeze_override) = freeze_override {
+        freeze_override.record(&ai).await;
     }
 
     let response = build_feature_response(
@@ -3149,7 +3156,9 @@ mod tests {
     mod justification_recording {
         use super::*;
         use crate::database::feature::CreateFeature;
-        use crate::judgment::justification::test_support::{Recorded, recording_runtime};
+        use crate::judgment::justification::test_support::{
+            Recorded, recording_runtime, recording_runtime_with_probe,
+        };
         use crate::judgment::{AiRuntime, SubjectType};
         use serde_json::json;
         use std::sync::Arc;
@@ -3163,6 +3172,9 @@ mod tests {
             pub(super) team_id: Uuid,
             pub(super) feature_id: Uuid,
             pub(super) user_id: Uuid,
+            /// Shared by every request, so a test can see what was broadcast.
+            pub(super) updates_tx: tokio::sync::broadcast::Sender<crate::grpc::pb::FeatureUpdate>,
+            _updates_rx: tokio::sync::broadcast::Receiver<crate::grpc::pb::FeatureUpdate>,
         }
 
         impl Fixture {
@@ -3200,11 +3212,15 @@ mod tests {
                     })
                     .await
                     .expect("seed feature");
+                let (updates_tx, _updates_rx) =
+                    tokio::sync::broadcast::channel::<crate::grpc::pb::FeatureUpdate>(64);
                 Self {
                     pool,
                     team_id,
                     feature_id,
                     user_id,
+                    updates_tx,
+                    _updates_rx,
                 }
             }
 
@@ -3263,8 +3279,7 @@ mod tests {
                     Box::new(PgActivityLogRepository::new(pool.clone())),
                     user_repository(pool.clone()),
                 );
-                let (updates_tx, _updates_rx) =
-                    tokio::sync::broadcast::channel::<crate::grpc::pb::FeatureUpdate>(8);
+                let updates_tx = self.updates_tx.clone();
                 let mut app = App::new()
                     .app_data(web::Data::new(pool.clone()))
                     .app_data(web::Data::new(
@@ -3454,6 +3469,113 @@ mod tests {
                 .await;
             assert_eq!(status, StatusCode::OK, "{body}");
             assert!(recorded.lock().unwrap().is_empty());
+            fixture.cleanup().await;
+        }
+
+        /// A runtime whose recorder notes how many edge updates were already
+        /// queued when each reason was submitted.
+        fn runtime_seeing_broadcasts(
+            fixture: &Fixture,
+            recorded: Recorded,
+        ) -> (AiRuntime, Arc<std::sync::Mutex<Vec<usize>>>) {
+            let queued: Arc<std::sync::Mutex<Vec<usize>>> = Arc::default();
+            let seen = queued.clone();
+            let updates_tx = fixture.updates_tx.clone();
+            let probe: Arc<dyn Fn() + Send + Sync> =
+                Arc::new(move || seen.lock().unwrap().push(updates_tx.len()));
+            (
+                recording_runtime_with_probe(true, false, recorded, probe),
+                queued,
+            )
+        }
+
+        #[actix_web::test]
+        async fn emergency_paths_record_the_reason_after_the_edge_broadcast() {
+            let fixture = Fixture::new().await;
+            for (action, reason) in [
+                ("emergency-disable", "Service degraded since 14:00"),
+                ("emergency-enable", "Fix shipped in release 4.2"),
+            ] {
+                let recorded: Recorded = Arc::default();
+                let (ai, queued) = runtime_seeing_broadcasts(&fixture, recorded.clone());
+                let before = fixture.updates_tx.len();
+                let (status, body) = fixture
+                    .post(action, json!({ "reason": reason }), Some(ai))
+                    .await;
+                assert_eq!(status, StatusCode::OK, "{action}: {body}");
+                assert_eq!(recorded.lock().unwrap().len(), 1, "{action}");
+                assert_eq!(
+                    queued.lock().unwrap().clone(),
+                    vec![before + 1],
+                    "{action}: the edge update is sent before the reason is submitted"
+                );
+            }
+            fixture.cleanup().await;
+        }
+
+        #[actix_web::test]
+        async fn archive_records_the_cleanup_reason_after_the_edge_broadcast() {
+            let fixture = Fixture::new().await;
+            let recorded: Recorded = Arc::default();
+            let (ai, queued) = runtime_seeing_broadcasts(&fixture, recorded.clone());
+            let body = archive_body(&fixture, Some("Replaced by checkout-v3")).await;
+            let before = fixture.updates_tx.len();
+            let (status, response) = fixture.patch_feature(body, Some(ai)).await;
+            assert_eq!(status, StatusCode::OK, "{response}");
+            assert_eq!(recorded.lock().unwrap().len(), 1);
+            assert_eq!(queued.lock().unwrap().clone(), vec![before + 1]);
+            fixture.cleanup().await;
+        }
+
+        #[actix_web::test]
+        async fn freeze_override_reason_is_recorded_once_after_the_update_commits() {
+            let fixture = Fixture::new().await;
+            let env_id = insert_environment(&fixture.pool, fixture.team_id).await;
+            sqlx::query(
+                "INSERT INTO change_freeze_windows (team_id, name, environment_id, starts_at, ends_at, active) \
+                 VALUES ($1, 'Release freeze', $2, NOW() - INTERVAL '1 hour', NOW() + INTERVAL '1 hour', TRUE)",
+            )
+            .bind(fixture.team_id)
+            .bind(env_id)
+            .execute(&fixture.pool)
+            .await
+            .expect("insert freeze window");
+            let recorded: Recorded = Arc::default();
+            let (ai, queued) = runtime_seeing_broadcasts(&fixture, recorded.clone());
+            let before = fixture.updates_tx.len();
+            let (status, response) = fixture
+                .patch_feature(
+                    json!({
+                        "key": "ai20-kill",
+                        "featureType": "SIMPLE",
+                        "description": "Changed during the freeze",
+                        "freezeOverrideReason": "Hotfix for checkout outage INC-42",
+                        "dependencies": [],
+                        "relationships": [],
+                        "stages": [{
+                            "environmentId": env_id.to_string(),
+                            "orderIndex": 0,
+                            "position": "{\"x\":0,\"y\":0}",
+                        }],
+                    }),
+                    Some(ai),
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK, "{response}");
+
+            let activity_id = fixture.activity_id("freeze_override").await;
+            let entries = recorded.lock().unwrap().clone();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(
+                (entries[0].0, entries[0].1),
+                (SubjectType::Activity, activity_id)
+            );
+            assert_eq!(entries[0].2["reason_kind"], "freeze_override");
+            assert_eq!(
+                queued.lock().unwrap().clone(),
+                vec![before + 1],
+                "recorded after the update committed and was broadcast"
+            );
             fixture.cleanup().await;
         }
 
