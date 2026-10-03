@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Type | Feature (follow-up from JI-21) |
-| Status | Open |
+| Status | Done in d5d6faf, UI 56042f8 |
 | Repo | backend (`feature-toggle/`) **then** UI (`../feature-toggle-ui/`): two commits |
 | Depends on | — |
 | Behavior change | Additive. New `reasonKind` value `stage_change` for the justification check; advisory hint under the reason field. Never blocks submit. |
@@ -61,4 +61,6 @@ When a user types a reason for a stage change, show the same AI "this reason is 
 
 ## Handoff log
 
-(empty)
+2026-10-03, backend `d5d6faf`, UI `56042f8`:
+- Implemented as specified. Backend: `ReasonKind::StageChange` (`stage_change`), description added, no other exhaustive match needed. Contract baseline `contract-hashes.json` updated, compat check passes. UI: `'stage_change'` in `ReasonKind`; hint under the `stage-change-reason` textarea with `aria-describedby`, same props source as the cleanup hint (`selectedTeam.id`, `featureKey || undefined`), rendered only when a team is selected.
+- Tests: backend `stage_change_kind_round_trips`, REST `stage_change_reason_kind_is_accepted` (checks the action text sent to the model); UI `stage change reason shows the reason hint`. RED seen first for both. Backend full suite passes except known flaky `test_pending_approval_listing_maps_feature_metadata`. UI: lint clean, build ok, 94 files 736 tests pass.

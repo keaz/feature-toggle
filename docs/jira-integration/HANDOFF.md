@@ -21,7 +21,7 @@ Read this after [`README.md`](README.md) and [`design.md`](design.md). It record
 
 **Phase 1 is complete (2026-10-03).**
 
-**Phase 2 is planned (2026-10-03):** write-back to Jira (comments + live remote link), inbound rate limit, signed native webhooks, reason hint. Design [`phase-2/design.md`](phase-2/design.md), tasks [`phase-2/README.md`](phase-2/README.md). **Next task: [JI-47](phase-2/tasks/JI-47-reason-hint-on-stage-change.md).**
+**Phase 2 is planned (2026-10-03):** write-back to Jira (comments + live remote link), inbound rate limit, signed native webhooks, reason hint. Design [`phase-2/design.md`](phase-2/design.md), tasks [`phase-2/README.md`](phase-2/README.md). **Next task: [JI-50](phase-2/tasks/JI-50-guide-and-e2e.md).**
 
 | Phase 2 task | Status | Commit |
 |---|---|---|
@@ -32,7 +32,7 @@ Read this after [`README.md`](README.md) and [`design.md`](design.md). It record
 | JI-44 inbound rate limit | Done | backend `8c7db99` |
 | JI-45 native webhook HMAC | Done | backend `088c2b2` |
 | JI-46 UI write-back settings | Done | UI `b4479f9` |
-| JI-47 reason hint on stage change | Open | |
+| JI-47 reason hint on stage change | Done | backend `d5d6faf`, UI `56042f8` |
 | JI-50 guide + e2e | Open | |
 
 Facts from JI-41 (backend `3de0dec`): `logic::jira_client::{JiraClient, client_for}` build a client from a row but do not check `writeback_enabled` (the sender must); credential AAD is the integration id bytes; turning write-back off does not yet dead the pending jobs (JI-42 adds it); `web::Data<config::JiraUiBaseUrl>` carries the UI base URL. Details in the JI-41 handoff log.
