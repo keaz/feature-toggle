@@ -505,3 +505,27 @@ async fn jobs_enqueued_in_one_tx_keep_insert_order() {
 
     fx.cleanup(&pool).await;
 }
+
+#[tokio::test]
+async fn outbound_jobs_have_the_feature_and_pending_issue_indexes() {
+    let pool = init_pg_pool().await;
+    let defs: Vec<String> = sqlx::query_scalar(
+        "SELECT indexdef FROM pg_indexes WHERE tablename = 'jira_outbound_jobs'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    // Feature deletes set `feature_id` to NULL: without an index that scans the table.
+    assert!(
+        defs.iter()
+            .any(|def| def.ends_with("(feature_id)") && !def.contains("WHERE")),
+        "{defs:?}"
+    );
+    assert!(
+        defs.iter().any(
+            |def| def.contains("(integration_id, issue_key, created_at) WHERE")
+                && def.contains("'pending'")
+        ),
+        "{defs:?}"
+    );
+}
