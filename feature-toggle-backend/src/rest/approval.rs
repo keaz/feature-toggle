@@ -661,11 +661,32 @@ fn build_change_diff(
     }
 }
 
+/// A risk assessment still `pending` this long after it was queued is reported
+/// as `failed`. The retry sweep stops after three attempts and does not run at
+/// all without an API key, so such a row may never finish. The UI stops polling
+/// after the same 10 minutes.
+pub(crate) const AI_RISK_PENDING_MAX_AGE_MINUTES: i64 = 10;
+
 /// Maps a stored judgment row to the response summary. No row, or a status
 /// this code does not know, means no assessment.
 pub(crate) fn map_ai_risk(judgment: Option<&AiJudgment>) -> Option<AiRiskSummary> {
+    map_ai_risk_at(judgment, Utc::now())
+}
+
+/// [`map_ai_risk`] at a given time: a pending row older than
+/// [`AI_RISK_PENDING_MAX_AGE_MINUTES`] counts as failed.
+pub(crate) fn map_ai_risk_at(
+    judgment: Option<&AiJudgment>,
+    now: DateTime<Utc>,
+) -> Option<AiRiskSummary> {
     let judgment = judgment?;
     let status = match judgment.status.as_str() {
+        "pending"
+            if now - judgment.created_at
+                > chrono::Duration::minutes(AI_RISK_PENDING_MAX_AGE_MINUTES) =>
+        {
+            AiRiskStatus::Failed
+        }
         "pending" => AiRiskStatus::Pending,
         "done" => AiRiskStatus::Done,
         "failed" => AiRiskStatus::Failed,
@@ -1826,6 +1847,38 @@ mod tests {
             assert_eq!(summary.signals, None);
             assert_eq!(summary.model, None);
             assert_eq!(summary.assessed_at, None);
+        }
+    }
+
+    #[actix_web::test]
+    async fn ai_risk_pending_past_the_age_cap_reports_failed() {
+        let now = Utc::now();
+        let cap = chrono::Duration::minutes(AI_RISK_PENDING_MAX_AGE_MINUTES);
+        let table = [
+            ("pending", chrono::Duration::zero(), AiRiskStatus::Pending),
+            (
+                "pending",
+                cap - chrono::Duration::seconds(1),
+                AiRiskStatus::Pending,
+            ),
+            (
+                "pending",
+                cap + chrono::Duration::seconds(1),
+                AiRiskStatus::Failed,
+            ),
+            ("pending", chrono::Duration::hours(6), AiRiskStatus::Failed),
+            // The cap only applies to pending rows.
+            ("failed", chrono::Duration::hours(6), AiRiskStatus::Failed),
+            ("done", chrono::Duration::hours(6), AiRiskStatus::Done),
+        ];
+        for (status, age, expected) in table {
+            let mut row = judgment_row(Uuid::new_v4(), status, Some(done_derived()));
+            row.created_at = now - age;
+            let summary = map_ai_risk_at(Some(&row), now).unwrap();
+            assert_eq!(summary.status, expected, "{status} aged {age}");
+            if expected != AiRiskStatus::Done {
+                assert_eq!(summary.level, None, "{status} aged {age}");
+            }
         }
     }
 
