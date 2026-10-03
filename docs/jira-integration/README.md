@@ -4,6 +4,8 @@ This folder holds the design and the task breakdown for the first Jira integrati
 
 Source investigation: [`../investigations/2026-10-sso-jira-sdks.md`](../investigations/2026-10-sso-jira-sdks.md), section 2.
 
+**Setting up Jira?** Follow the [setup guide](setup-guide.md) (Jira Cloud and Data Center).
+
 ## Rules for agents
 
 1. **One task at a time, in table order.** Do not start a task until every task in its "Depends on" column is done and committed. Do not work on two tasks in one session.
