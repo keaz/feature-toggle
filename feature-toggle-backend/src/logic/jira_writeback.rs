@@ -1,7 +1,7 @@
 //! Pure rules of the Jira write-back sender (JI-42): retry schedule, classification
 //! of Jira replies and the bodies sent to Jira.
 
-use chrono::Duration;
+use chrono::{DateTime, Duration, Utc};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -10,6 +10,9 @@ use crate::logic::jira_client::{JiraEdition, JiraResponse, JiraTransportError, s
 
 /// A job is `dead` after this many failed attempts.
 pub const MAX_ATTEMPTS: i32 = 6;
+/// Longest wait between attempts (the last step of [`retry_delay`]); also the cap on
+/// a `Retry-After` header.
+const MAX_RETRY_SECS: u64 = 6 * 3600;
 const MAX_TITLE_CHARS: usize = 255;
 
 /// Wait after `attempts_done` failed attempts; `None` when out of attempts.
@@ -44,9 +47,10 @@ pub fn classify(
     let retry = |retry_after: Option<u64>| match retry_delay(attempts_done) {
         None => Outcome::Dead,
         Some(delay) => Outcome::Retry {
+            // Retry-After is Jira's (or a proxy's) word: cap it at the longest scheduled
+            // wait, so a huge value can neither overflow a timestamp nor stall the issue.
             delay: retry_after
-                .and_then(|secs| i64::try_from(secs).ok())
-                .and_then(Duration::try_seconds)
+                .map(|secs| Duration::seconds(i64::try_from(secs.min(MAX_RETRY_SECS)).unwrap_or(0)))
                 .map_or(delay, |after| delay.max(after)),
         },
     };
@@ -74,8 +78,46 @@ pub fn comment_body(edition: JiraEdition, lines: &[String]) -> Value {
                 .collect();
             json!({"body": {"type": "doc", "version": 1, "content": paragraphs}})
         }
-        JiraEdition::DataCenter => json!({"body": lines.join("\n")}),
+        JiraEdition::DataCenter => {
+            let lines: Vec<String> = lines.iter().map(|line| escape_wiki_markup(line)).collect();
+            json!({"body": lines.join("\n")})
+        }
     }
+}
+
+/// Data Center renders a plain-text comment body as wiki markup, so text that came
+/// from users (reasons, references, names, feature keys) could add links, images,
+/// macros or tables. Escapes the markup characters with `\`, and writes `\` itself
+/// and the dot of a leading `h1.`..`h6.` / `bq.` as character references, so the text
+/// renders literally. The fixed comment text contains none of these characters.
+pub fn escape_wiki_markup(line: &str) -> String {
+    let mut out = String::with_capacity(line.len() + 8);
+    let block = ["h1.", "h2.", "h3.", "h4.", "h5.", "h6.", "bq."]
+        .iter()
+        .any(|prefix| line.starts_with(prefix));
+    for (index, ch) in line.chars().enumerate() {
+        match ch {
+            // `\\` is a forced line break: never let a user backslash pair with ours.
+            '\\' => out.push_str("&#92;"),
+            '.' if block && index == 2 => out.push_str("&#46;"),
+            '[' | ']' | '{' | '}' | '|' | '!' | '*' | '_' | '^' | '~' | '+' | '-' | '?' | '#' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// `now + delay`, without the panic of `DateTime + TimeDelta` on overflow: falls back
+/// to the scheduled delay for `attempts_done`, then to `now`.
+pub fn next_attempt_at(now: DateTime<Utc>, delay: Duration, attempts_done: i32) -> DateTime<Utc> {
+    now.checked_add_signed(delay)
+        .or_else(|| {
+            retry_delay(attempts_done).and_then(|scheduled| now.checked_add_signed(scheduled))
+        })
+        .unwrap_or(now)
 }
 
 pub fn remote_link_global_id(feature_id: Uuid) -> String {
@@ -191,6 +233,78 @@ mod tests {
         assert_eq!(classify(Comment, &resp(302, None), 1), Outcome::Dead);
         assert_eq!(classify(Comment, &resp(400, None), 1), Outcome::Dead);
         assert_eq!(classify(Comment, &resp(409, None), 1), Outcome::Dead);
+    }
+
+    #[test]
+    fn retry_after_is_capped_at_the_longest_scheduled_delay() {
+        use OutboundKind::Comment;
+        let six_hours = Outcome::Retry {
+            delay: Duration::hours(6),
+        };
+        // Values that overflow a timestamp (or a TimeDelta) are capped, never kept.
+        assert_eq!(
+            classify(Comment, &resp(429, Some(u64::MAX / 2)), 1),
+            six_hours
+        );
+        assert_eq!(classify(Comment, &resp(429, Some(u64::MAX)), 1), six_hours);
+        assert_eq!(
+            classify(Comment, &resp(429, Some(10_000_000_000_000)), 1),
+            six_hours
+        );
+        assert_eq!(
+            classify(Comment, &resp(429, Some(6 * 3600 + 1)), 2),
+            six_hours
+        );
+        // Below the cap Retry-After is kept as is.
+        assert_eq!(
+            classify(Comment, &resp(429, Some(7200)), 1),
+            Outcome::Retry {
+                delay: Duration::seconds(7200)
+            }
+        );
+    }
+
+    #[test]
+    fn next_attempt_at_never_overflows() {
+        let now = chrono::Utc::now();
+        assert_eq!(
+            next_attempt_at(now, Duration::seconds(30), 1),
+            now + Duration::seconds(30)
+        );
+        // A delay past the last representable time falls back to the schedule.
+        assert_eq!(
+            next_attempt_at(now, Duration::seconds(10_000_000_000_000), 2),
+            now + Duration::minutes(2)
+        );
+        let end = chrono::DateTime::<chrono::Utc>::MAX_UTC;
+        assert_eq!(next_attempt_at(end, Duration::hours(6), 5), end);
+    }
+
+    #[test]
+    fn data_center_comment_escapes_wiki_markup() {
+        let lines = vec![
+            "FluxGate: Jira status 'Done'".to_string(),
+            "Reason: see [docs|https://evil.example] {html}x{html} !https://evil.example/p.png!"
+                .to_string(),
+            "a|b *b* _i_ -s- +u+ ^p^ ~q~ ??c?? #n back\\slash \\[".to_string(),
+            "h1. heading".to_string(),
+            "bq. quote".to_string(),
+        ];
+        let body = comment_body(JiraEdition::DataCenter, &lines);
+        assert_eq!(
+            body["body"],
+            [
+                "FluxGate: Jira status 'Done'",
+                "Reason: see \\[docs\\|https://evil.example\\] \\{html\\}x\\{html\\} \\!https://evil.example/p.png\\!",
+                "a\\|b \\*b\\* \\_i\\_ \\-s\\- \\+u\\+ \\^p\\^ \\~q\\~ \\?\\?c\\?\\? \\#n back&#92;slash &#92;\\[",
+                "h1&#46; heading",
+                "bq&#46; quote",
+            ]
+            .join("\n")
+        );
+        // Cloud ADF text is not markup: kept as is.
+        let cloud = comment_body(JiraEdition::Cloud, &lines[1..2]);
+        assert_eq!(cloud["body"]["content"][0]["content"][0]["text"], lines[1]);
     }
 
     #[test]

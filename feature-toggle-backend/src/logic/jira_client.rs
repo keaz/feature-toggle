@@ -13,6 +13,20 @@ use crate::logic::secret_box;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const BODY_EXCERPT_CHARS: usize = 300;
+/// Most of a reply body that is read; the rest is dropped unread.
+const MAX_BODY_BYTES: usize = 64 * 1024;
+/// Error for a base URL with userinfo, a query or a fragment.
+pub const BASE_URL_SHAPE_MESSAGE: &str =
+    "Jira base URL must not contain credentials, a query or a fragment";
+
+/// True when the base URL carries userinfo, a query or a fragment. Write-back appends
+/// paths to the base URL, so these parts would leak into (or break) every request.
+pub fn has_disallowed_base_url_parts(url: &reqwest::Url) -> bool {
+    !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+}
 
 /// Jira edition, selected by `jira_auth_kind`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,7 +248,7 @@ impl JiraClient {
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.trim().parse::<u64>().ok());
-        let body = response.text().await.unwrap_or_default();
+        let body = read_capped(response).await;
         let body_excerpt = scrub_secrets(&body, &self.secrets())
             .chars()
             .take(BODY_EXCERPT_CHARS)
@@ -248,6 +262,21 @@ impl JiraClient {
             body,
         ))
     }
+}
+
+/// At most [`MAX_BODY_BYTES`] of the body, as lossy UTF-8. A read error ends the body.
+async fn read_capped(mut response: reqwest::Response) -> String {
+    let mut bytes: Vec<u8> = Vec::new();
+    while bytes.len() < MAX_BODY_BYTES {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                let room = MAX_BODY_BYTES - bytes.len();
+                bytes.extend_from_slice(&chunk[..chunk.len().min(room)]);
+            }
+            Ok(None) | Err(_) => break,
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 /// Replaces every non-empty string of `secrets` in `text` with `***`.
@@ -298,9 +327,11 @@ pub fn client_for(
         },
         JiraEdition::DataCenter => None,
     };
-    let insecure = reqwest::Url::parse(base_url)
-        .map(|url| url.scheme() != "https")
-        .unwrap_or(true);
+    let parsed = reqwest::Url::parse(base_url).ok();
+    if parsed.as_ref().is_some_and(has_disallowed_base_url_parts) {
+        return Err(Error::InvalidInput(BASE_URL_SHAPE_MESSAGE.to_string()));
+    }
+    let insecure = parsed.map(|url| url.scheme() != "https").unwrap_or(true);
     if insecure && !(config.allow_insecure_http && base_url.starts_with("http://")) {
         return Err(Error::InvalidInput(
             "Jira base URL must use https".to_string(),
@@ -448,6 +479,31 @@ mod tests {
         assert_eq!(response.status, 500);
         assert_eq!(response.retry_after_secs, Some(7));
         assert_eq!(response.body_excerpt.chars().count(), 300);
+    }
+
+    #[tokio::test]
+    async fn reads_at_most_64_kib_of_the_body() {
+        let server = MockServer::start().await;
+        let token = token();
+        // The credential sits past the cap: the excerpt never sees it.
+        let body = format!("{}{token}", "a".repeat(200 * 1024));
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(500).set_body_string(body))
+            .mount(&server)
+            .await;
+        let client = JiraClient::new(
+            &server.uri(),
+            JiraEdition::DataCenter,
+            JiraAuth::Bearer {
+                token: token.clone(),
+            },
+        )
+        .unwrap();
+        let (response, body) = client.get_myself().await.unwrap();
+        assert_eq!(response.status, 500);
+        assert_eq!(body.len(), 64 * 1024);
+        assert!(!body.contains(&token));
+        assert_eq!(response.body_excerpt, "a".repeat(300));
     }
 
     fn cloud_client(server: &MockServer, token: &str) -> JiraClient {
@@ -606,6 +662,24 @@ mod tests {
             jira_credential_enc: Some("sealed".to_string()),
             writeback_paused_reason: None,
             native_webhook_secret_enc: None,
+        }
+    }
+
+    #[test]
+    fn client_for_refuses_credentials_query_or_fragment_in_the_base_url() {
+        let config = JiraConfig::default();
+        for url in [
+            "https://user:pw@jira.example.com",
+            "https://user@jira.example.com",
+            "https://jira.example.com/?x=1",
+            "https://jira.example.com/jira#frag",
+        ] {
+            let err = client_for(&row(url), &config).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("Jira base URL must not contain credentials, a query or a fragment"),
+                "{url}: {err}"
+            );
         }
     }
 

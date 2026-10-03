@@ -24,8 +24,8 @@ use crate::database::jira_outbound_job::{
 };
 use crate::logic::jira_client::{JiraClient, JiraResponse, JiraTransportError, client_for};
 use crate::logic::jira_writeback::{
-    Outcome, classify, comment_body, error_note, remote_link_body, remote_link_global_id,
-    remote_link_title,
+    Outcome, classify, comment_body, error_note, next_attempt_at, remote_link_body,
+    remote_link_global_id, remote_link_title,
 };
 
 const BATCH_SIZE: i64 = 50;
@@ -267,7 +267,7 @@ impl JiraWritebackSender {
                 Settled::Sent
             }
             Outcome::Retry { delay } => {
-                let next_attempt_at = Utc::now() + delay;
+                let next_attempt_at = next_attempt_at(Utc::now(), delay, attempts_done);
                 warn!(
                     "Jira write-back job {} (integration {}, issue {}) will retry, status {:?}",
                     job.id, job.integration_id, job.issue_key, status
@@ -539,6 +539,33 @@ mod tests {
             )
         }
 
+        /// One sender tick limited to this fixture's jobs: claims every due job, sends
+        /// this integration's and puts the others (rows other tests left behind) back
+        /// as due, so counts do not depend on shared test DB state.
+        async fn tick(&self, sender: &JiraWritebackSender) -> SendCounts {
+            let claimed = self.claim_mine().await;
+            sender.process(claimed).await
+        }
+
+        async fn run_once(&self) -> SendCounts {
+            self.tick(&self.sender()).await
+        }
+
+        /// Claims every due job and keeps only this integration's.
+        async fn claim_mine(&self) -> Vec<OutboundJobRow> {
+            let jobs = jira_outbound_job_repository(self.pool.clone());
+            let claimed = jobs
+                .claim_due(500, chrono::Duration::minutes(5))
+                .await
+                .expect("claim");
+            let (mine, others): (Vec<_>, Vec<_>) = claimed
+                .into_iter()
+                .partition(|job| job.integration_id == self.integration_id);
+            let others: Vec<Uuid> = others.iter().map(|job| job.id).collect();
+            jobs.release(&others, Utc::now()).await.expect("release");
+            mine
+        }
+
         async fn enqueue(
             &self,
             issue: &str,
@@ -667,7 +694,7 @@ mod tests {
             .await;
         let id = fx.comment("PROJ-1", "hello").await;
 
-        let counts = fx.sender().run_once().await;
+        let counts = fx.run_once().await;
         assert_eq!(
             counts,
             SendCounts {
@@ -697,11 +724,7 @@ mod tests {
             .await;
         let first = fx.comment("PROJ-1", "one").await;
         let second = fx.comment("PROJ-1", "two").await;
-        let jobs = jira_outbound_job_repository(fx.pool.clone());
-        let claimed = jobs
-            .claim_due(500, chrono::Duration::minutes(5))
-            .await
-            .unwrap();
+        let claimed = fx.claim_mine().await;
         // Write-back is turned off while the batch is in flight.
         let mut conn = fx.pool.acquire().await.unwrap();
         let cancelled =
@@ -739,7 +762,7 @@ mod tests {
         for text in ["first", "second", "third"] {
             fx.comment("PROJ-1", text).await;
         }
-        let counts = fx.sender().run_once().await;
+        let counts = fx.run_once().await;
         assert_eq!(counts.sent, 3);
         let bodies: Vec<_> = requests(&fx.jira)
             .await
@@ -764,7 +787,7 @@ mod tests {
             .await;
         let id = fx.comment("PROJ-1", "hello").await;
 
-        let counts = fx.sender().run_once().await;
+        let counts = fx.run_once().await;
         assert_eq!(
             counts,
             SendCounts {
@@ -795,12 +818,42 @@ mod tests {
             .await;
         let id = fx.comment("PROJ-1", "hello").await;
 
-        fx.sender().run_once().await;
+        fx.run_once().await;
         let job = fx.job(id).await;
         assert_eq!(job.attempts, 1);
         let wait = job.next_attempt_at - Utc::now();
         assert!(
             wait > chrono::Duration::seconds(115) && wait <= chrono::Duration::seconds(120),
+            "{wait}"
+        );
+
+        fx.cleanup().await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn huge_retry_after_is_capped_and_does_not_panic() {
+        let fx = Fixture::new(false).await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "99999999999999"))
+            .mount(&fx.jira)
+            .await;
+        let id = fx.comment("PROJ-1", "hello").await;
+
+        let counts = fx.run_once().await;
+        assert_eq!(
+            counts,
+            SendCounts {
+                retried: 1,
+                ..Default::default()
+            }
+        );
+        let job = fx.job(id).await;
+        assert_eq!(job.status, "pending");
+        let wait = job.next_attempt_at - Utc::now();
+        assert!(
+            wait > chrono::Duration::hours(6) - chrono::Duration::seconds(10)
+                && wait <= chrono::Duration::hours(6),
             "{wait}"
         );
 
@@ -819,7 +872,7 @@ mod tests {
         let same_issue = fx.comment("PROJ-1", "two").await;
         let other_issue = fx.comment("PROJ-2", "three").await;
 
-        let counts = fx.sender().run_once().await;
+        let counts = fx.run_once().await;
         assert_eq!(
             counts,
             SendCounts {
@@ -843,7 +896,7 @@ mod tests {
             .expect("RFC 3339 time");
 
         // Paused: the next tick sends nothing.
-        assert_eq!(fx.sender().run_once().await, SendCounts::default());
+        assert_eq!(fx.run_once().await, SendCounts::default());
         assert_eq!(requests(&fx.jira).await.len(), 1);
 
         fx.cleanup().await;
@@ -863,7 +916,7 @@ mod tests {
             .await;
         let id = fx.comment("PROJ-1", "hello").await;
 
-        let counts = fx.sender().run_once().await;
+        let counts = fx.run_once().await;
         assert_eq!(counts.dead, 1);
         let job = fx.job(id).await;
         assert_eq!(job.status, "dead");
@@ -891,7 +944,7 @@ mod tests {
             .await;
         let id = fx.comment("PROJ-1", "hello").await;
 
-        fx.sender().run_once().await;
+        fx.run_once().await;
         let job = fx.job(id).await;
         assert_eq!(job.status, "dead");
         let error = job.last_error.expect("last_error");
@@ -922,7 +975,7 @@ mod tests {
             .expect("delete feature");
         assert!(fx.job(id).await.feature_id.is_none(), "FK sets NULL");
 
-        let counts = fx.sender().run_once().await;
+        let counts = fx.run_once().await;
         assert_eq!(counts.sent, 1);
         let job = fx.job(id).await;
         assert_eq!(job.status, "sent");
@@ -951,7 +1004,7 @@ mod tests {
             )
             .await;
 
-        fx.sender().run_once().await;
+        fx.run_once().await;
         let job = fx.job(id).await;
         assert_eq!(job.status, "sent");
         assert_eq!(
@@ -977,7 +1030,7 @@ mod tests {
             )
             .await;
 
-        fx.sender_with_ui(None).run_once().await;
+        fx.tick(&fx.sender_with_ui(None)).await;
         let job = fx.job(id).await;
         assert_eq!(job.status, "dead");
         assert_eq!(
@@ -1017,7 +1070,7 @@ mod tests {
             )
             .await;
 
-        let counts = fx.sender().run_once().await;
+        let counts = fx.run_once().await;
         assert_eq!(counts.sent, 1);
         assert_eq!(fx.job(id).await.status, "sent");
         let body = requests(&fx.jira).await[0]
@@ -1056,7 +1109,7 @@ mod tests {
             )
             .await;
 
-        fx.sender().run_once().await;
+        fx.run_once().await;
         assert_eq!(fx.job(id).await.status, "sent", "404 on delete is success");
 
         fx.cleanup().await;
@@ -1073,7 +1126,7 @@ mod tests {
         let first = fx.comment("PROJ-1", "one").await;
         let second = fx.comment("PROJ-1", "two").await;
 
-        let counts = fx.sender().run_once().await;
+        let counts = fx.run_once().await;
         assert_eq!(
             counts,
             SendCounts {
@@ -1109,7 +1162,7 @@ mod tests {
             .await
             .expect("set attempts");
 
-        let counts = fx.sender().run_once().await;
+        let counts = fx.run_once().await;
         assert_eq!(
             counts,
             SendCounts {
@@ -1139,7 +1192,7 @@ mod tests {
             .await
             .expect("break credential");
 
-        let counts = fx.sender().run_once().await;
+        let counts = fx.run_once().await;
         assert_eq!(
             counts,
             SendCounts {
