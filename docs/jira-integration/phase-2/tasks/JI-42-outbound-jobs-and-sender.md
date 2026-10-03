@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Type | Feature |
-| Status | Open |
+| Status | Done in 0bf6d7b |
 | Repo | backend (`feature-toggle/`) |
 | Crate | `feature-toggle-backend` |
 | Depends on | JI-41 |
@@ -173,4 +173,18 @@ A durable outbox for Jira write-back, and a worker that delivers it with retries
 
 ## Handoff log
 
-(empty)
+2026-10-03, backend `0bf6d7b`:
+- Implemented as specified: migration `20261004060000_jira_outbound_jobs.sql`, `database/jira_outbound_job.rs` (trait, Tx trait, `NewOutboundJob`, `OutboundKind` with `as_str` and `parse`), `OutboundJobRow` in `database/entity.rs`, `logic/jira_writeback.rs`, three `JiraClient` calls, `scheduler/jira_writeback_sender.rs` (spawned in `lib.rs`, 5 s), `rest/jira_outbound_jobs.rs`, retention in `TokenCleanupScheduler::with_jira_outbound_jobs`, contract baseline updated.
+- For JI-43: use `jira_outbound_job_repository_tx(pool).enqueue_tx(conn, NewOutboundJob {..})`. `comment` payload `{lines: [..]}` (sender reads only `lines`). `remote_link_delete` payload must carry `{featureId: "<uuid>"}`. `remote_link` needs `feature_id` set and no payload. `enqueue` returns `false` for a duplicate `dedupe_key` or an already pending remote link.
+- Deviations:
+  - `JiraWritebackSender::new(pool, jira_config: JiraConfig, ui_base_url, interval)`: it takes the `JiraConfig` because `client_for` needs it (`allow_insecure_http`).
+  - `error_note(resp, secrets: &[String])` takes the secrets; `JiraClient::secrets()` returns the token and, on Cloud, `base64(email:token)`. The client also scrubs the body before cutting the 300 character excerpt (a secret split by the cut would survive a scrub of the excerpt).
+  - `claim_due` adds a condition: a job is not claimed while an earlier pending job of the same integration and issue waits (`next_attempt_at > now()`). Without it a comment queued after a retry was scheduled would overtake the retried one.
+  - `update_jira_integration_in_tx` and `update_jira_writeback_in_tx` gained an `outbound_repo: &O` parameter (`O: JiraOutboundJobRepositoryTx`), after `repo`. Both cancel pending jobs (`last_error = "write-back disabled"`): the writeback one when enabled goes true to false, the base URL host change one when it disables write-back.
+  - The list response is `{items, total}` as the brief says (no `meta`). A retry of an unknown job id returns 409 `job is not dead`, like a job in another state. A retry that would create a second pending remote link for the same issue and feature (partial unique index) returns 409 `a pending job already covers this one`.
+  - Retention of `sent` jobs uses `sent_at`, of `dead` jobs `created_at`.
+  - Sender and DB claim tests use `#[serial]` / `#[serial(jira_jobs)]`: `claim_due` takes every due job in the shared test DB.
+  - A 401/403 pause releases the unprocessed jobs of that integration to `now()`, so they are due again as soon as an admin resumes. An undecryptable or missing credential pauses with `"credential cannot be decrypted"` / `"write-back is not configured"`; an `http` base URL pauses with the `client_for` message.
+- Verified: `cargo fmt`; `cargo clippy --all-targets` (no warnings in the touched files); `cargo test -p feature-toggle-backend` passes (899 lib, 335 integration); `./scripts/check-contract-compat.sh` passes after copying the baseline.
+- Known flaky, unrelated: `tests/database/feature_test::test_pending_approval_listing_maps_feature_metadata` failed once in the full run and passed on rerun.
+- Open: the sender does not create the `remote_link` jobs or comments yet (JI-43). `last_error` of a `sent` job holds the skip note.
