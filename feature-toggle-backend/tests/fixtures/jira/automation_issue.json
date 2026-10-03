@@ -1,0 +1,10 @@
+{
+  "id": "10042",
+  "key": "PROJ-123",
+  "fields": {
+    "summary": "Ship the new checkout",
+    "status": { "name": " Done ", "id": "10002" },
+    "labels": ["QA"],
+    "updated": "2026-10-03T13:15:00.000+0000"
+  }
+}

@@ -348,7 +348,8 @@ where
                 || (path == "/api/v1/auth/login" && method == actix_web::http::Method::POST)
                 || (path == "/api/v1/auth/refresh" && method == actix_web::http::Method::POST)
                 || (path == "/api/v1/auth/status" && method == actix_web::http::Method::GET)
-                || super::is_public_sso_path(&path, &method);
+                || super::is_public_sso_path(&path, &method)
+                || super::is_public_jira_event_path(&path, &method);
 
             if is_public_path {
                 let res = service.call(req).await?;
@@ -2152,7 +2153,9 @@ mod tests {
                     .route("/api/v1/auth/sso/{slug}/authorize", web::get().to(ok))
                     .route("/api/v1/auth/sso/{slug}/callback", web::get().to(ok))
                     .route("/api/v1/auth/sso/{slug}/other", web::get().to(ok))
-                    .route("/api/v1/auth/sso/exchange", web::post().to(ok)),
+                    .route("/api/v1/auth/sso/exchange", web::post().to(ok))
+                    .route("/api/v1/integrations/jira/{id}/events", web::post().to(ok))
+                    .route("/api/v1/integrations/jira/{id}/other", web::post().to(ok)),
             )
             .await
         }};
@@ -2226,6 +2229,10 @@ mod tests {
             ("GET", "/api/v1/auth/sso/okta/authorize"),
             ("GET", "/api/v1/auth/sso/okta/callback?code=c&state=s"),
             ("POST", "/api/v1/auth/sso/exchange"),
+            (
+                "POST",
+                "/api/v1/integrations/jira/0f0e8c39-6f7d-4bd5-9a52-3c2a9f1d7e11/events",
+            ),
         ] {
             let builder = if method == "GET" {
                 test::TestRequest::get()
@@ -2246,6 +2253,11 @@ mod tests {
             ("POST", "/api/v1/roles"),
             ("GET", "/api/v1/auth/sso/okta/other"),
             ("GET", "/api/v1/auth/sso/okta%2Fx/authorize"),
+            (
+                "POST",
+                "/api/v1/integrations/jira/0f0e8c39-6f7d-4bd5-9a52-3c2a9f1d7e11/other",
+            ),
+            ("POST", "/api/v1/integrations/jira/x/events"),
         ] {
             let builder = if method == "GET" {
                 test::TestRequest::get()

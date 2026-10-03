@@ -1,0 +1,21 @@
+{
+  "timestamp": 1759496400000,
+  "webhookEvent": "jira:issue_updated",
+  "issue_event_type_name": "issue_updated",
+  "user": { "accountId": "5b10ac8d82e05b22cc7d4ef5", "displayName": "Jane Doe" },
+  "issue": {
+    "id": "10042",
+    "key": "PROJ-123",
+    "fields": {
+      "summary": "Ship the new checkout (v2)",
+      "status": { "name": "In Review", "id": "10001" },
+      "updated": "2026-10-03T13:05:00.000+0000"
+    }
+  },
+  "changelog": {
+    "id": "10501",
+    "items": [
+      { "field": "summary", "fieldtype": "jira", "fieldId": "summary", "fromString": "Ship the new checkout", "toString": "Ship the new checkout (v2)" }
+    ]
+  }
+}

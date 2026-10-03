@@ -1,0 +1,12 @@
+{
+  "issue": {
+    "id": "10042",
+    "key": "PROJ-123",
+    "fields": {
+      "status": { "name": "Ready for Release", "id": "10003" },
+      "labels": ["qa"],
+      "updated": "2026-10-03T13:20:00.000+0000"
+    }
+  },
+  "user": { "accountId": "5b10ac8d82e05b22cc7d4ef5", "displayName": "Jane Doe" }
+}

@@ -313,14 +313,15 @@ pub async fn run() -> std::io::Result<()> {
         scheduled_change_scheduler.start().await;
     });
 
-    // Expired session token cleanup (hourly)
+    // Expired session token and old Jira event cleanup (hourly)
     let token_cleanup_scheduler = scheduler::TokenCleanupScheduler::new(
         database::jwt_token::jwt_token_repository(db_pool.clone()),
         database::refresh_token::refresh_token_repository(db_pool.clone()),
         database::sso_login_state::sso_login_state_repository(db_pool.clone()),
         database::sso_login_code::sso_login_code_repository(db_pool.clone()),
         Duration::from_secs(3600),
-    );
+    )
+    .with_jira_events(database::jira_event::jira_event_repository(db_pool.clone()));
     tokio::spawn(async move {
         token_cleanup_scheduler.start().await;
     });
@@ -403,6 +404,10 @@ pub async fn run() -> std::io::Result<()> {
             .app_data(web::Data::new(
                 database::jira_integration::jira_integration_repository(db_pool.clone()),
             ))
+            .app_data(web::Data::new(database::jira_event::jira_event_repository(
+                db_pool.clone(),
+            )))
+            .app_data(web::Data::new(environment_repository.clone()))
             .app_data(web::Data::new(variant_allocations_repository.clone()))
             .app_data(web::Data::new(compound_rules_repository.clone()))
             .app_data(web::Data::new(updates_tx.clone()))

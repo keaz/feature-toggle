@@ -1,0 +1,44 @@
+{
+  "timestamp": 1759496400000,
+  "webhookEvent": "jira:issue_updated",
+  "issue_event_type_name": "issue_generic",
+  "user": {
+    "self": "https://acme.atlassian.net/rest/api/2/user?accountId=5b10ac8d82e05b22cc7d4ef5",
+    "accountId": "5b10ac8d82e05b22cc7d4ef5",
+    "displayName": "Jane Doe",
+    "active": true,
+    "timeZone": "Europe/Berlin",
+    "accountType": "atlassian"
+  },
+  "issue": {
+    "id": "10042",
+    "self": "https://acme.atlassian.net/rest/api/2/10042",
+    "key": "proj-123",
+    "fields": {
+      "summary": "Ship the new checkout",
+      "status": {
+        "name": "Ready for Release",
+        "id": "10003",
+        "statusCategory": { "key": "indeterminate", "name": "In Progress" }
+      },
+      "labels": ["checkout", "qa"],
+      "customfield_10042": { "self": "https://acme.atlassian.net/rest/api/2/customFieldOption/10100", "value": "QA", "id": "10100" },
+      "customfield_10050": "new-checkout",
+      "updated": "2026-10-03T13:00:00.000+0000"
+    }
+  },
+  "changelog": {
+    "id": "10500",
+    "items": [
+      {
+        "field": "status",
+        "fieldtype": "jira",
+        "fieldId": "status",
+        "from": "10001",
+        "fromString": "In Review",
+        "to": "10003",
+        "toString": "Ready for Release"
+      }
+    ]
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "timestamp": 1759496400000,
+  "webhookEvent": "jira:issue_updated",
+  "issue_event_type_name": "issue_generic",
+  "user": {
+    "self": "https://jira.acme.internal/rest/api/2/user?username=jdoe",
+    "name": "jdoe",
+    "key": "JIRAUSER10100",
+    "emailAddress": "jdoe@acme.internal",
+    "displayName": "John Doe",
+    "active": true
+  },
+  "issue": {
+    "id": "20077",
+    "key": "OPS-7",
+    "fields": {
+      "status": { "name": "Done", "id": "10002" },
+      "customfield_10200": [{ "value": "QA", "id": "10301" }, { "value": "Production", "id": "10302" }],
+      "updated": "2026-10-03T13:10:00.000+0000"
+    }
+  },
+  "changelog": {
+    "id": 30012,
+    "items": [
+      { "field": "resolution", "fieldtype": "jira", "from": null, "fromString": null, "to": "10000", "toString": "Done" },
+      { "field": "status", "fieldtype": "jira", "from": "10003", "fromString": "Ready for Release", "to": "10002", "toString": "Done" }
+    ]
+  }
+}

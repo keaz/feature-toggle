@@ -10,6 +10,7 @@ pub mod error;
 pub mod evaluation;
 pub mod external_link;
 pub mod feature;
+pub mod jira_events;
 pub mod jira_integration;
 pub mod jwt_secret;
 pub mod metrics;
@@ -93,6 +94,7 @@ use crate::rest::feature::{
     RolloutMetricsQuery, RolloutMetricsResponse, StageChangeRequest, StageChangeRequestBody,
     UpdateFeatureRequest, VariantValueType,
 };
+use crate::rest::jira_events::{JiraEventLogItem, JiraEventResponse, JiraEventsResponse};
 use crate::rest::jira_integration::{
     CreateJiraIntegrationRequest, JiraIntegrationResponse, JiraIntegrationWithSecretResponse,
     JiraIntegrationsResponse, JiraStatusRuleRequest, JiraStatusRuleResponse,
@@ -225,6 +227,8 @@ async fn health() -> impl Responder {
         jira_integration::rotate_jira_integration_secret,
         jira_integration::list_jira_status_rules,
         jira_integration::replace_jira_status_rules,
+        jira_events::receive_jira_event,
+        jira_events::list_jira_events,
         feature::create_feature,
         feature::update_feature,
         feature::emergency_disable_feature,
@@ -410,6 +414,11 @@ async fn health() -> impl Responder {
         ReplaceJiraStatusRulesRequest,
         JiraStatusRuleResponse,
         JiraStatusRulesResponse,
+        JiraEventResponse,
+        JiraEventLogItem,
+        JiraEventsResponse,
+        crate::logic::jira_rules::RuleResult,
+        crate::logic::jira_events::JiraActor,
         CreateFeatureRequest,
         UpdateFeatureRequest,
         RollbackFeatureVersionRequest,
@@ -707,6 +716,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .configure(feature::configure)
             .configure(external_link::configure)
             .configure(jira_integration::configure)
+            .configure(jira_events::configure)
             .configure(criteria::configure)
             .configure(metrics::configure)
             .configure(approval::configure)

@@ -32,9 +32,26 @@ pub(crate) fn is_public_sso_path(path: &str, method: &actix_web::http::Method) -
     }
 }
 
+/// Whether `path` (the routed path) is the inbound Jira event route,
+/// `POST /api/v1/integrations/jira/{integration_id}/events` with a UUID id.
+/// Jira authenticates with the integration secret, which the handler checks;
+/// nothing else under `/api/v1/integrations/` becomes public.
+pub(crate) fn is_public_jira_event_path(path: &str, method: &actix_web::http::Method) -> bool {
+    if method != actix_web::http::Method::POST {
+        return false;
+    }
+    let Some(rest) = path.strip_prefix("/api/v1/integrations/jira/") else {
+        return false;
+    };
+    match rest.split('/').collect::<Vec<_>>().as_slice() {
+        [id, "events"] => uuid::Uuid::parse_str(id).is_ok(),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::is_public_sso_path;
+    use super::{is_public_jira_event_path, is_public_sso_path};
     use actix_web::http::Method;
 
     #[test]
@@ -62,6 +79,59 @@ mod tests {
             (Method::GET, "/api/v1/auth/ssox/okta/authorize"),
         ] {
             assert!(!is_public_sso_path(path, &method), "{method} {path}");
+        }
+    }
+
+    #[test]
+    fn the_jira_event_path_is_public_for_post_with_a_uuid_only() {
+        let id = "0f0e8c39-6f7d-4bd5-9a52-3c2a9f1d7e11";
+        assert!(is_public_jira_event_path(
+            &format!("/api/v1/integrations/jira/{id}/events"),
+            &Method::POST
+        ));
+        for (method, path) in [
+            (
+                Method::GET,
+                format!("/api/v1/integrations/jira/{id}/events"),
+            ),
+            (
+                Method::PUT,
+                format!("/api/v1/integrations/jira/{id}/events"),
+            ),
+            (
+                Method::POST,
+                format!("/api/v1/integrations/jira/{id}/other"),
+            ),
+            (
+                Method::POST,
+                format!("/api/v1/integrations/jira/{id}/events/x"),
+            ),
+            (Method::POST, format!("/api/v1/integrations/jira/{id}")),
+            (
+                Method::POST,
+                "/api/v1/integrations/jira/x/events".to_string(),
+            ),
+            (
+                Method::POST,
+                "/api/v1/integrations/jira//events".to_string(),
+            ),
+            (
+                Method::POST,
+                format!("/api/v1/integrations/github/{id}/events"),
+            ),
+            (
+                Method::POST,
+                format!("/api/v1/jira-integrations/{id}/events"),
+            ),
+            (
+                Method::POST,
+                format!("/api/v1/integrations/jira/{id}%2Fevents"),
+            ),
+        ] {
+            assert!(
+                !is_public_jira_event_path(&path, &method),
+                "{method} {path}"
+            );
         }
     }
 }

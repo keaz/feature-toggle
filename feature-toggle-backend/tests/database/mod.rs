@@ -13,6 +13,7 @@ mod external_link_test;
 mod feature_evaluation_test;
 mod feature_test;
 mod flag_kind_test;
+mod jira_event_test;
 mod jira_integration_test;
 mod justification_recording_test;
 mod jwt_secret_test;

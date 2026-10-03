@@ -1278,6 +1278,10 @@ mod tests {
                 Method::PUT,
                 format!("/api/v1/jira-integrations/{integration_id}/rules"),
             ),
+            (
+                Method::GET,
+                format!("/api/v1/jira-integrations/{integration_id}/events"),
+            ),
         ]
     }
 
@@ -1298,6 +1302,7 @@ mod tests {
                 format!("/api/v1/jira-integrations/{id}"),
                 format!("/api/v1/jira-integrations/{id}/rules"),
                 format!("/api/v1/jira-integrations/{id}/rotate-secret"),
+                format!("/api/v1/jira-integrations/{id}/events"),
                 // A route added later under the prefix is guarded by default.
                 format!("/api/v1/jira-integrations/{id}/events"),
             ] {
