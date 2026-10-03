@@ -174,6 +174,7 @@ pub(crate) async fn create_external_link(
         .begin()
         .await
         .map_err(|e| RestError::internal(format!("Failed to start transaction: {e}")))?;
+    let external_key = link.external_key.clone();
     let created = create_external_link_in_tx(
         &mut tx,
         &repo_tx,
@@ -182,7 +183,13 @@ pub(crate) async fn create_external_link(
         link,
         Some(ActorContext::new(jwt.id, jwt.username.clone())),
     )
-    .await?;
+    .await
+    .map_err(|err| match err {
+        crate::Error::RecordAlreadyExists(_) => {
+            RestError::conflict(format!("{external_key} is already linked to this feature"))
+        }
+        other => RestError::from(other),
+    })?;
     tx.commit()
         .await
         .map_err(|e| RestError::internal(format!("Failed to commit transaction: {e}")))?;
@@ -536,6 +543,7 @@ mod tests {
             .post_link(fixture.feature_id, jira("proj-1"), fixture.team_admin())
             .await;
         assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["message"], "PROJ-1 is already linked to this feature");
         assert_eq!(fixture.link_count().await, 1);
 
         fixture.cleanup(&[]).await;
