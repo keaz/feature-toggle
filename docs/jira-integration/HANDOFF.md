@@ -15,11 +15,11 @@ Read this after [`README.md`](README.md) and [`design.md`](design.md). It record
 | JI-15 inbound events + rules | Done | backend `120b73d` |
 | JI-12 by-key endpoints (optional) | Done (built before JI-13, at the user's request) | backend `513f393` |
 | JI-20 UI Jira links | Done | UI `3366750`, backend `a95d30c` |
-| JI-21 UI ref/reason, Jira approval | Open, **next** (needs JI-11, JI-14) | — |
-| JI-22 UI Jira settings | Open (needs JI-13, JI-15) | — |
+| JI-21 UI ref/reason, Jira approval | Done | UI `b603188` |
+| JI-22 UI Jira settings | Open, **next** (needs JI-13, JI-15) | — |
 | JI-30 setup guide + e2e test | Open (needs JI-15) | — |
 
-**Next task: [JI-21](tasks/JI-21-ui-external-ref-on-stage-changes.md).**
+**Next task: [JI-22](tasks/JI-22-ui-jira-integration-settings.md).**
 
 ## 2. Planning log (2026-10-03)
 
@@ -147,3 +147,11 @@ New tasks JI-13, JI-14, JI-15, JI-22; JI-12 became optional; JI-21 and JI-30 cha
 - Duplicate link 409 message is now `<KEY> is already linked to this feature`.
 - The UI repo had an unrelated uncommitted change in `src/pages/FeatureDetail.tsx` (stage label); it is still in the working tree, not committed. Do not commit it with a task unless the user asks.
 - Manual UI checks: Chrome extension was not connected; the Chrome DevTools MCP (`new_page` with `isolatedContext`) works. Backend on `:8080` + `pnpm dev --port 8090` needs no config change (`public/config.js` points at `:8080`).
+
+### From JI-21 (UI `b603188`)
+
+- `requestStageChange(stageId, request, { freezeOverrideReason?, externalRef?, reason? })` (`StageChangeOptions` in `api/features.ts`) sends only non-empty, trimmed values.
+- `ApprovalRequest` (`api/approvals.ts`) has `externalRef`, `requestReason`, `approvalSource: 'fluxgate' | 'jira' | 'auto'`, `externalApprover: ExternalApprover | null`. `ExternalApprover` keys are snake_case (`account_id`, `display_name`, `issue_key`, `status`) because the backend stores and returns that JSON as is.
+- Reusable for JI-22: `ApprovalRequestContext` (`components/approvals/`), `getJiraApproval` and `findExternalRefUrl` (`utils/approvalRequestContext.ts`). The approvals detail reads links through the shared key `feature-external-links:<featureId>`.
+- Stage requests by a user need the Requester role; `api-test-admin` has none, so manual UI checks of stage requests need a separate requester user (the test DB now has `ji21-requester` / `password123` in team `JI-21 check 1791039213`).
+- Open follow-up: `ReasonQualityHint` on the new stage change reason field.
