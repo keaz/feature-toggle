@@ -21,7 +21,7 @@ Read this after [`README.md`](README.md) and [`design.md`](design.md). It record
 
 **Phase 1 is complete (2026-10-03).**
 
-**Phase 2 is planned (2026-10-03):** write-back to Jira (comments + live remote link), inbound rate limit, signed native webhooks, reason hint. Design [`phase-2/design.md`](phase-2/design.md), tasks [`phase-2/README.md`](phase-2/README.md). **Next task: [JI-44](phase-2/tasks/JI-44-inbound-rate-limit.md).**
+**Phase 2 is planned (2026-10-03):** write-back to Jira (comments + live remote link), inbound rate limit, signed native webhooks, reason hint. Design [`phase-2/design.md`](phase-2/design.md), tasks [`phase-2/README.md`](phase-2/README.md). **Next task: [JI-45](phase-2/tasks/JI-45-native-webhook-hmac.md).**
 
 | Phase 2 task | Status | Commit |
 |---|---|---|
@@ -29,7 +29,7 @@ Read this after [`README.md`](README.md) and [`design.md`](design.md). It record
 | JI-41 write-back config | Done | backend `3de0dec` |
 | JI-42 outbound jobs + sender | Done | backend `0bf6d7b` |
 | JI-43 capture | Done | backend `84b2611` |
-| JI-44 inbound rate limit | Open | |
+| JI-44 inbound rate limit | Done | backend `8c7db99` |
 | JI-45 native webhook HMAC | Open | |
 | JI-46 UI write-back settings | Open | |
 | JI-47 reason hint on stage change | Open | |

@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Type | Hardening |
-| Status | Open |
+| Status | Done in 8c7db99 |
 | Repo | backend (`feature-toggle/`) |
 | Crate | `feature-toggle-backend` |
 | Depends on | — (can run before JI-40 if needed) |
@@ -94,4 +94,11 @@ Stop floods and secret guessing on `POST /api/v1/integrations/jira/{id}/events` 
 
 ## Handoff log
 
-(empty)
+2026-10-03, backend `8c7db99`:
+- Implemented as specified. New: `rest/jira_inbound_limit.rs` (`JiraInboundLimiter`, `Admission`), `JiraConfig.inbound_per_minute` (120) and `inbound_burst` (60), `sanitized()` raises 0 to the default. `RestError::TooManyRequests` / `too_many_requests(secs)` (429, `Retry-After`). `web::Data<JiraInboundLimiter>` built in `lib.rs` (one instance shared by all workers).
+- Handler order: bad id -> `check_unknown` -> 401; `get` missing/disabled -> `check_unknown` -> 401; `check_known`; secret (a missing secret is now a 401 after the limit); body. JI-45 adds HMAC after the `check_known` step.
+- 429 body is `{"error":"rate limited","message":"Too many requests"}` (error key is the brief's literal string, not snake_case). Documented in `#[utoipa::path]`; contract baseline `contract-hashes.json` updated.
+- Unknown bucket: 30/min, burst 10. Drop warning: first drop logs at once, then at most once per 60 s per key (`unknown` for the shared bucket) with the count since the last line. Counter map is bounded by existing integrations plus `unknown`.
+- Tests: 3 limiter unit tests, 4 handler mock tests (429 + Retry-After + 2 inserts, wrong secret still 429, unknown ids, bad uuid), 2 config tests. Mock test `setup` now has a `burst` field (default 50) and `send_all` for several requests on one app.
+- Verified: `cargo fmt`; `cargo clippy --all-targets` (no warnings in touched files); `cargo test -p feature-toggle-backend` passes except the known flaky `test_pending_approval_listing_maps_feature_metadata`; contract check passes.
+- Manual check (step 9): not run. It needs an admin login to create an integration and read its secret; no known credentials. The handler tests cover the 200 then 429 sequence.
