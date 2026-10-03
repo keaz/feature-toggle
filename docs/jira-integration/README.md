@@ -74,7 +74,7 @@ Source investigation: [`../investigations/2026-10-sso-jira-sdks.md`](../investig
 | [ ] | [JI-13](tasks/JI-13-jira-integration-config-backend.md) | Jira integration config: integrations, environment field and map, Jira-approved environments, status rules, inbound secret | backend | Additive | JI-10 |
 | [ ] | [JI-14](tasks/JI-14-external-approval-path-backend.md) | Approval by an external system (Jira): approve, deploy, rollback paths with source and actor in the audit | backend | Additive (only reachable through JI-15) | JI-11 |
 | [ ] | [JI-15](tasks/JI-15-jira-inbound-events-backend.md) | Inbound Jira events endpoint and rule engine, event log | backend | Additive | JI-13, JI-14 |
-| [ ] | [JI-12](tasks/JI-12-by-key-endpoints-backend.md) | By-key read and request-change endpoints (optional, for status read-back and manual rules) | backend | Additive | JI-11 |
+| [x] | [JI-12](tasks/JI-12-by-key-endpoints-backend.md) | By-key read and request-change endpoints (optional, for status read-back and manual rules) | backend | Additive | JI-11 |
 | [ ] | [JI-20](tasks/JI-20-ui-feature-jira-links.md) | UI: Jira links panel on the feature page | UI | New UI | JI-10 |
 | [ ] | [JI-21](tasks/JI-21-ui-external-ref-on-stage-changes.md) | UI: `externalRef`/`reason` inputs and display on approvals and activity, "approved by Jira" display | UI | New UI | JI-11, JI-14 |
 | [ ] | [JI-22](tasks/JI-22-ui-jira-integration-settings.md) | UI: Jira integration settings, rules editor, event log | UI | New page | JI-13, JI-15 |

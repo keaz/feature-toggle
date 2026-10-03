@@ -13,7 +13,7 @@ Read this after [`README.md`](README.md) and [`design.md`](design.md). It record
 | JI-13 integration config | Open, **next** | — |
 | JI-14 external approval path | Open (needs JI-11) | — |
 | JI-15 inbound events + rules | Open (needs JI-13, JI-14) | — |
-| JI-12 by-key endpoints (optional) | Open (needs JI-11) | — |
+| JI-12 by-key endpoints (optional) | Done (built before JI-13, at the user's request) | backend `513f393` |
 | JI-20 UI Jira links | Open (needs JI-10) | — |
 | JI-21 UI ref/reason, Jira approval | Open (needs JI-11, JI-14) | — |
 | JI-22 UI Jira settings | Open (needs JI-13, JI-15) | — |
@@ -98,3 +98,11 @@ New tasks JI-13, JI-14, JI-15, JI-22; JI-12 became optional; JI-21 and JI-30 cha
 - Notifications: `STAGE_CHANGE_REQUESTED` metadata has `external_ref` when present; the message ends with ` Ref: <externalRef>.`.
 - Scheduled stage changes pass their scheduled change reason as `reason`.
 
+### From JI-12 (`513f393`)
+
+- `rest/feature.rs::perform_stage_change(...)` is the one stage change path for REST callers (role check, `externalRef`/`reason` validation, freeze, logic, broadcast). Any new entry point that requests a stage change for a user or system client should call it rather than copy it. JI-15's rule engine authenticates differently (integration secret), so it may call the logic directly; if it does, it must broadcast the feature update itself.
+- `resolve_stage_by_key(feature_repo, env_logic, team_id, feature_key, env_name) -> Result<Uuid, RestError>` and `resolve_feature_id_by_key` (both private in `rest/feature.rs`). JI-15 needs the same resolution from an issue's environment value; move them to `logic/` if it needs them outside REST.
+- `EnvironmentRepository` / `EnvironmentLogic::get_active_environments_by_name(team_id, name) -> Vec<Environment>`: active, equal ignoring case, no substring. Environment names are not unique in a team, so it can return several; JI-13's alias map should store environment ids, not names.
+- 404 codes: `feature_not_found`, `environment_not_found`, `stage_not_found` (in `code`, and as the message prefix). 409 when same-named environments both hold a stage.
+- Both mocks (`MockEnvironmentRepository`, `MockEnvironmentLogic`) gained the method; no existing test needed a change.
+- No migration, no `.sqlx` change. Contract baseline updated.

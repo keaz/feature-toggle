@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Type | Feature |
-| Status | Open |
+| Status | Done |
 | Repo | backend (`feature-toggle/`) |
 | Crate | `feature-toggle-backend` |
 | Depends on | JI-11 |
@@ -56,4 +56,24 @@ Jira knows a feature key and an environment name, not FluxGate UUIDs. Let an aut
 
 ## Handoff log
 
-(empty)
+### 2026-10-03: done in `513f393`
+
+Built ahead of JI-13 at the user's request (the handoff listed JI-13 as next).
+
+What changed:
+
+- `rest/feature.rs`: `perform_stage_change(db_pool, activity_repo, ai, req, feature_logic, feature_repo, env_logic, updates_tx, stage_uuid, body) -> Result<FeatureResponse, RestError>` holds the old handler body (JWT, role check, `validate_stage_change_meta`, freeze, logic call, broadcast, freeze override record, response). `request_stage_change` and the new by-key handler both call it.
+- `resolve_feature_id_by_key(feature_repo, team_id, key)` uses `FeatureRepository::get_feature_by_key` (exact, case-sensitive; archived features resolve). `resolve_stage_by_key(feature_repo, env_logic, team_id, key, env_name) -> Uuid` (stage id).
+- New `EnvironmentRepository::get_active_environments_by_name(team_id, name)` and the same on `EnvironmentLogic`: `active AND lower(name) = lower($2)`. It returns a `Vec` because environment names are **not unique** in a team (no constraint). The resolver keeps the stage whose `environment_id` is in that set. Two same-named environments that both hold a stage of the feature give 409 `conflict`.
+- Endpoints `get_feature_by_key` (`GET /teams/{team_id}/features/by-key/{key}`) and `request_stage_change_by_key` (`POST .../by-key/{key}/environments/{env_name}/request-change`), registered in `configure` and `ApiDoc`, tag `Features`.
+- 404 body: `code` is `feature_not_found`, `environment_not_found` or `stage_not_found`, and the message starts with the same code (`"stage_not_found: feature 'x' has no stage in environment 'QA'"`).
+- Resolution runs before the role check and body validation, so an unknown key gives 404 even for a caller without the role.
+- `api-tests/src/tests/feature-by-key.test.ts`: a `flag:write` system client of the team requests `DEPLOYMENT_REQUESTED` by key (lower-cased environment name with a space) and reads the result by key; another team's client gets 403 on both.
+- Contract baseline updated. No migration, no `query!` macro (no `.sqlx` change).
+
+Verified (test DB `feture_toggle_test`):
+
+- `cargo fmt`: clean. `cargo clippy --all-targets`: 27 warnings before and after, none in changed code.
+- `cargo test -p feature-toggle-backend`: all pass (792 lib tests, integration suites, contract test after the baseline update). 9 new handler tests in `rest::feature::tests::by_key`.
+- `./scripts/check-contract-compat.sh`: pass.
+- API tests against a local backend on `:18180`: 21 suites, 380 tests pass.
