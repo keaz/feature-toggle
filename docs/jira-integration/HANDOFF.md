@@ -9,8 +9,8 @@ Read this after [`README.md`](README.md) and [`design.md`](design.md). It record
 | Planning (this folder) | Done 2026-10-03 | backend `46a50a7` |
 | JI-01 system clients cannot vote | Done | backend `e1bebfe` |
 | JI-10 external links backend | Done | backend `f3941e4` |
-| JI-11 `externalRef`/`reason` backend | Open, **next** | — |
-| JI-13 integration config | Open (needs JI-10) | — |
+| JI-11 `externalRef`/`reason` backend | Done | backend `e251f9e` |
+| JI-13 integration config | Open, **next** | — |
 | JI-14 external approval path | Open (needs JI-11) | — |
 | JI-15 inbound events + rules | Open (needs JI-13, JI-14) | — |
 | JI-12 by-key endpoints (optional) | Open (needs JI-11) | — |
@@ -19,7 +19,7 @@ Read this after [`README.md`](README.md) and [`design.md`](design.md). It record
 | JI-22 UI Jira settings | Open (needs JI-13, JI-15) | — |
 | JI-30 setup guide + e2e test | Open (needs JI-15) | — |
 
-**Next task: [JI-11](tasks/JI-11-stage-change-external-ref-backend.md).**
+**Next task: [JI-13](tasks/JI-13-jira-integration-config-backend.md).**
 
 ## 2. Planning log (2026-10-03)
 
@@ -61,7 +61,7 @@ New tasks JI-13, JI-14, JI-15, JI-22; JI-12 became optional; JI-21 and JI-30 cha
 - **Run the backend end to end** without clashing with a dev server: a TOML outside the repo with `http_addr = "127.0.0.1:18180"` and `grpc_addr = "127.0.0.1:15151"`, then `FEATURE_TOGGLE_CONFIG=<file> ./target/debug/feature-toggle-backend` from `feature-toggle/` (needs `log4rs.yaml` in the working directory). On an empty DB create the admin with `POST /api/v1/admins` (`api-test-admin` / `password123`), then `POST /api/v1/auth/login`.
 - **System client for manual checks:** `POST /api/v1/teams/{teamId}/system-clients` as a team admin returns `{systemClient, token}`. Use the token as `Authorization: Bearer <token>`. Never paste it into a file or commit.
 - **Contracts:** after a DTO or endpoint change run `./scripts/export-contracts.sh`, copy `feature-toggle-backend/contracts/generated/contract-hashes.json` to `contracts/baseline/`, then `./scripts/check-contract-compat.sh`. Only the baseline file is tracked.
-- **Migrations:** latest is `20261004000000_feature_external_links.sql` (JI-10). Later tasks use later `20261004...` timestamps, in task order.
+- **Migrations:** latest is `20261004010000_approval_request_external_ref.sql` (JI-11). Later tasks use later `20261004...` timestamps, in task order.
 - **UI:** `../feature-toggle-ui/` on `main` (last commit at planning: `dc16a2f`). pnpm only: `pnpm lint`, `pnpm build`, `pnpm test:run`.
 - After code changes run `graphify update .` in the repo you changed.
 
@@ -86,3 +86,15 @@ New tasks JI-13, JI-14, JI-15, JI-22; JI-12 became optional; JI-21 and JI-30 cha
 - `get_features_with_offset_filtered` (repository and `FeatureCrudLogic`) has a new `external_key: Option<String>` argument after `flag_kind`. Mocks and callers with 14 arguments now take 15.
 - Link writes: users need `authorize_feature_update` (admin or Team Admin of the team); system clients need `flag:write` and a token of the feature's team. Reading links as a system client needs `admin:read` or `evaluate` (existing `JwtGuard` rule for GET on `features`): a Jira token needs `flag:write` + `admin:read`.
 - `rest/operational_safety.rs`: `policy_actor_for_request(pool, jwt)` (user vs system client, checked in the DB) and `rest_error_from_policy` are `pub(crate)` for reuse.
+
+### From JI-11 (`e251f9e`)
+
+- `crate::model::StageChangeMeta { external_ref: Option<String>, reason: Option<String> }` (`Default`, `PartialEq`).
+- Signatures: `DeploymentLogic::request_stage_change(stage_id, request, user_id, meta: StageChangeMeta)`; `ApprovalLogic::maybe_create_stage_change_request(feature, stage, next_status, requested_by, meta: &StageChangeMeta)`. Mock expectations take one more argument (`withf(|_, _, _, meta| ...)`).
+- REST validation: `rest/feature/types.rs` `validate_stage_change_meta(external_ref, reason)` (trim, blank → `None`, `externalRef` ≤ 100 chars and no control characters, `reason` ≤ 1000 chars and no control characters except `\n`). Reuse it for any other entry point that takes a ref and reason (JI-12, JI-15).
+- Migration `20261004010000`: `approval_requests.external_ref`, `approval_requests.request_reason`. `ApprovalRequest` and `CreateApprovalRequestInput` have both fields; every struct literal needs them (`None` in tests).
+- Response: `ApprovalRequestResponse.externalRef`, `.requestReason` (also on the approvals stream).
+- Activity: only the direct (not gated) stage change activity row carries `external_ref` / `reason`. The gated path and approval execution (`execute_change[_tx]`) write **no** activity row; none was added. JI-14 should decide whether a Jira approval writes one, and can take `external_ref` from the request.
+- Notifications: `STAGE_CHANGE_REQUESTED` metadata has `external_ref` when present; the message ends with ` Ref: <externalRef>.`.
+- Scheduled stage changes pass their scheduled change reason as `reason`.
+

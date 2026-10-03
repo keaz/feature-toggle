@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Type | Feature |
-| Status | Open |
+| Status | Done in `e251f9e` |
 | Repo | backend (`feature-toggle/`) |
 | Crate | `feature-toggle-backend` |
 | Depends on | — (run after JI-10 by project order) |
@@ -60,4 +60,31 @@ Out of scope: AI justification recording of `reason` (could reuse AI-20 later; n
 
 ## Handoff log
 
-(empty)
+### 2026-10-03: done in `e251f9e`
+
+What changed:
+
+- `model.rs`: `StageChangeMeta { external_ref, reason }`.
+- `rest/feature/types.rs`: `StageChangeRequestBody` gained `external_ref` / `reason` (camelCase `externalRef`, `reason`). `validate_stage_change_meta(external_ref, reason) -> Result<StageChangeMeta, String>` trims, drops blanks, checks length in characters (100 / 1000) and control characters (`\n` allowed only in `reason`). The handler validates right after the role check, before the freeze check, and returns 400 `invalid_input` with the message.
+- `DeploymentLogic::request_stage_change(stage_id, request, user_id, meta)` and `ApprovalLogic::maybe_create_stage_change_request(feature, stage, next_status, requested_by, &meta)`. Every caller and mock updated. The scheduler passes `StageChangeMeta { external_ref: None, reason: <trimmed scheduled change reason, None if blank> }`.
+- Migration `20261004010000_approval_request_external_ref.sql`: `approval_requests.external_ref`, `approval_requests.request_reason` (both `TEXT NULL`).
+- `CreateApprovalRequestInput` and `ApprovalRequest` gained `external_ref` / `request_reason`; both inserts and every `RETURNING`/`SELECT` list read them (`map_request_row`). The `SELECT r.*` queries pick them up automatically.
+- `ApprovalRequestResponse` gained `externalRef` / `requestReason`. The approvals stream uses the same `map_request_with_policy`, so it carries them too.
+- Activity: the direct (not gated) stage change activity row gets `external_ref` and `reason` in metadata when present; without them neither key exists.
+- Notifications: both `STAGE_CHANGE_REQUESTED` dispatches (gated and direct) add `external_ref` to metadata when present and append ` Ref: <externalRef>.` to the message.
+- Contract baseline updated.
+
+Findings:
+
+- **The gated path writes no activity row** at request time (`request_stage_change` returns after creating the approval request), and **approval execution writes none either** (`execute_change`, `execute_change_tx` only call `approve_or_reject_stage_change[_tx]`). Per the task, no activity row was added. For a gated request the ref and reason are visible on the approval request (`GET /approval-requests`) and in the notification, not in the activity log. JI-14 may want an activity row for Jira approvals; it can read `request.external_ref` / `request.request_reason` there.
+- The logic test "with an approval policy ... the activity metadata contains both" was split accordingly: the gated test checks that the meta reaches `maybe_create_stage_change_request` and the notification; the direct tests check the activity metadata.
+- Out of scope, not done: recording `reason` as an AI justification (AI-20 could reuse it), auto-creating external links from `externalRef`.
+
+Verified (test DB `feture_toggle_test`, migration applied):
+
+- `cargo fmt --check`: clean.
+- `cargo clippy --all-targets`: no warnings in changed lines (existing warnings elsewhere unchanged).
+- `cargo test -p feature-toggle-backend`: all pass (783 lib tests, integration suite, contract test).
+- `./scripts/check-contract-compat.sh`: pass after the baseline update.
+
+New tests: `rest::feature::types::tests::stage_change_meta_validation`, `stage_change_body_reads_external_ref_and_reason`; `rest::feature::tests::stage_change_meta::*` (handler passes meta to the logic mock; 400 on a 101-character ref); `logic::feature::test::{direct_stage_change_records_external_ref_and_reason, direct_stage_change_without_meta_adds_no_keys, gated_stage_change_passes_meta_to_the_approval_request}`; `logic::approval::tests::test_maybe_create_stage_change_request_emits_event` (asserts the create input); `rest::approval::tests::map_request_returns_external_ref_and_request_reason`; DB tests in `tests/database/approval_workflow_test.rs` (gated request read back through get and list, request without the fields, direct activity metadata).

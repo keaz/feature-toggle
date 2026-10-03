@@ -29,7 +29,7 @@ Source investigation: [`../investigations/2026-10-sso-jira-sdks.md`](../investig
      pnpm test:run        # use pnpm, never npm
      ```
 7. **Repo gotchas:**
-   - Never edit an applied migration. Add a new timestamped one: `migrations/YYYYMMDDHHMMSS_name.sql`, later than every existing file (latest today: `20261003030000_approval_request_auto_approve_failures.sql`).
+   - Never edit an applied migration. Add a new timestamped one: `migrations/YYYYMMDDHHMMSS_name.sql`, later than every existing file (latest today: `20261004010000_approval_request_external_ref.sql`).
    - Prefer runtime `sqlx::query(...)`. If you add a `query!`/`query_as!` macro, run `cargo sqlx prepare -- --all-targets` in `feature-toggle-backend/` and commit `.sqlx/`.
    - New REST endpoints and DTO fields: register them in `ApiDoc` (`rest/mod.rs`). Then run `./scripts/export-contracts.sh` and copy `feature-toggle-backend/contracts/generated/contract-hashes.json` to `contracts/baseline/`. Say so in the commit message.
    - Any write that changes evaluable feature state must send a `FeatureUpdate` on the broadcast channel. External links and request metadata do not change evaluation, so they need no broadcast.
@@ -70,7 +70,7 @@ Source investigation: [`../investigations/2026-10-sso-jira-sdks.md`](../investig
 |---|---|---|---|---|---|
 | [x] | [JI-01](tasks/JI-01-system-clients-cannot-vote.md) | System clients cannot approve or reject approval requests, and are not eligible approvers | backend | **Yes** (403 for M2M votes; bots not eligible; user decision 2026-10-03) | — |
 | [x] | [JI-10](tasks/JI-10-feature-external-links-backend.md) | `feature_external_links` table, CRUD API, `externalKey` list filter | backend | Additive | — |
-| [ ] | [JI-11](tasks/JI-11-stage-change-external-ref-backend.md) | `externalRef` + `reason` on stage change, approval requests and activity | backend | Additive | — |
+| [x] | [JI-11](tasks/JI-11-stage-change-external-ref-backend.md) | `externalRef` + `reason` on stage change, approval requests and activity | backend | Additive | — |
 | [ ] | [JI-13](tasks/JI-13-jira-integration-config-backend.md) | Jira integration config: integrations, environment field and map, Jira-approved environments, status rules, inbound secret | backend | Additive | JI-10 |
 | [ ] | [JI-14](tasks/JI-14-external-approval-path-backend.md) | Approval by an external system (Jira): approve, deploy, rollback paths with source and actor in the audit | backend | Additive (only reachable through JI-15) | JI-11 |
 | [ ] | [JI-15](tasks/JI-15-jira-inbound-events-backend.md) | Inbound Jira events endpoint and rule engine, event log | backend | Additive | JI-13, JI-14 |
