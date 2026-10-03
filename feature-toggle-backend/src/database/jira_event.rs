@@ -10,6 +10,9 @@ use uuid::Uuid;
 
 use crate::Error;
 use crate::database::handle_error;
+use crate::database::jira_outbound_job::{
+    JiraOutboundJobRepositoryTx, NewOutboundJob, jira_outbound_job_repository_tx,
+};
 
 const EVENT_COLUMNS: &str = "id, integration_id, received_at, issue_key, jira_status, jira_actor, \
      delivery_hash, results, unknown_environments, unknown_features, ignored, error";
@@ -34,6 +37,8 @@ pub struct JiraEventRow {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewJiraEvent {
+    /// Set by the caller (`Uuid::new_v4()`), so a job can name the event before it exists.
+    pub id: Uuid,
     pub integration_id: Uuid,
     pub issue_key: Option<String>,
     pub jira_status: Option<String>,
@@ -50,6 +55,13 @@ pub struct NewJiraEvent {
 #[async_trait::async_trait]
 pub trait JiraEventRepository: Send + Sync {
     async fn insert(&self, event: NewJiraEvent) -> Result<JiraEventRow, Error>;
+    /// Stores the event and enqueues `jobs` in one transaction. A job whose
+    /// `dedupe_key` is taken is skipped; it does not fail the call.
+    async fn insert_with_jobs(
+        &self,
+        event: NewJiraEvent,
+        jobs: Vec<NewOutboundJob>,
+    ) -> Result<JiraEventRow, Error>;
     /// The newest event of the integration with `delivery_hash` received at or
     /// after `since` that was processed without an error.
     async fn find_recent_delivery(
@@ -86,27 +98,53 @@ struct JiraEventRepositoryImpl {
     pool: PgPool,
 }
 
+async fn insert_event(
+    conn: &mut sqlx::PgConnection,
+    event: NewJiraEvent,
+) -> Result<JiraEventRow, Error> {
+    let result = sqlx::query_as::<_, JiraEventRow>(&format!(
+        "INSERT INTO jira_integration_events (id, integration_id, issue_key, jira_status, \
+         jira_actor, delivery_hash, results, unknown_environments, unknown_features, ignored, \
+         error) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING {EVENT_COLUMNS}"
+    ))
+    .bind(event.id)
+    .bind(event.integration_id)
+    .bind(event.issue_key)
+    .bind(event.jira_status)
+    .bind(event.jira_actor)
+    .bind(event.delivery_hash)
+    .bind(event.results)
+    .bind(event.unknown_environments)
+    .bind(event.unknown_features)
+    .bind(event.ignored)
+    .bind(event.error)
+    .fetch_one(conn)
+    .await;
+    handle_error(Some(event.integration_id), result)
+}
+
 #[async_trait::async_trait]
 impl JiraEventRepository for JiraEventRepositoryImpl {
     async fn insert(&self, event: NewJiraEvent) -> Result<JiraEventRow, Error> {
-        let result = sqlx::query_as::<_, JiraEventRow>(&format!(
-            "INSERT INTO jira_integration_events (integration_id, issue_key, jira_status, \
-             jira_actor, delivery_hash, results, unknown_environments, unknown_features, ignored, \
-             error) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING {EVENT_COLUMNS}"
-        ))
-        .bind(event.integration_id)
-        .bind(event.issue_key)
-        .bind(event.jira_status)
-        .bind(event.jira_actor)
-        .bind(event.delivery_hash)
-        .bind(event.results)
-        .bind(event.unknown_environments)
-        .bind(event.unknown_features)
-        .bind(event.ignored)
-        .bind(event.error)
-        .fetch_one(&self.pool)
-        .await;
-        handle_error(Some(event.integration_id), result)
+        let integration_id = event.integration_id;
+        let mut conn = handle_error(Some(integration_id), self.pool.acquire().await)?;
+        insert_event(&mut conn, event).await
+    }
+
+    async fn insert_with_jobs(
+        &self,
+        event: NewJiraEvent,
+        jobs: Vec<NewOutboundJob>,
+    ) -> Result<JiraEventRow, Error> {
+        let integration_id = event.integration_id;
+        let mut tx = handle_error(Some(integration_id), self.pool.begin().await)?;
+        let row = insert_event(&mut tx, event).await?;
+        let outbox = jira_outbound_job_repository_tx(self.pool.clone());
+        for job in jobs {
+            outbox.enqueue_tx(&mut tx, job).await?;
+        }
+        handle_error(Some(integration_id), tx.commit().await)?;
+        Ok(row)
     }
 
     async fn find_recent_delivery(

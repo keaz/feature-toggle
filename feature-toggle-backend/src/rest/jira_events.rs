@@ -19,7 +19,9 @@ use crate::database::external_link::ExternalLinkRepository;
 use crate::database::feature::FeatureRepository;
 use crate::database::jira_event::{JiraEventRepository, JiraEventRow, NewJiraEvent};
 use crate::database::jira_integration::JiraIntegrationRepository;
+use crate::database::jira_outbound_job::{NewOutboundJob, OutboundKind};
 use crate::logic::external_change::ExternalChangeLogic;
+use crate::logic::jira_capture::event_comment_lines;
 use crate::logic::jira_events::{JiraActor, delivery_hash, field_values, parse_event};
 use crate::logic::jira_integration::hash_secret;
 use crate::logic::jira_rules::{RuleEngine, RuleResult};
@@ -176,6 +178,7 @@ pub(crate) async fn receive_jira_event(
     }
 
     let empty_event = NewJiraEvent {
+        id: Uuid::new_v4(),
         integration_id,
         issue_key: None,
         jira_status: None,
@@ -256,15 +259,36 @@ pub(crate) async fn receive_jira_event(
     };
     match engine.run(&integration, &rules, &event, &status).await {
         Ok(outcome) => {
-            let row = events
-                .insert(NewJiraEvent {
-                    results: serde_json::to_value(&outcome.results)
-                        .unwrap_or_else(|_| serde_json::json!([])),
-                    unknown_environments: outcome.unknown_environments,
-                    unknown_features: outcome.unknown_features,
-                    ..base
-                })
-                .await?;
+            // Source 1 of the write-back outbox (JI-43): one comment for the event,
+            // stored in the same transaction as the event row.
+            let jobs = if integration.writeback_enabled && integration.writeback_comments {
+                event_comment_lines(&status, &outcome)
+                    .map(|lines| {
+                        vec![NewOutboundJob {
+                            integration_id,
+                            issue_key: event.issue_key.clone(),
+                            feature_id: None,
+                            kind: OutboundKind::Comment,
+                            payload: serde_json::json!({ "lines": lines }),
+                            dedupe_key: format!("event:{}", base.id),
+                        }]
+                    })
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            let stored = NewJiraEvent {
+                results: serde_json::to_value(&outcome.results)
+                    .unwrap_or_else(|_| serde_json::json!([])),
+                unknown_environments: outcome.unknown_environments,
+                unknown_features: outcome.unknown_features,
+                ..base
+            };
+            let row = if jobs.is_empty() {
+                events.insert(stored).await?
+            } else {
+                events.insert_with_jobs(stored, jobs).await?
+            };
             Ok(HttpResponse::Ok().json(response_from_row(&row, false)))
         }
         Err(err) => {
@@ -341,6 +365,7 @@ mod tests {
     use crate::database::feature::MockFeatureRepository;
     use crate::database::jira_event::MockJiraEventRepository;
     use crate::database::jira_integration::MockJiraIntegrationRepository;
+    use crate::database::jira_outbound_job::{NewOutboundJob, OutboundKind};
     use crate::logic::external_change::{ExternalOutcome, MockExternalChangeLogic};
     use actix_web::{App, http::StatusCode, test};
     use serde_json::json;
@@ -424,17 +449,20 @@ mod tests {
 
     type Applied = Arc<Mutex<Vec<(Uuid, Uuid, String)>>>;
     type Inserted = Arc<Mutex<Vec<NewJiraEvent>>>;
+    type WithJobs = Arc<Mutex<Vec<(NewJiraEvent, Vec<NewOutboundJob>)>>>;
 
     struct Outcome {
         status: StatusCode,
         body: serde_json::Value,
         applied: Applied,
         inserted: Inserted,
+        with_jobs: WithJobs,
     }
 
     async fn send(setup: Setup, request: test::TestRequest) -> Outcome {
         let applied: Applied = Arc::default();
         let inserted: Inserted = Arc::default();
+        let with_jobs: WithJobs = Arc::default();
 
         let mut integrations = MockJiraIntegrationRepository::new();
         let integration = setup.integration.clone();
@@ -455,11 +483,9 @@ mod tests {
                 assert!(since <= Utc::now() - Duration::minutes(DUPLICATE_WINDOW_MINUTES - 1));
                 Ok(stored.clone())
             });
-        let record = inserted.clone();
-        events.expect_insert().returning(move |event| {
-            record.lock().unwrap().push(event.clone());
-            Ok(JiraEventRow {
-                id: Uuid::new_v4(),
+        fn stored_row(event: NewJiraEvent) -> JiraEventRow {
+            JiraEventRow {
+                id: event.id,
                 integration_id: event.integration_id,
                 received_at: Utc::now(),
                 issue_key: event.issue_key,
@@ -471,8 +497,20 @@ mod tests {
                 unknown_features: event.unknown_features,
                 ignored: event.ignored,
                 error: event.error,
-            })
+            }
+        }
+        let record = inserted.clone();
+        events.expect_insert().returning(move |event| {
+            record.lock().unwrap().push(event.clone());
+            Ok(stored_row(event))
         });
+        let record = with_jobs.clone();
+        events
+            .expect_insert_with_jobs()
+            .returning(move |event, jobs| {
+                record.lock().unwrap().push((event.clone(), jobs));
+                Ok(stored_row(event))
+            });
 
         let mut external = MockExternalChangeLogic::new();
         let calls = applied.clone();
@@ -536,6 +574,7 @@ mod tests {
             body: serde_json::from_slice(&bytes).unwrap_or_default(),
             applied,
             inserted,
+            with_jobs,
         }
     }
 
@@ -817,6 +856,99 @@ mod tests {
             assert_eq!(inserted.len(), 1, "{body}");
             assert!(inserted[0].error.is_some(), "{body}");
             assert!(out.applied.lock().unwrap().is_empty());
+        }
+    }
+
+    #[actix_web::test]
+    async fn processed_event_enqueues_one_comment_when_writeback_is_on() {
+        let mut s = setup();
+        s.integration.writeback_enabled = true;
+        let integration_id = s.integration.id;
+        let request = bearer(post(&s), SECRET).set_json(status_change(
+            "Ready for Release",
+            json!([{"value": "QA"}, {"value": "Lab"}]),
+        ));
+
+        let out = send(s, request).await;
+
+        assert_eq!(out.status, StatusCode::OK, "{}", out.body);
+        assert!(out.inserted.lock().unwrap().is_empty());
+        let with_jobs = out.with_jobs.lock().unwrap();
+        assert_eq!(with_jobs.len(), 1);
+        let (event, jobs) = &with_jobs[0];
+        assert_eq!(jobs.len(), 1);
+        let job = &jobs[0];
+        assert_eq!(job.kind, OutboundKind::Comment);
+        assert_eq!(job.integration_id, integration_id);
+        assert_eq!(job.issue_key, "PROJ-123");
+        assert_eq!(job.feature_id, None);
+        assert_eq!(job.dedupe_key, format!("event:{}", event.id));
+        assert_eq!(out.body["eventId"], event.id.to_string());
+        let lines = job.payload["lines"].as_array().unwrap();
+        assert_eq!(lines[0], "FluxGate: Jira status 'Ready for Release'");
+        assert!(lines.iter().any(|l| l == "Unknown environment values: Lab"));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.as_str().unwrap().starts_with("checkout · QA: "))
+        );
+    }
+
+    #[actix_web::test]
+    async fn duplicate_and_ignored_events_enqueue_nothing() {
+        let mut s = setup();
+        s.integration.writeback_enabled = true;
+        s.stored_delivery = Some(JiraEventRow {
+            id: Uuid::new_v4(),
+            integration_id: s.integration.id,
+            received_at: Utc::now(),
+            issue_key: Some("PROJ-123".to_string()),
+            jira_status: Some("Done".to_string()),
+            jira_actor: None,
+            delivery_hash: Some("hash".to_string()),
+            results: json!([]),
+            unknown_environments: vec![],
+            unknown_features: vec![],
+            ignored: None,
+            error: None,
+        });
+        let request = bearer(post(&s), SECRET).set_json(status_change("Done", json!("QA")));
+        let out = send(s, request).await;
+        assert_eq!(out.body["duplicate"], true);
+        assert!(out.with_jobs.lock().unwrap().is_empty());
+
+        let mut s = setup();
+        s.integration.writeback_enabled = true;
+        let mut body = status_change("Done", json!("QA"));
+        body["changelog"]["items"] = json!([{"field": "summary", "toString": "x"}]);
+        let request = bearer(post(&s), SECRET).set_json(body);
+        let out = send(s, request).await;
+        assert_eq!(out.body["ignored"], IGNORED_NO_STATUS_CHANGE);
+        assert!(out.with_jobs.lock().unwrap().is_empty());
+        assert_eq!(out.inserted.lock().unwrap().len(), 1);
+
+        // Nothing to report: a status with no rule and no unknown values.
+        let mut s = setup();
+        s.integration.writeback_enabled = true;
+        let request = bearer(post(&s), SECRET).set_json(status_change("Unruled", json!("QA")));
+        let out = send(s, request).await;
+        assert_eq!(out.status, StatusCode::OK);
+        assert!(out.with_jobs.lock().unwrap().is_empty());
+        assert_eq!(out.inserted.lock().unwrap().len(), 1);
+    }
+
+    #[actix_web::test]
+    async fn writeback_off_uses_plain_insert() {
+        for (enabled, comments) in [(false, true), (true, false)] {
+            let mut s = setup();
+            s.integration.writeback_enabled = enabled;
+            s.integration.writeback_comments = comments;
+            let request =
+                bearer(post(&s), SECRET).set_json(status_change("Ready for Release", json!("QA")));
+            let out = send(s, request).await;
+            assert_eq!(out.status, StatusCode::OK, "{}", out.body);
+            assert!(out.with_jobs.lock().unwrap().is_empty());
+            assert_eq!(out.inserted.lock().unwrap().len(), 1);
         }
     }
 
@@ -1175,6 +1307,76 @@ mod flow_tests {
         assert_eq!(body["results"][0]["outcome"], "refused");
         assert_eq!(body["results"][0]["reason"], "not approved");
         assert_eq!(flow.stage_status().await, "NOT_DEPLOYED");
+        flow.cleanup().await;
+    }
+
+    /// A Jira event gives one comment (Source 1) and, through the activity cursor,
+    /// a remote link refresh (Source 2) but no second comment.
+    #[actix_web::test]
+    #[serial_test::serial(jira_capture)]
+    async fn inbound_event_and_activity_give_one_comment_each() {
+        let flow = Flow::new().await;
+        sqlx::query("UPDATE jira_integrations SET writeback_enabled = TRUE WHERE id = $1")
+            .bind(flow.integration_id)
+            .execute(&flow.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO jira_writeback_cursor (id, last_created_at) \
+             VALUES (TRUE, now() - interval '1 minute') \
+             ON CONFLICT (id) DO UPDATE SET last_created_at = EXCLUDED.last_created_at",
+        )
+        .execute(&flow.pool)
+        .await
+        .unwrap();
+
+        // Approve, then deploy: two Jira events.
+        let (status, _) = flow.send(webhook("Ready for Release", "1")).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, body) = flow.send(webhook("Done", "2")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["results"][0]["to"], "DEPLOYED");
+
+        crate::scheduler::JiraWritebackCapture::new(
+            flow.pool.clone(),
+            std::time::Duration::from_secs(5),
+        )
+        .with_lag(Duration::zero())
+        .run_once()
+        .await
+        .unwrap();
+
+        let jobs: Vec<(String, String)> = sqlx::query_as(
+            "SELECT kind, dedupe_key FROM jira_outbound_jobs WHERE integration_id = $1",
+        )
+        .bind(flow.integration_id)
+        .fetch_all(&flow.pool)
+        .await
+        .unwrap();
+        let comments: Vec<&(String, String)> =
+            jobs.iter().filter(|job| job.0 == "comment").collect();
+        assert_eq!(
+            comments.len(),
+            2,
+            "one per event, none from the activity rows: {jobs:?}"
+        );
+        assert!(comments.iter().all(|job| job.1.starts_with("event:")));
+        let links = jobs.iter().filter(|job| job.0 == "remote_link").count();
+        assert_eq!(links, 1, "one pending remote link refresh: {jobs:?}");
+
+        let text: String = sqlx::query_scalar(
+            "SELECT payload::text FROM jira_outbound_jobs \
+             WHERE integration_id = $1 AND kind = 'comment' ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(flow.integration_id)
+        .fetch_one(&flow.pool)
+        .await
+        .unwrap();
+        assert!(
+            text.contains("Jira status 'Done'") && text.contains("deploy applied"),
+            "{text}"
+        );
+
         flow.cleanup().await;
     }
 }

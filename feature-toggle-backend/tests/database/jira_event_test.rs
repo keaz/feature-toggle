@@ -7,6 +7,9 @@ use feature_toggle_backend::database::activity_log::activity_log_repository;
 use feature_toggle_backend::database::init_pg_pool;
 use feature_toggle_backend::database::jira_event::{NewJiraEvent, jira_event_repository};
 use feature_toggle_backend::database::jira_integration::jira_integration_repository_tx;
+use feature_toggle_backend::database::jira_outbound_job::{
+    NewOutboundJob, OutboundKind, jira_outbound_job_repository,
+};
 use feature_toggle_backend::logic::ActorContext;
 use feature_toggle_backend::logic::jira_integration_tx::{
     JiraIntegrationInput, create_jira_integration_in_tx,
@@ -66,6 +69,7 @@ async fn cleanup(pool: &PgPool, team_id: Uuid, shadow_user: Uuid) {
 
 fn event(integration_id: Uuid, hash: &str) -> NewJiraEvent {
     NewJiraEvent {
+        id: Uuid::new_v4(),
         integration_id,
         issue_key: Some("PROJ-1".to_string()),
         jira_status: Some("Done".to_string()),
@@ -179,5 +183,77 @@ async fn delete_older_than_removes_only_old_events() {
     let (left, total) = repo.list(id, 0, 10).await.unwrap();
     assert_eq!(total, 1);
     assert_eq!(left[0].id, new.id);
+    cleanup(&pool, team, user).await;
+}
+
+fn comment_job(integration_id: Uuid, dedupe_key: &str) -> NewOutboundJob {
+    NewOutboundJob {
+        integration_id,
+        issue_key: "PROJ-1".to_string(),
+        feature_id: None,
+        kind: OutboundKind::Comment,
+        payload: serde_json::json!({"lines": ["FluxGate: test"]}),
+        dedupe_key: dedupe_key.to_string(),
+    }
+}
+
+async fn job_count(pool: &PgPool, dedupe_key: &str) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM jira_outbound_jobs WHERE dedupe_key = $1")
+        .bind(dedupe_key)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn insert_with_jobs_is_atomic() {
+    let pool = init_pg_pool().await;
+    let (team, id, user) = integration(&pool, "events-atomic").await;
+    let repo = jira_event_repository(pool.clone());
+    let jobs = jira_outbound_job_repository(pool.clone());
+
+    // Event and job are stored together.
+    let first = event(id, "atomic-1");
+    let key = format!("event:{}", first.id);
+    let stored = repo
+        .insert_with_jobs(first.clone(), vec![comment_job(id, &key)])
+        .await
+        .expect("insert with jobs");
+    assert_eq!(stored.id, first.id, "the caller's id is used");
+    assert_eq!(job_count(&pool, &key).await, 1);
+
+    // A dedupe key that is already taken does not fail the call; the event is stored.
+    let taken = format!("taken-{}", Uuid::new_v4());
+    assert!(jobs.enqueue(comment_job(id, &taken)).await.unwrap());
+    let second = event(id, "atomic-2");
+    let stored = repo
+        .insert_with_jobs(second.clone(), vec![comment_job(id, &taken)])
+        .await
+        .expect("a taken dedupe key is not an error");
+    assert_eq!(stored.id, second.id);
+    assert_eq!(job_count(&pool, &taken).await, 1);
+
+    // A job that fails (unknown integration: foreign key) rolls the event back too.
+    let third = event(id, "atomic-3");
+    let ok_key = format!("rolled-back-{}", Uuid::new_v4());
+    let result = repo
+        .insert_with_jobs(
+            third.clone(),
+            vec![
+                comment_job(id, &ok_key),
+                comment_job(Uuid::new_v4(), &format!("bad-{}", Uuid::new_v4())),
+            ],
+        )
+        .await;
+    assert!(result.is_err());
+    let events: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM jira_integration_events WHERE id = $1")
+            .bind(third.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(events, 0, "event rolled back");
+    assert_eq!(job_count(&pool, &ok_key).await, 0, "first job rolled back");
+
     cleanup(&pool, team, user).await;
 }

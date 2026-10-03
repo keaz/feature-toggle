@@ -75,6 +75,16 @@ pub trait ActivityLogRepository: Send + Sync {
         activity: CreateActivityLog,
     ) -> Result<ActivityLogRow, sqlx::Error>;
 
+    /// Entries of the given types with `from <= created_at <= to`, oldest first
+    /// (`created_at`, then `id`), at most `limit`.
+    async fn list_window(
+        &self,
+        types: &[&'static str],
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+        limit: i64,
+    ) -> Result<Vec<ActivityLogRow>, sqlx::Error>;
+
     /// Sets one top-level key of the entry's metadata, keeping the other keys.
     /// Updates nothing when the entry does not exist.
     async fn merge_activity_metadata(
@@ -300,6 +310,27 @@ impl ActivityLogRepository for PgActivityLogRepository {
 
         let count = sql_query.fetch_one(&self.pool).await?;
         Ok(count)
+    }
+
+    async fn list_window(
+        &self,
+        types: &[&'static str],
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+        limit: i64,
+    ) -> Result<Vec<ActivityLogRow>, sqlx::Error> {
+        let types: Vec<String> = types.iter().map(|t| t.to_string()).collect();
+        sqlx::query_as::<_, ActivityLogRow>(
+            "SELECT * FROM activity_log \
+             WHERE created_at >= $1 AND created_at <= $2 AND activity_type = ANY($3) \
+             ORDER BY created_at, id LIMIT $4",
+        )
+        .bind(from)
+        .bind(to)
+        .bind(types)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
     }
 
     async fn merge_activity_metadata(

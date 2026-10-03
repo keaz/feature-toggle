@@ -17,6 +17,7 @@ mod flag_kind_test;
 mod jira_event_test;
 mod jira_integration_test;
 mod jira_outbound_job_test;
+mod jira_writeback_capture_test;
 mod justification_recording_test;
 mod jwt_secret_test;
 mod last_admin_test;

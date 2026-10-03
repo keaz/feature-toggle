@@ -340,6 +340,13 @@ pub async fn run() -> std::io::Result<()> {
         jira_writeback_sender.run().await;
     });
 
+    // Jira write-back capture: activity_log to the outbound job queue (every 5 s)
+    let jira_writeback_capture =
+        scheduler::JiraWritebackCapture::new(db_pool.clone(), Duration::from_secs(5));
+    tokio::spawn(async move {
+        jira_writeback_capture.run().await;
+    });
+
     // Clone values for use in the HttpServer closure
     let jwt_secret_logic_for_server = jwt_secret_logic.clone();
     let jwt_token_logic_for_server = jwt_token_logic.clone();
