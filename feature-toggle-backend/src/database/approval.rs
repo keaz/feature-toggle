@@ -28,7 +28,8 @@ const ALREADY_RESOLVED: &str = "Request is already resolved";
 
 /// SQL condition: user `u` (a `users u` row in scope) may approve under a
 /// policy with the given team, approver roles, named approvers and role
-/// fallback, and is not the requester. Each argument is a SQL expression
+/// fallback, is a team member, is not a system client and is not the
+/// requester. Each argument is a SQL expression
 /// (a bind parameter or a column). Approval routing
 /// (`ApprovalLogicImpl::resolve_approval_routing`) and the "who can still vote"
 /// count both use it, so the two always apply the same checks.
@@ -40,21 +41,13 @@ pub(crate) fn approver_qualifies_sql(
     requester_id: &str,
 ) -> String {
     format!(
-        r#"(
-              EXISTS (
-                  SELECT 1 FROM user_teams ut
-                  WHERE ut.user_id = u.id AND ut.team_id = {team_id}
-              )
-              -- A system client's shadow user is not a team member, but it
-              -- belongs to its client's team while the client is active.
-              OR EXISTS (
-                  SELECT 1 FROM system_clients sc
-                  WHERE sc.id = u.id
-                    AND sc.team_id = {team_id}
-                    AND sc.enabled = TRUE
-                    AND sc.expires_at > NOW()
-              )
+        r#"EXISTS (
+              SELECT 1 FROM user_teams ut
+              WHERE ut.user_id = u.id AND ut.team_id = {team_id}
           )
+          -- Approvals need a human: a system client's shadow user holds the
+          -- Approver role but is never an approver (Jira decision J2).
+          AND NOT EXISTS (SELECT 1 FROM system_clients sc WHERE sc.id = u.id)
           AND u.enabled = TRUE
           AND ({requester_id} IS NULL OR u.id <> {requester_id})
           AND EXISTS (
@@ -251,6 +244,9 @@ pub trait ApprovalRepository: Send + Sync {
     /// Whether `user_id` is on the request's eligible list and still qualifies
     /// under its policy today (the same check as the reachable count).
     async fn is_eligible_voter(&self, request_id: Uuid, user_id: Uuid) -> Result<bool, Error>;
+    /// Whether `user_id` is the shadow user of a system client. System clients
+    /// never vote on approval requests.
+    async fn is_system_client(&self, user_id: Uuid) -> Result<bool, Error>;
     /// Pending requests whose AI-11 override can no longer be reached because
     /// no remaining eligible approver can vote, while their approvals already
     /// meet the policy's `required_approvers`. The reconciliation approves them.
@@ -1045,6 +1041,14 @@ impl ApprovalRepository for ApprovalRepositoryImpl {
             .into_iter()
             .map(|row| (row.get::<Uuid, _>("id"), row.get::<i64, _>("reachable")))
             .collect())
+    }
+
+    async fn is_system_client(&self, user_id: Uuid) -> Result<bool, Error> {
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM system_clients WHERE id = $1)")
+            .bind(user_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(Error::DatabaseError)
     }
 
     async fn is_eligible_voter(&self, request_id: Uuid, user_id: Uuid) -> Result<bool, Error> {

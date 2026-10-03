@@ -23,6 +23,11 @@ impl ErrorResponse {
     }
 }
 
+/// Error code and message for a vote by a system client (REST layer and `JwtGuard`).
+pub(crate) const SYSTEM_CLIENT_VOTE_CODE: &str = "system_client_vote_not_permitted";
+pub(crate) const SYSTEM_CLIENT_VOTE_MESSAGE: &str =
+    "System clients cannot vote on approval requests";
+
 #[derive(Debug, thiserror::Error)]
 pub enum RestError {
     #[error("Not found")]
@@ -202,6 +207,16 @@ impl RestError {
         }
     }
 
+    /// 403 with `code: "system_client_vote_not_permitted"`: approvals need a human,
+    /// so a system client never approves or rejects. `JwtGuard` answers the same.
+    pub fn system_client_vote_not_permitted() -> Self {
+        Self::Forbidden {
+            message: SYSTEM_CLIENT_VOTE_MESSAGE.to_string(),
+            code: Some(SYSTEM_CLIENT_VOTE_CODE.to_string()),
+            details: None,
+        }
+    }
+
     pub fn forbidden(message: impl Into<String>) -> Self {
         Self::Forbidden {
             message: message.into(),
@@ -365,6 +380,9 @@ impl From<crate::Error> for RestError {
             crate::Error::Unauthorized(msg) => RestError::unauthorized(msg),
             crate::Error::AccountDisabled => RestError::account_disabled("Account is disabled"),
             crate::Error::SelfApprovalNotAllowed => RestError::self_approval_not_allowed(),
+            crate::Error::SystemClientVoteNotPermitted => {
+                RestError::system_client_vote_not_permitted()
+            }
             crate::Error::LastAdminRequired => RestError::last_admin_required(),
             crate::Error::SsoManaged => RestError::sso_managed(),
             crate::Error::SsoUserNoLocalPassword => RestError::sso_user_no_local_password(),
@@ -465,6 +483,17 @@ mod tests {
         let body = to_bytes(resp.into_body()).await.expect("body");
         let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
         assert_eq!(json["error"], "last_admin_required");
+    }
+
+    #[actix_web::test]
+    async fn system_client_vote_maps_to_403_with_its_code() {
+        let err = RestError::from(crate::Error::SystemClientVoteNotPermitted);
+        let resp = err.error_response();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = to_bytes(resp.into_body()).await.expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(json["error"], "forbidden");
+        assert_eq!(json["code"], "system_client_vote_not_permitted");
     }
 
     #[actix_web::test]

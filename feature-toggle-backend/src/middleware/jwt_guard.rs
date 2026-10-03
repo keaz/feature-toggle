@@ -170,6 +170,28 @@ fn path_has_segment(path: &str, segment: &str) -> bool {
         .any(|part| part == segment)
 }
 
+/// Whether `path` (the routed path) is a vote on an approval request:
+/// `POST /api/v1/approval-requests/{id}/approve` or `/reject`.
+fn is_approval_vote_route(method: &actix_web::http::Method, path: &str) -> bool {
+    if method != actix_web::http::Method::POST {
+        return false;
+    }
+    let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+    matches!(
+        segments.as_slice(),
+        ["api", "v1", "approval-requests", _, "approve" | "reject"]
+    )
+}
+
+fn system_client_vote_forbidden_response() -> HttpResponse {
+    HttpResponse::Forbidden().json(serde_json::json!({
+        "error": "forbidden",
+        "message": crate::rest::error::SYSTEM_CLIENT_VOTE_MESSAGE,
+        "code": crate::rest::error::SYSTEM_CLIENT_VOTE_CODE,
+        "details": null
+    }))
+}
+
 fn system_client_scope_allowed(
     scopes: &[String],
     method: &actix_web::http::Method,
@@ -655,6 +677,14 @@ where
                                         } else {
                                             stored_token.scopes.clone()
                                         };
+
+                                        // Approvals need a human: no scope lets a system client
+                                        // approve or reject (Jira decision J2). Cancel stays open.
+                                        if is_approval_vote_route(&method, &path) {
+                                            let res = system_client_vote_forbidden_response()
+                                                .map_into_right_body();
+                                            return Ok(req.into_response(res));
+                                        }
 
                                         // System client management routes skip the scope check so
                                         // the policy below denies them (403 policy_denied, audited).
@@ -2135,6 +2165,83 @@ mod tests {
                 actix_web::http::StatusCode::UNAUTHORIZED,
                 "{uri}"
             );
+        }
+    }
+
+    #[actix_web::test]
+    async fn approval_vote_routes_are_approve_and_reject_posts_only() {
+        use actix_web::http::Method;
+        let id = Uuid::new_v4();
+        assert!(is_approval_vote_route(
+            &Method::POST,
+            &format!("/api/v1/approval-requests/{id}/approve")
+        ));
+        assert!(is_approval_vote_route(
+            &Method::POST,
+            &format!("/api/v1/approval-requests/{id}/reject")
+        ));
+        assert!(is_approval_vote_route(
+            &Method::POST,
+            &format!("/api/v1/approval-requests/{id}/approve/")
+        ));
+        for (method, path) in [
+            (
+                Method::POST,
+                format!("/api/v1/approval-requests/{id}/cancel"),
+            ),
+            (
+                Method::GET,
+                format!("/api/v1/approval-requests/{id}/approve"),
+            ),
+            (Method::POST, format!("/api/v1/approval-requests/{id}")),
+            (Method::POST, format!("/api/v1/features/{id}/approve")),
+            (
+                Method::POST,
+                "/api/v1/approval-requests/approve".to_string(),
+            ),
+        ] {
+            assert!(!is_approval_vote_route(&method, &path), "{method} {path}");
+        }
+    }
+
+    #[actix_web::test]
+    async fn system_client_cannot_vote_on_approval_requests_whatever_its_scopes() {
+        let pool = db_pool().await;
+        let scopes = vec![
+            "admin:read".to_string(),
+            "flag:write".to_string(),
+            "evaluate".to_string(),
+            "metrics:write".to_string(),
+        ];
+        let (_team_id, _client_id, token) = system_client_with_token(&pool, scopes).await;
+
+        let app = test::init_service(
+            App::new()
+                .wrap(JwtGuard::new(
+                    "http://ui".to_string(),
+                    db_secret_logic(),
+                    pool.clone(),
+                ))
+                .default_service(web::to(|| async { HttpResponse::Ok().finish() })),
+        )
+        .await;
+
+        // A request id the scope resolver cannot place in the client's team would
+        // also be refused, so the vote check must answer first with its own code.
+        let request_id = Uuid::new_v4();
+        for action in ["approve", "reject", "%61pprove"] {
+            let req = test::TestRequest::post()
+                .uri(&format!("/api/v1/approval-requests/{request_id}/{action}"))
+                .insert_header(("Authorization", format!("Bearer {token}")))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(
+                resp.status(),
+                actix_web::http::StatusCode::FORBIDDEN,
+                "{action}"
+            );
+            let body: serde_json::Value = test::read_body_json(resp).await;
+            assert_eq!(body["code"], "system_client_vote_not_permitted", "{action}");
         }
     }
 }

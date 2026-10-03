@@ -10,10 +10,11 @@ use uuid::Uuid;
 
 const APPROVER_ROLE_ID: &str = "00000000-0000-0000-0000-000000000001";
 
-/// A system client gets the Approver role on creation, so it must count as an
-/// eligible approver for its own team's policies (and not for other teams').
+/// Approvals need a human (Jira decision J2). A system client's shadow user holds
+/// the Approver role, but it never counts as an eligible approver, in its own
+/// team or any other. A human approver of the team still counts.
 #[tokio::test]
-async fn test_system_client_is_eligible_approver_for_its_team_only() {
+async fn test_system_client_is_never_an_eligible_approver() {
     let pool = init_pg_pool().await;
     let team_id = Uuid::new_v4();
     let other_team_id = Uuid::new_v4();
@@ -63,6 +64,31 @@ async fn test_system_client_is_eligible_approver_for_its_team_only() {
         .await
         .expect("create system client");
 
+    // A human approver in the own team only.
+    let human_id = Uuid::new_v4();
+    sqlx::query(
+        r#"INSERT INTO users (id, username, password_hash, first_name, last_name, email, is_admin, enabled)
+           VALUES ($1, $2, 'x', 'Human', 'Approver', $3, false, true)"#,
+    )
+    .bind(human_id)
+    .bind(format!("sc-approval-human-{human_id}"))
+    .bind(format!("sc-approval-human-{human_id}@example.com"))
+    .execute(&pool)
+    .await
+    .expect("insert human approver");
+    sqlx::query("INSERT INTO user_teams (user_id, team_id) VALUES ($1, $2)")
+        .bind(human_id)
+        .bind(team_id)
+        .execute(&pool)
+        .await
+        .expect("add human approver to team");
+    sqlx::query("INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)")
+        .bind(human_id)
+        .bind(approver_role)
+        .execute(&pool)
+        .await
+        .expect("give human the Approver role");
+
     let activity_log_repository =
         feature_toggle_backend::database::activity_log::activity_log_repository(pool.clone());
     let environment_logic = environment::environment_logic(
@@ -96,12 +122,13 @@ async fn test_system_client_is_eligible_approver_for_its_team_only() {
         .execute(&pool)
         .await
         .expect("delete teams");
-    sqlx::query("DELETE FROM users WHERE id = $1")
-        .bind(system_client.id)
+    sqlx::query("DELETE FROM users WHERE id = ANY($1)")
+        .bind(vec![system_client.id, human_id])
         .execute(&pool)
         .await
-        .expect("delete shadow user");
+        .expect("delete shadow user and human approver");
 
+    // Only the human: the system client of this team is not counted.
     assert_eq!(
         own.expect("preview own team").eligible_approvers_count,
         Some(1)

@@ -41,6 +41,8 @@ pub enum Error {
     AccountDisabled,
     #[error("Requesters cannot approve their own request")]
     SelfApprovalNotAllowed,
+    #[error("System clients cannot vote on approval requests")]
+    SystemClientVoteNotPermitted,
     #[error("At least one enabled administrator must remain")]
     LastAdminRequired,
     #[error("Assignment is managed by SSO group sync")]

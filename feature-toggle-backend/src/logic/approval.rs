@@ -612,6 +612,16 @@ impl ApprovalLogicImpl {
         approver_id: Uuid,
         vote: &ApprovalVoteValue,
     ) -> Result<(), Error> {
+        // Approvals need a human: a system client never votes, whatever roles
+        // its shadow user holds and whatever the override settings say.
+        if self
+            .approval_repository
+            .is_system_client(approver_id)
+            .await?
+        {
+            return Err(Error::SystemClientVoteNotPermitted);
+        }
+
         // The requester can reject their own request, but never approve it, and an
         // admin override does not lift that restriction.
         if *vote == ApprovalVoteValue::Approve && request.requested_by == approver_id {
@@ -2264,6 +2274,9 @@ mod tests {
     #[tokio::test]
     async fn test_approve_request_success_with_valid_roles() {
         let mut approval_repo = MockApprovalRepository::new();
+        approval_repo
+            .expect_is_system_client()
+            .returning(|_| Ok(false));
         let mut role_repo = MockRoleRepository::new();
         let feature_repo = MockFeatureRepository::new();
         let env_logic = MockEnvironmentLogic::new();
@@ -2509,6 +2522,9 @@ mod tests {
     #[tokio::test]
     async fn test_approve_request_fails_without_policy_role() {
         let mut approval_repo = MockApprovalRepository::new();
+        approval_repo
+            .expect_is_system_client()
+            .returning(|_| Ok(false));
         let mut role_repo = MockRoleRepository::new();
         let feature_repo = MockFeatureRepository::new();
         let env_logic = MockEnvironmentLogic::new();
@@ -2627,8 +2643,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn system_client_cannot_vote_even_with_admin_override() {
+        let mut approval_repo = MockApprovalRepository::new();
+        let mut role_repo = MockRoleRepository::new();
+        let feature_repo = MockFeatureRepository::new();
+        let env_logic = MockEnvironmentLogic::new();
+
+        let request_id = Uuid::new_v4();
+        let system_client_id = Uuid::new_v4();
+        let policy_id = Uuid::new_v4();
+
+        let request = ApprovalRequest {
+            id: request_id,
+            policy_id,
+            feature_id: Uuid::new_v4(),
+            environment_id: Some(Uuid::new_v4()),
+            change_type: "stage_change".into(),
+            change_payload: serde_json::json!({}),
+            change_description: None,
+            requested_by: Uuid::new_v4(),
+            eligible_approver_ids: vec![system_client_id],
+            routing_reason: None,
+            admin_override_enabled: true,
+            status: ApprovalStatus::Pending,
+            approved_count: 0,
+            rejected_count: 0,
+            executed_at: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            required_approvers_override: None,
+        };
+        let policy = ApprovalPolicy {
+            id: policy_id,
+            team_id: Uuid::new_v4(),
+            name: "Production Approval".into(),
+            description: None,
+            applies_to: "all".into(),
+            environment_ids: None,
+            required_approvers: 1,
+            approver_role_ids: Vec::new(),
+            approver_user_ids: vec![system_client_id],
+            allow_admin_override: true,
+            fallback_to_roles: true,
+            auto_approve_after_hours: None,
+            enabled: true,
+            created_at: Utc::now(),
+            ai_risk_mode: "advisory".to_string(),
+        };
+
+        approval_repo
+            .expect_get_request_by_id()
+            .times(2)
+            .returning(move |_| Ok(Some(request.clone())));
+        approval_repo
+            .expect_get_policy_by_id()
+            .times(2)
+            .returning(move |_| Ok(Some(policy.clone())));
+        approval_repo
+            .expect_is_system_client()
+            .with(mockall::predicate::eq(system_client_id))
+            .times(2)
+            .returning(|_| Ok(true));
+        // The check comes first: no role, override or eligibility lookups, no vote.
+        approval_repo.expect_add_vote().times(0);
+        approval_repo.expect_is_eligible_voter().times(0);
+        role_repo.expect_user_has_role().times(0);
+        role_repo.expect_clone_box().returning(|| {
+            let mut mock = MockRoleRepository::new();
+            mock.expect_clone_box()
+                .returning(|| Box::new(MockRoleRepository::new()));
+            Box::new(mock)
+        });
+
+        let (tx, _rx) = tokio::sync::broadcast::channel(10);
+        let (updates_tx, _updates_rx) = tokio::sync::broadcast::channel(10);
+        let logic = approval_logic(
+            Box::new(approval_repo),
+            Box::new(feature_repo),
+            Box::new(env_logic),
+            Box::new(role_repo),
+            tx,
+            updates_tx,
+        );
+
+        let approve = logic
+            .approve_request(request_id, system_client_id, None)
+            .await;
+        assert!(matches!(approve, Err(Error::SystemClientVoteNotPermitted)));
+        let reject = logic
+            .reject_request(request_id, system_client_id, None)
+            .await;
+        assert!(matches!(reject, Err(Error::SystemClientVoteNotPermitted)));
+    }
+
+    #[tokio::test]
     async fn test_approve_request_fails_when_not_in_frozen_eligible_set() {
         let mut approval_repo = MockApprovalRepository::new();
+        approval_repo
+            .expect_is_system_client()
+            .returning(|_| Ok(false));
         let mut role_repo = MockRoleRepository::new();
         let feature_repo = MockFeatureRepository::new();
         let env_logic = MockEnvironmentLogic::new();
@@ -2920,6 +3033,9 @@ mod tests {
     #[tokio::test]
     async fn test_approve_request_publishes_events_on_status_change() {
         let mut approval_repo = MockApprovalRepository::new();
+        approval_repo
+            .expect_is_system_client()
+            .returning(|_| Ok(false));
         let mut role_repo = MockRoleRepository::new();
         let mut feature_repo = MockFeatureRepository::new();
         let env_logic = MockEnvironmentLogic::new();
@@ -3541,6 +3657,9 @@ mod ai_risk_trigger_tests {
         };
 
         let mut approval_repo = MockApprovalRepository::new();
+        approval_repo
+            .expect_is_system_client()
+            .returning(|_| Ok(false));
         let stored = pending.clone();
         approval_repo
             .expect_get_request_by_id()

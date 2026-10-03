@@ -162,7 +162,7 @@ describe('System Client API', () => {
     expect(issue.data.code).toBe('policy_denied');
   });
 
-  it('can request a stage change with a system client token but not approve it itself', async () => {
+  it('can request a stage change with a system client token but never vote on it', async () => {
     const requestResponse = await tokenClient.post(`/stages/${stageId}/request-change`, {
       request: 'DEPLOYMENT_REQUESTED',
     });
@@ -171,11 +171,14 @@ describe('System Client API', () => {
     const requestId = requestResponse.data.pendingApprovalRequestId;
     expect(requestId).toBeTruthy();
 
-    const selfApprove = await tokenClient.post(`/approval-requests/${requestId}/approve`, {
-      comment: 'automation approval',
-    });
-    expectStatus(selfApprove, 403);
-    expect(selfApprove.data.error).toBe('self_approval_not_allowed');
+    // Approvals need a human: no scope lets a system client approve or reject.
+    for (const action of ['approve', 'reject']) {
+      const vote = await tokenClient.post(`/approval-requests/${requestId}/${action}`, {
+        comment: 'automation vote',
+      });
+      expectStatus(vote, 403);
+      expect(vote.data.code).toBe('system_client_vote_not_permitted');
+    }
 
     const approveResponse = await humanApproverClient.post(`/approval-requests/${requestId}/approve`, {
       comment: 'human approval',
