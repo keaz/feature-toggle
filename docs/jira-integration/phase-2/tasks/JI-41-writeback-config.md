@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Type | Feature |
-| Status | Open |
+| Status | Done in 3de0dec |
 | Repo | backend (`feature-toggle/`) |
 | Crate | `feature-toggle-backend` |
 | Depends on | — |
@@ -151,4 +151,17 @@ Produces (later tasks use these exact names):
 
 ## Handoff log
 
-(empty)
+2026-10-03, backend `3de0dec`:
+- Implemented as specified: migration `20261004050000_jira_writeback.sql`, `JiraIntegrationRow` fields, `JiraWritebackColumns` + `set_writeback(_tx)` / `set_writeback_paused(_tx)` on the repository, `config::JiraConfig`, `Config::jira_ui_base_url`, `logic/jira_client.rs`, the three endpoints and response fields, contract baseline updated.
+- Deviations (JI-42 must know):
+  - `update_jira_writeback_in_tx` and `resume_jira_writeback_in_tx` follow the existing tx pattern: `(conn, repo, activity_repo, id, patch, &JiraConfig, ui_base_url: Option<&str>, actor)` and `(conn, repo, activity_repo, id, actor)`. The brief omitted `repo`/`activity_repo`.
+  - Besides `web::Data<JiraConfig>`, `lib.rs` registers `web::Data<config::JiraUiBaseUrl>` (the resolved `jira_ui_base_url()`), which the PUT handler passes to the logic.
+  - `client_for` returns `None` when base URL, auth kind or credential is missing (or the Cloud email). It does NOT check `writeback_enabled` (so "test connection" works before enabling). The JI-42 sender must check `row.writeback_enabled` (and `writeback_paused_reason`) itself. A decrypt failure is `Error::InvalidInput`.
+  - Extra method `JiraClient::myself_display_name()`: `body_excerpt` (300 chars) is too short to hold `displayName` on Cloud, so test connection parses the full body.
+  - `authKind` / `accountEmail`: omitted keeps, blank clears. A blank credential clears only with `enabled = false`.
+  - Credential decrypts with AAD `integration_id.as_bytes()` (same as SSO).
+- NOT done here (JI-42): turning write-back off must set pending jobs to `dead` with `last_error = 'write-back disabled'`; the jobs table does not exist yet. Hook it into `update_jira_writeback_in_tx` when `enabled` goes true to false (and in `update_jira_integration_in_tx` if it should follow `enabled`).
+- Activity: `jira_integration_updated` with `changed_fields` (`writeback_enabled`, `writeback_comments`, `writeback_remote_link`, `jira_auth_kind`, `jira_account_email`, `jira_credential`, `writeback_paused_reason`) plus flags and `has_credential`; never the credential, sealed value or email.
+- Tests: 6 `jira_client` unit, 3 config, 8 REST DB tests (`rest::jira_integration`, `#[serial]`, random key set once via env), policy route lists extended (403 for plain users, other-team admins and system clients covered by the existing policy tests). Full `cargo test -p feature-toggle-backend`: 862 lib + 327 integration pass; one run flaked `database::feature_test::test_pending_approval_listing_maps_feature_metadata` (passes alone and on 2 reruns; unrelated).
+- `wiremock` dev dependency added; `Cargo.lock` also bumped hyper 1.6.0 to 1.11.1 and h2 0.4.12 to 0.4.19.
+- The secret_box key is cached in a `OnceLock` on first use: do not call `secret_box::is_configured()` in a test before setting the env key.
