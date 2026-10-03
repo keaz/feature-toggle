@@ -2005,6 +2005,40 @@ pub(crate) async fn request_stage_change(
     payload: web::Json<StageChangeRequestBody>,
 ) -> Result<impl Responder, RestError> {
     let stage_uuid = parse_uuid(&stage_id, "stage id")?;
+    let response = perform_stage_change(
+        db_pool.get_ref(),
+        activity_repo.as_ref().as_ref(),
+        &ai,
+        &req,
+        feature_logic.as_ref().as_ref(),
+        feature_repo.as_ref().as_ref(),
+        env_logic.as_ref().as_ref(),
+        updates_tx.get_ref(),
+        stage_uuid,
+        payload.into_inner(),
+    )
+    .await?;
+
+    Ok(HttpResponse::Ok().json(response))
+}
+
+/// Requests a stage change for `stage_uuid` on behalf of the caller: role
+/// check, ref/reason validation, freeze enforcement, the change itself, the
+/// edge broadcast and the freeze override reason. Shared by the stage route
+/// and the by-key route.
+#[allow(clippy::too_many_arguments)]
+async fn perform_stage_change(
+    db_pool: &sqlx::PgPool,
+    activity_repo: &dyn ActivityLogRepository,
+    ai: &Option<web::Data<crate::judgment::AiRuntime>>,
+    req: &HttpRequest,
+    feature_logic: &dyn FeatureLogic,
+    feature_repo: &dyn FeatureRepository,
+    env_logic: &dyn EnvironmentLogic,
+    updates_tx: &tokio::sync::broadcast::Sender<crate::grpc::pb::FeatureUpdate>,
+    stage_uuid: Uuid,
+    payload: StageChangeRequestBody,
+) -> Result<FeatureResponse, RestError> {
     let jwt_user = req
         .extensions()
         .get::<JwtUser>()
@@ -2013,13 +2047,12 @@ pub(crate) async fn request_stage_change(
 
     RoleAuthorizer::authorize_stage_change_request(&jwt_user.roles, payload.request.as_str())
         .map_err(|e| RestError::forbidden(e.to_string()))?;
-    let payload = payload.into_inner();
     let meta = types::validate_stage_change_meta(payload.external_ref, payload.reason)
         .map_err(RestError::invalid_input)?;
 
     let freeze_override = crate::rest::operational_safety::enforce_freeze_for_stage(
-        db_pool.get_ref(),
-        activity_repo.as_ref().as_ref(),
+        db_pool,
+        activity_repo,
         stage_uuid,
         &jwt_user,
         payload.freeze_override_reason.as_deref(),
@@ -2033,12 +2066,124 @@ pub(crate) async fn request_stage_change(
         .map_err(RestError::from)?;
 
     if let Ok(fid) = Uuid::try_from(feature.id.clone()) {
-        broadcast_feature_update(feature_repo.as_ref().as_ref(), updates_tx.get_ref(), fid).await;
+        broadcast_feature_update(feature_repo, updates_tx, fid).await;
     }
     // After the change and its broadcast, as for every other recorded reason.
     if let Some(freeze_override) = freeze_override {
-        freeze_override.record(&ai).await;
+        freeze_override.record(ai).await;
     }
+
+    build_feature_response(&feature, feature_repo, env_logic, true, true, true).await
+}
+
+/// 404 for the by-key routes. `code` (`feature_not_found`,
+/// `environment_not_found` or `stage_not_found`) is both the error code and
+/// the start of the message, so an automation can tell what was missing.
+fn by_key_not_found(code: &str, detail: String) -> RestError {
+    RestError::NotFound {
+        message: format!("{code}: {detail}"),
+        code: Some(code.to_string()),
+        details: None,
+    }
+}
+
+/// The id of the team's feature whose key is exactly `key` (case-sensitive).
+/// Archived features resolve too; the stage logic decides what is allowed.
+async fn resolve_feature_id_by_key(
+    feature_repo: &dyn FeatureRepository,
+    team_id: Uuid,
+    key: &str,
+) -> Result<Uuid, RestError> {
+    feature_repo
+        .get_feature_by_key(team_id, key.to_string())
+        .await
+        .map_err(RestError::from)?
+        .map(|feature| feature.id)
+        .ok_or_else(|| {
+            by_key_not_found(
+                "feature_not_found",
+                format!("no feature with key '{key}' in this team"),
+            )
+        })
+}
+
+/// Resolves a feature key and an environment name to the feature's stage in
+/// that environment. The environment must be active and in the team; its name
+/// matches ignoring case, never as a substring.
+async fn resolve_stage_by_key(
+    feature_repo: &dyn FeatureRepository,
+    env_logic: &dyn EnvironmentLogic,
+    team_id: Uuid,
+    feature_key: &str,
+    env_name: &str,
+) -> Result<Uuid, RestError> {
+    let feature_id = resolve_feature_id_by_key(feature_repo, team_id, feature_key).await?;
+
+    let environments = env_logic
+        .get_active_environments_by_name(ID::from(team_id), env_name.to_string())
+        .await
+        .map_err(RestError::from)?;
+    if environments.is_empty() {
+        return Err(by_key_not_found(
+            "environment_not_found",
+            format!("no active environment named '{env_name}' in this team"),
+        ));
+    }
+    let env_ids = environments
+        .iter()
+        .filter_map(|env| Uuid::try_from(env.id.clone()).ok())
+        .collect::<HashSet<_>>();
+
+    let stages = feature_repo
+        .get_feature_stages(feature_id)
+        .await
+        .map_err(RestError::from)?
+        .into_iter()
+        .filter(|stage| env_ids.contains(&stage.environment_id))
+        .collect::<Vec<_>>();
+    match stages.as_slice() {
+        [stage] => Ok(stage.id),
+        [] => Err(by_key_not_found(
+            "stage_not_found",
+            format!("feature '{feature_key}' has no stage in environment '{env_name}'"),
+        )),
+        _ => Err(RestError::conflict(format!(
+            "feature '{feature_key}' has stages in more than one environment named '{env_name}'"
+        ))),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/teams/{team_id}/features/by-key/{key}",
+    params(
+        ("team_id" = String, Path, description = "Team ID"),
+        ("key" = String, Path, description = "Feature key (exact, case-sensitive)")
+    ),
+    responses(
+        (status = 200, description = "Feature detail", body = FeatureResponse),
+        (status = 400, description = "Invalid input", body = crate::rest::error::ErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::rest::error::ErrorResponse),
+        (status = 403, description = "Forbidden", body = crate::rest::error::ErrorResponse),
+        (status = 404, description = "feature_not_found", body = crate::rest::error::ErrorResponse)
+    ),
+    tag = "Features"
+)]
+#[get("/teams/{team_id}/features/by-key/{key}")]
+pub(crate) async fn get_feature_by_key(
+    logic: web::Data<Box<dyn FeatureLogic>>,
+    feature_repo: web::Data<Box<dyn FeatureRepository>>,
+    env_logic: web::Data<Box<dyn EnvironmentLogic>>,
+    path: web::Path<(String, String)>,
+) -> Result<impl Responder, RestError> {
+    let (team_id, key) = path.into_inner();
+    let team_uuid = parse_uuid(&team_id, "team_id")?;
+    let feature_id =
+        resolve_feature_id_by_key(feature_repo.as_ref().as_ref(), team_uuid, &key).await?;
+    let feature = logic
+        .get_feature_by_id(ID::from(feature_id))
+        .await
+        .map_err(RestError::from)?;
 
     let response = build_feature_response(
         &feature,
@@ -2047,6 +2192,66 @@ pub(crate) async fn request_stage_change(
         true,
         true,
         true,
+    )
+    .await?;
+
+    Ok(HttpResponse::Ok().json(response))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/teams/{team_id}/features/by-key/{key}/environments/{env_name}/request-change",
+    request_body = StageChangeRequestBody,
+    params(
+        ("team_id" = String, Path, description = "Team ID"),
+        ("key" = String, Path, description = "Feature key (exact, case-sensitive)"),
+        ("env_name" = String, Path, description = "Active environment name (case-insensitive, exact)")
+    ),
+    responses(
+        (status = 200, description = "Stage change requested", body = FeatureResponse),
+        (status = 400, description = "Invalid input", body = crate::rest::error::ErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::rest::error::ErrorResponse),
+        (status = 403, description = "Forbidden", body = crate::rest::error::ErrorResponse),
+        (status = 404, description = "feature_not_found, environment_not_found or stage_not_found", body = crate::rest::error::ErrorResponse),
+        (status = 409, description = "Ambiguous environment name", body = crate::rest::error::ErrorResponse)
+    ),
+    tag = "Features"
+)]
+#[post("/teams/{team_id}/features/by-key/{key}/environments/{env_name}/request-change")]
+pub(crate) async fn request_stage_change_by_key(
+    db_pool: web::Data<sqlx::PgPool>,
+    activity_repo: web::Data<Box<dyn ActivityLogRepository>>,
+    ai: Option<web::Data<crate::judgment::AiRuntime>>,
+    req: HttpRequest,
+    feature_logic: web::Data<Box<dyn FeatureLogic>>,
+    feature_repo: web::Data<Box<dyn FeatureRepository>>,
+    env_logic: web::Data<Box<dyn EnvironmentLogic>>,
+    updates_tx: web::Data<tokio::sync::broadcast::Sender<crate::grpc::pb::FeatureUpdate>>,
+    path: web::Path<(String, String, String)>,
+    payload: web::Json<StageChangeRequestBody>,
+) -> Result<impl Responder, RestError> {
+    let (team_id, key, env_name) = path.into_inner();
+    let team_uuid = parse_uuid(&team_id, "team_id")?;
+    let stage_uuid = resolve_stage_by_key(
+        feature_repo.as_ref().as_ref(),
+        env_logic.as_ref().as_ref(),
+        team_uuid,
+        &key,
+        &env_name,
+    )
+    .await?;
+
+    let response = perform_stage_change(
+        db_pool.get_ref(),
+        activity_repo.as_ref().as_ref(),
+        &ai,
+        &req,
+        feature_logic.as_ref().as_ref(),
+        feature_repo.as_ref().as_ref(),
+        env_logic.as_ref().as_ref(),
+        updates_tx.get_ref(),
+        stage_uuid,
+        payload.into_inner(),
     )
     .await?;
 
@@ -2223,6 +2428,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .service(active_kill_switches)
         .service(audit_analytics)
         .service(bulk_feature_action)
+        .service(get_feature_by_key)
+        .service(request_stage_change_by_key)
         .service(list_feature_versions)
         .service(get_feature_version_diff)
         .service(rollback_feature_version)
@@ -3978,6 +4185,364 @@ mod tests {
                 body["message"],
                 "externalRef must be at most 100 characters"
             );
+        }
+    }
+
+    mod by_key {
+        use super::*;
+        use crate::database::feature::{CreateFeature, CreateFeatureStage};
+        use crate::model::StageChangeMeta;
+        use serde_json::json;
+
+        /// A team with one feature whose only stage is in `env_name`, plus an
+        /// active environment `other_env_name` without a stage for that feature.
+        struct Fixture {
+            pool: sqlx::PgPool,
+            team_id: Uuid,
+            feature_id: Uuid,
+            feature_key: String,
+            stage_id: Uuid,
+            env_name: String,
+            other_env_name: String,
+        }
+
+        async fn insert_named_environment(
+            pool: &sqlx::PgPool,
+            team_id: Uuid,
+            name: &str,
+            active: bool,
+        ) -> Uuid {
+            let env_id = Uuid::new_v4();
+            sqlx::query(
+                r#"INSERT INTO environments (id, name, active, team_id, environment_type)
+                   VALUES ($1, $2, $3, $4, 'Production')"#,
+            )
+            .bind(env_id)
+            .bind(name)
+            .bind(active)
+            .bind(team_id)
+            .execute(pool)
+            .await
+            .expect("insert environment");
+            env_id
+        }
+
+        impl Fixture {
+            async fn new() -> Self {
+                let pool = test_pool().await;
+                let team_id = insert_team(&pool).await;
+                let suffix = Uuid::new_v4().simple().to_string();
+                let env_name = format!("Pre Prod {suffix}");
+                let other_env_name = format!("QA {suffix}");
+                let env_id = insert_named_environment(&pool, team_id, &env_name, true).await;
+                insert_named_environment(&pool, team_id, &other_env_name, true).await;
+                let stage_id = Uuid::new_v4();
+                let feature_key = format!("ji12-{suffix}");
+                let feature_id = feature_repository(pool.clone())
+                    .create_feature(CreateFeature {
+                        team_id,
+                        key: feature_key.clone(),
+                        description: None,
+                        feature_type: crate::database::entity::FeatureType::Simple,
+                        lifecycle_stage: "active".to_string(),
+                        owner: None,
+                        purpose: None,
+                        reference_url: None,
+                        expires_at: None,
+                        cleanup_reason: None,
+                        tags: vec![],
+                        stages: vec![CreateFeatureStage {
+                            id: stage_id,
+                            environment_id: env_id,
+                            order_index: 0,
+                            parent_stage: None,
+                            position: "{\"x\":0,\"y\":0}".to_string(),
+                            enabled: true,
+                        }],
+                        dependencies: vec![],
+                        variants: None,
+                        flag_kind: None,
+                    })
+                    .await
+                    .expect("seed feature");
+                Self {
+                    pool,
+                    team_id,
+                    feature_id,
+                    feature_key,
+                    stage_id,
+                    env_name,
+                    other_env_name,
+                }
+            }
+
+            async fn send(
+                &self,
+                mock_logic: MockFeatureLogic,
+                req: test::TestRequest,
+            ) -> (StatusCode, serde_json::Value) {
+                let pool = &self.pool;
+                let (updates_tx, _updates_rx) =
+                    tokio::sync::broadcast::channel::<crate::grpc::pb::FeatureUpdate>(8);
+                let app = test::init_service(
+                    App::new()
+                        .app_data(web::Data::new(pool.clone()))
+                        .app_data(web::Data::new(Box::new(PgActivityLogRepository::new(
+                            pool.clone(),
+                        ))
+                            as Box<dyn ActivityLogRepository>))
+                        .app_data(web::Data::new(Box::new(mock_logic) as Box<dyn FeatureLogic>))
+                        .app_data(web::Data::new(feature_repository(pool.clone())))
+                        .app_data(web::Data::new(environment_logic(
+                            environment_repository(pool.clone()),
+                            Box::new(PgActivityLogRepository::new(pool.clone())),
+                        )))
+                        .app_data(web::Data::new(updates_tx))
+                        .service(web::scope("/api/v1").configure(super::super::configure)),
+                )
+                .await;
+                let req = req.to_request();
+                req.extensions_mut().insert(JwtUser {
+                    id: Uuid::new_v4(),
+                    username: "ji12-requester".to_string(),
+                    is_admin: true,
+                    roles: vec!["Requester".to_string()],
+                    team_id: Some(self.team_id),
+                    token_hash: "hash".to_string(),
+                });
+                let resp = test::call_service(&app, req).await;
+                let status = resp.status();
+                let bytes = test::read_body(resp).await;
+                (status, serde_json::from_slice(&bytes).unwrap_or_default())
+            }
+
+            fn get_uri(&self, key: &str) -> String {
+                format!("/api/v1/teams/{}/features/by-key/{key}", self.team_id)
+            }
+
+            fn post_uri(&self, key: &str, env_name: &str) -> String {
+                format!(
+                    "/api/v1/teams/{}/features/by-key/{key}/environments/{}/request-change",
+                    self.team_id,
+                    env_name.replace(' ', "%20")
+                )
+            }
+
+            /// A mock that expects one request for this fixture's stage.
+            fn expect_stage_request(&self, meta: StageChangeMeta) -> MockFeatureLogic {
+                let stage_id = self.stage_id;
+                let feature = sample_feature(self.feature_id, self.team_id);
+                let mut mock_logic = MockFeatureLogic::new();
+                mock_logic
+                    .expect_request_stage_change()
+                    .withf(move |stage, request, _, m| {
+                        stage.to_string() == stage_id.to_string()
+                            && *request == StageChangeRequestType::DeploymentRequested
+                            && *m == meta
+                    })
+                    .times(1)
+                    .returning(move |_, _, _, _| Ok(feature.clone()));
+                mock_logic
+            }
+
+            fn no_stage_request() -> MockFeatureLogic {
+                let mut mock_logic = MockFeatureLogic::new();
+                mock_logic.expect_request_stage_change().times(0);
+                mock_logic
+            }
+
+            async fn cleanup(self) {
+                for sql in [
+                    "DELETE FROM features WHERE team_id = $1",
+                    "DELETE FROM environments WHERE team_id = $1",
+                    "DELETE FROM teams WHERE id = $1",
+                ] {
+                    sqlx::query(sql)
+                        .bind(self.team_id)
+                        .execute(&self.pool)
+                        .await
+                        .expect("cleanup");
+                }
+            }
+        }
+
+        fn deploy_body() -> serde_json::Value {
+            json!({ "request": "DEPLOYMENT_REQUESTED" })
+        }
+
+        fn assert_not_found(status: StatusCode, body: &serde_json::Value, code: &str) {
+            assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+            assert_eq!(body["code"], code, "{body}");
+            assert!(
+                body["message"].as_str().unwrap_or_default().contains(code),
+                "{body}"
+            );
+        }
+
+        #[actix_web::test]
+        async fn get_by_key_returns_the_feature_with_its_stages() {
+            let fixture = Fixture::new().await;
+            let feature_id = fixture.feature_id;
+            let feature = sample_feature(feature_id, fixture.team_id);
+            let mut mock_logic = MockFeatureLogic::new();
+            mock_logic
+                .expect_get_feature_by_id()
+                .withf(move |id| id.to_string() == feature_id.to_string())
+                .times(1)
+                .returning(move |_| Ok(feature.clone()));
+
+            let (status, body) = fixture
+                .send(
+                    mock_logic,
+                    test::TestRequest::get().uri(&fixture.get_uri(&fixture.feature_key)),
+                )
+                .await;
+
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["id"], feature_id.to_string());
+            assert_eq!(body["stages"][0]["id"], fixture.stage_id.to_string());
+            fixture.cleanup().await;
+        }
+
+        #[actix_web::test]
+        async fn get_by_unknown_key_is_feature_not_found() {
+            let fixture = Fixture::new().await;
+            let (status, body) = fixture
+                .send(
+                    MockFeatureLogic::new(),
+                    test::TestRequest::get().uri(&fixture.get_uri("ji12-missing")),
+                )
+                .await;
+            assert_not_found(status, &body, "feature_not_found");
+            fixture.cleanup().await;
+        }
+
+        #[actix_web::test]
+        async fn key_of_another_team_is_feature_not_found() {
+            let fixture = Fixture::new().await;
+            let other_team = insert_team(&fixture.pool).await;
+            let uri = format!(
+                "/api/v1/teams/{other_team}/features/by-key/{}",
+                fixture.feature_key
+            );
+            let (status, body) = fixture
+                .send(MockFeatureLogic::new(), test::TestRequest::get().uri(&uri))
+                .await;
+            assert_not_found(status, &body, "feature_not_found");
+            sqlx::query("DELETE FROM teams WHERE id = $1")
+                .bind(other_team)
+                .execute(&fixture.pool)
+                .await
+                .expect("delete other team");
+            fixture.cleanup().await;
+        }
+
+        #[actix_web::test]
+        async fn request_change_by_key_reaches_the_stage_logic_with_the_meta() {
+            let fixture = Fixture::new().await;
+            let mock_logic = fixture.expect_stage_request(StageChangeMeta {
+                external_ref: Some("PROJ-7".to_string()),
+                reason: Some("Ready".to_string()),
+            });
+            let (status, body) = fixture
+                .send(
+                    mock_logic,
+                    test::TestRequest::post()
+                        .uri(&fixture.post_uri(&fixture.feature_key, &fixture.env_name))
+                        .set_json(json!({
+                            "request": "DEPLOYMENT_REQUESTED",
+                            "externalRef": " PROJ-7 ",
+                            "reason": "Ready",
+                        })),
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["id"], fixture.feature_id.to_string());
+            fixture.cleanup().await;
+        }
+
+        #[actix_web::test]
+        async fn environment_name_match_ignores_case() {
+            let fixture = Fixture::new().await;
+            let mock_logic = fixture.expect_stage_request(StageChangeMeta::default());
+            let env_name = fixture.env_name.to_uppercase();
+            let (status, body) = fixture
+                .send(
+                    mock_logic,
+                    test::TestRequest::post()
+                        .uri(&fixture.post_uri(&fixture.feature_key, &env_name))
+                        .set_json(deploy_body()),
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            fixture.cleanup().await;
+        }
+
+        #[actix_web::test]
+        async fn environment_name_does_not_match_a_substring() {
+            let fixture = Fixture::new().await;
+            // "Pre Prod" is a prefix of the fixture's "Pre Prod <suffix>".
+            let (status, body) = fixture
+                .send(
+                    Fixture::no_stage_request(),
+                    test::TestRequest::post()
+                        .uri(&fixture.post_uri(&fixture.feature_key, "Pre Prod"))
+                        .set_json(deploy_body()),
+                )
+                .await;
+            assert_not_found(status, &body, "environment_not_found");
+            fixture.cleanup().await;
+        }
+
+        #[actix_web::test]
+        async fn inactive_environment_is_environment_not_found() {
+            let fixture = Fixture::new().await;
+            sqlx::query("UPDATE environments SET active = false WHERE team_id = $1 AND name = $2")
+                .bind(fixture.team_id)
+                .bind(&fixture.env_name)
+                .execute(&fixture.pool)
+                .await
+                .expect("deactivate environment");
+            let (status, body) = fixture
+                .send(
+                    Fixture::no_stage_request(),
+                    test::TestRequest::post()
+                        .uri(&fixture.post_uri(&fixture.feature_key, &fixture.env_name))
+                        .set_json(deploy_body()),
+                )
+                .await;
+            assert_not_found(status, &body, "environment_not_found");
+            fixture.cleanup().await;
+        }
+
+        #[actix_web::test]
+        async fn request_change_by_unknown_key_is_feature_not_found() {
+            let fixture = Fixture::new().await;
+            let (status, body) = fixture
+                .send(
+                    Fixture::no_stage_request(),
+                    test::TestRequest::post()
+                        .uri(&fixture.post_uri("ji12-missing", &fixture.env_name))
+                        .set_json(deploy_body()),
+                )
+                .await;
+            assert_not_found(status, &body, "feature_not_found");
+            fixture.cleanup().await;
+        }
+
+        #[actix_web::test]
+        async fn environment_without_a_stage_is_stage_not_found() {
+            let fixture = Fixture::new().await;
+            let (status, body) = fixture
+                .send(
+                    Fixture::no_stage_request(),
+                    test::TestRequest::post()
+                        .uri(&fixture.post_uri(&fixture.feature_key, &fixture.other_env_name))
+                        .set_json(deploy_body()),
+                )
+                .await;
+            assert_not_found(status, &body, "stage_not_found");
+            fixture.cleanup().await;
         }
     }
 }

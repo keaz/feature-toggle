@@ -17,6 +17,14 @@ pub trait EnvironmentLogic: Send + Sync {
         active: Option<bool>,
     ) -> Result<Vec<Environment>, Error>;
 
+    /// Active environments in a team whose name equals `name` ignoring case
+    /// (no substring matching). Names are not unique, so there can be several.
+    async fn get_active_environments_by_name(
+        &self,
+        team_id: ID,
+        name: String,
+    ) -> Result<Vec<Environment>, Error>;
+
     async fn get_environments_paginated(
         &self,
         team_id: ID,
@@ -110,6 +118,28 @@ impl EnvironmentLogic for EnvironmentLogicImpl {
         let environments = self
             .repository
             .get_environments(team_id, name, active)
+            .await?;
+        Ok(environments
+            .into_iter()
+            .map(|env| Environment {
+                id: ID::from(env.id),
+                name: env.name,
+                active: env.active,
+                team_id: ID::from(env.team_id),
+                environment_type: env.environment_type,
+            })
+            .collect())
+    }
+
+    async fn get_active_environments_by_name(
+        &self,
+        team_id: ID,
+        name: String,
+    ) -> Result<Vec<Environment>, Error> {
+        let team_id = Uuid::try_from(team_id).map_err(|e| Error::InvalidInput(e.to_string()))?;
+        let environments = self
+            .repository
+            .get_active_environments_by_name(team_id, name)
             .await?;
         Ok(environments
             .into_iter()

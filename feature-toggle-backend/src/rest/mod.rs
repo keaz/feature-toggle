@@ -216,6 +216,8 @@ async fn health() -> impl Responder {
         feature::emergency_disable_feature,
         feature::emergency_enable_feature,
         feature::request_stage_change,
+        feature::get_feature_by_key,
+        feature::request_stage_change_by_key,
         feature::pending_approvals,
         feature::active_kill_switches,
         feature::rollout_metrics,

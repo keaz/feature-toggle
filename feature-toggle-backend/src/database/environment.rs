@@ -26,6 +26,14 @@ pub trait EnvironmentRepository: Send + Sync {
         name: Option<String>,
         active: Option<bool>,
     ) -> Result<Vec<Environment>, Error>;
+    /// Active environments in a team whose name equals `name` ignoring case.
+    /// No substring or wildcard matching. Names are not unique, so this can
+    /// return more than one environment.
+    async fn get_active_environments_by_name(
+        &self,
+        team_id: Uuid,
+        name: String,
+    ) -> Result<Vec<Environment>, Error>;
     async fn get_environments_paginated(
         &self,
         team_id: Uuid,
@@ -185,6 +193,24 @@ impl EnvironmentRepository for EnvironmentRepositoryImpl {
 
         let environments = handle_error(None, result)?;
         Ok(environments)
+    }
+
+    async fn get_active_environments_by_name(
+        &self,
+        team_id: Uuid,
+        name: String,
+    ) -> Result<Vec<Environment>, Error> {
+        let result = sqlx::query_as::<_, Environment>(
+            r#"SELECT id, name, active, team_id, environment_type FROM environments
+               WHERE team_id = $1 AND active AND lower(name) = lower($2)
+               ORDER BY name"#,
+        )
+        .bind(team_id)
+        .bind(name)
+        .fetch_all(&self.pool)
+        .await;
+
+        handle_error(None, result)
     }
 
     async fn get_environments_paginated(
