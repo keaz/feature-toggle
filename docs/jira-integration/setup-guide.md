@@ -118,7 +118,7 @@ Set it up in this order.
    - **Jira Data Center**: create a **personal access token** for that user (profile → Personal Access Tokens). Data Center needs no email.
 2. **Give the user these permissions** on the projects involved: **Browse projects**, **Add comments**, **Link issues**.
 3. **In FluxGate**, open **Settings → Jira**, pick the integration, and open **Write-back**:
-   - make sure the integration has a **Jira base URL** (section 1.1; `https` unless you allow `http`, see [section 4](#4-network));
+   - make sure the integration has a **Jira base URL** (section 1.1; `https` unless you allow `http`, see [section 4](#4-network)). The base URL must not contain credentials (`https://user:password@...`), a query (`?...`) or a fragment (`#...`); FluxGate refuses such a URL while write-back is on or being switched on ("Jira base URL must not contain credentials, a query or a fragment");
    - choose the **edition** (Cloud or Data Center), enter the **account email** (Cloud only) and the **token**;
    - switch on **Enable write-back**, and choose **Comments** and **Remote link**;
    - save, then press **Test connection**. FluxGate calls `GET /rest/api/<v>/myself` on your Jira and shows the Jira display name of the user, or the error.
@@ -126,7 +126,7 @@ Set it up in this order.
    API: `PUT /api/v1/jira-integrations/{id}/writeback` with `{"enabled": true, "comments": true, "remoteLink": true, "authKind": "cloud_basic", "accountEmail": "bot@example.com", "credential": "<token>"}` (`authKind` is `cloud_basic` for Cloud and `dc_pat` for Data Center), then `POST /api/v1/jira-integrations/{id}/writeback/test`.
 4. **Link issues to features** (section 1.3). Write-back only writes to linked issues.
 
-> **Changing the Jira base URL host clears the token.** If you change the host (scheme, host or port) of the base URL, FluxGate deletes the stored token and turns write-back off, so a token for one Jira is never sent to another. Enter the token again and switch write-back on again.
+> **Changing the Jira base URL host clears the token.** If you change the host (scheme, host or port) of the base URL, FluxGate deletes the stored token and turns write-back off, so a token for one Jira is never sent to another. Jobs still queued for the old host are marked `dead`, even when write-back was already off. Enter the token again and switch write-back on again.
 
 ### What appears on the issue
 
@@ -156,13 +156,15 @@ The remote link has the title `FluxGate: new-checkout · qa DEPLOYED · prod DEP
 - If Jira answers **401 or 403** (the token is wrong, expired or lacks permission), FluxGate **pauses** write-back for that integration. The Write-back section shows the reason. Jobs that are already queued wait; nothing more is sent.
 - **Resume** (or saving a new token) clears the pause, and the waiting jobs go out. API: `POST /api/v1/jira-integrations/{id}/writeback/resume`.
 - Other failures (timeouts, 5xx, 429 from Jira) are retried with a growing delay and end as `dead` after the last attempt.
-- **Settings → Jira → Outbound tab** (next to Events) lists the jobs: `pending`, `sent` or `dead`, with the last error. Press **Retry** on a `dead` job to send it again. API: `GET /api/v1/jira-integrations/{id}/outbound-jobs?status=dead` and `POST /api/v1/jira-integrations/{id}/outbound-jobs/{jobId}/retry`. Turning write-back off marks the pending jobs `dead` with the note `write-back disabled`.
+- **Settings → Jira → Outbound tab** (next to Events) lists the jobs: `pending`, `sent` or `dead`, with the last error. Press **Retry** on a `dead` job to send it again. API: `GET /api/v1/jira-integrations/{id}/outbound-jobs?status=dead` and `POST /api/v1/jira-integrations/{id}/outbound-jobs/{jobId}/retry`. Turning write-back off marks the pending jobs `dead` with the note `write-back disabled`; disabling the whole integration (the **Enabled** switch) does the same with `integration disabled`. **Retry** answers 409 `write-back is off` while the integration or its write-back is off.
 
 ### Security
 
 - The token is stored **encrypted** in the database. The backend needs the environment variable `FLUXGATE_ENCRYPTION_KEY` (base64 of 32 random bytes, for example `openssl rand -base64 32`); without it FluxGate refuses to save a token (`encryption_key_missing`). Keep the key outside the repository and the config file, and back it up: a lost key means the token must be entered again.
 - FluxGate **never shows the token again**, not in the UI, the API or the activity log. Replace it by entering a new one.
 - Use a dedicated user with only the three permissions above, so a leaked token can do little.
+- **Who controls the target host.** A team admin sets the Jira base URL, and the backend then sends HTTPS requests to that host with the token. So a team admin can point write-back at **any https host the backend can reach**, including internal services (server-side request forgery). Give team admin rights only to trusted people, and if the backend runs inside a private network, restrict its outbound traffic (egress firewall or proxy) to your Jira hosts.
+- On **Data Center**, comments are plain text that Jira renders as wiki markup. FluxGate escapes the markup characters (`[ ] { } | ! * _ ^ ~ + - ? #`, a leading `h1.` or `bq.`, and `\`) in every comment, so a reason or feature key cannot add links, images or macros. Cloud comments are sent as ADF and need no escaping.
 
 ## 2. Jira side
 
@@ -226,7 +228,7 @@ FluxGate trusts whatever the rule sends for Jira-approved environments. Protect 
 
 A Jira webhook can replace the Automation rule. Jira signs the request body with a secret that you share with FluxGate, and FluxGate accepts a request when the signature is valid.
 
-**Which versions.** Jira **Cloud** signs webhook bodies (Secret field in the webhook form), and this is confirmed. **Recent Data Center versions** that offer a webhook **Secret** field sign the same way (the Managing webhooks page of Atlassian's Data Center documentation describes it for 11.3; Atlassian does not say which version added it). If your Data Center webhook form has no Secret field, use Automation (2.2).
+**Which versions.** Jira **Cloud** signs webhook bodies (Secret field in the webhook form), and this is confirmed. **Recent Data Center versions** that offer a webhook **Secret** field sign the same way (Atlassian's current Data Center documentation, the Managing webhooks page of version 11.3, describes it; that is simply the version the page belongs to, not the first version with the field, which Atlassian does not name). If your Data Center webhook form has no Secret field, use Automation (2.2).
 
 1. **Create the FluxGate native secret.** In FluxGate: **Settings → Jira**, the integration, **Native webhook secret → Generate**. Copy the secret at once; FluxGate shows it once and stores it encrypted (it needs `FLUXGATE_ENCRYPTION_KEY`). **Rotate** gives a new one and the old one stops working. **Remove** turns native webhooks off for the integration. API: `POST /api/v1/jira-integrations/{id}/native-webhook-secret` (returns `{"secret": "..."}`) and `DELETE` on the same path. This secret is different from the integration secret of section 1.1.
 2. **Create the webhook in Jira.**

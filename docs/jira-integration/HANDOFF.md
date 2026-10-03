@@ -25,10 +25,11 @@ Read this after [`README.md`](README.md) and [`design.md`](design.md). It record
 
 Open points after phase 2:
 - No real Jira site was tested (Cloud or Data Center). Only the fake Jira, the mock-Jira sender tests and the Cloud webhook fixture have run. Do one pass against a test site before relying on it.
-- Data Center native webhook signing: Atlassian docs describe `X-Hub-Signature` for DC 11.3 but name no first version (JI-45). The guide words it as "recent versions with a Secret field; else Automation".
+- Data Center native webhook signing: Atlassian's current DC docs (the 11.3 page) describe `X-Hub-Signature` but name no first version (JI-45). The guide words it as "recent versions with a Secret field; else Automation".
 - `test:docker` was not run (no Docker on the dev machine). The compose file now mounts `api-tests/backend-config.toml` and sets `FLUXGATE_ENCRYPTION_KEY`, `extra_hosts` and `FAKE_JIRA_HOST`; run it once where Docker exists.
 - The rate limit runs before the secret check, so anyone who knows an integration id can use up its budget (guide section 4 says to keep the URL private and limit per IP at the proxy).
-- Known flaky tests, not fixed: `feature_test::test_pending_approval_listing_maps_feature_metadata`; `jira_writeback_capture_test::list_window_is_ascending_and_bounded` (depends on shared test DB state).
+- Known flaky test, not fixed: `feature_test::test_pending_approval_listing_maps_feature_metadata`. (`jira_writeback_capture_test::list_window_is_ascending_and_bounded` was made deterministic in the final review fixes.)
+- A team admin can point write-back at any https host the backend can reach (SSRF by design of a configurable base URL). The guide says to keep team admin rights to trusted people and to restrict the backend's egress.
 
 | Phase 2 task | Status | Commit |
 |---|---|---|
@@ -47,6 +48,16 @@ Facts from JI-41 (backend `3de0dec`): `logic::jira_client::{JiraClient, client_f
 Facts from JI-42 (backend `0bf6d7b`): enqueue through `jira_outbound_job_repository_tx(pool).enqueue_tx(conn, NewOutboundJob {..})`; `comment` payload `{lines}`, `remote_link_delete` payload `{featureId}`, `remote_link` has `feature_id` and no payload; the sender (`scheduler/jira_writeback_sender.rs`, 5 s) takes `JiraConfig` as well as the UI base URL; turning write-back off (or a base URL host change) now sets pending jobs to `dead`. Details in the JI-42 handoff log.
 
 Facts from JI-43 (backend `84b2611`): write-back now posts for real when an integration has it on. `NewJiraEvent` has `id`; `JiraEventRepository::insert_with_jobs`. `scheduler/jira_writeback_capture.rs` (`JiraWritebackCapture`, 5 s, table `jira_writeback_cursor`) turns `logic::jira_capture::plan_jobs` output into jobs. Details in the JI-43 handoff log.
+
+Final review fixes (after JI-50; backend and UI commits `docs(jira): final review fixes for phase 2` and the ones before it; report in `.superpowers/sdd/README/final-fix-report.md`, not tracked):
+- Sender: `Retry-After` is capped at 6 h (the last scheduled delay); `logic::jira_writeback::next_attempt_at(now, delay, attempts_done)` adds without the `DateTime + TimeDelta` panic. A huge header used to panic the sender task.
+- `JiraClient` reads at most 64 KiB of a reply body (`read_capped`), then scrubs and cuts the excerpt as before.
+- Base URL shape: `jira_client::has_disallowed_base_url_parts` / `BASE_URL_SHAPE_MESSAGE` ("Jira base URL must not contain credentials, a query or a fragment"). Refused by `client_for`, by enabling write-back, and by a PATCH while write-back is on or a token is stored.
+- Stale queues: PATCH `enabled` true→false cancels pending jobs (`integration disabled`); any base URL host change cancels them (`write-back disabled` if write-back was on, else `Jira host changed`). `POST .../outbound-jobs/{jobId}/retry` answers 409 `write-back is off` while the integration or write-back is off.
+- Data Center comments: `jira_writeback::escape_wiki_markup` runs on every line at send time (Cloud ADF untouched). Payload lines stay raw.
+- 429 error code is now `rate_limited` (was `rate limited`); contract baseline updated.
+- Migration `20261004080000_jira_outbound_jobs_indexes.sql`: `jira_outbound_jobs (feature_id)` and pending-only `(integration_id, issue_key, created_at)`. Later migrations must sort after it.
+- Tests: sender tests send only their fixture's jobs (`Fixture::tick` / `claim_mine` put other due jobs back); capture tests assert per integration, and `list_window` uses run-unique activity types. UI re-keys the write-back form on `updatedAt` and notes "Tests the saved settings." next to Test connection. The JI-50 api-test waits for test 3's event comment before test 4's baseline.
 
 Facts found while planning phase 2 (backend `b276078`):
 - Approval decisions (vote, auto-approval, capped reconciliation), cancel and approval-gated requests write no activity row today; the `stage_approved` constant is never written (JI-40 fixes this).
