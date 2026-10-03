@@ -15,14 +15,14 @@ Out of scope: pushing events to Jira (webhooks), approving from Jira, kill switc
 - `RequestScopeResolver` (`logic/authorization.rs`) resolves the team of `/teams/{id}`, `/features/{id}`, `/stages/{id}` and `/approval-requests/{id}` paths, and `JwtGuard` rejects a system client outside its team.
 - Stage change: `POST /api/v1/stages/{id}/request-change` with `StageChangeRequestBody { request, freezeOverrideReason }` (`rest/feature/types.rs`). The handler `request_stage_change` (`rest/feature.rs`) checks roles (`RoleAuthorizer::authorize_stage_change_request`), freeze windows, then calls `DeploymentLogic::request_stage_change(stage_id, request, user_id)` (`logic/feature.rs`). That method creates the approval request through `ApprovalLogic::maybe_create_stage_change_request` (`logic/approval.rs`) when a policy matches, updates the stage, sends notifications and writes an activity row (`stage_change_requested`, `STAGE_DEPLOYED`, ...) with metadata `feature_id`, `feature_key`, `stage_id`, `status`, `team_id`, `environment_name`, `environment_id`.
 - State machine (`validation.rs`): `NOT_DEPLOYED → DEPLOYMENT_REQUESTED → DEPLOYMENT_APPROVED → DEPLOYED → ROLLBACK_REQUESTED → ROLLBACK_APPROVED → ROLLBACKED`. Request and execute are two calls.
-- Votes: `POST /approval-requests/{id}/approve|reject`. `ensure_user_can_vote` (`logic/approval.rs`) blocks self-approval and checks the `Approver` role **from the database** (`user_roles`), not from the JWT. There is no explicit rule against system clients.
+- Votes: `POST /approval-requests/{id}/approve|reject`. `ensure_user_can_vote` (`logic/approval.rs`) blocks self-approval and checks the `Approver` role **from the database** (`user_roles`), not from the JWT. At planning time there was no rule against system clients, and their shadow users hold the `Approver` role (fixed by JI-01).
 - Features have `reference_url` and `tags`. No link to an issue tracker. `get_feature_by_key(team_id, key)` exists in the repository.
 
 ## 3. Changes
 
 ### 3.1 System clients never vote (JI-01)
 
-Deny `approve` and `reject` for system-client actors with 403 `system_client_vote_not_permitted`, at the REST layer and again in `ensure_user_can_vote` (defense in depth, also covers any future caller). `cancel` keeps today's rules, so Jira can withdraw a request it created.
+Deny `approve` and `reject` for system-client actors with 403 `system_client_vote_not_permitted`, at the REST layer and again in `ensure_user_can_vote` (defense in depth, also covers any future caller). `cancel` keeps today's rules, so Jira can withdraw a request it created. System clients are also never eligible approvers (`approver_qualifies_sql`), so routing, notifications and the AI-11 cap ignore them (decision J9). Done in `e1bebfe`; the REST-layer check lives in `JwtGuard`.
 
 ### 3.2 External links (JI-10)
 

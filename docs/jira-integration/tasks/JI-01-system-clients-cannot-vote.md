@@ -3,11 +3,11 @@
 | Field | Value |
 |---|---|
 | Type | Hardening |
-| Status | Open |
+| Status | Done in e1bebfe |
 | Repo | backend (`feature-toggle/`) |
 | Crate | `feature-toggle-backend` |
 | Depends on | — |
-| Behavior change | A system-client token gets 403 on `POST /approval-requests/{id}/approve` and `/reject`. Users are not affected. `cancel` is unchanged. |
+| Behavior change | A system-client token gets 403 on `POST /approval-requests/{id}/approve` and `/reject`. System clients are no longer eligible approvers (user decision 2026-10-03). Users are not affected. `cancel` is unchanged. |
 | Design | [design.md §3.1](../design.md#31-system-clients-never-vote-ji-01) |
 
 ## Goal
@@ -50,4 +50,34 @@ Today a system client probably fails the vote anyway, because `ensure_user_can_v
 
 ## Handoff log
 
-(empty)
+### 2026-10-03: done in `e1bebfe`
+
+**Finding.** The task assumed the shadow user has no roles. It has: `create_system_client` (`database/system_client.rs`) inserts `user_roles` rows for `Approver` and `Requester`. Commit `7c54500` also made active system clients **eligible approvers** of their team in `approver_qualifies_sql`. So a system-client token could vote whenever a policy routed by role. Blocking votes alone would have left bots on eligible lists and in the AI-11 "can still vote" cap. The user decided (2026-10-03): remove system clients from eligibility too, and keep the role rows.
+
+**What changed**
+
+- `middleware/jwt_guard.rs`: `is_approval_vote_route` (POST `/api/v1/approval-requests/{any}/approve|reject`, on the routed path) is checked in the system-client branch **before** the scope check. Answer: 403 `{"error":"forbidden","code":"system_client_vote_not_permitted"}`. Not audited (scope violations are not audited either). This is the REST-layer check; the handlers in `rest/approval.rs` are unchanged.
+- `logic/approval.rs`: `ensure_user_can_vote` first calls `ApprovalRepository::is_system_client(approver_id)` and returns `Error::SystemClientVoteNotPermitted`, before the self-approval, admin override and role checks.
+- `database/approval.rs`: new `is_system_client` (runtime query on `system_clients`). `approver_qualifies_sql` drops the system-client team branch and adds `AND NOT EXISTS (SELECT 1 FROM system_clients sc WHERE sc.id = u.id)`. Routing, `count_reachable_approvals` and `is_eligible_voter` all use it.
+- `lib.rs`: `Error::SystemClientVoteNotPermitted`. `rest/error.rs`: constants `SYSTEM_CLIENT_VOTE_CODE` / `SYSTEM_CLIENT_VOTE_MESSAGE`, `RestError::system_client_vote_not_permitted()` (a `Forbidden` with that code), and the `From<crate::Error>` arm.
+- Tests: guard route matcher and an end-to-end guard test (approve, reject, and percent-encoded `%61pprove`); logic test (admin override on, bot named on the policy: still denied, no vote, no role lookups); error mapping test; `tests/database/system_client_approval_test.rs` rewritten to "a system client is never an eligible approver; a human approver of the team still counts"; five existing mock tests got `expect_is_system_client().returning(|_| Ok(false))`.
+- `api-tests/src/tests/system-client.test.ts`: the system client's approve **and** reject now expect 403 `system_client_vote_not_permitted` (was `self_approval_not_allowed`).
+
+**Behavior changes**
+
+- A system client gets 403 on approve and reject.
+- A stage change request created by a system client, in a team whose policy routes by role, now needs a human approver in the team. Without one, the request fails the "no eligible approvers" check, as for any user.
+- No contract change (no DTO or OpenAPI change); `check-contract-compat.sh` passes.
+
+**Verified**
+
+- `cargo fmt`; `cargo clippy --all-targets`: no warnings in the changed files.
+- `cargo test -p feature-toggle-backend` on `feture_toggle_test`: all pass (753 lib, 285 integration, 0 failed).
+- `./scripts/check-contract-compat.sh`: pass.
+- Docker is not installed on this machine, so `test:docker` could not run. Instead: backend built and run on `127.0.0.1:18180` against `feture_toggle_test` (`env -u TYPESAFE_API_KEY`), then `API_BASE_URL=http://127.0.0.1:18180/api/v1 pnpm --dir api-tests exec jest --runInBand system-client approval`: 4 suites, 62 tests, all pass.
+- The new tests were written before the implementation, but the red run was a compile failure, not a failing assertion. Ten existing mock tests then failed until their mocks were updated.
+
+**For later tasks**
+
+- JI-30's end-to-end test should assert `code == "system_client_vote_not_permitted"` (the `error` field is `forbidden`).
+- `cancel` is still allowed for system clients with `flag:write`, so Jira can withdraw a request it made.

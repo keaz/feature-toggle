@@ -56,12 +56,13 @@ Source investigation: [`../investigations/2026-10-sso-jira-sdks.md`](../investig
 | J6 | Jira learns the result by reading FluxGate (`GET` by key). Push to Jira (webhooks) is a later phase. |
 | J7 | Kill switch from Jira is out of scope. System clients stay denied on emergency endpoints. |
 | J8 | Security prerequisites P1-P8 from the investigation are already fixed (verified 2026-10-03 against `6c9b332`). |
+| J9 | System clients are never eligible approvers; their shadow users keep the `Approver` role row (2026-10-03, JI-01). |
 
 ## Tasks
 
 | Done | ID | Title | Repo | Behavior change | Depends on |
 |---|---|---|---|---|---|
-| [ ] | [JI-01](tasks/JI-01-system-clients-cannot-vote.md) | System clients cannot approve or reject approval requests | backend | Hardening (403 for M2M votes) | — |
+| [x] | [JI-01](tasks/JI-01-system-clients-cannot-vote.md) | System clients cannot approve or reject approval requests, and are not eligible approvers | backend | **Yes** (403 for M2M votes; bots not eligible; user decision 2026-10-03) | — |
 | [ ] | [JI-10](tasks/JI-10-feature-external-links-backend.md) | `feature_external_links` table, CRUD API, `externalKey` list filter | backend | Additive | — |
 | [ ] | [JI-11](tasks/JI-11-stage-change-external-ref-backend.md) | `externalRef` + `reason` on stage change, approval requests and activity | backend | Additive | — |
 | [ ] | [JI-12](tasks/JI-12-by-key-endpoints-backend.md) | By-key read and request-change endpoints | backend | Additive | JI-11 |
