@@ -828,7 +828,7 @@ mod tests {
     #[actix_web::test]
     async fn bad_signature_is_401_and_does_nothing() {
         let mut s = setup();
-        let native = with_native_secret(&mut s);
+        with_native_secret(&mut s);
         let other = crate::logic::jira_integration::generate_secret();
         let wrong_secret = signed(&s, &other, CLOUD_FIXTURE);
         let out = send(s, wrong_secret).await;
@@ -851,13 +851,16 @@ mod tests {
         assert_eq!(out.status, StatusCode::UNAUTHORIZED);
         assert_eq!(out.body["message"], UNAUTHORIZED_MESSAGE);
         assert!(out.inserted.lock().unwrap().is_empty());
-        let _ = native;
     }
 
     #[actix_web::test]
     async fn signature_without_a_stored_native_secret_is_401() {
         let s = setup();
-        let request = signed(&s, "any-secret-value", CLOUD_FIXTURE);
+        let request = signed(
+            &s,
+            &crate::logic::jira_integration::generate_secret(),
+            CLOUD_FIXTURE,
+        );
         let out = send(s, request).await;
         assert_eq!(out.status, StatusCode::UNAUTHORIZED);
         assert_eq!(out.body["message"], UNAUTHORIZED_MESSAGE);
@@ -867,7 +870,7 @@ mod tests {
     #[actix_web::test]
     async fn bearer_secret_still_works_when_a_native_secret_exists() {
         let mut s = setup();
-        let _native = with_native_secret(&mut s);
+        with_native_secret(&mut s);
         let request = bearer(post(&s), SECRET).set_json(status_change("Done", json!("QA")));
         let out = send(s, request).await;
         assert_eq!(out.status, StatusCode::OK, "{}", out.body);
@@ -879,7 +882,11 @@ mod tests {
         crate::rest::jira_integration::tests::ensure_encryption_key();
         let mut s = setup();
         s.integration.native_webhook_secret_enc = Some("not-a-sealed-value".to_string());
-        let request = signed(&s, "any-secret-value", CLOUD_FIXTURE);
+        let request = signed(
+            &s,
+            &crate::logic::jira_integration::generate_secret(),
+            CLOUD_FIXTURE,
+        );
         let out = send(s, request).await;
         assert_eq!(out.status, StatusCode::UNAUTHORIZED);
         assert_eq!(out.body["message"], UNAUTHORIZED_MESSAGE);
@@ -1170,7 +1177,7 @@ mod tests {
             .parse()
             .unwrap();
         assert!(retry_after >= 1);
-        assert_eq!(out.body["error"], "rate limited");
+        assert_eq!(out.body["error"], "rate_limited");
         assert_eq!(out.inserted.lock().unwrap().len(), 2);
     }
 

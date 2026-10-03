@@ -267,7 +267,7 @@ impl RestError {
             Self::SsoRequired { .. } => "sso_required",
             Self::InvalidSsoCode { .. } => "invalid_sso_code",
             Self::Forbidden { .. } => "forbidden",
-            Self::TooManyRequests { .. } => "rate limited",
+            Self::TooManyRequests { .. } => "rate_limited",
             Self::Internal { .. } => "internal",
         }
     }

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::database::entity::OutboundJobRow;
+use crate::database::entity::{JiraIntegrationRow, OutboundJobRow};
 use crate::database::jira_integration::JiraIntegrationRepository;
 use crate::database::jira_outbound_job::JiraOutboundJobRepository;
 use crate::rest::error::RestError;
@@ -70,13 +70,11 @@ fn parse_uuid(value: &str, what: &str) -> Result<Uuid, RestError> {
 async fn ensure_integration(
     integrations: &dyn JiraIntegrationRepository,
     id: Uuid,
-) -> Result<(), RestError> {
-    if integrations.get(id).await?.is_none() {
-        return Err(RestError::not_found(format!(
-            "Jira integration {id} not found"
-        )));
-    }
-    Ok(())
+) -> Result<JiraIntegrationRow, RestError> {
+    integrations
+        .get(id)
+        .await?
+        .ok_or_else(|| RestError::not_found(format!("Jira integration {id} not found")))
 }
 
 #[utoipa::path(
@@ -137,7 +135,7 @@ pub(crate) async fn list_jira_outbound_jobs(
         (status = 401, description = "Unauthorized", body = crate::rest::error::ErrorResponse),
         (status = 403, description = "Forbidden", body = crate::rest::error::ErrorResponse),
         (status = 404, description = "Integration not found", body = crate::rest::error::ErrorResponse),
-        (status = 409, description = "The job is not dead (or does not exist), or a pending job already covers it", body = crate::rest::error::ErrorResponse)
+        (status = 409, description = "The job is not dead (or does not exist), a pending job already covers it, or write-back is off (integration disabled or write-back disabled)", body = crate::rest::error::ErrorResponse)
     ),
     tag = "Jira"
 )]
@@ -150,7 +148,11 @@ pub(crate) async fn retry_jira_outbound_job(
     let (id, job_id) = path.into_inner();
     let id = parse_uuid(&id, "integration id")?;
     let job_id = parse_uuid(&job_id, "job id")?;
-    ensure_integration(integrations.as_ref().as_ref(), id).await?;
+    let integration = ensure_integration(integrations.as_ref().as_ref(), id).await?;
+    if !integration.enabled || !integration.writeback_enabled {
+        // A revived job would be cancelled again (or wait forever): say so instead.
+        return Err(RestError::conflict("write-back is off"));
+    }
     let retried = jobs.retry_dead(id, job_id).await.map_err(|err| match err {
         // The partial unique index: a newer pending remote link refresh exists.
         crate::Error::RecordAlreadyExists(_) => {
@@ -227,6 +229,11 @@ mod tests {
             .await
             .expect("create integration");
             tx.commit().await.expect("commit");
+            sqlx::query("UPDATE jira_integrations SET writeback_enabled = TRUE WHERE id = $1")
+                .bind(created.integration.id)
+                .execute(&pool)
+                .await
+                .expect("write-back on");
             Self {
                 pool,
                 team_id,
@@ -387,6 +394,42 @@ mod tests {
             )
             .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        fx.cleanup().await;
+    }
+
+    #[actix_web::test]
+    #[serial]
+    async fn retry_is_409_while_the_integration_or_write_back_is_off() {
+        let fx = Fixture::new().await;
+        let id = fx.enqueue(1).await;
+        jira_outbound_job_repository(fx.pool.clone())
+            .mark_dead(id, 6, "500: boom".to_string())
+            .await
+            .unwrap();
+        let uri = format!(
+            "/jira-integrations/{}/outbound-jobs/{id}/retry",
+            fx.integration_id
+        );
+        for (enabled, writeback) in [(true, false), (false, true)] {
+            sqlx::query(
+                "UPDATE jira_integrations SET enabled = $2, writeback_enabled = $3 WHERE id = $1",
+            )
+            .bind(fx.integration_id)
+            .bind(enabled)
+            .bind(writeback)
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+            let (status, body) = fx.call("POST", &uri).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{body}");
+            assert_eq!(body["message"], "write-back is off");
+        }
+        let (rows, _) = jira_outbound_job_repository(fx.pool.clone())
+            .list(fx.integration_id, None, 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(rows[0].status, "dead", "the job was not revived");
 
         fx.cleanup().await;
     }

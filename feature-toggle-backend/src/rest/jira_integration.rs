@@ -2109,6 +2109,102 @@ pub(crate) mod tests {
 
     #[actix_web::test]
     #[serial]
+    async fn base_url_with_credentials_query_or_fragment_is_400_for_writeback() {
+        ensure_encryption_key();
+        let fixture = Fixture::new().await;
+        let id = enabled_integration(&fixture, "https://jira.example.com", &test_token()).await;
+        let uri = format!("/jira-integrations/{id}");
+        let message = "Jira base URL must not contain credentials, a query or a fragment";
+        for url in [
+            "https://user:pw@jira.example.com",
+            "https://jira.example.com/?x=1",
+            "https://jira.example.com/#frag",
+        ] {
+            let (status, body) = fixture
+                .call("PATCH", &uri, Some(serde_json::json!({"jiraBaseUrl": url})))
+                .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{url}: {body}");
+            assert_eq!(body["message"], message, "{url}");
+        }
+
+        // Write-back off and no credential: the URL is stored, but enabling refuses it.
+        let created = fixture.create("Jira 2").await;
+        let other = created["integration"]["id"].as_str().unwrap().to_string();
+        let (status, body) = fixture
+            .call(
+                "PATCH",
+                &format!("/jira-integrations/{other}"),
+                Some(serde_json::json!({"jiraBaseUrl": "https://jira.example.com/?x=1"})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, body) = fixture
+            .call(
+                "PUT",
+                &format!("/jira-integrations/{other}/writeback"),
+                Some(writeback_body(Some(&test_token()))),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["message"], message);
+        fixture.cleanup(&[]).await;
+    }
+
+    #[actix_web::test]
+    #[serial]
+    async fn disabling_the_integration_cancels_pending_jobs() {
+        ensure_encryption_key();
+        let fixture = Fixture::new().await;
+        let id = enabled_integration(&fixture, "https://jira.example.com", &test_token()).await;
+        let pending = insert_job(&fixture, &id, "pending").await;
+        let sent = insert_job(&fixture, &id, "sent").await;
+        let uri = format!("/jira-integrations/{id}");
+
+        // A PATCH that keeps the integration enabled keeps the queue.
+        let (status, body) = fixture
+            .call("PATCH", &uri, Some(serde_json::json!({"enabled": true})))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(job_state(&fixture, pending).await.0, "pending");
+
+        let (status, body) = fixture
+            .call("PATCH", &uri, Some(serde_json::json!({"enabled": false})))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            job_state(&fixture, pending).await,
+            ("dead".to_string(), Some("integration disabled".to_string()))
+        );
+        assert_eq!(job_state(&fixture, sent).await.0, "sent");
+        fixture.cleanup(&[]).await;
+    }
+
+    #[actix_web::test]
+    #[serial]
+    async fn changing_jira_host_while_writeback_is_off_cancels_pending_jobs() {
+        ensure_encryption_key();
+        let fixture = Fixture::new().await;
+        let created = fixture.create("Jira").await;
+        let id = created["integration"]["id"].as_str().unwrap().to_string();
+        let pending = insert_job(&fixture, &id, "pending").await;
+
+        let (status, body) = fixture
+            .call(
+                "PATCH",
+                &format!("/jira-integrations/{id}"),
+                Some(serde_json::json!({"jiraBaseUrl": "https://other.example.com"})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            job_state(&fixture, pending).await,
+            ("dead".to_string(), Some("Jira host changed".to_string()))
+        );
+        fixture.cleanup(&[]).await;
+    }
+
+    #[actix_web::test]
+    #[serial]
     async fn put_does_not_clobber_a_concurrent_pause() {
         ensure_encryption_key();
         let fixture = Fixture::new().await;

@@ -16,7 +16,9 @@ use crate::database::jira_integration::{
 use crate::database::jira_outbound_job::JiraOutboundJobRepositoryTx;
 use crate::logic::ActorContext;
 use crate::logic::external_link::validate_url;
-use crate::logic::jira_client::JiraEdition;
+use crate::logic::jira_client::{
+    BASE_URL_SHAPE_MESSAGE, JiraEdition, has_disallowed_base_url_parts,
+};
 use crate::logic::jira_integration::{
     JiraStatusRuleInput, generate_secret, hash_secret, validate_environment_aliases,
     validate_environment_ids, validate_field_name, validate_integration_name, validate_rules,
@@ -30,6 +32,10 @@ use crate::utils::activity_logger::activity_types::{
 const ENTITY_TYPE: &str = "jira_integration";
 /// `last_error` of jobs cancelled because write-back went off.
 const WRITEBACK_DISABLED: &str = "write-back disabled";
+/// `last_error` of jobs cancelled because the integration was disabled.
+const INTEGRATION_DISABLED: &str = "integration disabled";
+/// `last_error` of jobs cancelled by a host change while write-back was already off.
+const HOST_CHANGED: &str = "Jira host changed";
 
 /// A new integration as sent by a client. Environment ids are strings, checked
 /// against the team.
@@ -218,11 +224,16 @@ where
         Some(new_url) => {
             if current.writeback_enabled {
                 validate_writeback_base_url(new_url.as_deref(), jira_config)?;
+            } else if current.jira_credential_enc.is_some() {
+                // Write-back is configured (a stored token) but off: the URL shape
+                // still matters, the scheme is checked when it is switched on.
+                validate_base_url_shape(new_url.as_deref())?;
             }
             origin_of(new_url.as_deref()) != origin_of(current.jira_base_url.as_deref())
         }
         None => false,
     };
+    let disabling = current.enabled && update.enabled == Some(false);
     let mut updated = repo
         .update_tx(conn, id, update)
         .await?
@@ -248,10 +259,24 @@ where
         changed_fields.push("jira_credential");
         if current.writeback_enabled {
             changed_fields.push("writeback_enabled");
-            outbound_repo
-                .cancel_pending_tx(conn, id, WRITEBACK_DISABLED)
-                .await?;
         }
+    }
+    if host_changed {
+        // Jobs queued for the old host must never go to the new one, whether or not
+        // write-back is on now.
+        let reason = if current.writeback_enabled {
+            WRITEBACK_DISABLED
+        } else {
+            HOST_CHANGED
+        };
+        outbound_repo.cancel_pending_tx(conn, id, reason).await?;
+    }
+    if disabling {
+        // A disabled integration sends nothing; its queue must not go out later when
+        // it is enabled again.
+        outbound_repo
+            .cancel_pending_tx(conn, id, INTEGRATION_DISABLED)
+            .await?;
     }
     let mut metadata = config_metadata(&updated);
     metadata["changed_fields"] = serde_json::json!(changed_fields);
@@ -317,11 +342,23 @@ fn origin_of(base_url: Option<&str>) -> Option<String> {
     Some(url.origin().ascii_serialization())
 }
 
+/// Refuses userinfo, a query or a fragment in a base URL. No URL, or one that does
+/// not parse, is left to the other checks.
+fn validate_base_url_shape(base_url: Option<&str>) -> Result<(), Error> {
+    match base_url.and_then(|url| reqwest::Url::parse(url).ok()) {
+        Some(url) if has_disallowed_base_url_parts(&url) => Err(invalid(BASE_URL_SHAPE_MESSAGE)),
+        _ => Ok(()),
+    }
+}
+
 fn validate_writeback_base_url(base_url: Option<&str>, config: &JiraConfig) -> Result<(), Error> {
     let base_url =
         base_url.ok_or_else(|| invalid("jira base URL is required while write-back is enabled"))?;
     let parsed =
         reqwest::Url::parse(base_url).map_err(|_| invalid("jira base URL must be a valid URL"))?;
+    if has_disallowed_base_url_parts(&parsed) {
+        return Err(invalid(BASE_URL_SHAPE_MESSAGE));
+    }
     match parsed.scheme() {
         "https" => Ok(()),
         "http" if config.allow_insecure_http => Ok(()),
