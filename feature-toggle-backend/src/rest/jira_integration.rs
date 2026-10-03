@@ -1417,6 +1417,7 @@ mod tests {
         let allow = JiraConfig {
             allow_insecure_http: true,
             ui_base_url: None,
+            ..JiraConfig::default()
         };
         let (status, response) = fixture
             .call_with(allow, None, "PUT", &uri, Some(body))
@@ -1552,6 +1553,7 @@ mod tests {
         let insecure = || JiraConfig {
             allow_insecure_http: true,
             ui_base_url: None,
+            ..JiraConfig::default()
         };
 
         // Not configured yet.
@@ -1752,6 +1754,7 @@ mod tests {
         let allow = JiraConfig {
             allow_insecure_http: true,
             ui_base_url: None,
+            ..JiraConfig::default()
         };
         let (status, body) = fixture
             .call_with(

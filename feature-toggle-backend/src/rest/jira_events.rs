@@ -26,6 +26,7 @@ use crate::logic::jira_events::{JiraActor, delivery_hash, field_values, parse_ev
 use crate::logic::jira_integration::hash_secret;
 use crate::logic::jira_rules::{RuleEngine, RuleResult};
 use crate::rest::error::RestError;
+use crate::rest::jira_inbound_limit::{Admission, JiraInboundLimiter};
 use crate::rest::pagination::{PageMeta, PaginationQuery, normalize_pagination};
 
 /// Largest accepted event body.
@@ -149,7 +150,8 @@ fn secret_matches(secret: &str, stored_hash: &str) -> bool {
         (status = 200, description = "Event processed (also when no rule matched, the event is not a status change, or it repeats a recent delivery)", body = JiraEventResponse),
         (status = 400, description = "Body is not JSON or names no issue", body = crate::rest::error::ErrorResponse),
         (status = 401, description = "Unknown or disabled integration, or wrong secret", body = crate::rest::error::ErrorResponse),
-        (status = 413, description = "Body larger than 1 MiB")
+        (status = 413, description = "Body larger than 1 MiB"),
+        (status = 429, description = "Rate limited; nothing is stored. `Retry-After` gives the seconds to wait", body = crate::rest::error::ErrorResponse)
     ),
     tag = "Jira"
 )]
@@ -164,15 +166,32 @@ pub(crate) async fn receive_jira_event(
     links: web::Data<Box<dyn ExternalLinkRepository>>,
     features: web::Data<Box<dyn FeatureRepository>>,
     environments: web::Data<Box<dyn EnvironmentRepository>>,
+    limiter: web::Data<JiraInboundLimiter>,
 ) -> Result<HttpResponse, RestError> {
     let unauthorized = || RestError::unauthorized(UNAUTHORIZED_MESSAGE);
-    let integration_id = Uuid::parse_str(&integration_id).map_err(|_| unauthorized())?;
-    let secret = presented_secret(&req).ok_or_else(unauthorized)?;
-    let integration = integrations
+    let limited = |admission: Admission| match admission {
+        Admission::Allowed => Ok(()),
+        Admission::Limited { retry_after_secs } => {
+            Err(RestError::too_many_requests(retry_after_secs))
+        }
+    };
+    // Rate limit first: before the secret check and the body parse. A bad
+    // id and an id of no enabled integration share one bucket, so the
+    // limiter never grows with random ids.
+    let Ok(integration_id) = Uuid::parse_str(&integration_id) else {
+        limited(limiter.check_unknown())?;
+        return Err(unauthorized());
+    };
+    let Some(integration) = integrations
         .get(integration_id)
         .await?
         .filter(|integration| integration.enabled)
-        .ok_or_else(unauthorized)?;
+    else {
+        limited(limiter.check_unknown())?;
+        return Err(unauthorized());
+    };
+    limited(limiter.check_known(integration_id))?;
+    let secret = presented_secret(&req).ok_or_else(unauthorized)?;
     if !secret_matches(&secret, &integration.secret_hash) {
         return Err(unauthorized());
     }
@@ -384,6 +403,8 @@ mod tests {
         stored_delivery: Option<JiraEventRow>,
         /// `None`: `get` finds nothing.
         known: bool,
+        /// Burst of the limiter registered for the test app.
+        burst: u32,
     }
 
     fn setup() -> Setup {
@@ -444,6 +465,7 @@ mod tests {
             ],
             stored_delivery: None,
             known: true,
+            burst: 50,
         }
     }
 
@@ -454,12 +476,19 @@ mod tests {
     struct Outcome {
         status: StatusCode,
         body: serde_json::Value,
+        /// Status and `Retry-After` of every request sent, in order.
+        responses: Vec<(StatusCode, Option<String>)>,
         applied: Applied,
         inserted: Inserted,
         with_jobs: WithJobs,
     }
 
     async fn send(setup: Setup, request: test::TestRequest) -> Outcome {
+        send_all(setup, vec![request]).await
+    }
+
+    /// Sends the requests, in order, to one app (so one limiter).
+    async fn send_all(setup: Setup, requests: Vec<test::TestRequest>) -> Outcome {
         let applied: Applied = Arc::default();
         let inserted: Inserted = Arc::default();
         let with_jobs: WithJobs = Arc::default();
@@ -563,15 +592,28 @@ mod tests {
                 .app_data(web::Data::new(links))
                 .app_data(web::Data::new(features))
                 .app_data(web::Data::new(environments))
+                .app_data(web::Data::new(JiraInboundLimiter::new(60, setup.burst, 30)))
                 .service(web::scope("/api/v1").configure(super::configure)),
         )
         .await;
-        let resp = test::call_service(&app, request.to_request()).await;
-        let status = resp.status();
-        let bytes = test::read_body(resp).await;
+        let mut responses = Vec::new();
+        let mut last = (StatusCode::OK, serde_json::Value::Null);
+        for request in requests {
+            let resp = test::call_service(&app, request.to_request()).await;
+            let status = resp.status();
+            let retry_after = resp
+                .headers()
+                .get("Retry-After")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
+            let bytes = test::read_body(resp).await;
+            responses.push((status, retry_after));
+            last = (status, serde_json::from_slice(&bytes).unwrap_or_default());
+        }
         Outcome {
-            status,
-            body: serde_json::from_slice(&bytes).unwrap_or_default(),
+            status: last.0,
+            body: last.1,
+            responses,
             applied,
             inserted,
             with_jobs,
@@ -952,6 +994,71 @@ mod tests {
         }
     }
 
+    fn valid_request(s: &Setup, secret: &str) -> test::TestRequest {
+        bearer(post(s), secret).set_json(status_change("Ready for Release", json!("QA")))
+    }
+
+    #[actix_web::test]
+    async fn over_the_limit_is_429_with_retry_after_and_stores_nothing() {
+        let mut s = setup();
+        s.burst = 2;
+        let requests = (0..3).map(|_| valid_request(&s, SECRET)).collect();
+        let out = send_all(s, requests).await;
+        assert_eq!(out.responses[0].0, StatusCode::OK);
+        assert_eq!(out.responses[1].0, StatusCode::OK);
+        assert_eq!(out.responses[2].0, StatusCode::TOO_MANY_REQUESTS);
+        let retry_after: u64 = out.responses[2]
+            .1
+            .clone()
+            .expect("Retry-After")
+            .parse()
+            .unwrap();
+        assert!(retry_after >= 1);
+        assert_eq!(out.body["error"], "rate limited");
+        assert_eq!(out.inserted.lock().unwrap().len(), 2);
+    }
+
+    #[actix_web::test]
+    async fn limited_request_with_a_wrong_secret_is_still_429() {
+        let mut s = setup();
+        s.burst = 1;
+        let requests = vec![valid_request(&s, SECRET), valid_request(&s, "wrong")];
+        let out = send_all(s, requests).await;
+        assert_eq!(out.responses[0].0, StatusCode::OK);
+        assert_eq!(out.responses[1].0, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(out.inserted.lock().unwrap().len(), 1);
+    }
+
+    #[actix_web::test]
+    async fn unknown_integration_ids_hit_the_shared_bucket() {
+        let mut s = setup();
+        s.known = false;
+        let requests = (0..11).map(|_| valid_request(&s, SECRET)).collect();
+        let out = send_all(s, requests).await;
+        assert!(
+            out.responses[..10]
+                .iter()
+                .all(|(status, _)| *status == StatusCode::UNAUTHORIZED)
+        );
+        assert_eq!(out.responses[10].0, StatusCode::TOO_MANY_REQUESTS);
+        assert!(out.responses[10].1.is_some());
+        assert!(out.inserted.lock().unwrap().is_empty());
+    }
+
+    #[actix_web::test]
+    async fn bad_uuid_counts_against_the_unknown_bucket() {
+        let s = setup();
+        let requests = (0..11)
+            .map(|_| {
+                test::TestRequest::post()
+                    .uri("/api/v1/integrations/jira/not-a-uuid/events")
+                    .set_json(status_change("Done", json!("QA")))
+            })
+            .collect();
+        let out = send_all(s, requests).await;
+        assert_eq!(out.responses[10].0, StatusCode::TOO_MANY_REQUESTS);
+    }
+
     #[actix_web::test]
     async fn a_body_above_the_default_limit_but_under_1_mib_is_accepted() {
         let s = setup();
@@ -1194,6 +1301,7 @@ mod flow_tests {
                     .app_data(web::Data::new(external_link_repository(pool.clone())))
                     .app_data(web::Data::new(feature_repository(pool.clone())))
                     .app_data(web::Data::new(environment_repository(pool.clone())))
+                    .app_data(web::Data::new(JiraInboundLimiter::new(60, 60, 30)))
                     .service(web::scope("/api/v1").configure(super::configure)),
             )
             .await;

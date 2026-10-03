@@ -334,6 +334,7 @@ fn rest_error_message(err: &RestError) -> String {
         | RestError::InvalidSsoCode { message }
         | RestError::Forbidden { message, .. }
         | RestError::Internal { message, .. } => message.clone(),
+        RestError::TooManyRequests { .. } => "Too many requests".to_string(),
     }
 }
 

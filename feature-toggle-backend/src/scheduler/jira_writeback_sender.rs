@@ -532,6 +532,7 @@ mod tests {
                 JiraConfig {
                     allow_insecure_http: true,
                     ui_base_url: None,
+                    ..JiraConfig::default()
                 },
                 ui,
                 Duration::from_secs(5),

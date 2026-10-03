@@ -82,6 +82,8 @@ pub enum RestError {
         code: Option<String>,
         details: Option<Value>,
     },
+    #[error("Rate limited")]
+    TooManyRequests { retry_after_secs: u64 },
     #[error("Internal server error")]
     Internal {
         message: String,
@@ -234,6 +236,11 @@ impl RestError {
         }
     }
 
+    /// 429 with `Retry-After: <retry_after_secs>`.
+    pub fn too_many_requests(retry_after_secs: u64) -> Self {
+        Self::TooManyRequests { retry_after_secs }
+    }
+
     pub fn internal(message: impl Into<String>) -> Self {
         Self::Internal {
             message: message.into(),
@@ -260,6 +267,7 @@ impl RestError {
             Self::SsoRequired { .. } => "sso_required",
             Self::InvalidSsoCode { .. } => "invalid_sso_code",
             Self::Forbidden { .. } => "forbidden",
+            Self::TooManyRequests { .. } => "rate limited",
             Self::Internal { .. } => "internal",
         }
     }
@@ -283,6 +291,7 @@ impl RestError {
             | Self::RefreshTokenReused { message }
             | Self::SsoRequired { message }
             | Self::InvalidSsoCode { message } => message,
+            Self::TooManyRequests { .. } => "Too many requests",
         }
     }
 
@@ -304,7 +313,8 @@ impl RestError {
             | Self::InvalidRefreshToken { .. }
             | Self::RefreshTokenReused { .. }
             | Self::SsoRequired { .. }
-            | Self::InvalidSsoCode { .. } => None,
+            | Self::InvalidSsoCode { .. }
+            | Self::TooManyRequests { .. } => None,
         }
     }
 
@@ -326,7 +336,8 @@ impl RestError {
             | Self::InvalidRefreshToken { .. }
             | Self::RefreshTokenReused { .. }
             | Self::SsoRequired { .. }
-            | Self::InvalidSsoCode { .. } => None,
+            | Self::InvalidSsoCode { .. }
+            | Self::TooManyRequests { .. } => None,
         }
     }
 
@@ -359,12 +370,17 @@ impl ResponseError for RestError {
             Self::Forbidden { .. }
             | Self::SelfApprovalNotAllowed { .. }
             | Self::SsoRequired { .. } => StatusCode::FORBIDDEN,
+            Self::TooManyRequests { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::Internal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
     fn error_response(&self) -> HttpResponse {
-        HttpResponse::build(self.status_code()).json(self.to_error_response())
+        let mut response = HttpResponse::build(self.status_code());
+        if let Self::TooManyRequests { retry_after_secs } = self {
+            response.insert_header(("Retry-After", retry_after_secs.to_string()));
+        }
+        response.json(self.to_error_response())
     }
 }
 

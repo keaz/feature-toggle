@@ -11,6 +11,7 @@ pub mod evaluation;
 pub mod external_link;
 pub mod feature;
 pub mod jira_events;
+pub mod jira_inbound_limit;
 pub mod jira_integration;
 pub mod jira_outbound_jobs;
 pub mod jwt_secret;

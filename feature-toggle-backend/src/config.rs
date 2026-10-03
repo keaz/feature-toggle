@@ -37,13 +37,47 @@ pub struct Config {
 }
 
 /// Jira write-back settings (`[jira]` section).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct JiraConfig {
     /// Allow `http://` Jira base URLs for write-back (default false).
     pub allow_insecure_http: bool,
     /// UI origin for remote links; falls back to `allowed_origin`.
     pub ui_base_url: Option<String>,
+    /// Sustained inbound events per minute, per integration (default 120).
+    pub inbound_per_minute: u32,
+    /// Inbound events one integration may send at once (default 60).
+    pub inbound_burst: u32,
+}
+
+pub const DEFAULT_JIRA_INBOUND_PER_MINUTE: u32 = 120;
+pub const DEFAULT_JIRA_INBOUND_BURST: u32 = 60;
+
+impl Default for JiraConfig {
+    fn default() -> Self {
+        Self {
+            allow_insecure_http: false,
+            ui_base_url: None,
+            inbound_per_minute: DEFAULT_JIRA_INBOUND_PER_MINUTE,
+            inbound_burst: DEFAULT_JIRA_INBOUND_BURST,
+        }
+    }
+}
+
+impl JiraConfig {
+    /// Raises inbound limits of 0 to the defaults, with a warning: a zero
+    /// limit would answer 429 to every Jira event.
+    pub fn sanitized(mut self) -> Self {
+        if self.inbound_per_minute == 0 {
+            warn!("jira.inbound_per_minute = 0; using {DEFAULT_JIRA_INBOUND_PER_MINUTE}");
+            self.inbound_per_minute = DEFAULT_JIRA_INBOUND_PER_MINUTE;
+        }
+        if self.inbound_burst == 0 {
+            warn!("jira.inbound_burst = 0; using {DEFAULT_JIRA_INBOUND_BURST}");
+            self.inbound_burst = DEFAULT_JIRA_INBOUND_BURST;
+        }
+        self
+    }
 }
 
 /// [`Config::jira_ui_base_url`] resolved at startup, shared as `web::Data`.
@@ -224,6 +258,7 @@ impl Config {
         let mut cfg: Config = toml::from_str(content)?;
         cfg.auth = cfg.auth.sanitized();
         cfg.typesafe = cfg.typesafe.sanitized();
+        cfg.jira = cfg.jira.sanitized();
         cfg.jira.ui_base_url = cfg
             .jira
             .ui_base_url
@@ -378,6 +413,29 @@ grpc_addr = "0.0.0.0:50051"
         let cfg =
             Config::from_toml(&format!("{BASE}\n[jira]\nallow_insecure_http = true\n")).unwrap();
         assert!(cfg.jira.allow_insecure_http);
+    }
+
+    #[test]
+    fn jira_inbound_defaults() {
+        let cfg = Config::from_toml(BASE).unwrap();
+        assert_eq!(cfg.jira.inbound_per_minute, 120);
+        assert_eq!(cfg.jira.inbound_burst, 60);
+        let cfg = Config::from_toml(&format!(
+            "{BASE}\n[jira]\ninbound_per_minute = 300\ninbound_burst = 20\n"
+        ))
+        .unwrap();
+        assert_eq!(cfg.jira.inbound_per_minute, 300);
+        assert_eq!(cfg.jira.inbound_burst, 20);
+    }
+
+    #[test]
+    fn zero_inbound_limit_is_raised_to_default() {
+        let cfg = Config::from_toml(&format!(
+            "{BASE}\n[jira]\ninbound_per_minute = 0\ninbound_burst = 0\n"
+        ))
+        .unwrap();
+        assert_eq!(cfg.jira.inbound_per_minute, 120);
+        assert_eq!(cfg.jira.inbound_burst, 60);
     }
 
     #[test]
