@@ -10,8 +10,8 @@ Read this after [`README.md`](README.md) and [`design.md`](design.md). It record
 | JI-01 system clients cannot vote | Done | backend `e1bebfe` |
 | JI-10 external links backend | Done | backend `f3941e4` |
 | JI-11 `externalRef`/`reason` backend | Done | backend `e251f9e` |
-| JI-13 integration config | Open, **next** | — |
-| JI-14 external approval path | Open (needs JI-11) | — |
+| JI-13 integration config | Done | backend `4b66d36` |
+| JI-14 external approval path | Open, **next** | — |
 | JI-15 inbound events + rules | Open (needs JI-13, JI-14) | — |
 | JI-12 by-key endpoints (optional) | Done (built before JI-13, at the user's request) | backend `513f393` |
 | JI-20 UI Jira links | Open (needs JI-10) | — |
@@ -19,7 +19,7 @@ Read this after [`README.md`](README.md) and [`design.md`](design.md). It record
 | JI-22 UI Jira settings | Open (needs JI-13, JI-15) | — |
 | JI-30 setup guide + e2e test | Open (needs JI-15) | — |
 
-**Next task: [JI-13](tasks/JI-13-jira-integration-config-backend.md).**
+**Next task: [JI-14](tasks/JI-14-external-approval-path-backend.md).**
 
 ## 2. Planning log (2026-10-03)
 
@@ -61,7 +61,7 @@ New tasks JI-13, JI-14, JI-15, JI-22; JI-12 became optional; JI-21 and JI-30 cha
 - **Run the backend end to end** without clashing with a dev server: a TOML outside the repo with `http_addr = "127.0.0.1:18180"` and `grpc_addr = "127.0.0.1:15151"`, then `FEATURE_TOGGLE_CONFIG=<file> ./target/debug/feature-toggle-backend` from `feature-toggle/` (needs `log4rs.yaml` in the working directory). On an empty DB create the admin with `POST /api/v1/admins` (`api-test-admin` / `password123`), then `POST /api/v1/auth/login`.
 - **System client for manual checks:** `POST /api/v1/teams/{teamId}/system-clients` as a team admin returns `{systemClient, token}`. Use the token as `Authorization: Bearer <token>`. Never paste it into a file or commit.
 - **Contracts:** after a DTO or endpoint change run `./scripts/export-contracts.sh`, copy `feature-toggle-backend/contracts/generated/contract-hashes.json` to `contracts/baseline/`, then `./scripts/check-contract-compat.sh`. Only the baseline file is tracked.
-- **Migrations:** latest is `20261004010000_approval_request_external_ref.sql` (JI-11). Later tasks use later `20261004...` timestamps, in task order.
+- **Migrations:** latest is `20261004020000_jira_integrations.sql` (JI-13). Later tasks use later `20261004...` timestamps, in task order.
 - **UI:** `../feature-toggle-ui/` on `main` (last commit at planning: `dc16a2f`). pnpm only: `pnpm lint`, `pnpm build`, `pnpm test:run`.
 - After code changes run `graphify update .` in the repo you changed.
 
@@ -106,3 +106,15 @@ New tasks JI-13, JI-14, JI-15, JI-22; JI-12 became optional; JI-21 and JI-30 cha
 - 404 codes: `feature_not_found`, `environment_not_found`, `stage_not_found` (in `code`, and as the message prefix). 409 when same-named environments both hold a stage.
 - Both mocks (`MockEnvironmentRepository`, `MockEnvironmentLogic`) gained the method; no existing test needed a change.
 - No migration, no `.sqlx` change. Contract baseline updated.
+
+### From JI-13 (`4b66d36`)
+
+- Tables `jira_integrations`, `jira_status_rules` (migration `20261004020000`). Rules are stored trimmed, run in `position` order (0-based list index); `environment_ids NULL` = every environment the issue names.
+- `environment_aliases` maps a Jira value to an **environment id** (`BTreeMap<String, Uuid>` in `JiraIntegrationRow`), not a name. Keys are unique ignoring case; JI-15 should compare the issue value to the keys ignoring case and surrounding spaces, then fall back to `get_active_environments_by_name`.
+- `database/jira_integration.rs`: `JiraIntegrationRepository` (`#[automock]`) `get`, `list_for_team`, `list_rules`, `create`, `update`, `delete`, `replace_rules`, `set_secret_hash`, `team_environment_ids`; Tx variants in `JiraIntegrationRepositoryTx`. Registered as `web::Data<Box<dyn JiraIntegrationRepository>>`. Row types `JiraIntegrationRow` (holds `secret_hash`; never serialize it) and `JiraStatusRuleRow` in `database/entity.rs`.
+- `logic/jira_integration.rs`: `hash_secret` (SHA-256 hex, same as `jwt_guard::hash_token`) for JI-15's secret check; `ACTION_REQUEST/APPROVE/DEPLOY/ROLLBACK`; `validate_field_name`.
+- Shadow user: `users.username = 'jira-integration-<integration id>'`, `auth_source = 'system'`, password hash `JIRA_INTEGRATION_NO_LOGIN`, not admin, `Requester` role only, **no `user_teams` row**, id in `jira_integrations.actor_user_id`. Its id is not in `system_clients`, so `is_system_client` is false for it. Delete sets `enabled = false` and keeps the row. JI-14: check whether the stage change path requires the requester to be a team member; if it does, decide whether to add a `user_teams` row at create time (and note it here).
+- Policy: `PolicyAction::ManageJiraIntegrations` covers every method under `/api/v1/jira-integrations/**` and `/api/v1/teams/{id}/jira-integrations/**` (so JI-15's `GET /jira-integrations/{id}/events` is covered). JI-15's inbound endpoint must **not** live under `/jira-integrations/`: design §3.9 puts it at `/api/v1/integrations/jira/{integrationId}/events`, which is outside this policy; make it public in `JwtGuard`.
+- `logic::policy::is_system_client_management_route` was replaced by `is_team_admin_management_route`.
+- Activity types `jira_integration_created/updated/secret_rotated/rules_replaced/deleted`, `entity_type = 'jira_integration'`, `entity_id` = integration id, metadata `{integration_id, team_id, name, actor_user_id, ...}`; never the secret or hash.
+- REST: create and rotate return `JiraIntegrationWithSecretResponse {integration, secret}`; the secret is 43 characters (32 bytes base64url).

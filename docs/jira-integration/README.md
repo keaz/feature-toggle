@@ -71,7 +71,7 @@ Source investigation: [`../investigations/2026-10-sso-jira-sdks.md`](../investig
 | [x] | [JI-01](tasks/JI-01-system-clients-cannot-vote.md) | System clients cannot approve or reject approval requests, and are not eligible approvers | backend | **Yes** (403 for M2M votes; bots not eligible; user decision 2026-10-03) | — |
 | [x] | [JI-10](tasks/JI-10-feature-external-links-backend.md) | `feature_external_links` table, CRUD API, `externalKey` list filter | backend | Additive | — |
 | [x] | [JI-11](tasks/JI-11-stage-change-external-ref-backend.md) | `externalRef` + `reason` on stage change, approval requests and activity | backend | Additive | — |
-| [ ] | [JI-13](tasks/JI-13-jira-integration-config-backend.md) | Jira integration config: integrations, environment field and map, Jira-approved environments, status rules, inbound secret | backend | Additive | JI-10 |
+| [x] | [JI-13](tasks/JI-13-jira-integration-config-backend.md) | Jira integration config: integrations, environment field and map, Jira-approved environments, status rules, inbound secret | backend | Additive | JI-10 |
 | [ ] | [JI-14](tasks/JI-14-external-approval-path-backend.md) | Approval by an external system (Jira): approve, deploy, rollback paths with source and actor in the audit | backend | Additive (only reachable through JI-15) | JI-11 |
 | [ ] | [JI-15](tasks/JI-15-jira-inbound-events-backend.md) | Inbound Jira events endpoint and rule engine, event log | backend | Additive | JI-13, JI-14 |
 | [x] | [JI-12](tasks/JI-12-by-key-endpoints-backend.md) | By-key read and request-change endpoints (optional, for status read-back and manual rules) | backend | Additive | JI-11 |
