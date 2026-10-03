@@ -305,25 +305,26 @@ impl ApprovalLogicImpl {
     }
 
     /// Queues the background AI risk assessment of a new request. It never
-    /// fails or delays the request. Every policy mode except `off` assesses;
+    /// fails the request. Every policy mode except `off` assesses;
     /// `gate_auto_approve` and `require_extra_approver` act on a finished
     /// assessment (see `database::approval` and `ApprovalRiskHandler::apply`).
+    /// Returns whether an assessment was queued.
     async fn submit_risk_assessment(
         &self,
         feature: &DbFeature,
         stage: &FeaturePipelineStage,
         policy: &ApprovalPolicy,
         request: &ApprovalRequest,
-    ) {
+    ) -> bool {
         let Some(judgments) = &self.judgments else {
-            return;
+            return false;
         };
         if policy.ai_risk_mode == "off"
             || !judgments
                 .team_enabled(feature.team_id, JudgmentKind::ApprovalRisk.feature())
                 .await
         {
-            return;
+            return false;
         }
 
         let environment = match self
@@ -337,12 +338,12 @@ impl ApprovalLogicImpl {
                     "Skipping AI risk assessment of approval request {}: {err}",
                     request.id
                 );
-                return;
+                return false;
             }
         };
         let input =
             approval_risk::build_input(feature, stage, &environment, &request.change_payload);
-        if let Err(err) = judgments
+        match judgments
             .submit(
                 feature.team_id,
                 JudgmentKind::ApprovalRisk,
@@ -352,10 +353,14 @@ impl ApprovalLogicImpl {
             )
             .await
         {
-            warn!(
-                "Could not queue AI risk assessment of approval request {}: {err}",
-                request.id
-            );
+            Ok(_) => true,
+            Err(err) => {
+                warn!(
+                    "Could not queue AI risk assessment of approval request {}: {err}",
+                    request.id
+                );
+                false
+            }
         }
     }
 
@@ -1517,11 +1522,18 @@ impl ApprovalLogic for ApprovalLogicImpl {
             })
             .await?;
 
-        self.submit_risk_assessment(feature, stage, &policy, &request)
-            .await;
-
         // Notify subscribers about the newly created request so dashboards/badges update immediately.
         self.publish_event(&request, feature.team_id).await?;
+
+        // After the event, so the AI settings reads and the judgment write do
+        // not delay it. Once an assessment is queued, a second event lets
+        // streams show it as pending.
+        if self
+            .submit_risk_assessment(feature, stage, &policy, &request)
+            .await
+        {
+            self.publish_event(&request, feature.team_id).await?;
+        }
 
         Ok(Some(request))
     }
@@ -2885,6 +2897,16 @@ mod ai_risk_trigger_tests {
         submit_fails: bool,
         submits: Arc<AtomicUsize>,
     ) -> Arc<JudgmentService> {
+        judgment_service_with_probe(team_setting_on, submit_fails, submits, Arc::new(|| {}))
+    }
+
+    /// Like `judgment_service`; `probe` runs at the start of every upsert.
+    fn judgment_service_with_probe(
+        team_setting_on: bool,
+        submit_fails: bool,
+        submits: Arc<AtomicUsize>,
+        probe: Arc<dyn Fn() + Send + Sync>,
+    ) -> Arc<JudgmentService> {
         let mut settings = MockTeamAiSettingsRepository::new();
         settings.expect_get().returning(move |_| {
             Ok(StoredTeamAiSettings {
@@ -2897,6 +2919,7 @@ mod ai_risk_trigger_tests {
         });
         let mut repo = MockAiJudgmentRepository::new();
         repo.expect_upsert_pending().returning(move |new| {
+            probe();
             submits.fetch_add(1, Ordering::SeqCst);
             assert_eq!(new.kind, JudgmentKind::ApprovalRisk);
             assert_eq!(new.input["feature"]["key"], "checkout_new");
@@ -2935,6 +2958,15 @@ mod ai_risk_trigger_tests {
     async fn create_request(
         ai_risk_mode: &str,
         judgments: Option<Arc<JudgmentService>>,
+    ) -> Result<Option<ApprovalRequest>, Error> {
+        let (tx, _rx) = tokio::sync::broadcast::channel(8);
+        create_request_with_events(ai_risk_mode, judgments, tx).await
+    }
+
+    async fn create_request_with_events(
+        ai_risk_mode: &str,
+        judgments: Option<Arc<JudgmentService>>,
+        tx: tokio::sync::broadcast::Sender<ApprovalRequestEvent>,
     ) -> Result<Option<ApprovalRequest>, Error> {
         let mut approval_repo = MockApprovalRepository::new();
         let mut feature_repo = MockFeatureRepository::new();
@@ -3057,7 +3089,6 @@ mod ai_risk_trigger_tests {
             .expect_list_votes_for_request()
             .returning(|_| Ok(vec![]));
 
-        let (tx, _rx) = tokio::sync::broadcast::channel(8);
         let (updates_tx, _updates_rx) = tokio::sync::broadcast::channel(8);
         let logic = approval_logic_with_notifications(
             Box::new(approval_repo),
@@ -3100,6 +3131,49 @@ mod ai_risk_trigger_tests {
 
             assert_eq!(submits.load(Ordering::SeqCst), 1, "{mode}");
         }
+    }
+
+    /// The request event is not delayed by the assessment: it goes out
+    /// first, and a second event follows once the assessment is queued, so
+    /// streams show it as pending.
+    #[tokio::test]
+    async fn the_request_event_is_published_before_the_assessment_is_queued() {
+        let (tx, mut rx) = tokio::sync::broadcast::channel(8);
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (probe_tx, probe_seen) = (tx.clone(), seen.clone());
+        let probe: Arc<dyn Fn() + Send + Sync> =
+            Arc::new(move || probe_seen.lock().unwrap().push(probe_tx.len()));
+        let submits = Arc::new(AtomicUsize::new(0));
+        let service = judgment_service_with_probe(true, false, submits.clone(), probe);
+
+        let created = create_request_with_events("advisory", Some(service), tx)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(submits.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            seen.lock().unwrap().clone(),
+            vec![1],
+            "one event was already published when the assessment was queued"
+        );
+        assert_eq!(rx.recv().await.unwrap().request.id, created.id);
+        assert_eq!(rx.recv().await.unwrap().request.id, created.id);
+        assert!(rx.try_recv().is_err(), "exactly two events");
+    }
+
+    #[tokio::test]
+    async fn no_second_event_when_nothing_is_queued() {
+        let (tx, mut rx) = tokio::sync::broadcast::channel(8);
+        let submits = Arc::new(AtomicUsize::new(0));
+        let service = judgment_service(false, false, submits.clone());
+
+        create_request_with_events("advisory", Some(service), tx)
+            .await
+            .unwrap();
+
+        assert!(rx.recv().await.is_ok());
+        assert!(rx.try_recv().is_err(), "exactly one event");
     }
 
     #[tokio::test]
