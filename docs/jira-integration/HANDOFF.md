@@ -8,8 +8,8 @@ Read this after [`README.md`](README.md) and [`design.md`](design.md). It record
 |---|---|---|
 | Planning (this folder) | Done 2026-10-03 | backend `46a50a7` |
 | JI-01 system clients cannot vote | Done | backend `e1bebfe` |
-| JI-10 external links backend | Open, **next** | — |
-| JI-11 `externalRef`/`reason` backend | Open | — |
+| JI-10 external links backend | Done | backend `f3941e4` |
+| JI-11 `externalRef`/`reason` backend | Open, **next** | — |
 | JI-13 integration config | Open (needs JI-10) | — |
 | JI-14 external approval path | Open (needs JI-11) | — |
 | JI-15 inbound events + rules | Open (needs JI-13, JI-14) | — |
@@ -19,7 +19,7 @@ Read this after [`README.md`](README.md) and [`design.md`](design.md). It record
 | JI-22 UI Jira settings | Open (needs JI-13, JI-15) | — |
 | JI-30 setup guide + e2e test | Open (needs JI-15) | — |
 
-**Next task: [JI-10](tasks/JI-10-feature-external-links-backend.md).**
+**Next task: [JI-11](tasks/JI-11-stage-change-external-ref-backend.md).**
 
 ## 2. Planning log (2026-10-03)
 
@@ -61,7 +61,7 @@ New tasks JI-13, JI-14, JI-15, JI-22; JI-12 became optional; JI-21 and JI-30 cha
 - **Run the backend end to end** without clashing with a dev server: a TOML outside the repo with `http_addr = "127.0.0.1:18180"` and `grpc_addr = "127.0.0.1:15151"`, then `FEATURE_TOGGLE_CONFIG=<file> ./target/debug/feature-toggle-backend` from `feature-toggle/` (needs `log4rs.yaml` in the working directory). On an empty DB create the admin with `POST /api/v1/admins` (`api-test-admin` / `password123`), then `POST /api/v1/auth/login`.
 - **System client for manual checks:** `POST /api/v1/teams/{teamId}/system-clients` as a team admin returns `{systemClient, token}`. Use the token as `Authorization: Bearer <token>`. Never paste it into a file or commit.
 - **Contracts:** after a DTO or endpoint change run `./scripts/export-contracts.sh`, copy `feature-toggle-backend/contracts/generated/contract-hashes.json` to `contracts/baseline/`, then `./scripts/check-contract-compat.sh`. Only the baseline file is tracked.
-- **Migrations:** latest is `20261003030000_approval_request_auto_approve_failures.sql`. JI-10 and JI-11 each add one; use `20261004...` timestamps and keep them in task order.
+- **Migrations:** latest is `20261004000000_feature_external_links.sql` (JI-10). Later tasks use later `20261004...` timestamps, in task order.
 - **UI:** `../feature-toggle-ui/` on `main` (last commit at planning: `dc16a2f`). pnpm only: `pnpm lint`, `pnpm build`, `pnpm test:run`.
 - After code changes run `graphify update .` in the repo you changed.
 
@@ -76,3 +76,13 @@ New tasks JI-13, JI-14, JI-15, JI-22; JI-12 became optional; JI-21 and JI-30 cha
 - `ApprovalRepository` gained `is_system_client(user_id)`. It is `#[automock]`ed: any mock test that reaches `ensure_user_can_vote` needs `expect_is_system_client().returning(|_| Ok(false))`.
 - `approver_qualifies_sql` now requires a `user_teams` row and excludes `system_clients`. Change it only together with routing, the reachable count and `is_eligible_voter`, which all share it.
 - No migration, no contract change.
+
+### From JI-10 (`f3941e4`)
+
+- Table `feature_external_links` (migration `20261004000000`), unique constraint `feature_external_links_unique (feature_id, system, external_key)`, index on `(system, external_key)`. Keys are stored upper case; only `system = 'jira'` is allowed.
+- `database/external_link.rs`: `ExternalLinkRepository` (`#[automock]`) with `feature_scope(feature_id) -> Option<FeatureScope { team_id, key }>`, `list_for_feature`, `create`, `delete -> bool`, `feature_ids_for_key(team_id, system, key)`. Use `feature_ids_for_key` in JI-15 to resolve an issue key to the team's features. Tx variants in `ExternalLinkRepositoryTx`. Registered as `web::Data<Box<dyn ExternalLinkRepository>>`.
+- `logic/external_link.rs`: `normalize_jira_key` (trim, upper-case, `^[A-Z][A-Z0-9_]+-[1-9][0-9]*$`), `validate_url`, `validate_new_link`, `SYSTEM_JIRA`. Reuse `normalize_jira_key` for any issue key that comes from Jira.
+- Activity types `external_link_added` / `external_link_removed` (`activity_types::EXTERNAL_LINK_ADDED/REMOVED`), `entity_type = 'feature'`, metadata `{feature_id, feature_key, team_id, link_id, system, external_key, url}`.
+- `get_features_with_offset_filtered` (repository and `FeatureCrudLogic`) has a new `external_key: Option<String>` argument after `flag_kind`. Mocks and callers with 14 arguments now take 15.
+- Link writes: users need `authorize_feature_update` (admin or Team Admin of the team); system clients need `flag:write` and a token of the feature's team. Reading links as a system client needs `admin:read` or `evaluate` (existing `JwtGuard` rule for GET on `features`): a Jira token needs `flag:write` + `admin:read`.
+- `rest/operational_safety.rs`: `policy_actor_for_request(pool, jwt)` (user vs system client, checked in the DB) and `rest_error_from_policy` are `pub(crate)` for reuse.

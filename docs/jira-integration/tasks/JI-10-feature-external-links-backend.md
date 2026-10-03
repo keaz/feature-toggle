@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Type | Feature |
-| Status | Open |
+| Status | Done in `f3941e4` |
 | Repo | backend (`feature-toggle/`) |
 | Crate | `feature-toggle-backend` |
 | Depends on | — (run after JI-01 by project order) |
@@ -60,4 +60,28 @@ Store which Jira issues belong to a feature, so Jira automations and the UI can 
 
 ## Handoff log
 
-(empty)
+### 2026-10-03: done in `f3941e4`
+
+**What changed**
+
+- Migration `20261004000000_feature_external_links.sql`: table and index as in design §3.2, plus a named unique constraint `feature_external_links_unique` and `id DEFAULT gen_random_uuid()`.
+- `database/external_link.rs`: `ExternalLinkRepository` (`#[automock]`: `feature_scope`, `list_for_feature`, `create`, `delete -> bool`, `feature_ids_for_key`) and `ExternalLinkRepositoryTx` (`feature_scope_tx`, `create_tx`, `delete_tx -> Option<ExternalLinkRow>`). Factories `external_link_repository(pool)` and `external_link_repository_tx(pool)`. `FeatureScope { team_id, key }` is the feature lookup used for 404 and activity metadata. A unique violation maps to `Error::RecordAlreadyExists` (409). Entity `ExternalLinkRow` in `database/entity.rs`.
+- `logic/external_link.rs`: `normalize_jira_key`, `validate_url`, `validate_new_link(system, key, url) -> NewExternalLink` (system `jira`, any case). `SYSTEM_JIRA`, `MAX_URL_LENGTH`.
+- `logic/external_link_tx.rs`: `create_external_link_in_tx` and `delete_external_link_in_tx`. Each writes the activity row in the same transaction: `entity_type = 'feature'`, `entity_id = feature_id`, metadata `{feature_id, feature_key, team_id, link_id, system, external_key, url}`. `link_id` was added to the metadata listed in the task so the removed row identifies the link.
+- `rest/external_link.rs`: the three endpoints, registered in `rest::configure` and `ApiDoc`. The repository is registered in `lib.rs::run`.
+- Authorization (`authorize_link_write`): users go through `policy::authorize_feature_update` (system admin, or `Team Admin` member of the feature's team). System clients are detected with `policy_actor_for_request` and allowed when the token's team is the feature's team (`JwtGuard` already checked `flag:write` and the team). `policy_actor_for_request` and `rest_error_from_policy` in `rest/operational_safety.rs` are now `pub(crate)`.
+- List filter: `FeatureListQuery.external_key` (`externalKey`), normalized with `normalize_jira_key` (400 on a bad key). `external_key: Option<String>` was added after `flag_kind` to `get_features_with_offset_filtered` (repository and logic traits), `get_features_windowed`, `count_filtered_features` and `push_feature_filters`. Other callers pass `None`.
+- Contract baseline updated.
+
+**Verified**
+
+- `cargo fmt`; `cargo clippy --all-targets`: no warnings in new code (existing warnings elsewhere unchanged).
+- `cargo test -p feature-toggle-backend --no-fail-fast` on `feture_toggle_test`: all pass (lib 775, integration 296, grpc 25, others).
+- `./scripts/check-contract-compat.sh`: pass.
+- Tests: unit (`logic::external_link`), REST (`rest::external_link`, `rest::feature::tests::list_features_*external_key*`), DB (`tests/database/external_link_test.rs`, including cascade, team scoping, tx rollback, activity rows, list filter). The filter tests were checked to fail with the filter disabled.
+- End to end against a local backend on `:18180` through the real `JwtGuard`: user create 201 / duplicate 409 / bad key 400 / delete 204 then 404; `flag:write` client of the team create 201 and delete 204; `flag:write` client of another team 403 on create, delete and list; `admin:read`-only client 403 on create; `?externalKey=proj-77` returns the linked feature; `?externalKey=bad` 400; four activity rows written.
+
+**For later tasks**
+
+- A system client with only `flag:write` gets 403 on `GET /features/{id}/external-links`: `JwtGuard` requires `admin:read` or `evaluate` for GET on `features` paths (existing rule). A Jira integration token that reads links needs `flag:write` plus `admin:read`.
+- No `FeatureUpdate` broadcast: links do not change evaluation.
