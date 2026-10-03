@@ -56,7 +56,7 @@ The five inputs most likely to break write-back in real use, each pinned by a te
 | [x] | [JI-40](tasks/JI-40-activity-rows-for-approval-decisions.md) | Activity rows for approval decisions, cancel and gated requests | backend | — |
 | [x] | [JI-41](tasks/JI-41-writeback-config.md) | Write-back configuration, encrypted credential, test connection | backend | — |
 | [x] | [JI-42](tasks/JI-42-outbound-jobs-and-sender.md) | Outbound jobs table, sender, retry and pause, job endpoints | backend | JI-41 |
-| [ ] | [JI-43](tasks/JI-43-capture.md) | Capture from inbound events and the activity cursor | backend | JI-40, JI-42 |
+| [x] | [JI-43](tasks/JI-43-capture.md) | Capture from inbound events and the activity cursor | backend | JI-40, JI-42 |
 | [ ] | [JI-44](tasks/JI-44-inbound-rate-limit.md) | Inbound rate limit | backend | — |
 | [ ] | [JI-45](tasks/JI-45-native-webhook-hmac.md) | Native webhook HMAC auth | backend | JI-41 |
 | [ ] | [JI-46](tasks/JI-46-ui-writeback-settings.md) | UI: write-back settings, native secret, Outbound tab, paused banner | UI | JI-42, JI-45 |

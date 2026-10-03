@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Type | Feature |
-| Status | Open |
+| Status | Done in 84b2611 |
 | Repo | backend (`feature-toggle/`) |
 | Crate | `feature-toggle-backend` |
 | Depends on | JI-40, JI-42 |
@@ -163,4 +163,18 @@ Fill `jira_outbound_jobs` from:
 
 ## Handoff log
 
-(empty)
+2026-10-03, backend `84b2611`:
+- Implemented as specified. New: `logic/jira_capture.rs` (pure), `scheduler/jira_writeback_capture.rs` (spawned in `lib.rs`, 5 s), migration `20261004070000_jira_writeback_cursor.sql`, `NewJiraEvent.id`, `JiraEventRepository::insert_with_jobs`, `ActivityLogRepository::list_window`. No DTO or endpoint change; contract check passes unchanged.
+- Deviations:
+  - `list_window` returns `Vec<ActivityLogRow>` with `sqlx::Error` (the trait's real types) and takes `types: &[&'static str]` (mockall cannot mock a non-static slice of borrowed strs).
+  - The `insert_with_jobs_is_atomic` forced failure is a job for an unknown integration (foreign key violation), not an invalid `kind` through raw SQL: `NewOutboundJob.kind` is typed, so the repository cannot send an invalid one.
+  - Source 2 comment jobs set `feature_id` (Source 1 comments keep `None`, as the brief says). The sender does not read it for comments.
+  - Batch loop: the first batch of a run reads from `cursor - 60 s`; later batches of the same run start at the newest row read (inclusive), so a burst larger than 500 rows in the overlap window cannot loop forever. If one whole batch shares a single timestamp the run steps 1 microsecond past it and logs a warning (rows beyond 500 with an identical timestamp would be skipped; not expected in practice).
+  - The cursor is set with `GREATEST(old, newest)`, so a window of only overlap rows never moves it back. One transaction per batch (jobs and cursor together).
+  - `JiraWritebackCapture::with_lag(Duration)` (default 2 s) exists for tests; production uses the default.
+  - `jira_actor_ids` is read with `SELECT actor_user_id FROM jira_integrations` in the scheduler (no repository method).
+  - Paused integrations still get jobs enqueued; the sender holds them until resume.
+- Tests: 14 pure tests in `logic/jira_capture.rs`; 3 new handler mock tests; `inbound_event_and_activity_give_one_comment_each` (flow test, real DB); `insert_with_jobs_is_atomic`; 11 in `tests/database/jira_writeback_capture_test.rs` (the capture tests are `#[serial(jira_capture)]`, the cursor is one global row).
+- Verified: `cargo fmt`; `cargo clippy --all-targets` (no warnings in touched files); `cargo test -p feature-toggle-backend` passes (918 lib, 349 integration); `./scripts/check-contract-compat.sh` passes with no baseline change.
+- Manual check with a fake Jira (step 10): not run. Reason: it needs a logged-in human and a sealed credential, and the seeded users have no known password. Covered instead by the flow test (real handler, rule engine, DB and capture) and the JI-42 sender tests against a mock Jira. JI-50's api-tests fake-Jira run should do the end-to-end check.
+- For JI-50: Source 1 comments dedupe on `event:<eventId>`; Source 2 on `activity:<rowId>:<integrationId>:<issue>` and `link:<integrationId>:<issue>:<featureId>:activity:<rowId>`.

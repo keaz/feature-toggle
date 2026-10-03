@@ -21,14 +21,14 @@ Read this after [`README.md`](README.md) and [`design.md`](design.md). It record
 
 **Phase 1 is complete (2026-10-03).**
 
-**Phase 2 is planned (2026-10-03):** write-back to Jira (comments + live remote link), inbound rate limit, signed native webhooks, reason hint. Design [`phase-2/design.md`](phase-2/design.md), tasks [`phase-2/README.md`](phase-2/README.md). **Next task: [JI-43](phase-2/tasks/JI-43-capture.md).**
+**Phase 2 is planned (2026-10-03):** write-back to Jira (comments + live remote link), inbound rate limit, signed native webhooks, reason hint. Design [`phase-2/design.md`](phase-2/design.md), tasks [`phase-2/README.md`](phase-2/README.md). **Next task: [JI-44](phase-2/tasks/JI-44-inbound-rate-limit.md).**
 
 | Phase 2 task | Status | Commit |
 |---|---|---|
 | JI-40 activity rows for approval decisions | Done | backend `c79fc64` |
 | JI-41 write-back config | Done | backend `3de0dec` |
 | JI-42 outbound jobs + sender | Done | backend `0bf6d7b` |
-| JI-43 capture | Open | |
+| JI-43 capture | Done | backend `84b2611` |
 | JI-44 inbound rate limit | Open | |
 | JI-45 native webhook HMAC | Open | |
 | JI-46 UI write-back settings | Open | |
@@ -38,6 +38,8 @@ Read this after [`README.md`](README.md) and [`design.md`](design.md). It record
 Facts from JI-41 (backend `3de0dec`): `logic::jira_client::{JiraClient, client_for}` build a client from a row but do not check `writeback_enabled` (the sender must); credential AAD is the integration id bytes; turning write-back off does not yet dead the pending jobs (JI-42 adds it); `web::Data<config::JiraUiBaseUrl>` carries the UI base URL. Details in the JI-41 handoff log.
 
 Facts from JI-42 (backend `0bf6d7b`): enqueue through `jira_outbound_job_repository_tx(pool).enqueue_tx(conn, NewOutboundJob {..})`; `comment` payload `{lines}`, `remote_link_delete` payload `{featureId}`, `remote_link` has `feature_id` and no payload; the sender (`scheduler/jira_writeback_sender.rs`, 5 s) takes `JiraConfig` as well as the UI base URL; turning write-back off (or a base URL host change) now sets pending jobs to `dead`. Details in the JI-42 handoff log.
+
+Facts from JI-43 (backend `84b2611`): write-back now posts for real when an integration has it on. `NewJiraEvent` has `id`; `JiraEventRepository::insert_with_jobs`. `scheduler/jira_writeback_capture.rs` (`JiraWritebackCapture`, 5 s, table `jira_writeback_cursor`) turns `logic::jira_capture::plan_jobs` output into jobs. Details in the JI-43 handoff log.
 
 Facts found while planning phase 2 (backend `b276078`):
 - Approval decisions (vote, auto-approval, capped reconciliation), cancel and approval-gated requests write no activity row today; the `stage_approved` constant is never written (JI-40 fixes this).
