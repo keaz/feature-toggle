@@ -686,9 +686,10 @@ where
                                             return Ok(req.into_response(res));
                                         }
 
-                                        // System client management routes skip the scope check so
-                                        // the policy below denies them (403 policy_denied, audited).
-                                        if !crate::logic::policy::is_system_client_management_route(
+                                        // System client and Jira integration management routes skip
+                                        // the scope check so the policy below denies them
+                                        // (403 policy_denied, audited).
+                                        if !crate::logic::policy::is_team_admin_management_route(
                                             &path,
                                         ) && !system_client_scope_allowed(
                                             &effective_scopes,
@@ -2021,6 +2022,98 @@ mod tests {
             let builder = match method {
                 "GET" => test::TestRequest::get(),
                 "POST" => test::TestRequest::post(),
+                _ => test::TestRequest::patch(),
+            };
+            let req = builder
+                .uri(&uri)
+                .insert_header(("Authorization", format!("Bearer {token}")))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(
+                resp.status(),
+                actix_web::http::StatusCode::FORBIDDEN,
+                "{method} {uri}"
+            );
+            let body: serde_json::Value = test::read_body_json(resp).await;
+            assert_eq!(body["code"], "policy_denied", "{method} {uri}");
+        }
+    }
+
+    #[actix_web::test]
+    async fn system_client_token_cannot_manage_jira_integrations() {
+        let pool = db_pool().await;
+        let scopes = vec![
+            "admin:read".to_string(),
+            "flag:write".to_string(),
+            "evaluate".to_string(),
+        ];
+        let (team_id, _, token) = system_client_with_token(&pool, scopes).await;
+        let shadow_user = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, first_name, last_name, email) \
+             VALUES ($1, $2, 'x', 'Jira', 'Shadow', $3)",
+        )
+        .bind(shadow_user)
+        .bind(format!("guard_jira_{shadow_user}"))
+        .bind(format!("guard_jira_{shadow_user}@example.com"))
+        .execute(&pool)
+        .await
+        .expect("insert shadow user");
+        let integration_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO jira_integrations (id, team_id, name, secret_hash, environment_field, actor_user_id) \
+             VALUES ($1, $2, 'guard', 'hash', 'labels', $3)",
+        )
+        .bind(integration_id)
+        .bind(team_id)
+        .bind(shadow_user)
+        .execute(&pool)
+        .await
+        .expect("insert integration");
+
+        let app = test::init_service(
+            App::new()
+                .wrap(JwtGuard::new(
+                    "http://ui".to_string(),
+                    db_secret_logic(),
+                    pool.clone(),
+                ))
+                .default_service(web::to(|| async { HttpResponse::Ok().finish() })),
+        )
+        .await;
+
+        // Same team as the token, every scope: still 403 policy_denied.
+        let routes = [
+            ("GET", format!("/api/v1/teams/{team_id}/jira-integrations")),
+            ("POST", format!("/api/v1/teams/{team_id}/jira-integrations")),
+            ("GET", format!("/api/v1/jira-integrations/{integration_id}")),
+            (
+                "PATCH",
+                format!("/api/v1/jira-integrations/{integration_id}"),
+            ),
+            (
+                "DELETE",
+                format!("/api/v1/jira-integrations/{integration_id}"),
+            ),
+            (
+                "POST",
+                format!("/api/v1/jira-integrations/{integration_id}/rotate-secret"),
+            ),
+            (
+                "GET",
+                format!("/api/v1/jira-integrations/{integration_id}/rules"),
+            ),
+            (
+                "PUT",
+                format!("/api/v1/jira-integrations/{integration_id}/rules"),
+            ),
+        ];
+        for (method, uri) in routes {
+            let builder = match method {
+                "GET" => test::TestRequest::get(),
+                "POST" => test::TestRequest::post(),
+                "PUT" => test::TestRequest::put(),
+                "DELETE" => test::TestRequest::delete(),
                 _ => test::TestRequest::patch(),
             };
             let req = builder

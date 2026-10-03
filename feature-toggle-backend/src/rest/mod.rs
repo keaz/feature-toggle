@@ -10,6 +10,7 @@ pub mod error;
 pub mod evaluation;
 pub mod external_link;
 pub mod feature;
+pub mod jira_integration;
 pub mod jwt_secret;
 pub mod metrics;
 pub mod notification;
@@ -91,6 +92,11 @@ use crate::rest::feature::{
     FeatureVersionsResponse, FeaturesResponse, LifecycleStage, RollbackFeatureVersionRequest,
     RolloutMetricsQuery, RolloutMetricsResponse, StageChangeRequest, StageChangeRequestBody,
     UpdateFeatureRequest, VariantValueType,
+};
+use crate::rest::jira_integration::{
+    CreateJiraIntegrationRequest, JiraIntegrationResponse, JiraIntegrationWithSecretResponse,
+    JiraIntegrationsResponse, JiraStatusRuleRequest, JiraStatusRuleResponse,
+    JiraStatusRulesResponse, ReplaceJiraStatusRulesRequest, UpdateJiraIntegrationRequest,
 };
 use crate::rest::jwt_secret::JwtSecretResponse;
 use crate::rest::metrics::{
@@ -211,6 +217,14 @@ async fn health() -> impl Responder {
         external_link::list_external_links,
         external_link::create_external_link,
         external_link::delete_external_link,
+        jira_integration::list_jira_integrations,
+        jira_integration::create_jira_integration,
+        jira_integration::get_jira_integration,
+        jira_integration::update_jira_integration,
+        jira_integration::delete_jira_integration,
+        jira_integration::rotate_jira_integration_secret,
+        jira_integration::list_jira_status_rules,
+        jira_integration::replace_jira_status_rules,
         feature::create_feature,
         feature::update_feature,
         feature::emergency_disable_feature,
@@ -387,6 +401,15 @@ async fn health() -> impl Responder {
         ExternalLinkResponse,
         ExternalLinksResponse,
         CreateExternalLinkRequest,
+        JiraIntegrationResponse,
+        JiraIntegrationsResponse,
+        JiraIntegrationWithSecretResponse,
+        CreateJiraIntegrationRequest,
+        UpdateJiraIntegrationRequest,
+        JiraStatusRuleRequest,
+        ReplaceJiraStatusRulesRequest,
+        JiraStatusRuleResponse,
+        JiraStatusRulesResponse,
         CreateFeatureRequest,
         UpdateFeatureRequest,
         RollbackFeatureVersionRequest,
@@ -555,7 +578,8 @@ async fn health() -> impl Responder {
         (name = "Activity", description = "Activity logs"),
         (name = "Notifications", description = "Notification settings and delivery preferences"),
         (name = "AI", description = "TypeSafe AI judgments: status and per-team settings"),
-        (name = "Operational Safety", description = "Freeze windows, blast radius previews, and scheduled changes")
+        (name = "Operational Safety", description = "Freeze windows, blast radius previews, and scheduled changes"),
+        (name = "Jira", description = "Jira integrations: environment mapping, Jira-approved environments, status rules and inbound secret")
     )
 )]
 pub struct ApiDoc;
@@ -681,6 +705,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .configure(rollout_template::configure)
             .configure(feature::configure)
             .configure(external_link::configure)
+            .configure(jira_integration::configure)
             .configure(criteria::configure)
             .configure(metrics::configure)
             .configure(approval::configure)

@@ -16,6 +16,7 @@ enum ScopedResourceKind {
     Client,
     SystemClient,
     SystemClientToken,
+    JiraIntegration,
 }
 
 impl ScopedResourceKind {
@@ -31,6 +32,7 @@ impl ScopedResourceKind {
             "clients" => Some(Self::Client),
             "system-clients" => Some(Self::SystemClient),
             "system-client-tokens" => Some(Self::SystemClientToken),
+            "jira-integrations" => Some(Self::JiraIntegration),
             _ => None,
         }
     }
@@ -173,6 +175,13 @@ impl RequestScopeResolver for DatabaseRequestScopeResolver {
                     JOIN system_clients sc ON sc.id = sct.system_client_id
                     WHERE sct.id = $1
                     "#,
+                    resource.id,
+                )
+                .await
+            }
+            ScopedResourceKind::JiraIntegration => {
+                self.fetch_team_id(
+                    "SELECT team_id FROM jira_integrations WHERE id = $1",
                     resource.id,
                 )
                 .await

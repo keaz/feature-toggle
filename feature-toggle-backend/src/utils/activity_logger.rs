@@ -21,6 +21,13 @@ pub mod activity_types {
     pub const EXTERNAL_LINK_ADDED: &str = "external_link_added";
     pub const EXTERNAL_LINK_REMOVED: &str = "external_link_removed";
 
+    // Jira integration activities
+    pub const JIRA_INTEGRATION_CREATED: &str = "jira_integration_created";
+    pub const JIRA_INTEGRATION_UPDATED: &str = "jira_integration_updated";
+    pub const JIRA_INTEGRATION_SECRET_ROTATED: &str = "jira_integration_secret_rotated";
+    pub const JIRA_INTEGRATION_RULES_REPLACED: &str = "jira_integration_rules_replaced";
+    pub const JIRA_INTEGRATION_DELETED: &str = "jira_integration_deleted";
+
     // User activities
     pub const USER_CREATED: &str = "user_created";
     pub const USER_UPDATED: &str = "user_updated";

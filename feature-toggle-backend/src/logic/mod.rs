@@ -39,6 +39,8 @@ pub mod external_link_tx;
 pub mod feature;
 pub mod feature_evaluation;
 pub mod feature_tx;
+pub mod jira_integration;
+pub mod jira_integration_tx;
 pub mod jwt_secret;
 pub mod jwt_secret_tx;
 pub mod jwt_token;

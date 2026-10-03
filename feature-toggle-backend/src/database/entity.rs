@@ -646,3 +646,35 @@ pub struct ExternalLinkRow {
     pub created_by: Option<Uuid>,
     pub created_at: DateTime<Utc>,
 }
+
+/// A team's Jira integration (`jira_integrations`). Never serialize it to a
+/// client: it holds `secret_hash`.
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
+pub struct JiraIntegrationRow {
+    pub id: Uuid,
+    pub team_id: Uuid,
+    pub name: String,
+    pub jira_base_url: Option<String>,
+    pub secret_hash: String,
+    pub environment_field: String,
+    /// Jira value -> environment id.
+    pub environment_aliases: sqlx::types::Json<std::collections::BTreeMap<String, Uuid>>,
+    pub jira_approved_environment_ids: Vec<Uuid>,
+    pub feature_key_field: Option<String>,
+    pub actor_user_id: Uuid,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// A Jira status -> rollout action rule (`jira_status_rules`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct JiraStatusRuleRow {
+    pub id: Uuid,
+    pub integration_id: Uuid,
+    pub jira_status: String,
+    pub action: String,
+    pub environment_ids: Option<Vec<Uuid>>,
+    pub enabled: bool,
+    pub position: i32,
+}

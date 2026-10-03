@@ -72,6 +72,7 @@ pub enum PolicyAction {
     ManageRoles,
     UpdateTeamResource,
     ManageSystemClients,
+    ManageJiraIntegrations,
     ManageSso,
 }
 
@@ -84,6 +85,7 @@ impl PolicyAction {
             PolicyAction::ManageRoles => "manage_roles",
             PolicyAction::UpdateTeamResource => "update_team_resource",
             PolicyAction::ManageSystemClients => "manage_system_clients",
+            PolicyAction::ManageJiraIntegrations => "manage_jira_integrations",
             PolicyAction::ManageSso => "manage_sso",
         }
     }
@@ -101,6 +103,7 @@ pub enum PolicyResource {
     Feature,
     SystemClient,
     SystemClientToken,
+    JiraIntegration,
     Sso,
 }
 
@@ -117,6 +120,7 @@ impl PolicyResource {
             PolicyResource::Feature => "feature",
             PolicyResource::SystemClient => "system_client",
             PolicyResource::SystemClientToken => "system_client_token",
+            PolicyResource::JiraIntegration => "jira_integration",
             PolicyResource::Sso => "sso",
         }
     }
@@ -198,7 +202,9 @@ pub async fn enforce_for_route(
             }
             None => None,
         },
-        PolicyAction::ManageSystemClients => resolve_team_id_for_path(pool, path).await?,
+        PolicyAction::ManageSystemClients | PolicyAction::ManageJiraIntegrations => {
+            resolve_team_id_for_path(pool, path).await?
+        }
         _ => None,
     };
 
@@ -247,12 +253,14 @@ pub(crate) async fn authorize_feature_update(
     decision_to_result(decision)
 }
 
-/// Whether `path` is a system-client management route (any method).
-pub(crate) fn is_system_client_management_route(path: &str) -> bool {
+/// Whether `path` is a route only a team admin or system admin may use (system client
+/// or Jira integration management, any method). System clients skip the token scope
+/// check on these routes so the policy denies them (403 `policy_denied`, audited).
+pub(crate) fn is_team_admin_management_route(path: &str) -> bool {
     matches!(
         route_policy_for_request(&Method::GET, path),
         Some(RoutePolicy {
-            action: PolicyAction::ManageSystemClients,
+            action: PolicyAction::ManageSystemClients | PolicyAction::ManageJiraIntegrations,
             ..
         })
     )
@@ -297,6 +305,21 @@ fn route_policy_for_request(method: &Method, path: &str) -> Option<RoutePolicy> 
             return Some(RoutePolicy {
                 action: PolicyAction::ManageSystemClients,
                 resource: PolicyResource::SystemClient,
+                resource_id: None,
+            });
+        }
+        // Jira integration management: every method and sub-route, team admin or admin.
+        "jira-integrations" => {
+            return Some(RoutePolicy {
+                action: PolicyAction::ManageJiraIntegrations,
+                resource: PolicyResource::JiraIntegration,
+                resource_id: parse_uuid_at(3),
+            });
+        }
+        "teams" if parts.get(4) == Some(&"jira-integrations") => {
+            return Some(RoutePolicy {
+                action: PolicyAction::ManageJiraIntegrations,
+                resource: PolicyResource::JiraIntegration,
                 resource_id: None,
             });
         }
@@ -413,6 +436,14 @@ async fn evaluate(
             )
             .await
         }
+        PolicyAction::ManageJiraIntegrations => {
+            evaluate_team_admin_or_admin(
+                pool,
+                policy_request,
+                "jira_integration_management_not_permitted",
+            )
+            .await
+        }
     }
 }
 
@@ -512,7 +543,7 @@ async fn user_in_team(
     .map_err(|e| PolicyError::Internal(crate::Error::DatabaseError(e)))
 }
 
-/// Owning team of a system-client management route, via the same resolver the JWT
+/// Owning team of a system-client or Jira integration management route, via the same resolver the JWT
 /// guard uses for system-client token scoping. A malformed id in the path resolves
 /// to no team (non-admins are then denied; admins reach the handler, which 400s/404s).
 async fn resolve_team_id_for_path(
@@ -963,11 +994,11 @@ mod tests {
                 let policy = route_policy_for_request(&method, &path)
                     .unwrap_or_else(|| panic!("{method} {path} has no policy"));
                 assert_eq!(policy.action, PolicyAction::ManageSystemClients);
-                assert!(is_system_client_management_route(&path));
+                assert!(is_team_admin_management_route(&path));
             }
         }
         // Neighbouring team routes stay out of scope.
-        assert!(!is_system_client_management_route(&format!(
+        assert!(!is_team_admin_management_route(&format!(
             "/api/v1/teams/{id}/clients"
         )));
     }
@@ -1191,6 +1222,194 @@ mod tests {
         assert!(!admin_exists(&mut *tx).await.expect("query admins"));
 
         tx.rollback().await.expect("rollback");
+    }
+
+    // ---- Jira integration management routes ----
+
+    async fn insert_jira_integration(pool: &sqlx::PgPool, team_id: Uuid) -> Uuid {
+        let actor_id = insert_user(pool, false, "jira_shadow").await;
+        let integration_id = Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO jira_integrations (id, team_id, name, secret_hash, environment_field, actor_user_id)
+               VALUES ($1, $2, $3, 'hash', 'labels', $4)"#,
+        )
+        .bind(integration_id)
+        .bind(team_id)
+        .bind(format!("policy-jira-{integration_id}"))
+        .bind(actor_id)
+        .execute(pool)
+        .await
+        .expect("Failed to insert Jira integration");
+        integration_id
+    }
+
+    /// Every Jira integration management route (method, path).
+    fn jira_integration_routes(team_id: Uuid, integration_id: Uuid) -> Vec<(Method, String)> {
+        vec![
+            (
+                Method::GET,
+                format!("/api/v1/teams/{team_id}/jira-integrations"),
+            ),
+            (
+                Method::POST,
+                format!("/api/v1/teams/{team_id}/jira-integrations"),
+            ),
+            (
+                Method::GET,
+                format!("/api/v1/jira-integrations/{integration_id}"),
+            ),
+            (
+                Method::PATCH,
+                format!("/api/v1/jira-integrations/{integration_id}"),
+            ),
+            (
+                Method::DELETE,
+                format!("/api/v1/jira-integrations/{integration_id}"),
+            ),
+            (
+                Method::POST,
+                format!("/api/v1/jira-integrations/{integration_id}/rotate-secret"),
+            ),
+            (
+                Method::GET,
+                format!("/api/v1/jira-integrations/{integration_id}/rules"),
+            ),
+            (
+                Method::PUT,
+                format!("/api/v1/jira-integrations/{integration_id}/rules"),
+            ),
+        ]
+    }
+
+    #[test]
+    fn every_jira_integration_route_and_method_has_a_management_policy() {
+        let id = Uuid::new_v4();
+        for method in [
+            Method::GET,
+            Method::POST,
+            Method::PATCH,
+            Method::PUT,
+            Method::DELETE,
+        ] {
+            for path in [
+                format!("/api/v1/teams/{id}/jira-integrations"),
+                format!("/api/v1/teams/{id}/jira-integrations/"),
+                "/api/v1/jira-integrations".to_string(),
+                format!("/api/v1/jira-integrations/{id}"),
+                format!("/api/v1/jira-integrations/{id}/rules"),
+                format!("/api/v1/jira-integrations/{id}/rotate-secret"),
+                // A route added later under the prefix is guarded by default.
+                format!("/api/v1/jira-integrations/{id}/events"),
+            ] {
+                let policy = route_policy_for_request(&method, &path)
+                    .unwrap_or_else(|| panic!("{method} {path} has no policy"));
+                assert_eq!(policy.action, PolicyAction::ManageJiraIntegrations);
+                assert!(is_team_admin_management_route(&path), "{path}");
+            }
+        }
+        assert!(is_team_admin_management_route(&format!(
+            "/api/v1/system-clients/{id}"
+        )));
+        assert!(!is_team_admin_management_route(&format!(
+            "/api/v1/teams/{id}/clients"
+        )));
+        assert!(!is_team_admin_management_route(&format!(
+            "/api/v1/features/{id}/external-links"
+        )));
+    }
+
+    #[tokio::test]
+    async fn allows_team_admin_of_owning_team_on_all_jira_integration_routes() {
+        let pool = test_pool().await;
+        let team_id = insert_team(&pool).await;
+        let integration_id = insert_jira_integration(&pool, team_id).await;
+        let user_id = insert_user(&pool, false, "jira_team_admin").await;
+        let role_id = team_admin_role_id(&pool).await;
+        assign_role(&pool, user_id, role_id).await;
+        assign_user_to_team(&pool, user_id, team_id).await;
+
+        for (method, path) in jira_integration_routes(team_id, integration_id) {
+            let result =
+                enforce_for_route(&pool, &method, &path, Some(team_admin_actor(user_id))).await;
+            assert!(result.is_ok(), "{method} {path}: {result:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn allows_system_admin_on_jira_integration_routes() {
+        let pool = test_pool().await;
+        let team_id = insert_team(&pool).await;
+        let integration_id = insert_jira_integration(&pool, team_id).await;
+        let admin_id = insert_user(&pool, true, "jira_admin").await;
+
+        for (method, path) in jira_integration_routes(team_id, integration_id)
+            .into_iter()
+            .chain([(
+                Method::GET,
+                format!("/api/v1/jira-integrations/{}", Uuid::new_v4()),
+            )])
+        {
+            let actor = PolicyActor::user(admin_id, "admin".to_string(), true, Vec::new());
+            let result = enforce_for_route(&pool, &method, &path, Some(actor)).await;
+            assert!(result.is_ok(), "{method} {path}: {result:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn denies_plain_users_other_team_admins_and_system_clients_on_jira_integration_routes() {
+        let pool = test_pool().await;
+        let team_id = insert_team(&pool).await;
+        let other_team = insert_team(&pool).await;
+        let integration_id = insert_jira_integration(&pool, team_id).await;
+        let role_id = team_admin_role_id(&pool).await;
+
+        let plain = insert_user(&pool, false, "jira_plain").await;
+        assign_user_to_team(&pool, plain, team_id).await;
+        let other_admin = insert_user(&pool, false, "jira_other_admin").await;
+        assign_role(&pool, other_admin, role_id).await;
+        assign_user_to_team(&pool, other_admin, other_team).await;
+        let (system_client_id, _) = insert_system_client(&pool, team_id).await;
+
+        for (method, path) in jira_integration_routes(team_id, integration_id) {
+            let actors = [
+                PolicyActor::user(plain, "plain".to_string(), false, Vec::new()),
+                team_admin_actor(other_admin),
+                // Even a token whose roles claim Team Admin must be denied.
+                PolicyActor::system_client(
+                    system_client_id,
+                    "bot".to_string(),
+                    vec![TEAM_ADMIN_ROLE.to_string()],
+                ),
+            ];
+            for actor in actors {
+                let result = enforce_for_route(&pool, &method, &path, Some(actor)).await;
+                assert!(
+                    matches!(result, Err(PolicyError::Forbidden(_))),
+                    "{method} {path}: {result:?}"
+                );
+            }
+            let result = enforce_for_route(&pool, &method, &path, None).await;
+            assert!(
+                matches!(result, Err(PolicyError::Unauthorized)),
+                "{method} {path}: {result:?}"
+            );
+        }
+
+        // A Team Admin cannot reach an integration that does not exist.
+        let owner_admin = insert_user(&pool, false, "jira_owner_admin").await;
+        assign_role(&pool, owner_admin, role_id).await;
+        assign_user_to_team(&pool, owner_admin, team_id).await;
+        let result = enforce_for_route(
+            &pool,
+            &Method::GET,
+            &format!("/api/v1/jira-integrations/{}", Uuid::new_v4()),
+            Some(team_admin_actor(owner_admin)),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(PolicyError::Forbidden(_))),
+            "{result:?}"
+        );
     }
 
     fn sso_admin_routes() -> Vec<(Method, String)> {

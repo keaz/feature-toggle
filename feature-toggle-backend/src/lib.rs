@@ -390,6 +390,9 @@ pub async fn run() -> std::io::Result<()> {
             .app_data(web::Data::new(
                 database::external_link::external_link_repository(db_pool.clone()),
             ))
+            .app_data(web::Data::new(
+                database::jira_integration::jira_integration_repository(db_pool.clone()),
+            ))
             .app_data(web::Data::new(variant_allocations_repository.clone()))
             .app_data(web::Data::new(compound_rules_repository.clone()))
             .app_data(web::Data::new(updates_tx.clone()))
