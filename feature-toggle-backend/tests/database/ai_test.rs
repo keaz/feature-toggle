@@ -1,7 +1,7 @@
 use feature_toggle_backend::Error;
 use feature_toggle_backend::database::ai::{
-    AiFeature, JudgmentResult, NewJudgment, TeamAiSettings, ai_judgment_repository,
-    team_ai_settings_repository,
+    AiFeature, JudgmentResult, MAX_ATTEMPTS, MAX_CLAIMS, NewJudgment, TeamAiSettings,
+    ai_judgment_repository, team_ai_settings_repository,
 };
 use feature_toggle_backend::database::init_pg_pool;
 use feature_toggle_backend::judgment::{JudgmentKind, SubjectType};
@@ -143,8 +143,8 @@ async fn upsert_pending_resets_an_existing_row() {
     );
     assert_eq!(second.status, "pending");
     assert_eq!(
-        second.attempts, 1,
-        "the initial run counts as the first attempt"
+        second.attempts, 0,
+        "no run has reached the API for the new input yet"
     );
     assert_eq!(second.input_hash, "h2");
     assert!(second.error.is_none());
@@ -299,14 +299,38 @@ async fn claim_retryable_picks_old_pending_and_failed_under_three_attempts() {
     assert!(!ids.contains(&exhausted.id));
     assert!(!ids.contains(&done.id));
     for row in claimed.iter().filter(|row| row.team_id == team_id) {
-        assert_eq!(row.attempts, 2, "claiming a row counts the retry attempt");
+        assert_eq!(
+            row.attempts, 0,
+            "claiming a row does not count an attempt; only a run that reaches the API does"
+        );
     }
 
     delete_team(&pool, team_id).await;
 }
 
+async fn claims(pool: &PgPool, id: Uuid) -> i32 {
+    sqlx::query_scalar("SELECT claims FROM ai_judgments WHERE id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// Moves the last claim back in time, as if the claim spacing had passed.
+async fn age_claim(pool: &PgPool, id: Uuid) {
+    sqlx::query("UPDATE ai_judgments SET claimed_at = NOW() - INTERVAL '5 minutes' WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+fn claimed_ids(rows: Vec<feature_toggle_backend::database::ai::AiJudgment>) -> Vec<Uuid> {
+    rows.into_iter().map(|row| row.id).collect()
+}
+
 #[tokio::test]
-async fn stuck_pending_row_stops_after_three_attempts() {
+async fn stuck_pending_row_reaches_the_api_at_most_three_times() {
     let _guard = ai_judgment_lock().lock().await;
     let pool = init_pg_pool().await;
     let team_id = insert_team(&pool).await;
@@ -317,15 +341,122 @@ async fn stuck_pending_row_stops_after_three_attempts() {
         .unwrap();
     age(&pool, stuck.id).await;
 
-    let claimed_ids = |rows: Vec<feature_toggle_backend::database::ai::AiJudgment>| -> Vec<Uuid> {
-        rows.into_iter().map(|row| row.id).collect()
-    };
-    assert!(claimed_ids(repo.claim_retryable(1000).await.unwrap()).contains(&stuck.id));
-    assert!(claimed_ids(repo.claim_retryable(1000).await.unwrap()).contains(&stuck.id));
+    for _ in 0..MAX_ATTEMPTS {
+        assert!(claimed_ids(repo.claim_retryable(1000).await.unwrap()).contains(&stuck.id));
+        assert!(repo.start_attempt(stuck.id, "s".into()).await.unwrap());
+        age_claim(&pool, stuck.id).await;
+    }
+    assert!(
+        !repo.start_attempt(stuck.id, "s".into()).await.unwrap(),
+        "a fourth run must not reach the API"
+    );
     assert!(
         !claimed_ids(repo.claim_retryable(1000).await.unwrap()).contains(&stuck.id),
-        "a row whose result can never be stored must stop after 3 attempts"
+        "a row whose result can never be stored must stop after 3 API runs"
     );
+
+    delete_team(&pool, team_id).await;
+}
+
+#[tokio::test]
+async fn a_refunded_attempt_can_be_used_again() {
+    let _guard = ai_judgment_lock().lock().await;
+    let pool = init_pg_pool().await;
+    let team_id = insert_team(&pool).await;
+    let repo = ai_judgment_repository(pool.clone());
+    let row = repo
+        .upsert_pending(new_judgment(team_id, Uuid::new_v4(), "r"))
+        .await
+        .unwrap();
+
+    for _ in 0..MAX_ATTEMPTS {
+        assert!(repo.start_attempt(row.id, "r".into()).await.unwrap());
+    }
+    assert!(!repo.start_attempt(row.id, "r".into()).await.unwrap());
+    assert!(repo.refund_attempt(row.id, "r".into()).await.unwrap());
+    assert!(repo.start_attempt(row.id, "r".into()).await.unwrap());
+
+    // Guarded by the input hash: an old run neither counts nor refunds.
+    assert!(!repo.start_attempt(row.id, "old".into()).await.unwrap());
+    assert!(!repo.refund_attempt(row.id, "old".into()).await.unwrap());
+    // A done row is never started again.
+    repo.mark_done(row.id, "r".into(), result()).await.unwrap();
+    assert!(repo.refund_attempt(row.id, "r".into()).await.unwrap());
+    assert!(!repo.start_attempt(row.id, "r".into()).await.unwrap());
+
+    delete_team(&pool, team_id).await;
+}
+
+/// Claims are spaced: a claimed row is not claimed again until 2 minutes
+/// after its last claim, so another node does not pick up a run in progress.
+#[tokio::test]
+async fn a_claimed_row_is_not_claimed_again_right_away() {
+    let _guard = ai_judgment_lock().lock().await;
+    let pool = init_pg_pool().await;
+    let team_id = insert_team(&pool).await;
+    let repo = ai_judgment_repository(pool.clone());
+    let row = repo
+        .upsert_pending(new_judgment(team_id, Uuid::new_v4(), "c"))
+        .await
+        .unwrap();
+    age(&pool, row.id).await;
+
+    assert!(claimed_ids(repo.claim_retryable(1000).await.unwrap()).contains(&row.id));
+    assert_eq!(claims(&pool, row.id).await, 1);
+    assert!(!claimed_ids(repo.claim_retryable(1000).await.unwrap()).contains(&row.id));
+    // A failed run right after its claim also waits for the spacing.
+    assert!(
+        repo.mark_failed(row.id, "c".into(), "x".into())
+            .await
+            .unwrap()
+    );
+    assert!(!claimed_ids(repo.claim_retryable(1000).await.unwrap()).contains(&row.id));
+
+    age_claim(&pool, row.id).await;
+    assert!(claimed_ids(repo.claim_retryable(1000).await.unwrap()).contains(&row.id));
+    assert_eq!(claims(&pool, row.id).await, 2);
+
+    delete_team(&pool, team_id).await;
+}
+
+/// A row whose runs never get an API permit keeps all its attempts, but the
+/// sweep stops picking it up after `MAX_CLAIMS` claims, so it cannot loop
+/// forever. A new submission starts the count again.
+#[tokio::test]
+async fn a_row_that_never_reaches_the_api_stops_after_max_claims() {
+    let _guard = ai_judgment_lock().lock().await;
+    let pool = init_pg_pool().await;
+    let team_id = insert_team(&pool).await;
+    let repo = ai_judgment_repository(pool.clone());
+    let subject_id = Uuid::new_v4();
+    let row = repo
+        .upsert_pending(new_judgment(team_id, subject_id, "n"))
+        .await
+        .unwrap();
+    age(&pool, row.id).await;
+
+    for claim in 0..MAX_CLAIMS {
+        let claimed = repo.claim_retryable(1000).await.unwrap();
+        let mine = claimed.iter().find(|claimed| claimed.id == row.id);
+        assert!(mine.is_some(), "claim {claim} should pick the row up");
+        assert_eq!(mine.unwrap().attempts, 0);
+        assert!(
+            repo.mark_failed(row.id, "n".into(), "busy".into())
+                .await
+                .unwrap()
+        );
+        age_claim(&pool, row.id).await;
+    }
+    assert!(
+        !claimed_ids(repo.claim_retryable(1000).await.unwrap()).contains(&row.id),
+        "the sweep must stop after MAX_CLAIMS claims"
+    );
+
+    let again = repo
+        .upsert_pending(new_judgment(team_id, subject_id, "n2"))
+        .await
+        .unwrap();
+    assert_eq!(claims(&pool, again.id).await, 0);
 
     delete_team(&pool, team_id).await;
 }

@@ -60,19 +60,19 @@ Repo practice for this project: commit directly on `main` in each repo (the READ
 
 ### Concurrency: sync calls versus the background pipeline (final-review fix `166a573`)
 
-- `HttpJudgmentClient` holds `max_in_flight` permits for all callers. A caller waits for a permit at most `timeout_ms`; if none frees up, `evaluate` returns `JudgmentError::Timeout` without sending anything. Sync endpoints then answer `{"available": false}` as for any other failure, instead of hanging.
+- `HttpJudgmentClient` holds `max_in_flight` permits for all callers. A caller waits for a permit at most `timeout_ms`; if none frees up, `evaluate` returns `JudgmentError::Busy` (log label `busy`) without sending anything. `JudgmentError::reached_api()` is false only for `Busy` and `Unavailable`. Sync endpoints then answer `{"available": false}` as for any other failure, instead of hanging.
 - `JudgmentService` has its own semaphore with `async_in_flight(max_in_flight)` = half of `max_in_flight` (at least 1) permits, taken around the API call. Background runs (approval risk, justification recording, flag kind, backfill) can therefore hold at most half of the global permits; the other half always stays free for the sync endpoints. Wired in `lib.rs` with `.with_async_in_flight(...)`.
-- A run started by `submit` waits at most `SUBMIT_QUEUE_WAIT` (60 s) for a background permit. If it cannot start, it returns `RunOutcome::Deferred` and leaves the row `pending`; the retry sweep runs it after 2 minutes. Because 60 s is shorter than the sweep's 2-minute pending threshold, a row the sweep may claim is not also started by its submit task, so a 500-row backfill no longer calls the API twice for the same row. Sweep runs wait for a permit without a limit (they already claimed the row).
+- A run started by `submit` waits at most `SUBMIT_QUEUE_WAIT` (60 s) for a background permit. If it cannot start, it returns `RunOutcome::Deferred` and leaves the row `pending` without spending an attempt; the retry sweep runs it after 2 minutes. Because 60 s is shorter than the sweep's 2-minute pending threshold, a row the sweep may claim is not also started by its submit task, so a 500-row backfill no longer calls the API twice for the same row. Sweep runs wait for a permit without a limit (they already claimed the row).
 - With `max_in_flight = 1` there is no reserve: background and sync share the one permit (sync still waits at most `timeout_ms`).
 
 ### Retry and attempt semantics (changed from the original design text; design §3.4 is updated)
 
-- `attempts` counts runs that started. `submit` writes the row with `attempts = 1`.
-- The sweep claims rows with `claim_retryable(50)`: pending rows older than 2 minutes and failed rows, both only while `attempts < 3`. It increments `attempts` as it claims (`FOR UPDATE SKIP LOCKED`). A row runs at most 3 times in total, even when its result can never be stored.
+- `attempts` counts runs that reached the API (fix 2026-10-03). `submit` (and a new input) writes the row with `attempts = 0`. A run holding its background permit calls `start_attempt` right before `client.evaluate`: an atomic `UPDATE ... SET attempts = attempts + 1 WHERE id AND input_hash AND status <> 'done' AND attempts < 3`. When it changes no row (newer input, already done, or 3 attempts used), the run makes no API call and returns `RunOutcome::Skipped`. When `evaluate` fails with `Busy` or `Unavailable` (nothing sent), the run calls `refund_attempt` and marks the row failed. A crash between `start_attempt` and the end of the call keeps the attempt counted. So at most 3 runs of one input reach the API, also across nodes; runs that waited for a permit (`Deferred`, `Busy`) spend nothing.
+- The sweep claims rows with `claim_retryable(50)`: pending rows older than 2 minutes and failed rows, only while `attempts < 3` and `claims < 10` (`MAX_CLAIMS`), and only 2 minutes after the row's last claim (`claimed_at`). Claiming increments `claims` and sets `claimed_at` (`FOR UPDATE SKIP LOCKED`); it does not touch `attempts`. `claims` is the bound that stops a row whose runs never get a permit from being claimed forever: with the 2-minute spacing it is retried for at least 20 minutes, then left alone. The spacing also keeps another node (or the next tick) from claiming a row whose run is still in progress. A new input resets `attempts`, `claims` and `claimed_at` (migration `20261003010000_ai_judgment_claims.sql`).
 - `mark_failed` does not change `attempts` and never overwrites a `done` row.
 - `mark_done` is guarded by `input_hash` **and** `status <> 'done'`. A second run of the same input returns `RunOutcome::Stale`, so `apply` runs once.
 - Before each retry the sweep checks the team toggle for the kind. When it is off, the row is marked failed ("skipped: AI feature turned off for this team") and no data is sent.
-- Every backend node runs the sweep. `SKIP LOCKED` plus the attempt count keeps this bounded.
+- Every backend node runs the sweep. `SKIP LOCKED`, the claim spacing, the claim count and the atomic `start_attempt` keep this bounded.
 
 ### UI (`feature-toggle-ui/src/`)
 
@@ -99,7 +99,7 @@ Repo practice for this project: commit directly on `main` in each repo (the READ
 - **TypeSafe key:** `TYPESAFE_API_KEY` is set in the shell. Never write it to a file, log, fixture or commit. Live smoke test: `cargo test -p feature-toggle-backend --test typesafe_live_test -- --ignored`. The live tuning tests in each feature task (`#[ignore]`, design §7) use the same key.
 - **UI:** use pnpm, never npm: `pnpm lint`, `pnpm build`, `pnpm test:run` in `feature-toggle-ui/`.
 - **Contracts:** after any DTO or endpoint change, run `./scripts/export-contracts.sh`, copy `feature-toggle-backend/contracts/generated/contract-hashes.json` to `contracts/baseline/`, then `./scripts/check-contract-compat.sh`. Only the baseline file is tracked.
-- **Migrations:** the latest is `20261002060000_approval_request_required_approvers_override.sql` (after `..030000_ai_judgments`, `..040000_approval_policy_ai_risk_mode`, `..050000_feature_flag_kind`). New ones must sort after it. The final-review fix waves added no migration.
+- **Migrations:** the latest is `20261003010000_ai_judgment_claims.sql` (after `20261002030000_ai_judgments`, `..040000_approval_policy_ai_risk_mode`, `..050000_feature_flag_kind`, `..060000_approval_request_required_approvers_override`). New ones must sort after it. The final-review fix waves added no migration; the known-issue fixes of 2026-10-03 added `ai_judgment_claims`.
 - After code changes run `graphify update .` in the repo you changed (`graphify-out/` is not committed).
 
 ## 4. Known gaps left open (decide when you touch the area)
@@ -108,7 +108,7 @@ Backend:
 
 - **Role-routed requests and the extra approver.** The cap at the eligible approver count only applies when the request lists its eligible approvers. A role-routed request (empty list) still gets `required + 1` and can need one more approver than the role has; admin override and cancel are the escapes. A policy edit does not clear an override already stored on a request.
 - **NL search owner filter** uses `f.owner ILIKE %owner%` (inherited from the list endpoint): the chip value is not an exact match, and `_`/`%` in an owner name act as wildcards. A tag named `unspecified` is offered but ignored; owner grouping is case-sensitive.
-- **Retry sweep re-claim.** `claim_retryable` does not reset `created_at`, so a claimed pending row still looks older than 2 minutes to the next tick or another node and can be claimed again while it runs. `attempts < 3` bounds it.
+- **Retry sweep re-claim.** A claimed row is not claimed again for 2 minutes (`claimed_at`). A sweep run that is still going after that (a long batch waiting for background permits) can be claimed again by another node; `start_attempt` still keeps the API runs of one input at 3.
 - **Rule-decided justification results:** a crash between `upsert_pending` and `mark_done` in `record_rule_result` leaves a pending row the sweep then sends to the API.
 - **Flag kind:** re-classification runs only on create and update (not bulk tag actions or rollback); an unknown stored kind maps to `None` silently (the CHECK constraint prevents it); the backfill scans all judged rows per call.
 - **AI-11 vote window:** a vote reads the request, then records; an override that lands in between is counted against the old requirement. `enforce_extra_approver` errors skip the activity write (fail open).

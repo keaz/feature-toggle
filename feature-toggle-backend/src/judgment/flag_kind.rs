@@ -576,6 +576,8 @@ pub(crate) mod test_support {
                 ..judgment(new.subject_id, "pending", json!({}), json!({}))
             })
         });
+        judgments.expect_start_attempt().returning(|_, _| Ok(true));
+        judgments.expect_refund_attempt().returning(|_, _| Ok(true));
         judgments.expect_mark_failed().returning(|_, _, _| Ok(true));
         let mut settings = MockTeamAiSettingsRepository::new();
         settings.expect_get().returning(move |_| {

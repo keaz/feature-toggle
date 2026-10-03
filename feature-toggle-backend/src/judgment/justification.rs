@@ -361,6 +361,8 @@ pub(crate) mod test_support {
                 completed_at: None,
             })
         });
+        judgments.expect_start_attempt().returning(|_, _| Ok(true));
+        judgments.expect_refund_attempt().returning(|_, _| Ok(true));
         judgments.expect_mark_failed().returning(|_, _, _| Ok(true));
         judgments.expect_mark_done().returning(|_, _, _| Ok(true));
         let mut client = MockJudgmentClient::new();
@@ -691,6 +693,10 @@ mod tests {
                 })
                 .times(1)
                 .returning(|new| Ok(pending_row(&new)));
+            judgments
+                .expect_start_attempt()
+                .times(1)
+                .returning(|_, _| Ok(true));
             judgments
                 .expect_mark_done()
                 .times(1)

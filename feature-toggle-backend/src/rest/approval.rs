@@ -662,9 +662,9 @@ fn build_change_diff(
 }
 
 /// A risk assessment still `pending` this long after it was queued is reported
-/// as `failed`. The retry sweep stops after three attempts and does not run at
-/// all without an API key, so such a row may never finish. The UI stops polling
-/// after the same 10 minutes.
+/// as `failed`. The retry sweep stops after three runs that reach the API (or
+/// ten sweep claims) and does not run at all without an API key, so such a row
+/// may never finish. The UI stops polling after the same 10 minutes.
 pub(crate) const AI_RISK_PENDING_MAX_AGE_MINUTES: i64 = 10;
 
 /// Maps a stored judgment row to the response summary. No row, or a status

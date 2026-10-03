@@ -11,9 +11,15 @@ use uuid::Uuid;
 use crate::database::{Error, handle_error};
 use crate::judgment::{JudgmentKind, SubjectType};
 
-/// Total runs (the first run plus sweep retries) before a judgment is left alone.
-/// `attempts` counts runs that started.
+/// Most runs of one input that may reach the TypeSafe API. `attempts` counts
+/// runs that reached the API: a run reserves an attempt (`start_attempt`) right
+/// before its API call and gives it back (`refund_attempt`) when the HTTP client
+/// had no free request slot and sent nothing.
 pub const MAX_ATTEMPTS: i32 = 3;
+/// Most times the retry sweep picks up one input. Bounds a row whose runs never
+/// get an API permit (and so never spend an attempt): with the 2-minute claim
+/// spacing it is retried for at least 20 minutes, then left alone.
+pub const MAX_CLAIMS: i32 = 10;
 /// Rows the retry sweep takes per tick.
 pub const RETRY_BATCH: i64 = 50;
 
@@ -214,8 +220,17 @@ pub struct JudgmentResult {
 #[async_trait]
 pub trait AiJudgmentRepository: Send + Sync {
     /// Inserts or resets the row for (subject_type, subject_id, kind) to `pending`
-    /// with `attempts = 1`: the run that `submit` starts is the first attempt.
+    /// with `attempts = 0` and no sweep claims: nothing has reached the API yet.
     async fn upsert_pending(&self, judgment: NewJudgment) -> Result<AiJudgment, Error>;
+    /// Reserves one API attempt right before a run calls the API. False (and no
+    /// call should be made) when `input_hash` no longer matches, the row is
+    /// done, or `MAX_ATTEMPTS` runs already reached the API. Atomic, so
+    /// concurrent runs on several nodes cannot exceed the bound.
+    async fn start_attempt(&self, id: Uuid, input_hash: String) -> Result<bool, Error>;
+    /// Gives back an attempt reserved by `start_attempt` when the run sent
+    /// nothing (no free API request slot). False when the hash is stale or no
+    /// attempt is counted.
+    async fn refund_attempt(&self, id: Uuid, input_hash: String) -> Result<bool, Error>;
     /// False when `input_hash` no longer matches (a newer submission won) or the
     /// row is already done (another run of the same input finished first).
     async fn mark_done(
@@ -225,7 +240,7 @@ pub trait AiJudgmentRepository: Send + Sync {
         result: JudgmentResult,
     ) -> Result<bool, Error>;
     /// False when the hash is stale or the row is already done. Does not count
-    /// an attempt: runs are counted when they start (`upsert_pending`, `claim_retryable`).
+    /// an attempt: a run counts it when it reaches the API (`start_attempt`).
     async fn mark_failed(&self, id: Uuid, input_hash: String, error: String)
     -> Result<bool, Error>;
     async fn get_for_subject(
@@ -241,9 +256,11 @@ pub trait AiJudgmentRepository: Send + Sync {
         kind: JudgmentKind,
     ) -> Result<Vec<AiJudgment>, Error>;
     /// Claims rows for the retry sweep, oldest first: pending rows older than
-    /// 2 minutes (their run was lost or never stored) and failed rows, both
-    /// only while `attempts < MAX_ATTEMPTS`. Claiming counts the attempt, so a
-    /// row whose result can never be stored stops after `MAX_ATTEMPTS` runs.
+    /// 2 minutes (their run was lost, deferred, or never stored) and failed
+    /// rows, both only while `attempts < MAX_ATTEMPTS` and
+    /// `claims < MAX_CLAIMS`, and only 2 minutes after the row's last claim (so
+    /// a run in progress is not picked up again). Claiming counts a claim, not
+    /// an attempt.
     async fn claim_retryable(&self, limit: i64) -> Result<Vec<AiJudgment>, Error>;
     fn clone_box(&self) -> Box<dyn AiJudgmentRepository>;
 }
@@ -273,11 +290,13 @@ impl AiJudgmentRepository for PgAiJudgmentRepository {
             r#"
             INSERT INTO ai_judgments
                 (id, team_id, subject_type, subject_id, kind, status, attempts, input, input_hash)
-            VALUES ($1, $2, $3, $4, $5, 'pending', 1, $6, $7)
+            VALUES ($1, $2, $3, $4, $5, 'pending', 0, $6, $7)
             ON CONFLICT (subject_type, subject_id, kind) DO UPDATE SET
                 team_id = EXCLUDED.team_id,
                 status = 'pending',
-                attempts = 1,
+                attempts = 0,
+                claims = 0,
+                claimed_at = NULL,
                 input = EXCLUDED.input,
                 input_hash = EXCLUDED.input_hash,
                 model = NULL,
@@ -322,6 +341,35 @@ impl AiJudgmentRepository for PgAiJudgmentRepository {
         .bind(&result.raw_answers)
         .bind(&result.derived)
         .bind(result.input_tokens)
+        .execute(&self.pool)
+        .await;
+        Ok(handle_error(Some(id), outcome)?.rows_affected() > 0)
+    }
+
+    async fn start_attempt(&self, id: Uuid, input_hash: String) -> Result<bool, Error> {
+        let outcome = sqlx::query(
+            r#"
+            UPDATE ai_judgments SET attempts = attempts + 1
+            WHERE id = $1 AND input_hash = $2 AND status <> 'done' AND attempts < $3
+            "#,
+        )
+        .bind(id)
+        .bind(&input_hash)
+        .bind(MAX_ATTEMPTS)
+        .execute(&self.pool)
+        .await;
+        Ok(handle_error(Some(id), outcome)?.rows_affected() > 0)
+    }
+
+    async fn refund_attempt(&self, id: Uuid, input_hash: String) -> Result<bool, Error> {
+        let outcome = sqlx::query(
+            r#"
+            UPDATE ai_judgments SET attempts = attempts - 1
+            WHERE id = $1 AND input_hash = $2 AND attempts > 0
+            "#,
+        )
+        .bind(id)
+        .bind(&input_hash)
         .execute(&self.pool)
         .await;
         Ok(handle_error(Some(id), outcome)?.rows_affected() > 0)
@@ -390,20 +438,23 @@ impl AiJudgmentRepository for PgAiJudgmentRepository {
     async fn claim_retryable(&self, limit: i64) -> Result<Vec<AiJudgment>, Error> {
         let result = sqlx::query_as::<_, AiJudgment>(&format!(
             r#"
-            UPDATE ai_judgments SET attempts = attempts + 1
+            UPDATE ai_judgments SET claims = claims + 1, claimed_at = NOW()
             WHERE id IN (
                 SELECT id FROM ai_judgments
                 WHERE ((status = 'pending' AND created_at < NOW() - INTERVAL '2 minutes')
                        OR status = 'failed')
                   AND attempts < $1
+                  AND claims < $2
+                  AND (claimed_at IS NULL OR claimed_at < NOW() - INTERVAL '2 minutes')
                 ORDER BY created_at ASC
-                LIMIT $2
+                LIMIT $3
                 FOR UPDATE SKIP LOCKED
             )
             RETURNING {JUDGMENT_COLUMNS}
             "#
         ))
         .bind(MAX_ATTEMPTS)
+        .bind(MAX_CLAIMS)
         .bind(limit)
         .fetch_all(&self.pool)
         .await;

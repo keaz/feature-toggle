@@ -42,8 +42,11 @@ pub enum RunOutcome {
     /// Stored as failed (or could not be stored); the sweep may retry it.
     Failed,
     /// Not started: no background permit within the queue limit. The row
-    /// stays pending and the retry sweep runs it later.
+    /// stays pending and the retry sweep runs it later. No attempt is spent.
     Deferred,
+    /// Not run: the row has a newer input, is already done, or already used
+    /// all its API attempts. No API call was made.
+    Skipped,
 }
 
 /// How long a run started by `submit` waits for a background permit before
@@ -298,11 +301,36 @@ impl JudgmentService {
             );
             return RunOutcome::Deferred;
         };
+        // Count the attempt only now, right before the call: a run that never
+        // got this far has not used one of the row's API attempts.
+        match self
+            .judgments
+            .start_attempt(row.id, row.input_hash.clone())
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return RunOutcome::Skipped,
+            Err(err) => {
+                error!("Could not count AI judgment {} attempt: {err}", row.id);
+                return RunOutcome::Failed;
+            }
+        }
         let response = self.client.evaluate(parts.state, parts.questions).await;
         drop(permit);
         let response = match response {
             Ok(response) => response,
             Err(err) => {
+                if !err.reached_api() {
+                    // Nothing was sent (no free request slot): give the
+                    // attempt back so the sweep can still make a real try.
+                    if let Err(refund) = self
+                        .judgments
+                        .refund_attempt(row.id, row.input_hash.clone())
+                        .await
+                    {
+                        error!("Could not refund AI judgment {} attempt: {refund}", row.id);
+                    }
+                }
                 self.fail(&row, err.to_string()).await;
                 return RunOutcome::Failed;
             }
@@ -522,6 +550,9 @@ mod tests {
             .times(1)
             .returning(|_, _| Ok(ok_response()));
         let mut repo = MockAiJudgmentRepository::new();
+        repo.expect_start_attempt()
+            .times(1)
+            .returning(|_, _| Ok(true));
         repo.expect_mark_done()
             .withf(|_, hash, result| {
                 hash == "h1"
@@ -546,6 +577,9 @@ mod tests {
             .times(1)
             .returning(|_, _| Err(JudgmentError::Timeout));
         let mut repo = MockAiJudgmentRepository::new();
+        repo.expect_start_attempt()
+            .times(1)
+            .returning(|_, _| Ok(true));
         repo.expect_mark_done().times(0);
         repo.expect_mark_failed()
             .withf(|_, hash, error| hash == "h1" && error.contains("timed out"))
@@ -557,6 +591,73 @@ mod tests {
         assert_eq!(applied.load(Ordering::SeqCst), 0);
     }
 
+    /// A run counts its attempt only once it can call the API. When the HTTP
+    /// client has no free permit (`Busy`), nothing was sent, so the attempt is
+    /// given back and the row is left failed for the sweep.
+    #[tokio::test]
+    async fn a_run_that_gets_no_api_permit_gives_its_attempt_back() {
+        let mut client = MockJudgmentClient::new();
+        client
+            .expect_evaluate()
+            .times(1)
+            .returning(|_, _| Err(JudgmentError::Busy));
+        let mut repo = MockAiJudgmentRepository::new();
+        repo.expect_start_attempt()
+            .withf(|_, hash| hash == "h1")
+            .times(1)
+            .returning(|_, _| Ok(true));
+        repo.expect_refund_attempt()
+            .withf(|_, hash| hash == "h1")
+            .times(1)
+            .returning(|_, _| Ok(true));
+        repo.expect_mark_done().times(0);
+        repo.expect_mark_failed()
+            .withf(|_, hash, _| hash == "h1")
+            .times(1)
+            .returning(|_, _, _| Ok(true));
+        let (service, applied, _) = service(client, repo, MockTeamAiSettingsRepository::new());
+
+        assert_eq!(service.run(row("h1")).await, RunOutcome::Failed);
+        assert_eq!(applied.load(Ordering::SeqCst), 0);
+    }
+
+    /// A real API failure keeps its attempt.
+    #[tokio::test]
+    async fn a_run_that_reached_the_api_keeps_its_attempt() {
+        let mut client = MockJudgmentClient::new();
+        client
+            .expect_evaluate()
+            .times(1)
+            .returning(|_, _| Err(JudgmentError::Timeout));
+        let mut repo = MockAiJudgmentRepository::new();
+        repo.expect_start_attempt()
+            .times(1)
+            .returning(|_, _| Ok(true));
+        repo.expect_refund_attempt().times(0);
+        repo.expect_mark_failed()
+            .times(1)
+            .returning(|_, _, _| Ok(true));
+        let (service, _, _) = service(client, repo, MockTeamAiSettingsRepository::new());
+
+        assert_eq!(service.run(row("h1")).await, RunOutcome::Failed);
+    }
+
+    /// No attempt left (or a newer input, or already done): no API call.
+    #[tokio::test]
+    async fn a_run_without_an_attempt_left_does_not_call_the_api() {
+        let mut client = MockJudgmentClient::new();
+        client.expect_evaluate().times(0);
+        let mut repo = MockAiJudgmentRepository::new();
+        repo.expect_start_attempt()
+            .times(1)
+            .returning(|_, _| Ok(false));
+        repo.expect_mark_done().times(0);
+        repo.expect_mark_failed().times(0);
+        let (service, _, _) = service(client, repo, MockTeamAiSettingsRepository::new());
+
+        assert_eq!(service.run(row("h1")).await, RunOutcome::Skipped);
+    }
+
     #[tokio::test]
     async fn newer_submission_makes_old_run_stale() {
         let mut client = MockJudgmentClient::new();
@@ -565,6 +666,9 @@ mod tests {
             .times(1)
             .returning(|_, _| Ok(ok_response()));
         let mut repo = MockAiJudgmentRepository::new();
+        repo.expect_start_attempt()
+            .times(1)
+            .returning(|_, _| Ok(true));
         repo.expect_mark_done()
             .times(1)
             .returning(|_, _, _| Ok(false));
@@ -604,6 +708,9 @@ mod tests {
                 stored.input_hash = new.input_hash;
                 Ok(stored)
             });
+        repo.expect_start_attempt()
+            .times(1)
+            .returning(|_, _| Ok(true));
         repo.expect_mark_done()
             .times(1)
             .returning(|_, _, _| Ok(true));
@@ -685,6 +792,9 @@ mod tests {
             .withf(|limit| *limit == crate::database::ai::RETRY_BATCH)
             .times(1)
             .returning(move |_| Ok(rows.clone()));
+        repo.expect_start_attempt()
+            .times(2)
+            .returning(|_, _| Ok(true));
         repo.expect_mark_done()
             .times(2)
             .returning(|_, _, _| Ok(true));
@@ -759,13 +869,22 @@ mod tests {
         }
     }
 
-    fn slow_service(async_in_flight: usize) -> (Arc<JudgmentService>, Arc<SlowClient>) {
+    /// Also returns how many attempts were counted (`start_attempt` calls).
+    fn slow_service(
+        async_in_flight: usize,
+    ) -> (Arc<JudgmentService>, Arc<SlowClient>, Arc<AtomicUsize>) {
         let client = Arc::new(SlowClient {
             in_flight: AtomicUsize::new(0),
             peak: AtomicUsize::new(0),
             calls: AtomicUsize::new(0),
         });
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counted = attempts.clone();
         let mut repo = MockAiJudgmentRepository::new();
+        repo.expect_start_attempt().returning(move |_, _| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Ok(true)
+        });
         repo.expect_mark_done().returning(|_, _, _| Ok(true));
         repo.expect_mark_failed().times(0);
         let handler = FakeHandler {
@@ -779,7 +898,7 @@ mod tests {
         )
         .with_handler(Arc::new(handler))
         .with_async_in_flight(async_in_flight);
-        (Arc::new(service), client)
+        (Arc::new(service), client, attempts)
     }
 
     #[test]
@@ -794,7 +913,7 @@ mod tests {
     /// backfill or an approval burst leaves permits for sync endpoints.
     #[tokio::test]
     async fn background_runs_are_capped_at_their_share() {
-        let (service, client) = slow_service(2);
+        let (service, client, attempts) = slow_service(2);
         let runs = (0..6).map(|i| {
             let service = service.clone();
             async move { service.run(row(&format!("h{i}"))).await }
@@ -807,15 +926,16 @@ mod tests {
                 .all(|outcome| *outcome == RunOutcome::Applied)
         );
         assert_eq!(client.calls.load(Ordering::SeqCst), 6);
+        assert_eq!(attempts.load(Ordering::SeqCst), 6);
         assert_eq!(client.peak.load(Ordering::SeqCst), 2);
     }
 
     /// A submitted run that cannot start within its queue limit leaves the row
     /// pending for the sweep instead of starting after the sweep may have
-    /// claimed it (which would call the API twice).
+    /// claimed it (which would call the API twice). It spends no attempt.
     #[tokio::test]
     async fn a_submitted_run_that_waits_too_long_is_left_for_the_sweep() {
-        let (service, client) = slow_service(1);
+        let (service, client, attempts) = slow_service(1);
         let _held = service.async_permits.clone().acquire_owned().await.unwrap();
 
         let outcome = service
@@ -824,5 +944,6 @@ mod tests {
 
         assert_eq!(outcome, RunOutcome::Deferred);
         assert_eq!(client.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(attempts.load(Ordering::SeqCst), 0, "no attempt was spent");
     }
 }

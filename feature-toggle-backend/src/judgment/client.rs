@@ -25,6 +25,10 @@ pub enum JudgmentError {
     Unavailable,
     #[error("TypeSafe request timed out")]
     Timeout,
+    /// No request slot (`max_in_flight` permit) came free in time, so nothing
+    /// was sent. Distinct from `Timeout`, which means a request was sent.
+    #[error("TypeSafe request not sent: all request slots busy")]
+    Busy,
     #[error("TypeSafe rate limit or overload")]
     RateLimited,
     #[error("TypeSafe connection error: {0}")]
@@ -41,11 +45,18 @@ impl JudgmentError {
         match self {
             JudgmentError::Unavailable => "unavailable".to_string(),
             JudgmentError::Timeout => "timeout".to_string(),
+            JudgmentError::Busy => "busy".to_string(),
             JudgmentError::RateLimited => "rate_limited".to_string(),
             JudgmentError::Transport(_) => "transport".to_string(),
             JudgmentError::Http(status, _) => format!("http_{status}"),
             JudgmentError::Decode(_) => "decode".to_string(),
         }
+    }
+
+    /// Whether a request was sent (or tried) to the API. False only when the
+    /// call never started: no client configured, or no request slot free.
+    pub fn reached_api(&self) -> bool {
+        !matches!(self, JudgmentError::Unavailable | JudgmentError::Busy)
     }
 }
 
@@ -199,7 +210,8 @@ impl JudgmentClient for HttpJudgmentClient {
             questions,
         };
         // Bounded: a sync endpoint must not hang behind other calls. A full
-        // queue fails like a timed-out call; async callers retry via the sweep.
+        // queue fails with `Busy` (nothing sent); async callers retry via the
+        // sweep without spending an attempt.
         let _permit = match tokio::time::timeout(self.permit_wait, self.permits.acquire()).await {
             Ok(Ok(permit)) => permit,
             Ok(Err(_)) => return Err(JudgmentError::Unavailable),
@@ -208,7 +220,7 @@ impl JudgmentClient for HttpJudgmentClient {
                     "TypeSafe call not sent: no permit within {} ms (max_in_flight reached)",
                     self.permit_wait.as_millis()
                 );
-                return Err(JudgmentError::Timeout);
+                return Err(JudgmentError::Busy);
             }
         };
         let started = Instant::now();
@@ -315,6 +327,7 @@ mod tests {
         assert_eq!(error.log_label(), "http_422");
         assert!(error.to_string().contains("my secret text"));
         assert_eq!(JudgmentError::Timeout.log_label(), "timeout");
+        assert_eq!(JudgmentError::Busy.log_label(), "busy");
         assert_eq!(
             JudgmentError::Transport("x".into()).log_label(),
             "transport"
@@ -375,7 +388,8 @@ mod tests {
     }
 
     /// A caller never waits behind a full set of permits for longer than the
-    /// configured timeout: it fails like a timed-out call and sends nothing.
+    /// configured timeout: it fails with `Busy` (not `Timeout`) and sends nothing,
+    /// so the async pipeline can tell that no request reached the API.
     #[tokio::test]
     async fn waiting_for_a_permit_is_bounded_by_the_timeout() {
         let (base_url, connections) = stalling_body_server().await;
@@ -396,9 +410,22 @@ mod tests {
         .await
         .expect("evaluate must not wait for a permit past its timeout");
 
-        assert_eq!(outcome.unwrap_err(), JudgmentError::Timeout);
+        let error = outcome.unwrap_err();
+        assert_eq!(error, JudgmentError::Busy);
+        assert!(!error.reached_api());
         assert!(started.elapsed() < Duration::from_millis(1000));
         assert_eq!(connections.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn only_busy_and_unavailable_mean_nothing_was_sent() {
+        assert!(!JudgmentError::Busy.reached_api());
+        assert!(!JudgmentError::Unavailable.reached_api());
+        assert!(JudgmentError::Timeout.reached_api());
+        assert!(JudgmentError::RateLimited.reached_api());
+        assert!(JudgmentError::Transport("x".into()).reached_api());
+        assert!(JudgmentError::Http(500, String::new()).reached_api());
+        assert!(JudgmentError::Decode("x".into()).reached_api());
     }
 
     #[test]
