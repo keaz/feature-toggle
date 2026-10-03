@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Type | Feature |
-| Status | Open |
+| Status | Done in UI b4479f9 |
 | Repo | UI (`../feature-toggle-ui/`, separate git repo) |
 | Depends on | JI-42, JI-45 |
 | Behavior change | New UI on the Jira settings page |
@@ -116,4 +116,9 @@ A team admin can configure write-back, test the connection, resume a paused inte
 
 ## Handoff log
 
-(empty)
+2026-10-03, UI `b4479f9`:
+- Implemented as specified. API functions and types in `api/jiraIntegrations.ts` (plus `JiraIntegration.writeback` and `hasNativeWebhookSecret`, both required, as the backend always returns them). New components `JiraWritebackSettings`, `JiraNativeWebhookSecret`, `JiraOutboundLog`; wired into `JiraSettingsPage` (Write-back and Native webhook secret sections under Settings; the log section has Events and Outbound tabs).
+- Contract notes (backend wins): `updateJiraWriteback` drops an empty `credential`. Cloud sends `accountEmail`, Data Center omits it. Test connection 400 (for example "Jira base URL must use https") shows its message in the failure style. Retry 409 ("job is not dead", "a pending job already covers this one") shows as an alert. Hint added under the base URL field: "Changing the Jira host removes the saved token and turns write-back off."
+- Token never stays in state after a successful save; the native secret is held only until "I stored the secret" (and not across integration switches, `key` remount).
+- Tests: 6 API, 11 `JiraWritebackSettings`, 3 `JiraNativeWebhookSecret`, 5 `JiraOutboundLog`, 1 new page test. RED seen first (4 files failed, 6 API tests failed on missing functions). Full run: `pnpm lint` clean, `pnpm build` ok, `pnpm test:run` 94 files, 735 tests pass.
+- Manual check (step 6): not run. It needs an admin login; no known credentials. Covered by unit tests and JI-50.
