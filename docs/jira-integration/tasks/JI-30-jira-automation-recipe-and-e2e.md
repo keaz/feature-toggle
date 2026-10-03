@@ -1,13 +1,13 @@
-# JI-30: Jira Automation recipe (Cloud and Data Center) and end-to-end API test
+# JI-30: Jira setup guide (Cloud and Data Center) and end-to-end API test
 
 | Field | Value |
 |---|---|
 | Type | Docs + test |
 | Status | Open |
 | Repo | backend (`feature-toggle/`): `docs/jira-integration/`, `api-tests/` |
-| Depends on | JI-01, JI-10, JI-11, JI-12 |
+| Depends on | JI-15 (and JI-12 if it was built) |
 | Behavior change | None |
-| Design | [design.md §3.6](../design.md#36-jira-automation-recipe-ji-30), [§4](../design.md#4-testing) |
+| Design | [design.md §3.7-3.10](../design.md#37-jira-integration-and-status-rules-ji-13), [§4](../design.md#4-testing) |
 
 ## Goal
 
@@ -24,28 +24,32 @@ Give teams a copy-paste setup for Jira Automation, and prove the whole flow with
 
 ## Changes
 
-1. **`api-tests/src/tests/advanced/jira-flow.test.ts`**:
-   1. Admin sets up team, environment, feature with a stage, approval policy (reuse helpers from the approval tests), and a human approver user.
-   2. Create a system client for the team; use only its token for the "Jira" steps.
-   3. Jira links `PROJ-1` to the feature; `GET /teams/{teamId}/features?externalKey=PROJ-1` returns it.
-   4. Jira requests `DEPLOYMENT_REQUESTED` by key with `externalRef: "PROJ-1"` and a reason.
-   5. Jira tries to approve the request → 403 `system_client_vote_not_permitted`.
-   6. The human approver approves; the request shows `externalRef` and `requestReason`.
-   7. Jira requests `DEPLOYED` by key; `GET` by key shows the stage `DEPLOYED`.
-   8. Activity log of the feature has the `external_ref`.
-   9. A system client of another team gets 403 on the by-key routes.
-2. **`docs/jira-integration/automation-recipe.md`**: the setup from design §3.6, written for an admin who has never seen FluxGate's API:
-   - prerequisites, creating and rotating the system client, which scopes it uses;
-   - one rule per transition with the exact URL, headers and JSON body, using Jira smart values (`{{issue.key}}`, `{{issue.summary}}`, a custom field for the feature key);
-   - read-back rule (scheduled, `GET` by key) and how to branch on stage status;
-   - Cloud vs Data Center: network reachability, Atlassian IP allow-list for Cloud, the "Send web request" action exists in both;
-   - error table: 400, 403 (scope, team, vote), 404 (`feature_not_found`, `environment_not_found`, `stage_not_found`), 409 (state machine) and what the rule should do;
-   - what is not supported yet (push to Jira, approving from Jira, kill switch).
-3. Link the recipe from the repo `ReadME.md` or `FluxGate-System-Guide.md` only if that file already has an integrations section; otherwise link it from this folder's README.
+1. **`api-tests/src/tests/advanced/jira-flow.test.ts`** (Jira is simulated with axios posts of Jira-shaped bodies to the inbound endpoint):
+   1. Admin sets up a team, environments `qa` and `prod`, a feature with stages in both, an approval policy for both, and a human approver user.
+   2. Create a Jira integration (JI-13): `environment_field = customfield_10042`, alias `QA → qa`, Jira approves in `qa` only. Rules: `Ready for Release → approve`, `Done → deploy`, `Ready for Release → request` limited to `prod`.
+   3. Link `PROJ-1` to the feature (JI-10).
+   4. Event "Ready for Release", field `QA`: `qa` stage is `DEPLOYMENT_APPROVED`; the approval request has `approvalSource = 'jira'` and the Jira display name.
+   5. Event "Done", field `QA`: `qa` stage is `DEPLOYED`.
+   6. Event "Done", field `Prod` before any approval: result `refused` ("not approved"), stage unchanged.
+   7. Event "Ready for Release", field `Prod`: the `approve` rule is refused (not trusted) and the `request` rule leaves a pending request; the human approves it in FluxGate; event "Done", field `Prod` deploys.
+   8. Wrong secret → 401. Same delivery twice → second response repeats the stored result, no new activity.
+   9. The integration's event log lists all events with results.
+2. **`docs/jira-integration/setup-guide.md`**, for an admin who has never seen FluxGate's API:
+   - FluxGate side: create the integration, copy the secret and inbound URL, choose the environment field and aliases, choose Jira-approved environments (with the security note: anyone who can move the issue to the status can then release there; restrict the transition in the Jira workflow), write the rules, link issues to features.
+   - Jira side, one static setup:
+     - Jira Cloud: Automation rule "When issue transitioned" → "Send web request" POST to the inbound URL, header `Authorization: Bearer <secret>`, body "Issue data (Jira format)". Or a system webhook (admin) for issue updates; check whether it can send the header, else use Automation.
+     - Jira Data Center: Automation for Jira with the same rule, or a webhook if your version can send custom headers.
+   - Finding the field id (`customfield_…`) in Jira.
+   - Network: Cloud calls come from Atlassian's published IP ranges; restrict ingress to the inbound path. Data Center usually runs inside the network.
+   - Reading results: the event log in Settings → Jira; the Jira Automation audit log shows the response body.
+   - Error and outcome table: 400, 401, `refused` reasons (not approved, not trusted, freeze window, dependency), `no-op`, unknown environment values.
+   - Not supported yet: comments or transitions back to Jira, kill switch, mapping Jira users to FluxGate users.
+   - If JI-12 was built: the per-transition by-key alternative (design §3.10).
+3. Link the guide from this folder's README.
 
 ## Done when
 
-- `pnpm --dir api-tests run test:docker` passes, including `jira-flow.test.ts`.
+- `jira-flow.test.ts` passes (`test:docker`, or against a local backend as `HANDOFF.md` §3 describes when Docker is not available).
 - The recipe has been followed by hand once against a local stack with `curl` standing in for Jira (record the commands in the handoff log, without tokens).
 - Handoff log entry written, `HANDOFF.md` and README table updated; phase 1 marked complete.
 

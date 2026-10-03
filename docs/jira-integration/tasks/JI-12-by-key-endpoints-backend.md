@@ -7,7 +7,7 @@
 | Repo | backend (`feature-toggle/`) |
 | Crate | `feature-toggle-backend` |
 | Depends on | JI-11 |
-| Behavior change | Additive. Two endpoints. |
+| Behavior change | Additive. Two endpoints. **Optional** since the 2026-10-03 replan: the inbound rules (JI-15) cover the main flow. Build it for status read-back and per-transition Automation rules, or skip it and record that in `HANDOFF.md`. |
 | Design | [design.md §3.4](../design.md#34-by-key-endpoints-ji-12) |
 
 ## Goal

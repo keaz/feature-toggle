@@ -1,6 +1,6 @@
 # Jira integration: work packages
 
-This folder holds the design and the task breakdown for the first Jira integration phase: linking features to Jira issues and letting Jira request deployments and rollbacks through the existing REST API. Read [`design.md`](design.md) once, then [`HANDOFF.md`](HANDOFF.md) for the current state. Then take the **next open task** from the table below. Each task file says what to change, where, how to test it, and when it is done. One agent can finish one task without reading the other task files.
+This folder holds the design and the task breakdown for the first Jira integration phase: linking features to Jira issues and letting Jira issue status drive request, approval, deployment and rollback per environment, through rules configured in FluxGate. Read [`design.md`](design.md) once, then [`HANDOFF.md`](HANDOFF.md) for the current state. Then take the **next open task** from the table below. Each task file says what to change, where, how to test it, and when it is done. One agent can finish one task without reading the other task files.
 
 Source investigation: [`../investigations/2026-10-sso-jira-sdks.md`](../investigations/2026-10-sso-jira-sdks.md), section 2.
 
@@ -48,15 +48,21 @@ Source investigation: [`../investigations/2026-10-sso-jira-sdks.md`](../investig
 
 | # | Decision |
 |---|---|
-| J1 | Support Jira Cloud and Jira Data Center. Phase 1 uses only Jira Automation "Send web request" calls into FluxGate. No Forge app, no bridge service, no outbound webhooks in this phase. |
-| J2 | Approvals stay in FluxGate. Jira can request and execute stage changes, but a system client can never vote on an approval request (JI-01). |
+| J1 | Support Jira Cloud and Jira Data Center. Jira calls into FluxGate (a Jira webhook or an Automation "Send web request" rule). No Forge app, no bridge service, no outbound webhooks in this phase. |
+| J2 | *Revised 2026-10-03, see J10.* Humans approve in FluxGate unless an environment is opted in to Jira approval. A system-client token can never vote through the vote endpoint (JI-01). |
 | J3 | Feature ↔ issue links live in a new `feature_external_links` table. The `jira:PROJ-123` tag convention is not used. |
 | J4 | `externalRef` and `reason` are optional on stage change requests. They are stored on the approval request and in the activity log metadata. |
-| J5 | Jira addresses features by team, feature key and environment name, not by UUID (JI-12). |
-| J6 | Jira learns the result by reading FluxGate (`GET` by key). Push to Jira (webhooks) is a later phase. |
+| J5 | Jira addresses features by team, feature key and environment name, not by UUID (JI-12, optional). |
+| J6 | Jira learns the result by reading FluxGate (`GET` by key) or from the integration's event log in the UI. Push to Jira (webhooks, comments) is a later phase. |
 | J7 | Kill switch from Jira is out of scope. System clients stay denied on emergency endpoints. |
 | J8 | Security prerequisites P1-P8 from the investigation are already fixed (verified 2026-10-03 against `6c9b332`). |
 | J9 | System clients are never eligible approvers; their shadow users keep the `Approver` role row (2026-10-03, JI-01). |
+| J10 | **Jira status drives rollout (2026-10-03).** A team configures a Jira integration in FluxGate with **status rules**: Jira status → action. Rules are data, edited in the UI, never hard-coded. |
+| J11 | Rule actions: `request` (pending approval request, humans approve in FluxGate), `approve`, `deploy`, `rollback`. |
+| J12 | **Jira is a trusted approver** for environments an admin opts in. An `approve` rule closes the approval request as approved by Jira; the audit stores the Jira user (account id, display name), issue key and status. FluxGate does not map the Jira user to a FluxGate user. In environments not opted in, `approve` is refused and logged. |
+| J13 | The environment comes from a **Jira field** on the issue (custom field or labels), mapped to FluxGate environments by name or by an alias map in the integration. A multi-value field targets each environment it lists. |
+| J14 | `deploy` on a stage that is not approved is **refused**: no change, a logged event result and an activity row. It never approves implicitly. |
+| J15 | Every inbound Jira event and its per-feature, per-environment result is stored and shown in the UI, so rule behavior can be checked and debugged. |
 
 ## Tasks
 
@@ -65,18 +71,22 @@ Source investigation: [`../investigations/2026-10-sso-jira-sdks.md`](../investig
 | [x] | [JI-01](tasks/JI-01-system-clients-cannot-vote.md) | System clients cannot approve or reject approval requests, and are not eligible approvers | backend | **Yes** (403 for M2M votes; bots not eligible; user decision 2026-10-03) | — |
 | [ ] | [JI-10](tasks/JI-10-feature-external-links-backend.md) | `feature_external_links` table, CRUD API, `externalKey` list filter | backend | Additive | — |
 | [ ] | [JI-11](tasks/JI-11-stage-change-external-ref-backend.md) | `externalRef` + `reason` on stage change, approval requests and activity | backend | Additive | — |
-| [ ] | [JI-12](tasks/JI-12-by-key-endpoints-backend.md) | By-key read and request-change endpoints | backend | Additive | JI-11 |
+| [ ] | [JI-13](tasks/JI-13-jira-integration-config-backend.md) | Jira integration config: integrations, environment field and map, Jira-approved environments, status rules, inbound secret | backend | Additive | JI-10 |
+| [ ] | [JI-14](tasks/JI-14-external-approval-path-backend.md) | Approval by an external system (Jira): approve, deploy, rollback paths with source and actor in the audit | backend | Additive (only reachable through JI-15) | JI-11 |
+| [ ] | [JI-15](tasks/JI-15-jira-inbound-events-backend.md) | Inbound Jira events endpoint and rule engine, event log | backend | Additive | JI-13, JI-14 |
+| [ ] | [JI-12](tasks/JI-12-by-key-endpoints-backend.md) | By-key read and request-change endpoints (optional, for status read-back and manual rules) | backend | Additive | JI-11 |
 | [ ] | [JI-20](tasks/JI-20-ui-feature-jira-links.md) | UI: Jira links panel on the feature page | UI | New UI | JI-10 |
-| [ ] | [JI-21](tasks/JI-21-ui-external-ref-on-stage-changes.md) | UI: `externalRef`/`reason` inputs and display on approvals and activity | UI | New UI | JI-11 |
-| [ ] | [JI-30](tasks/JI-30-jira-automation-recipe-and-e2e.md) | Jira Automation recipe (Cloud + DC) and end-to-end API test | docs + api-tests | None | JI-01, JI-10, JI-11, JI-12 |
+| [ ] | [JI-21](tasks/JI-21-ui-external-ref-on-stage-changes.md) | UI: `externalRef`/`reason` inputs and display on approvals and activity, "approved by Jira" display | UI | New UI | JI-11, JI-14 |
+| [ ] | [JI-22](tasks/JI-22-ui-jira-integration-settings.md) | UI: Jira integration settings, rules editor, event log | UI | New page | JI-13, JI-15 |
+| [ ] | [JI-30](tasks/JI-30-jira-automation-recipe-and-e2e.md) | Jira setup guide (Cloud + DC) and end-to-end API test | docs + api-tests | None | JI-15 (JI-12 if built) |
 
 ## Order
 
 ```
-JI-01 ─► JI-10 ─► JI-11 ─► JI-12 ─► JI-20 ─► JI-21 ─► JI-30
+JI-01 ─► JI-10 ─► JI-11 ─► JI-13 ─► JI-14 ─► JI-15 ─► JI-12 ─► JI-20 ─► JI-21 ─► JI-22 ─► JI-30
 ```
 
-The work runs one task at a time, in this order. Technically JI-01, JI-10 and JI-11 are independent, and JI-20 only needs JI-10, but the project runs them in sequence so each handoff builds on the last.
+The work runs one task at a time, in this order. JI-12 is optional: skip it if the inbound rules cover every flow, and say so in `HANDOFF.md`.
 
 ## Later phases (not planned here)
 

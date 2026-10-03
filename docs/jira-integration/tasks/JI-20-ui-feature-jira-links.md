@@ -7,7 +7,7 @@
 | Repo | UI (`../feature-toggle-ui/`) |
 | Depends on | JI-10 |
 | Behavior change | New card on the feature detail page. |
-| Design | [design.md §3.5](../design.md#35-ui-ji-20-ji-21) |
+| Design | [design.md §3.5](../design.md#35-ui-ji-20-ji-21-ji-22) |
 
 ## Goal
 

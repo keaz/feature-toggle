@@ -10,10 +10,14 @@ Read this after [`README.md`](README.md) and [`design.md`](design.md). It record
 | JI-01 system clients cannot vote | Done | backend `e1bebfe` |
 | JI-10 external links backend | Open, **next** | — |
 | JI-11 `externalRef`/`reason` backend | Open | — |
-| JI-12 by-key endpoints | Open (needs JI-11) | — |
+| JI-13 integration config | Open (needs JI-10) | — |
+| JI-14 external approval path | Open (needs JI-11) | — |
+| JI-15 inbound events + rules | Open (needs JI-13, JI-14) | — |
+| JI-12 by-key endpoints (optional) | Open (needs JI-11) | — |
 | JI-20 UI Jira links | Open (needs JI-10) | — |
-| JI-21 UI ref/reason | Open (needs JI-11) | — |
-| JI-30 recipe + e2e test | Open (needs JI-01, JI-10, JI-11, JI-12) | — |
+| JI-21 UI ref/reason, Jira approval | Open (needs JI-11, JI-14) | — |
+| JI-22 UI Jira settings | Open (needs JI-13, JI-15) | — |
+| JI-30 setup guide + e2e test | Open (needs JI-15) | — |
 
 **Next task: [JI-10](tasks/JI-10-feature-external-links-backend.md).**
 
@@ -29,6 +33,19 @@ Read this after [`README.md`](README.md) and [`design.md`](design.md). It record
   - P3 (JWT `iss`/`aud`, key rotation) and P9-P11 (edge/SDK) are not needed for Jira phase 1.
 - Gap found during planning, closed by JI-01: system-client JWTs carry roles `Requester` and `Approver`, and `flag:write` allows POST on `approval-requests` paths.
 - `docs/investigations/2026-10-sso-jira-sdks.md` is not committed in this repo (untracked at planning time). The README links to it; commit it or keep a local copy.
+
+## 2a. Replan log (2026-10-03, after JI-01)
+
+The user wants Jira status to drive the rollout per environment, configured dynamically: for example "Ready for Release" with Environment = QA approves the feature for QA, and "Done" deploys it. Decisions (README J10-J15):
+
+- Jira is a **trusted approver** in environments an admin opts in. The approval request is closed as `approval_source = 'jira'` with the Jira user in the audit. Jira users are not mapped to FluxGate users.
+- The environment comes from a **Jira field** (custom field or labels) plus an alias map.
+- Rule actions: request, approve, deploy, rollback. Rules are rows in FluxGate, edited in the UI.
+- `deploy` on a stage that is not approved is refused and logged; it never approves implicitly.
+
+This revises J2 ("approvals stay in FluxGate"). **JI-01 stays valid**: a system-client token still cannot vote through the vote endpoint, and system clients are still never eligible approvers. Jira approves only through the integration path (JI-14/JI-15), authenticated by the integration secret, with its own non-approver shadow user.
+
+New tasks JI-13, JI-14, JI-15, JI-22; JI-12 became optional; JI-21 and JI-30 changed. Design §3.7-3.9 hold the new parts.
 
 ## 3. Environment and verification
 
