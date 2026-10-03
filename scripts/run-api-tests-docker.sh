@@ -35,6 +35,12 @@ cleanup() {
 
 trap cleanup EXIT
 
+# Key that seals the Jira write-back token in the backend container. Generated per run, never stored.
+if [[ -z "${FLUXGATE_ENCRYPTION_KEY:-}" ]]; then
+  FLUXGATE_ENCRYPTION_KEY="$(openssl rand -base64 32)"
+fi
+export FLUXGATE_ENCRYPTION_KEY
+
 echo "Starting Postgres for API tests..."
 compose up -d postgres
 
@@ -62,5 +68,6 @@ done
 echo "Running API tests against ${API_BASE_URL_VALUE}"
 (
   cd "$ROOT_DIR"
-  API_BASE_URL="$API_BASE_URL_VALUE" pnpm --dir api-tests test "$@"
+  # The fake Jira of jira-writeback.test.ts runs on the host; the backend container reaches it here.
+  API_BASE_URL="$API_BASE_URL_VALUE" FAKE_JIRA_HOST="${FAKE_JIRA_HOST:-host.docker.internal}" pnpm --dir api-tests test "$@"
 )

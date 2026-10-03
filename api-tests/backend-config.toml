@@ -1,0 +1,10 @@
+# Backend config for the api-test stack (mounted by docker-compose.api-tests.yml).
+# The [jira] keys are for jira-writeback.test.ts: it runs a fake Jira over http and
+# the backend builds remote link URLs from ui_base_url.
+allowed_origin = "http://localhost:8090"
+http_addr = "0.0.0.0:8080"
+grpc_addr = "0.0.0.0:50051"
+
+[jira]
+allow_insecure_http = true
+ui_base_url = "http://localhost:8090"

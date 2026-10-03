@@ -42,9 +42,17 @@ services:
       dockerfile: feature-toggle-backend/Dockerfile
     environment:
       DATABASE_URL: postgres://postgres:root123@postgres:5432/feature_toggle_api_tests
+      # Seals the Jira write-back token. run-api-tests-docker.sh generates one per run.
+      FLUXGATE_ENCRYPTION_KEY: ${FLUXGATE_ENCRYPTION_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy
+    # The jira-writeback api-test runs a fake Jira on the host; the container reaches
+    # it as host.docker.internal (set FAKE_JIRA_HOST for the test).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./api-tests/backend-config.toml:/app/config/config.toml:ro
     ports:
       - "18080:8080"
     restart: unless-stopped
