@@ -6,7 +6,7 @@ Read this after [`README.md`](README.md) and [`design.md`](design.md). It record
 
 | Task | State | Where |
 |---|---|---|
-| Planning (this folder) | Done 2026-10-03 | backend docs commit `docs(jira): plan phase 1 ...` |
+| Planning (this folder) | Done 2026-10-03 | backend `46a50a7` |
 | JI-01 system clients cannot vote | Open, **next** | — |
 | JI-10 external links backend | Open | — |
 | JI-11 `externalRef`/`reason` backend | Open | — |
