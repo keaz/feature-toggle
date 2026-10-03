@@ -18,6 +18,8 @@ pub mod activity_types {
     pub const FEATURE_DISABLED: &str = "feature_disabled";
     pub const KILL_SWITCH_ACTIVATED: &str = "kill_switch_activated";
     pub const KILL_SWITCH_DEACTIVATED: &str = "kill_switch_deactivated";
+    pub const EXTERNAL_LINK_ADDED: &str = "external_link_added";
+    pub const EXTERNAL_LINK_REMOVED: &str = "external_link_removed";
 
     // User activities
     pub const USER_CREATED: &str = "user_created";

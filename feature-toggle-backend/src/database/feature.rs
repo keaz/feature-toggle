@@ -645,6 +645,7 @@ pub trait FeatureRepository: Send + Sync {
         dependency_status: Option<String>,
         approval_status: Option<String>,
         flag_kind: Option<FlagKindFilter>,
+        external_key: Option<String>,
         offset: i64,
         limit: i64,
     ) -> Result<(Vec<Feature>, i64), Error>;
@@ -1787,6 +1788,7 @@ impl FeatureRepositoryImpl {
         dependency_status: Option<&str>,
         approval_status: Option<&str>,
         flag_kind: Option<FlagKindFilter>,
+        external_key: Option<&str>,
     ) {
         if let Some(key) = key {
             query_builder.push(" AND f.key ILIKE ");
@@ -1879,6 +1881,14 @@ impl FeatureRepositoryImpl {
             }
             None => {}
         }
+        if let Some(external_key) = external_key {
+            query_builder.push(
+                " AND f.id IN (SELECT l.feature_id FROM feature_external_links l \
+                 WHERE l.system = 'jira' AND l.external_key = ",
+            );
+            query_builder.push_bind(external_key.to_string());
+            query_builder.push(")");
+        }
     }
 
     async fn archive_blockers_conn(
@@ -1933,6 +1943,7 @@ impl FeatureRepositoryImpl {
         dependency_status: Option<String>,
         approval_status: Option<String>,
         flag_kind: Option<FlagKindFilter>,
+        external_key: Option<String>,
         order: FeatureOrder,
         limit: i64,
         offset: i64,
@@ -1952,6 +1963,7 @@ impl FeatureRepositoryImpl {
                     dependency_status.clone(),
                     approval_status.clone(),
                     flag_kind,
+                    external_key.clone(),
                 )
                 .await?;
             return Ok((Vec::new(), total_count));
@@ -1985,6 +1997,7 @@ impl FeatureRepositoryImpl {
             dependency_status.as_deref(),
             approval_status.as_deref(),
             flag_kind,
+            external_key.as_deref(),
         );
         query_builder.push(order.order_by_sql());
         query_builder.push(" LIMIT ").push_bind(limit);
@@ -2009,6 +2022,7 @@ impl FeatureRepositoryImpl {
                 dependency_status.clone(),
                 approval_status.clone(),
                 flag_kind,
+                external_key.clone(),
             )
             .await?
         };
@@ -2035,6 +2049,7 @@ impl FeatureRepositoryImpl {
         dependency_status: Option<String>,
         approval_status: Option<String>,
         flag_kind: Option<FlagKindFilter>,
+        external_key: Option<String>,
     ) -> Result<i64, Error> {
         let mut count_query = sqlx::QueryBuilder::new("SELECT COUNT(*) FROM features f");
         count_query.push(" WHERE f.team_id = ").push_bind(team_id);
@@ -2051,6 +2066,7 @@ impl FeatureRepositoryImpl {
             dependency_status.as_deref(),
             approval_status.as_deref(),
             flag_kind,
+            external_key.as_deref(),
         );
 
         let total_count: i64 = count_query
@@ -2584,6 +2600,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
             dependency_status.as_deref(),
             approval_status.as_deref(),
             None,
+            None,
         );
         query_builder.push(" ORDER BY f.key");
 
@@ -2616,6 +2633,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
                 None,
                 None,
                 true,
+                None,
                 None,
                 None,
                 None,
@@ -2655,6 +2673,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
                 None,
                 None,
                 None,
+                None,
                 FeatureOrder::Key,
                 limit,
                 offset,
@@ -2680,6 +2699,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
         dependency_status: Option<String>,
         approval_status: Option<String>,
         flag_kind: Option<FlagKindFilter>,
+        external_key: Option<String>,
         offset: i64,
         limit: i64,
     ) -> Result<(Vec<Feature>, i64), Error> {
@@ -2697,6 +2717,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
                 dependency_status,
                 approval_status,
                 flag_kind,
+                external_key,
                 FeatureOrder::Key,
                 limit,
                 offset,
@@ -2815,6 +2836,7 @@ impl FeatureRepository for FeatureRepositoryImpl {
                 dependency_status,
                 approval_status,
                 flag_kind,
+                None,
                 FeatureOrder::Usage,
                 limit,
                 0,

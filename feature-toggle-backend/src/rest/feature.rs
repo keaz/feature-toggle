@@ -608,6 +608,7 @@ fn detect_cycles_for_impact(adjacency: &HashMap<Uuid, Vec<Uuid>>) -> Vec<Vec<Uui
         ("name" = Option<String>, Query, description = "Filter by feature name"),
         ("featureType" = Option<FeatureType>, Query, description = "Filter by feature type"),
         ("flagKind" = Option<String>, Query, description = "Filter by flag kind: release, experiment, ops, permission, config, or unclassified"),
+        ("externalKey" = Option<String>, Query, description = "Only features linked to this Jira issue key, for example PROJ-123"),
         ("offset" = Option<i64>, Query, description = "Pagination offset"),
         ("limit" = Option<i64>, Query, description = "Pagination limit")
     ),
@@ -631,6 +632,11 @@ pub(crate) async fn list_features(
     });
 
     let flag_kind = parse_flag_kind_filter(query.flag_kind.as_deref())?;
+    let external_key = query
+        .external_key
+        .as_deref()
+        .map(crate::logic::external_link::normalize_jira_key)
+        .transpose()?;
 
     let (features, total) = logic
         .get_features_with_offset_filtered(
@@ -646,6 +652,7 @@ pub(crate) async fn list_features(
             query.dependency_status.clone(),
             query.approval_status.clone(),
             flag_kind,
+            external_key,
             offset,
             limit,
         )
@@ -2379,6 +2386,7 @@ mod tests {
                       dependency_status,
                       approval_status,
                       flag_kind,
+                      external_key,
                       offset,
                       limit| {
                     id.to_string() == team_id.to_string()
@@ -2393,12 +2401,13 @@ mod tests {
                         && dependency_status.is_none()
                         && approval_status.is_none()
                         && flag_kind.is_none()
+                        && external_key.is_none()
                         && *offset == 10
                         && *limit == 5
                 },
             )
             .times(1)
-            .returning(move |_, _, _, _, _, _, _, _, _, _, _, _, _, _| {
+            .returning(move |_, _, _, _, _, _, _, _, _, _, _, _, _, _, _| {
                 Ok((vec![feature.clone()], 1))
             });
 
@@ -2433,7 +2442,7 @@ mod tests {
         let mut mock_logic = MockFeatureLogic::new();
         mock_logic
             .expect_get_features_with_offset_filtered()
-            .returning(move |_, _, _, _, _, _, _, _, _, _, _, flag_kind, _, _| {
+            .returning(move |_, _, _, _, _, _, _, _, _, _, _, flag_kind, _, _, _| {
                 *seen_by_mock.lock().unwrap() = Some(flag_kind);
                 Ok((vec![], 0))
             });
@@ -2449,6 +2458,57 @@ mod tests {
         let resp = test::call_service(&app, req).await;
         let forwarded = seen.lock().unwrap().take().flatten();
         (resp.status(), forwarded)
+    }
+
+    async fn list_with_external_key(query: &str) -> (StatusCode, Option<String>) {
+        let team_id = Uuid::new_v4();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let seen_by_mock = seen.clone();
+        let mut mock_logic = MockFeatureLogic::new();
+        mock_logic
+            .expect_get_features_with_offset_filtered()
+            .returning(
+                move |_, _, _, _, _, _, _, _, _, _, _, _, external_key, _, _| {
+                    *seen_by_mock.lock().unwrap() = Some(external_key);
+                    Ok((vec![], 0))
+                },
+            );
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(Box::new(mock_logic) as Box<dyn FeatureLogic>))
+                .service(web::scope("/api/v1").configure(super::configure)),
+        )
+        .await;
+        let req = test::TestRequest::get()
+            .uri(&format!("/api/v1/teams/{team_id}/features{query}"))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        let forwarded = seen.lock().unwrap().take().flatten();
+        (resp.status(), forwarded)
+    }
+
+    #[actix_web::test]
+    async fn list_features_forwards_the_normalized_external_key() {
+        let (status, forwarded) = list_with_external_key("?externalKey=%20proj-123%20").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(forwarded.as_deref(), Some("PROJ-123"));
+
+        let (status, forwarded) = list_with_external_key("").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(forwarded, None);
+    }
+
+    #[actix_web::test]
+    async fn list_features_rejects_a_malformed_external_key() {
+        for query in [
+            "?externalKey=PROJ",
+            "?externalKey=PROJ-0",
+            "?externalKey=123-4",
+        ] {
+            let (status, forwarded) = list_with_external_key(query).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
+            assert_eq!(forwarded, None, "{query}");
+        }
     }
 
     #[actix_web::test]

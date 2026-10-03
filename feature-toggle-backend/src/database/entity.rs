@@ -630,3 +630,15 @@ pub struct SsoLoginCode {
     pub used_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
 }
+
+/// Link between a feature and an issue in an external tracker (`feature_external_links`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ExternalLinkRow {
+    pub id: Uuid,
+    pub feature_id: Uuid,
+    pub system: String,
+    pub external_key: String,
+    pub url: Option<String>,
+    pub created_by: Option<Uuid>,
+    pub created_at: DateTime<Utc>,
+}

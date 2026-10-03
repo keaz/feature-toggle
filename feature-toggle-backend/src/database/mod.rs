@@ -7,6 +7,7 @@ pub mod compound_rules;
 pub mod context;
 pub mod entity;
 pub mod environment;
+pub mod external_link;
 pub mod feature;
 pub mod feature_evaluation;
 pub mod jwt_secret;

@@ -8,6 +8,7 @@ pub mod developer;
 pub mod environment;
 pub mod error;
 pub mod evaluation;
+pub mod external_link;
 pub mod feature;
 pub mod jwt_secret;
 pub mod metrics;
@@ -75,6 +76,9 @@ use crate::rest::environment::{
 };
 use crate::rest::error::ErrorResponse;
 use crate::rest::evaluation::{EvaluateRequest, EvaluateResponse};
+use crate::rest::external_link::{
+    CreateExternalLinkRequest, ExternalLinkResponse, ExternalLinksResponse,
+};
 use crate::rest::feature::{
     AuditAnalyticsBreakdownRow, AuditAnalyticsEvent, AuditAnalyticsQuery, AuditAnalyticsResponse,
     AuditAnalyticsTopFeature, BulkFeatureAction, BulkFeatureActionRequest,
@@ -204,6 +208,9 @@ async fn health() -> impl Responder {
         feature::list_feature_versions,
         feature::get_feature_version_diff,
         feature::rollback_feature_version,
+        external_link::list_external_links,
+        external_link::create_external_link,
+        external_link::delete_external_link,
         feature::create_feature,
         feature::update_feature,
         feature::emergency_disable_feature,
@@ -375,6 +382,9 @@ async fn health() -> impl Responder {
         FeatureVersionDiffResponse,
         FeatureVersionResponse,
         FeatureVersionsResponse,
+        ExternalLinkResponse,
+        ExternalLinksResponse,
+        CreateExternalLinkRequest,
         CreateFeatureRequest,
         UpdateFeatureRequest,
         RollbackFeatureVersionRequest,
@@ -668,6 +678,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .configure(pipeline::configure)
             .configure(rollout_template::configure)
             .configure(feature::configure)
+            .configure(external_link::configure)
             .configure(criteria::configure)
             .configure(metrics::configure)
             .configure(approval::configure)

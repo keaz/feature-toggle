@@ -354,7 +354,10 @@ pub(crate) async fn load_scheduled_change_creator(
     }
 }
 
-async fn policy_actor_for_request(pool: &PgPool, jwt: &JwtUser) -> Result<PolicyActor, RestError> {
+pub(crate) async fn policy_actor_for_request(
+    pool: &PgPool,
+    jwt: &JwtUser,
+) -> Result<PolicyActor, RestError> {
     let is_system_client: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM system_clients WHERE id = $1)")
             .bind(jwt.id)
@@ -373,12 +376,12 @@ async fn policy_actor_for_request(pool: &PgPool, jwt: &JwtUser) -> Result<Policy
     })
 }
 
-fn rest_error_from_policy(err: PolicyError) -> RestError {
+pub(crate) fn rest_error_from_policy(err: PolicyError) -> RestError {
     match err {
         PolicyError::Unauthorized => RestError::unauthorized("User authentication not found"),
         PolicyError::Forbidden(reason) => RestError::policy_denied(reason),
         PolicyError::Internal(err) => {
-            log::error!("Scheduled change authorization failed: {err:?}");
+            log::error!("Policy authorization failed: {err:?}");
             RestError::internal("Authorization service is temporarily unavailable")
         }
     }

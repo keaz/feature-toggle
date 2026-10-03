@@ -103,6 +103,7 @@ pub trait FeatureCrudLogic: Send + Sync {
         dependency_status: Option<String>,
         approval_status: Option<String>,
         flag_kind: Option<crate::model::FlagKindFilter>,
+        external_key: Option<String>,
         offset: i64,
         limit: i64,
     ) -> Result<(Vec<Feature>, i64), Error>;
@@ -298,6 +299,7 @@ mockall::mock! {
             dependency_status: Option<String>,
             approval_status: Option<String>,
             flag_kind: Option<crate::model::FlagKindFilter>,
+            external_key: Option<String>,
             offset: i64,
             limit: i64,
         ) -> Result<(Vec<Feature>, i64), Error>;
@@ -958,6 +960,7 @@ impl FeatureCrudLogic for FeatureLogicImpl {
             None,
             None,
             None,
+            None,
             offset,
             limit,
         )
@@ -978,6 +981,7 @@ impl FeatureCrudLogic for FeatureLogicImpl {
         dependency_status: Option<String>,
         approval_status: Option<String>,
         flag_kind: Option<crate::model::FlagKindFilter>,
+        external_key: Option<String>,
         offset: i64,
         limit: i64,
     ) -> Result<(Vec<Feature>, i64), Error> {
@@ -999,6 +1003,7 @@ impl FeatureCrudLogic for FeatureLogicImpl {
                 dependency_status,
                 approval_status,
                 flag_kind,
+                external_key,
                 offset,
                 limit,
             )
@@ -4410,6 +4415,7 @@ mod stale_rules_tests {
                 None,
                 Some(stale),
                 true,
+                None,
                 None,
                 None,
                 None,

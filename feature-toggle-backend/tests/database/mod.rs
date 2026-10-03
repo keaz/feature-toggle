@@ -8,6 +8,7 @@ mod context_test;
 mod criteria_test;
 mod dependency_value_type_test;
 mod environment_test;
+mod external_link_test;
 mod feature_evaluation_test;
 mod feature_test;
 mod flag_kind_test;

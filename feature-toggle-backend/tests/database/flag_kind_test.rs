@@ -187,7 +187,8 @@ async fn list_with(
 ) -> Vec<Uuid> {
     let (features, total) = repo
         .get_features_with_offset_filtered(
-            team_id, None, None, None, None, false, None, None, None, None, None, filter, 0, 100,
+            team_id, None, None, None, None, false, None, None, None, None, None, filter, None, 0,
+            100,
         )
         .await
         .unwrap();

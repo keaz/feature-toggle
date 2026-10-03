@@ -110,6 +110,7 @@ async fn test_lifecycle_metadata_filters_and_archive_guard() {
             None,
             None,
             None,
+            None,
             0,
             10,
         )
@@ -154,6 +155,7 @@ async fn test_lifecycle_metadata_filters_and_archive_guard() {
             None,
             None,
             None,
+            None,
             0,
             10,
         )
@@ -169,6 +171,7 @@ async fn test_lifecycle_metadata_filters_and_archive_guard() {
             Some("archived".to_string()),
             None,
             false,
+            None,
             None,
             None,
             None,

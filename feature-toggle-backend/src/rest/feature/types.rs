@@ -124,6 +124,8 @@ pub struct FeatureListQuery {
     pub approval_status: Option<String>,
     /// `release`, `experiment`, `ops`, `permission`, `config`, or `unclassified`.
     pub flag_kind: Option<String>,
+    /// Jira issue key such as `PROJ-123`: only features linked to it.
+    pub external_key: Option<String>,
     pub offset: Option<i64>,
     pub limit: Option<i64>,
 }

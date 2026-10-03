@@ -387,6 +387,9 @@ pub async fn run() -> std::io::Result<()> {
             .app_data(web::Data::new(approval_events_tx.clone()))
             .app_data(web::Data::new(admin_state.clone()))
             .app_data(web::Data::new(feature_repository.clone_box()))
+            .app_data(web::Data::new(
+                database::external_link::external_link_repository(db_pool.clone()),
+            ))
             .app_data(web::Data::new(variant_allocations_repository.clone()))
             .app_data(web::Data::new(compound_rules_repository.clone()))
             .app_data(web::Data::new(updates_tx.clone()))
