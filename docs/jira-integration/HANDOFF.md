@@ -16,10 +16,10 @@ Read this after [`README.md`](README.md) and [`design.md`](design.md). It record
 | JI-12 by-key endpoints (optional) | Done (built before JI-13, at the user's request) | backend `513f393` |
 | JI-20 UI Jira links | Done | UI `3366750`, backend `a95d30c` |
 | JI-21 UI ref/reason, Jira approval | Done | UI `b603188` |
-| JI-22 UI Jira settings | Open, **next** (needs JI-13, JI-15) | — |
-| JI-30 setup guide + e2e test | Open (needs JI-15) | — |
+| JI-22 UI Jira settings | Done | UI `131060d` |
+| JI-30 setup guide + e2e test | Open, **next** (needs JI-15) | — |
 
-**Next task: [JI-22](tasks/JI-22-ui-jira-integration-settings.md).**
+**Next task: [JI-30](tasks/JI-30-jira-automation-recipe-and-e2e.md).**
 
 ## 2. Planning log (2026-10-03)
 
@@ -155,3 +155,10 @@ New tasks JI-13, JI-14, JI-15, JI-22; JI-12 became optional; JI-21 and JI-30 cha
 - Reusable for JI-22: `ApprovalRequestContext` (`components/approvals/`), `getJiraApproval` and `findExternalRefUrl` (`utils/approvalRequestContext.ts`). The approvals detail reads links through the shared key `feature-external-links:<featureId>`.
 - Stage requests by a user need the Requester role; `api-test-admin` has none, so manual UI checks of stage requests need a separate requester user (the test DB now has `ji21-requester` / `password123` in team `JI-21 check 1791039213`).
 - Open follow-up: `ReasonQualityHint` on the new stage change reason field.
+
+### From JI-22 (UI `131060d`)
+
+- Settings → Jira at `/settings/jira` (admins and Team Admins). JI-30's guide can point users there for the events URL, the header and the secret (shown once on create and rotate).
+- UI API module `src/api/jiraIntegrations.ts`; helpers in `src/utils/jiraIntegrations.ts` (`jiraInboundEventsUrl`, `ruleWarnings`). The events URL is built from the UI's `REST_HTTP_URL`; if the backend is public under another host, the guide should say to use the public URL.
+- Integration delete removes the integration row (rules and events cascade); the JI-13 note "Delete sets `enabled = false`" is about the shadow user. To pause an integration, use the Enabled switch.
+- Test DB now holds integration `JI-22 Jira` (team `JI-21 check 1791039213`, rules "Ready for Release" → approve, "Done" → deploy, no Jira-approved environment) and four events for `PROJ-12`.

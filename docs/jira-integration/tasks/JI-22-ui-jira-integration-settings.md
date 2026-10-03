@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Type | Feature |
-| Status | Open |
+| Status | Done |
 | Repo | UI (`../feature-toggle-ui/`) |
 | Depends on | JI-13, JI-15 |
 | Behavior change | New settings page. |
@@ -53,4 +53,13 @@ Let a team admin set up Jira integrations and change the status rules at any tim
 
 ## Handoff log
 
-(empty)
+### 2026-10-03, UI `131060d`
+
+- `api/jiraIntegrations.ts`: types and calls for every JI-13 and JI-15 endpoint (`listJiraIntegrations`, `createJiraIntegration`, `updateJiraIntegration`, `deleteJiraIntegration`, `rotateJiraIntegrationSecret`, `listJiraStatusRules`, `replaceJiraStatusRules`, `listJiraEvents`). `JIRA_RULE_ACTIONS` lists the actions.
+- `utils/jiraIntegrations.ts`: `jiraInboundEventsUrl(id)` (REST base URL from `config.js`, a relative base is resolved against the UI origin), `JIRA_SECRET_HEADER`, rule draft helpers (`toRuleDrafts`, `toRuleInputs`, `moveItem`) and `ruleWarnings`.
+- Page `pages/JiraSettingsPage.tsx`, route `/settings/jira`, nav item "Jira" under Settings with no extra gate (the group gate is `teamsManagement`, so admins and Team Admins see it). The page gate is `canAccessTeamsManagement`, like the backend policy; the AI page is admin only, this one is not.
+- Components in `components/jira/`: `JiraIntegrationSettingsForm` (name, base URL, environment field, aliases, "Jira approves in" with the trust warning, feature key field, enabled; saves the whole form with `PATCH`, empty base URL / feature key field clear them), `JiraRulesEditor` (loads and `PUT`s the whole list; add, reorder, remove, enable; blank status blocked in the UI; server 400 shown as is), `JiraEventLog` (20 per page, refresh button, refused uses the warning token style).
+- Warnings: approve rule whose environments (or, without a filter, the integration) have no Jira-approved environment; deploy rule when there is no enabled approve rule. The approve warning follows the **saved** "Jira approves in" list, not unsaved form edits.
+- Secret: kept in page state only, shown on create and rotate with a copy button and an "I stored the secret" dismiss; gone after reload or team switch. Delete is a hard delete on the backend (rules and events cascade), so the page asks for confirmation.
+- Tests: `utils/jiraIntegrations.test.ts`, `components/jira/__tests__/JiraRulesEditor.test.tsx`, `components/jira/__tests__/JiraEventLog.test.tsx`, `pages/__tests__/JiraSettingsPage.test.tsx`, nav test cases. `pnpm lint`, `pnpm build`, `pnpm test:run` (90 files, 709 tests) pass.
+- Manual check (backend on `:8080` against `feture_toggle_test`, `pnpm dev --port 8090`, Chrome DevTools MCP, `api-test-admin`): created integration `JI-22 Jira` in team `JI-21 check 1791039213`, set "Jira approves in" = production, rules "Ready for Release" → approve and "Done" → deploy. Curl webhooks for `PROJ-12` (linked to `ji21-checkout-1791039213`): approve applied, deploy applied (with unknown environment `staging`), repeat deploy no-op; after clearing "Jira approves in", approve refused. Wrong secret → 401. After reload the event log showed all four with the right badges, the secret was gone and the approve rule showed its warning. The integration is left in the test DB with no Jira-approved environment; the feature's production stage is now `DEPLOYED`.

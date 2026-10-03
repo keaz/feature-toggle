@@ -77,7 +77,7 @@ Source investigation: [`../investigations/2026-10-sso-jira-sdks.md`](../investig
 | [x] | [JI-12](tasks/JI-12-by-key-endpoints-backend.md) | By-key read and request-change endpoints (optional, for status read-back and manual rules) | backend | Additive | JI-11 |
 | [x] | [JI-20](tasks/JI-20-ui-feature-jira-links.md) | UI: Jira links panel on the feature page | UI | New UI | JI-10 |
 | [x] | [JI-21](tasks/JI-21-ui-external-ref-on-stage-changes.md) | UI: `externalRef`/`reason` inputs and display on approvals and activity, "approved by Jira" display | UI | New UI | JI-11, JI-14 |
-| [ ] | [JI-22](tasks/JI-22-ui-jira-integration-settings.md) | UI: Jira integration settings, rules editor, event log | UI | New page | JI-13, JI-15 |
+| [x] | [JI-22](tasks/JI-22-ui-jira-integration-settings.md) | UI: Jira integration settings, rules editor, event log | UI | New page | JI-13, JI-15 |
 | [ ] | [JI-30](tasks/JI-30-jira-automation-recipe-and-e2e.md) | Jira setup guide (Cloud + DC) and end-to-end API test | docs + api-tests | None | JI-15 (JI-12 if built) |
 
 ## Order
