@@ -46,6 +46,7 @@ pub mod jira_events;
 pub mod jira_integration;
 pub mod jira_integration_tx;
 pub mod jira_rules;
+pub mod jira_signature;
 pub mod jira_writeback;
 pub mod jwt_secret;
 pub mod jwt_secret_tx;

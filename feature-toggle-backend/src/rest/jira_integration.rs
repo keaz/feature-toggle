@@ -26,9 +26,11 @@ use crate::logic::jira_client::client_for;
 use crate::logic::jira_integration::JiraStatusRuleInput;
 use crate::logic::jira_integration_tx::{
     JiraIntegrationInput, JiraIntegrationPatch, JiraIntegrationWithSecret, WritebackPatch,
-    create_jira_integration_in_tx, delete_jira_integration_in_tx, replace_jira_status_rules_in_tx,
-    resume_jira_writeback_in_tx, rotate_jira_integration_secret_in_tx,
-    update_jira_integration_in_tx, update_jira_writeback_in_tx,
+    create_jira_integration_in_tx, delete_jira_integration_in_tx,
+    generate_native_webhook_secret_in_tx, remove_native_webhook_secret_in_tx,
+    replace_jira_status_rules_in_tx, resume_jira_writeback_in_tx,
+    rotate_jira_integration_secret_in_tx, update_jira_integration_in_tx,
+    update_jira_writeback_in_tx,
 };
 use crate::logic::secret_box;
 use crate::rest::error::RestError;
@@ -756,6 +758,88 @@ pub(crate) async fn resume_jira_writeback(
     Ok(HttpResponse::Ok().json(map_integration(updated)))
 }
 
+/// Returned once when a native webhook secret is generated or rotated.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct JiraNativeWebhookSecretResponse {
+    /// Paste it into the Jira webhook's "Secret" field. Jira then signs each delivery
+    /// (`X-Hub-Signature: sha256=<hex>`). Store it now: FluxGate cannot show it again.
+    pub secret: String,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/jira-integrations/{id}/native-webhook-secret",
+    params(("id" = String, Path, description = "Jira integration ID")),
+    responses(
+        (status = 200, description = "New native webhook secret (a second call rotates it). Shown once", body = JiraNativeWebhookSecretResponse),
+        (status = 400, description = "FLUXGATE_ENCRYPTION_KEY is not set (`encryption_key_missing`)", body = crate::rest::error::ErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::rest::error::ErrorResponse),
+        (status = 403, description = "Forbidden", body = crate::rest::error::ErrorResponse),
+        (status = 404, description = "Integration not found", body = crate::rest::error::ErrorResponse)
+    ),
+    tag = "Jira"
+)]
+#[post("/jira-integrations/{id}/native-webhook-secret")]
+pub(crate) async fn generate_jira_native_webhook_secret(
+    db_pool: web::Data<sqlx::PgPool>,
+    activity_repo: web::Data<Box<dyn ActivityLogRepository>>,
+    req: HttpRequest,
+    id: web::Path<String>,
+) -> Result<impl Responder, RestError> {
+    let id = parse_uuid(&id, "integration id")?;
+    let actor = actor(&req)?;
+    if !secret_box::is_configured() {
+        return Err(RestError::encryption_key_missing());
+    }
+
+    let repo = jira_integration_repository_tx(db_pool.get_ref().clone());
+    let mut tx = begin(db_pool.get_ref()).await?;
+    let secret = generate_native_webhook_secret_in_tx(
+        &mut tx,
+        &repo,
+        activity_repo.as_ref().as_ref(),
+        id,
+        actor,
+    )
+    .await
+    .map_err(map_error(id))?;
+    commit(tx).await?;
+
+    Ok(HttpResponse::Ok().json(JiraNativeWebhookSecretResponse { secret }))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/v1/jira-integrations/{id}/native-webhook-secret",
+    params(("id" = String, Path, description = "Jira integration ID")),
+    responses(
+        (status = 204, description = "Native webhook secret removed; signed deliveries are rejected"),
+        (status = 401, description = "Unauthorized", body = crate::rest::error::ErrorResponse),
+        (status = 403, description = "Forbidden", body = crate::rest::error::ErrorResponse),
+        (status = 404, description = "Integration not found", body = crate::rest::error::ErrorResponse)
+    ),
+    tag = "Jira"
+)]
+#[delete("/jira-integrations/{id}/native-webhook-secret")]
+pub(crate) async fn remove_jira_native_webhook_secret(
+    db_pool: web::Data<sqlx::PgPool>,
+    activity_repo: web::Data<Box<dyn ActivityLogRepository>>,
+    req: HttpRequest,
+    id: web::Path<String>,
+) -> Result<impl Responder, RestError> {
+    let id = parse_uuid(&id, "integration id")?;
+    let actor = actor(&req)?;
+
+    let repo = jira_integration_repository_tx(db_pool.get_ref().clone());
+    let mut tx = begin(db_pool.get_ref()).await?;
+    remove_native_webhook_secret_in_tx(&mut tx, &repo, activity_repo.as_ref().as_ref(), id, actor)
+        .await
+        .map_err(map_error(id))?;
+    commit(tx).await?;
+
+    Ok(HttpResponse::NoContent().finish())
+}
+
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(list_jira_integrations)
         .service(create_jira_integration)
@@ -763,6 +847,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .service(update_jira_integration)
         .service(delete_jira_integration)
         .service(rotate_jira_integration_secret)
+        .service(generate_jira_native_webhook_secret)
+        .service(remove_jira_native_webhook_secret)
         .service(list_jira_status_rules)
         .service(replace_jira_status_rules)
         .service(update_jira_writeback)
@@ -771,7 +857,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::config::{JiraConfig, JiraUiBaseUrl};
     use crate::database::activity_log::activity_log_repository;
@@ -1197,7 +1283,7 @@ mod tests {
     }
 
     /// The encryption key is read once per process. Tests set a random one.
-    fn ensure_encryption_key() {
+    pub(crate) fn ensure_encryption_key() {
         use base64::Engine;
         static SET: std::sync::Once = std::sync::Once::new();
         SET.call_once(|| {
@@ -1705,6 +1791,102 @@ mod tests {
         assert!(!text.contains(&token));
         assert!(!text.contains(&sealed));
         assert!(!text.contains(&account));
+
+        fixture.cleanup(&[]).await;
+    }
+
+    async fn stored_native_secret(fixture: &Fixture, id: &str) -> Option<String> {
+        sqlx::query_scalar("SELECT native_webhook_secret_enc FROM jira_integrations WHERE id = $1")
+            .bind(Uuid::parse_str(id).unwrap())
+            .fetch_one(&fixture.pool)
+            .await
+            .expect("native secret column")
+    }
+
+    #[actix_web::test]
+    #[serial]
+    async fn native_webhook_secret_create_rotate_delete() {
+        ensure_encryption_key();
+        let fixture = Fixture::new().await;
+        let created = fixture.create("Jira").await;
+        let id = created["integration"]["id"].as_str().unwrap().to_string();
+        let uri = format!("/jira-integrations/{id}/native-webhook-secret");
+        assert_eq!(created["integration"]["hasNativeWebhookSecret"], false);
+        assert!(stored_native_secret(&fixture, &id).await.is_none());
+
+        // Create: plaintext returned once, the column holds the sealed value.
+        let (status, body) = fixture.call("POST", &uri, None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let first = body["secret"].as_str().expect("secret").to_string();
+        assert!(first.len() >= 32);
+        let sealed = stored_native_secret(&fixture, &id).await.expect("sealed");
+        assert_ne!(sealed, first);
+        assert_eq!(
+            secret_box::decrypt_with_aad(&sealed, Uuid::parse_str(&id).unwrap().as_bytes())
+                .unwrap(),
+            first
+        );
+
+        // GET shows the flag, never the value.
+        let (status, got) = fixture
+            .call("GET", &format!("/jira-integrations/{id}"), None)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{got}");
+        assert_eq!(got["hasNativeWebhookSecret"], true);
+        assert!(!got.to_string().contains(&first));
+        assert!(!got.to_string().contains(&sealed));
+
+        // Rotate: a second call changes it.
+        let (status, body) = fixture.call("POST", &uri, None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let second = body["secret"].as_str().expect("secret").to_string();
+        assert_ne!(second, first);
+        let sealed2 = stored_native_secret(&fixture, &id).await.expect("sealed");
+        assert_eq!(
+            secret_box::decrypt_with_aad(&sealed2, Uuid::parse_str(&id).unwrap().as_bytes())
+                .unwrap(),
+            second
+        );
+
+        // The activity rows name the field and carry no value.
+        let rows: Vec<serde_json::Value> = sqlx::query_scalar(
+            "SELECT metadata FROM activity_log WHERE entity_id = $1 \
+             AND activity_type = 'jira_integration_updated'",
+        )
+        .bind(&id)
+        .fetch_all(&fixture.pool)
+        .await
+        .expect("activity rows");
+        assert_eq!(rows.len(), 2);
+        for metadata in &rows {
+            assert_eq!(
+                metadata["changed_fields"],
+                serde_json::json!(["native_webhook_secret"])
+            );
+            let text = metadata.to_string();
+            for value in [&first, &second, &sealed, &sealed2] {
+                assert!(!text.contains(value.as_str()));
+            }
+        }
+
+        // Delete clears it.
+        let (status, _) = fixture.call("DELETE", &uri, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(stored_native_secret(&fixture, &id).await.is_none());
+        let (_, got) = fixture
+            .call("GET", &format!("/jira-integrations/{id}"), None)
+            .await;
+        assert_eq!(got["hasNativeWebhookSecret"], false);
+
+        // Unknown integration.
+        let missing = format!(
+            "/jira-integrations/{}/native-webhook-secret",
+            Uuid::new_v4()
+        );
+        let (status, _) = fixture.call("POST", &missing, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = fixture.call("DELETE", &missing, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
 
         fixture.cleanup(&[]).await;
     }

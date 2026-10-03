@@ -1332,6 +1332,7 @@ dependencies = [
  "feature-toggle-shared",
  "futures-util",
  "governor",
+ "hmac",
  "jsonwebtoken",
  "lettre",
  "log",

@@ -3,7 +3,8 @@
 //! `POST /api/v1/integrations/jira/{integration_id}/events` is public in
 //! `JwtGuard` (`middleware::is_public_jira_event_path`): Jira has no FluxGate
 //! JWT. It is authenticated by the integration's secret instead, sent as
-//! `Authorization: Bearer <secret>` or `X-FluxGate-Jira-Secret: <secret>`.
+//! `Authorization: Bearer <secret>` or `X-FluxGate-Jira-Secret: <secret>`, or by a
+//! native Jira webhook signature (`X-Hub-Signature: sha256=<hex>`, JI-45).
 //! `GET /api/v1/jira-integrations/{id}/events` is the event log, behind the
 //! same policy as the rest of `/jira-integrations/**`.
 
@@ -14,6 +15,7 @@ use subtle::ConstantTimeEq;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use crate::database::entity::JiraIntegrationRow;
 use crate::database::environment::EnvironmentRepository;
 use crate::database::external_link::ExternalLinkRepository;
 use crate::database::feature::FeatureRepository;
@@ -25,6 +27,8 @@ use crate::logic::jira_capture::event_comment_lines;
 use crate::logic::jira_events::{JiraActor, delivery_hash, field_values, parse_event};
 use crate::logic::jira_integration::hash_secret;
 use crate::logic::jira_rules::{RuleEngine, RuleResult};
+use crate::logic::jira_signature::{SIGNATURE_HEADER, signature_matches};
+use crate::logic::secret_box;
 use crate::rest::error::RestError;
 use crate::rest::jira_inbound_limit::{Admission, JiraInboundLimiter};
 use crate::rest::pagination::{PageMeta, PaginationQuery, normalize_pagination};
@@ -136,6 +140,42 @@ fn secret_matches(secret: &str, stored_hash: &str) -> bool {
         .into()
 }
 
+/// Integrations whose native secret failed to decrypt, so the warning is logged once.
+static DECRYPT_WARNED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<Uuid>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// True when `X-Hub-Signature` is a valid HMAC of the raw body under the
+/// integration's native webhook secret. No stored secret, or one that cannot be
+/// decrypted (the key changed), is a failed check.
+fn native_signature_ok(req: &HttpRequest, integration: &JiraIntegrationRow, body: &[u8]) -> bool {
+    let Some(signature) = req
+        .headers()
+        .get(SIGNATURE_HEADER)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    let Some(sealed) = integration.native_webhook_secret_enc.as_deref() else {
+        return false;
+    };
+    match secret_box::decrypt_with_aad(sealed, integration.id.as_bytes()) {
+        Ok(secret) => signature_matches(&secret, body, signature),
+        Err(_) => {
+            let first = DECRYPT_WARNED
+                .lock()
+                .map(|mut warned| warned.insert(integration.id))
+                .unwrap_or(false);
+            if first {
+                log::warn!(
+                    "Jira integration {}: native webhook secret cannot be decrypted",
+                    integration.id
+                );
+            }
+            false
+        }
+    }
+}
+
 /// Receives one Jira event. The body is the Jira webhook payload or an
 /// Automation "Issue data (Jira format)" body.
 #[utoipa::path(
@@ -144,12 +184,13 @@ fn secret_matches(secret: &str, stored_hash: &str) -> bool {
     request_body(content = Object, description = "Jira webhook or Automation issue body (Jira format), at most 1 MiB"),
     params(
         ("integration_id" = String, Path, description = "Jira integration ID"),
-        ("X-FluxGate-Jira-Secret" = Option<String>, Header, description = "Integration secret, when `Authorization: Bearer <secret>` is not used")
+        ("X-FluxGate-Jira-Secret" = Option<String>, Header, description = "Integration secret, when `Authorization: Bearer <secret>` is not used"),
+        ("X-Hub-Signature" = Option<String>, Header, description = "Native Jira webhook signature `sha256=<hex>`: HMAC-SHA256 of the raw body with the integration's native webhook secret. Accepted instead of the integration secret")
     ),
     responses(
         (status = 200, description = "Event processed (also when no rule matched, the event is not a status change, or it repeats a recent delivery)", body = JiraEventResponse),
         (status = 400, description = "Body is not JSON or names no issue", body = crate::rest::error::ErrorResponse),
-        (status = 401, description = "Unknown or disabled integration, or wrong secret", body = crate::rest::error::ErrorResponse),
+        (status = 401, description = "Unknown or disabled integration, or wrong secret or signature", body = crate::rest::error::ErrorResponse),
         (status = 413, description = "Body larger than 1 MiB"),
         (status = 429, description = "Rate limited; nothing is stored. `Retry-After` gives the seconds to wait", body = crate::rest::error::ErrorResponse)
     ),
@@ -191,8 +232,11 @@ pub(crate) async fn receive_jira_event(
         return Err(unauthorized());
     };
     limited(limiter.check_known(integration_id))?;
-    let secret = presented_secret(&req).ok_or_else(unauthorized)?;
-    if !secret_matches(&secret, &integration.secret_hash) {
+    // Either check passes: the integration secret, or a native Jira webhook
+    // signature. One 401 for both, so a caller never learns which check failed.
+    let bearer_ok = presented_secret(&req)
+        .is_some_and(|secret| secret_matches(&secret, &integration.secret_hash));
+    if !bearer_ok && !native_signature_ok(&req, &integration, &body) {
         return Err(unauthorized());
     }
 
@@ -727,6 +771,118 @@ mod tests {
         assert_eq!(out.body["message"], UNAUTHORIZED_MESSAGE);
         assert!(out.applied.lock().unwrap().is_empty());
         assert!(out.inserted.lock().unwrap().is_empty());
+    }
+
+    const CLOUD_FIXTURE: &str =
+        include_str!("../../tests/fixtures/jira/cloud_webhook_status_change.json");
+
+    /// Seals a fresh native secret for the integration (AAD = integration id) and
+    /// returns the plaintext. The key is the process-wide test key.
+    fn with_native_secret(setup: &mut Setup) -> String {
+        crate::rest::jira_integration::tests::ensure_encryption_key();
+        let secret = crate::logic::jira_integration::generate_secret();
+        setup.integration.native_webhook_secret_enc = Some(
+            crate::logic::secret_box::encrypt_with_aad(&secret, setup.integration.id.as_bytes())
+                .expect("seal native secret"),
+        );
+        secret
+    }
+
+    fn sign(secret: &str, body: &[u8]) -> String {
+        use hmac::{Hmac, Mac};
+        let mut mac = Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(body);
+        let hex: String = mac
+            .finalize()
+            .into_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        format!("sha256={hex}")
+    }
+
+    fn signed(setup: &Setup, secret: &str, body: &str) -> test::TestRequest {
+        post(setup)
+            .insert_header((
+                crate::logic::jira_signature::SIGNATURE_HEADER,
+                sign(secret, body.as_bytes()),
+            ))
+            .insert_header(("Content-Type", "application/json"))
+            .set_payload(body.to_string())
+    }
+
+    #[actix_web::test]
+    async fn signed_native_webhook_is_accepted_without_the_bearer_secret() {
+        let mut s = setup();
+        let native = with_native_secret(&mut s);
+        let request = signed(&s, &native, CLOUD_FIXTURE);
+        let out = send(s, request).await;
+        assert_eq!(out.status, StatusCode::OK, "{}", out.body);
+        let inserted = out.inserted.lock().unwrap();
+        assert_eq!(inserted.len(), 1);
+        assert_eq!(inserted[0].issue_key.as_deref(), Some("PROJ-123"));
+        assert!(inserted[0].error.is_none());
+        assert!(inserted[0].ignored.is_none());
+    }
+
+    #[actix_web::test]
+    async fn bad_signature_is_401_and_does_nothing() {
+        let mut s = setup();
+        let native = with_native_secret(&mut s);
+        let other = crate::logic::jira_integration::generate_secret();
+        let wrong_secret = signed(&s, &other, CLOUD_FIXTURE);
+        let out = send(s, wrong_secret).await;
+        assert_eq!(out.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(out.body["message"], UNAUTHORIZED_MESSAGE);
+        assert!(out.applied.lock().unwrap().is_empty());
+        assert!(out.inserted.lock().unwrap().is_empty());
+
+        // Signed body differs from the sent body by one byte.
+        let mut s = setup();
+        let native2 = with_native_secret(&mut s);
+        let tampered = CLOUD_FIXTURE.replacen("Jane", "Jone", 1);
+        let request = post(&s)
+            .insert_header((
+                crate::logic::jira_signature::SIGNATURE_HEADER,
+                sign(&native2, CLOUD_FIXTURE.as_bytes()),
+            ))
+            .set_payload(tampered);
+        let out = send(s, request).await;
+        assert_eq!(out.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(out.body["message"], UNAUTHORIZED_MESSAGE);
+        assert!(out.inserted.lock().unwrap().is_empty());
+        let _ = native;
+    }
+
+    #[actix_web::test]
+    async fn signature_without_a_stored_native_secret_is_401() {
+        let s = setup();
+        let request = signed(&s, "any-secret-value", CLOUD_FIXTURE);
+        let out = send(s, request).await;
+        assert_eq!(out.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(out.body["message"], UNAUTHORIZED_MESSAGE);
+        assert!(out.inserted.lock().unwrap().is_empty());
+    }
+
+    #[actix_web::test]
+    async fn bearer_secret_still_works_when_a_native_secret_exists() {
+        let mut s = setup();
+        let _native = with_native_secret(&mut s);
+        let request = bearer(post(&s), SECRET).set_json(status_change("Done", json!("QA")));
+        let out = send(s, request).await;
+        assert_eq!(out.status, StatusCode::OK, "{}", out.body);
+        assert_eq!(out.inserted.lock().unwrap().len(), 1);
+    }
+
+    #[actix_web::test]
+    async fn undecryptable_native_secret_counts_as_none() {
+        crate::rest::jira_integration::tests::ensure_encryption_key();
+        let mut s = setup();
+        s.integration.native_webhook_secret_enc = Some("not-a-sealed-value".to_string());
+        let request = signed(&s, "any-secret-value", CLOUD_FIXTURE);
+        let out = send(s, request).await;
+        assert_eq!(out.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(out.body["message"], UNAUTHORIZED_MESSAGE);
     }
 
     #[actix_web::test]

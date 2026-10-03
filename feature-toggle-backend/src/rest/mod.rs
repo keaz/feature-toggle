@@ -99,9 +99,10 @@ use crate::rest::feature::{
 use crate::rest::jira_events::{JiraEventLogItem, JiraEventResponse, JiraEventsResponse};
 use crate::rest::jira_integration::{
     CreateJiraIntegrationRequest, JiraIntegrationResponse, JiraIntegrationWithSecretResponse,
-    JiraIntegrationsResponse, JiraStatusRuleRequest, JiraStatusRuleResponse,
-    JiraStatusRulesResponse, JiraWritebackResponse, JiraWritebackTestResponse,
-    ReplaceJiraStatusRulesRequest, UpdateJiraIntegrationRequest, UpdateJiraWritebackRequest,
+    JiraIntegrationsResponse, JiraNativeWebhookSecretResponse, JiraStatusRuleRequest,
+    JiraStatusRuleResponse, JiraStatusRulesResponse, JiraWritebackResponse,
+    JiraWritebackTestResponse, ReplaceJiraStatusRulesRequest, UpdateJiraIntegrationRequest,
+    UpdateJiraWritebackRequest,
 };
 use crate::rest::jira_outbound_jobs::{JiraOutboundJobResponse, JiraOutboundJobsResponse};
 use crate::rest::jwt_secret::JwtSecretResponse;
@@ -229,6 +230,8 @@ async fn health() -> impl Responder {
         jira_integration::update_jira_integration,
         jira_integration::delete_jira_integration,
         jira_integration::rotate_jira_integration_secret,
+        jira_integration::generate_jira_native_webhook_secret,
+        jira_integration::remove_jira_native_webhook_secret,
         jira_integration::list_jira_status_rules,
         jira_integration::replace_jira_status_rules,
         jira_integration::update_jira_writeback,
@@ -426,6 +429,7 @@ async fn health() -> impl Responder {
         UpdateJiraWritebackRequest,
         JiraWritebackResponse,
         JiraWritebackTestResponse,
+        JiraNativeWebhookSecretResponse,
         JiraEventResponse,
         JiraEventLogItem,
         JiraEventsResponse,

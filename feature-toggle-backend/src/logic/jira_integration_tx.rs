@@ -502,6 +502,88 @@ where
     Ok(updated)
 }
 
+/// Generates a native webhook secret, stores it sealed (AAD = integration id) and
+/// writes a `jira_integration_updated` activity row naming the field only. A second
+/// call rotates it. Returns the plaintext, shown once.
+/// `Error::NotFound(id)` when the integration does not exist; `Error::InvalidInput`
+/// when `FLUXGATE_ENCRYPTION_KEY` is not set.
+pub async fn generate_native_webhook_secret_in_tx<R>(
+    conn: &mut PgConnection,
+    repo: &R,
+    activity_repo: &dyn ActivityLogRepository,
+    id: Uuid,
+    actor: ActorContext,
+) -> Result<String, Error>
+where
+    R: JiraIntegrationRepositoryTx + ?Sized,
+{
+    let secret = generate_secret();
+    let sealed = secret_box::encrypt_with_aad(&secret, id.as_bytes()).map_err(|_| {
+        invalid("FLUXGATE_ENCRYPTION_KEY must be set to store a native webhook secret")
+    })?;
+    let updated = repo
+        .set_native_webhook_secret_tx(conn, id, Some(sealed))
+        .await?
+        .ok_or(Error::NotFound(id))?;
+    write_native_secret_activity(
+        conn,
+        activity_repo,
+        &updated,
+        "Set the native webhook secret of Jira integration",
+        actor,
+    )
+    .await?;
+    Ok(secret)
+}
+
+/// Clears the native webhook secret and writes a `jira_integration_updated` row.
+/// `Error::NotFound(id)` when the integration does not exist.
+pub async fn remove_native_webhook_secret_in_tx<R>(
+    conn: &mut PgConnection,
+    repo: &R,
+    activity_repo: &dyn ActivityLogRepository,
+    id: Uuid,
+    actor: ActorContext,
+) -> Result<(), Error>
+where
+    R: JiraIntegrationRepositoryTx + ?Sized,
+{
+    let updated = repo
+        .set_native_webhook_secret_tx(conn, id, None)
+        .await?
+        .ok_or(Error::NotFound(id))?;
+    write_native_secret_activity(
+        conn,
+        activity_repo,
+        &updated,
+        "Removed the native webhook secret of Jira integration",
+        actor,
+    )
+    .await
+}
+
+async fn write_native_secret_activity(
+    conn: &mut PgConnection,
+    activity_repo: &dyn ActivityLogRepository,
+    integration: &JiraIntegrationRow,
+    description: &str,
+    actor: ActorContext,
+) -> Result<(), Error> {
+    let mut metadata = config_metadata(integration);
+    metadata["changed_fields"] = serde_json::json!(["native_webhook_secret"]);
+    metadata["has_native_webhook_secret"] = integration.native_webhook_secret_enc.is_some().into();
+    write_activity(
+        conn,
+        activity_repo,
+        JIRA_INTEGRATION_UPDATED,
+        format!("{description} '{}'", integration.name),
+        integration,
+        Some(metadata),
+        actor,
+    )
+    .await
+}
+
 /// Activity row for a write-back change. Carries flags and field names only, never
 /// the credential or its sealed form.
 async fn write_writeback_activity(

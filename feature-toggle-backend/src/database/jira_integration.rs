@@ -133,6 +133,13 @@ pub trait JiraIntegrationRepository: Send + Sync {
         id: Uuid,
         columns: JiraWritebackColumns,
     ) -> Result<Option<JiraIntegrationRow>, Error>;
+    /// Sets or clears (`None`) the sealed native webhook secret. `None` when the
+    /// integration does not exist.
+    async fn set_native_webhook_secret(
+        &self,
+        id: Uuid,
+        sealed: Option<String>,
+    ) -> Result<Option<JiraIntegrationRow>, Error>;
     /// Sets or clears (`None`) the paused reason. `None` when the integration does not exist.
     async fn set_writeback_paused(
         &self,
@@ -191,6 +198,12 @@ pub trait JiraIntegrationRepositoryTx: JiraIntegrationRepository {
         conn: &mut PgConnection,
         id: Uuid,
         columns: JiraWritebackColumns,
+    ) -> Result<Option<JiraIntegrationRow>, Error>;
+    async fn set_native_webhook_secret_tx(
+        &self,
+        conn: &mut PgConnection,
+        id: Uuid,
+        sealed: Option<String>,
     ) -> Result<Option<JiraIntegrationRow>, Error>;
     async fn set_writeback_paused_tx(
         &self,
@@ -465,6 +478,22 @@ impl JiraIntegrationRepositoryImpl {
         handle_error(None, result)
     }
 
+    async fn set_native_webhook_secret_conn(
+        conn: &mut PgConnection,
+        id: Uuid,
+        sealed: Option<String>,
+    ) -> Result<Option<JiraIntegrationRow>, Error> {
+        let result = sqlx::query_as::<_, JiraIntegrationRow>(&format!(
+            "UPDATE jira_integrations SET native_webhook_secret_enc = $2, updated_at = now() \
+             WHERE id = $1 RETURNING {INTEGRATION_COLUMNS}"
+        ))
+        .bind(id)
+        .bind(sealed)
+        .fetch_optional(&mut *conn)
+        .await;
+        handle_error(None, result)
+    }
+
     async fn set_writeback_paused_conn(
         conn: &mut PgConnection,
         id: Uuid,
@@ -573,6 +602,15 @@ impl JiraIntegrationRepository for JiraIntegrationRepositoryImpl {
         Self::set_writeback_conn(&mut conn, id, columns).await
     }
 
+    async fn set_native_webhook_secret(
+        &self,
+        id: Uuid,
+        sealed: Option<String>,
+    ) -> Result<Option<JiraIntegrationRow>, Error> {
+        let mut conn = self.pool.acquire().await.map_err(Error::DatabaseError)?;
+        Self::set_native_webhook_secret_conn(&mut conn, id, sealed).await
+    }
+
     async fn set_writeback_paused(
         &self,
         id: Uuid,
@@ -652,6 +690,15 @@ impl JiraIntegrationRepositoryTx for JiraIntegrationRepositoryImpl {
         columns: JiraWritebackColumns,
     ) -> Result<Option<JiraIntegrationRow>, Error> {
         Self::set_writeback_conn(conn, id, columns).await
+    }
+
+    async fn set_native_webhook_secret_tx(
+        &self,
+        conn: &mut PgConnection,
+        id: Uuid,
+        sealed: Option<String>,
+    ) -> Result<Option<JiraIntegrationRow>, Error> {
+        Self::set_native_webhook_secret_conn(conn, id, sealed).await
     }
 
     async fn set_writeback_paused_tx(

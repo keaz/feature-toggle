@@ -52,6 +52,7 @@ clap = { version = "4.5.40", features = ["derive", "env"] }
 regex = "1.10"
 reqwest = { version = "0.12.20", default-features = false, features = ["json", "rustls-tls"] }
 governor = "0.10.4"
+hmac = "0.12"
 
 [build-dependencies]
 tonic-build = { version = "0.12" }

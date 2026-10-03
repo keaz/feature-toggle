@@ -1271,6 +1271,14 @@ mod tests {
                 format!("/api/v1/jira-integrations/{integration_id}/rotate-secret"),
             ),
             (
+                Method::POST,
+                format!("/api/v1/jira-integrations/{integration_id}/native-webhook-secret"),
+            ),
+            (
+                Method::DELETE,
+                format!("/api/v1/jira-integrations/{integration_id}/native-webhook-secret"),
+            ),
+            (
                 Method::GET,
                 format!("/api/v1/jira-integrations/{integration_id}/rules"),
             ),
@@ -1325,6 +1333,7 @@ mod tests {
                 format!("/api/v1/jira-integrations/{id}"),
                 format!("/api/v1/jira-integrations/{id}/rules"),
                 format!("/api/v1/jira-integrations/{id}/rotate-secret"),
+                format!("/api/v1/jira-integrations/{id}/native-webhook-secret"),
                 format!("/api/v1/jira-integrations/{id}/events"),
                 format!("/api/v1/jira-integrations/{id}/writeback"),
                 format!("/api/v1/jira-integrations/{id}/writeback/test"),
