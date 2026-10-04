@@ -106,6 +106,10 @@ impl ConfigFiles {
         self.config.delete_from(Some(profile_section(profile)), key);
     }
 
+    pub fn remove_session_value(&mut self, session: &str, key: &str) {
+        self.config.delete_from(Some(session_section(session)), key);
+    }
+
     pub fn set_session_value(&mut self, session: &str, key: &str, value: &str) {
         self.config
             .with_section(Some(session_section(session)))

@@ -18,6 +18,10 @@ pub struct NewSsoLoginState {
     pub pkce_verifier: String,
     pub redirect_path: Option<String>,
     pub expires_at: DateTime<Utc>,
+    /// Loopback callback of a CLI login.
+    pub cli_redirect_uri: Option<String>,
+    /// PKCE S256 challenge of a CLI login.
+    pub cli_code_challenge: Option<String>,
 }
 
 impl std::fmt::Debug for NewSsoLoginState {
@@ -28,6 +32,7 @@ impl std::fmt::Debug for NewSsoLoginState {
             .field("pkce_verifier", &"<redacted>")
             .field("redirect_path", &self.redirect_path)
             .field("expires_at", &self.expires_at)
+            .field("cli_redirect_uri", &self.cli_redirect_uri)
             .finish()
     }
 }
@@ -90,11 +95,12 @@ impl SsoLoginStateRepositoryImpl {
             SsoLoginState,
             r#"
             INSERT INTO sso_login_states (
-                id, state_hash, provider_id, nonce, pkce_verifier, redirect_path, expires_at
+                id, state_hash, provider_id, nonce, pkce_verifier, redirect_path, expires_at,
+                cli_redirect_uri, cli_code_challenge
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             RETURNING id, state_hash, provider_id, nonce, pkce_verifier, redirect_path,
-                      expires_at, created_at
+                      expires_at, created_at, cli_redirect_uri, cli_code_challenge
             "#,
             Uuid::new_v4(),
             input.state_hash,
@@ -102,7 +108,9 @@ impl SsoLoginStateRepositoryImpl {
             input.nonce,
             input.pkce_verifier,
             input.redirect_path,
-            input.expires_at
+            input.expires_at,
+            input.cli_redirect_uri,
+            input.cli_code_challenge
         )
         .fetch_one(&mut *conn)
         .await
@@ -119,7 +127,7 @@ impl SsoLoginStateRepositoryImpl {
             DELETE FROM sso_login_states
             WHERE state_hash = $1 AND expires_at > now()
             RETURNING id, state_hash, provider_id, nonce, pkce_verifier, redirect_path,
-                      expires_at, created_at
+                      expires_at, created_at, cli_redirect_uri, cli_code_challenge
             "#,
             state_hash
         )

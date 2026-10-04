@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            INSERT INTO sso_login_states (\n                id, state_hash, provider_id, nonce, pkce_verifier, redirect_path, expires_at\n            )\n            VALUES ($1, $2, $3, $4, $5, $6, $7)\n            RETURNING id, state_hash, provider_id, nonce, pkce_verifier, redirect_path,\n                      expires_at, created_at\n            ",
+  "query": "\n            INSERT INTO sso_login_states (\n                id, state_hash, provider_id, nonce, pkce_verifier, redirect_path, expires_at,\n                cli_redirect_uri, cli_code_challenge\n            )\n            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)\n            RETURNING id, state_hash, provider_id, nonce, pkce_verifier, redirect_path,\n                      expires_at, created_at, cli_redirect_uri, cli_code_challenge\n            ",
   "describe": {
     "columns": [
       {
@@ -42,6 +42,16 @@
         "ordinal": 7,
         "name": "created_at",
         "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "cli_redirect_uri",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "cli_code_challenge",
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -52,7 +62,9 @@
         "Text",
         "Text",
         "Text",
-        "Timestamptz"
+        "Timestamptz",
+        "Text",
+        "Text"
       ]
     },
     "nullable": [
@@ -63,8 +75,10 @@
       false,
       true,
       false,
-      false
+      false,
+      true,
+      true
     ]
   },
-  "hash": "c21c2c0108cf555a52e5f85d780f9ed8fdbc6ec00866fc0d58c88278d566b499"
+  "hash": "3d1f4cf36eba0ede6da33951ea44f73b4773d0c244b1934508c5fd9c2b9fb4d0"
 }

@@ -508,6 +508,8 @@ async fn test_provider_delete_cascades_but_keeps_users() {
                 pkce_verifier: "v".into(),
                 redirect_path: None,
                 expires_at: Utc::now() + Duration::minutes(10),
+                cli_redirect_uri: None,
+                cli_code_challenge: None,
             },
         )
         .await
@@ -764,6 +766,8 @@ async fn test_login_state_is_single_use_and_expires() {
         pkce_verifier: "verifier".into(),
         redirect_path: Some("/features".into()),
         expires_at: Utc::now() + Duration::minutes(10),
+        cli_redirect_uri: None,
+        cli_code_challenge: None,
     })
     .await
     .unwrap();
@@ -792,6 +796,8 @@ async fn test_login_state_is_single_use_and_expires() {
         pkce_verifier: "v".into(),
         redirect_path: None,
         expires_at: Utc::now() - Duration::seconds(1),
+        cli_redirect_uri: None,
+        cli_code_challenge: None,
     })
     .await
     .unwrap();
@@ -814,6 +820,8 @@ async fn test_login_state_is_single_use_and_expires() {
         pkce_verifier: "v".into(),
         redirect_path: None,
         expires_at: Utc::now() + Duration::minutes(1),
+        cli_redirect_uri: None,
+        cli_code_challenge: None,
     };
     repo.create_state(input.clone()).await.unwrap();
     assert!(repo.create_state(input).await.is_err());
@@ -834,6 +842,8 @@ async fn test_login_state_consume_is_atomic_under_concurrency() {
         pkce_verifier: "v".into(),
         redirect_path: None,
         expires_at: Utc::now() + Duration::minutes(10),
+        cli_redirect_uri: None,
+        cli_code_challenge: None,
     })
     .await
     .unwrap();

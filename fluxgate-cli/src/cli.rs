@@ -218,9 +218,13 @@ pub enum RolloutSubcommand {
 
 #[derive(Debug, Args)]
 pub struct LoginArgs {
-    /// Log in with username and password.
-    #[arg(long)]
+    /// Log in with username and password, even when the session uses SSO.
+    #[arg(long, conflicts_with = "sso")]
     pub password: bool,
+    /// Log in through SSO provider SLUG in the browser; without SLUG, the
+    /// session's sso_provider.
+    #[arg(long, value_name = "SLUG", num_args = 0..=1, default_missing_value = "")]
+    pub sso: Option<String>,
     /// Username; asked for when not given.
     #[arg(long)]
     pub username: Option<String>,

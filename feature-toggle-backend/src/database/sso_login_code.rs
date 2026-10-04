@@ -47,6 +47,13 @@ pub trait SsoLoginCodeRepositoryTx: SsoLoginCodeRepository {
         conn: &mut PgConnection,
         code_hash: &str,
     ) -> Result<Option<SsoLoginCode>, Error>;
+    /// Binds the code to a PKCE S256 challenge that the exchange must answer.
+    async fn set_code_challenge_tx(
+        &self,
+        conn: &mut PgConnection,
+        code_hash: &str,
+        challenge: &str,
+    ) -> Result<(), Error>;
 }
 
 pub fn sso_login_code_repository(pool: PgPool) -> Box<dyn SsoLoginCodeRepository> {
@@ -72,7 +79,8 @@ impl SsoLoginCodeRepositoryImpl {
             r#"
             INSERT INTO sso_login_codes (id, code_hash, user_id, provider_id, expires_at)
             VALUES ($1, $2, $3, $4, $5)
-            RETURNING id, code_hash, user_id, provider_id, expires_at, used_at, created_at
+            RETURNING id, code_hash, user_id, provider_id, expires_at, used_at, created_at,
+                      code_challenge
             "#,
             Uuid::new_v4(),
             input.code_hash,
@@ -95,7 +103,8 @@ impl SsoLoginCodeRepositoryImpl {
             UPDATE sso_login_codes
             SET used_at = now()
             WHERE code_hash = $1 AND used_at IS NULL AND expires_at > now()
-            RETURNING id, code_hash, user_id, provider_id, expires_at, used_at, created_at
+            RETURNING id, code_hash, user_id, provider_id, expires_at, used_at, created_at,
+                      code_challenge
             "#,
             code_hash
         )
@@ -147,5 +156,22 @@ impl SsoLoginCodeRepositoryTx for SsoLoginCodeRepositoryImpl {
         code_hash: &str,
     ) -> Result<Option<SsoLoginCode>, Error> {
         Self::consume(conn, code_hash).await
+    }
+
+    async fn set_code_challenge_tx(
+        &self,
+        conn: &mut PgConnection,
+        code_hash: &str,
+        challenge: &str,
+    ) -> Result<(), Error> {
+        sqlx::query!(
+            "UPDATE sso_login_codes SET code_challenge = $2 WHERE code_hash = $1",
+            code_hash,
+            challenge
+        )
+        .execute(&mut *conn)
+        .await
+        .map_err(Error::DatabaseError)?;
+        Ok(())
     }
 }

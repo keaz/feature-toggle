@@ -164,21 +164,6 @@ async fn wrong_password_exits_3() {
 }
 
 #[tokio::test]
-async fn sso_sessions_need_the_password_flag_in_this_version() {
-    let h = Harness::new().await;
-    h.write(
-        "config",
-        &format!(
-            "[default]\nsession = corp\n\n[session corp]\nurl = {}\nsso_provider = okta\n",
-            h.url()
-        ),
-    );
-    let r = h.run(&["login", "--output", "text"], &[]).await;
-    assert_eq!(r.code, 2);
-    assert!(r.stderr.contains("fluxgate login --password"));
-}
-
-#[tokio::test]
 async fn logout_revokes_the_refresh_token_and_deletes_the_cache() {
     let h = Harness::new().await;
     h.write(

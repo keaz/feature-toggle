@@ -3,6 +3,7 @@ use chrono::Utc;
 use super::App;
 use crate::auth::password::password_login;
 use crate::auth::session::{SessionCache, SessionStore};
+use crate::auth::sso_loopback::{LOGIN_WAIT, sso_login};
 use crate::cli::LoginArgs;
 use crate::config::Source;
 use crate::context::Context;
@@ -18,13 +19,14 @@ pub async fn run(args: LoginArgs, app: &mut App<'_>) -> Result<Outcome, CliError
         files.set_profile_value(&profile, "session", &profile);
     }
     let settings = app.settings(&files)?;
-    if let Some(provider) = &settings.sso_provider
-        && !args.password
-    {
-        return Err(CliError::Usage(format!(
-            "this session uses SSO provider '{provider}', which this version cannot log in to: run fluxgate login --password"
-        )));
-    }
+    let sso_slug = match (&args.sso, args.password) {
+        (_, true) => None,
+        (Some(slug), _) if !slug.trim().is_empty() => Some(slug.trim().to_string()),
+        (Some(_), _) => Some(settings.sso_provider.clone().ok_or_else(|| {
+            CliError::Usage("pass --sso <slug>, or set sso_provider for the session".into())
+        })?),
+        (None, false) => settings.sso_provider.clone(),
+    };
     // A profile without a session gets one named after the profile.
     let session = settings
         .session
@@ -38,12 +40,17 @@ pub async fn run(args: LoginArgs, app: &mut App<'_>) -> Result<Outcome, CliError
         }
         _ => settings.url.value.clone(),
     };
-    let username = match args.username {
-        Some(username) => username,
-        None => app.prompter.input("Username", None)?,
-    };
     let timeout = Context::timeout(&settings);
-    let response = password_login(&mut *app.prompter, &url, &username, timeout).await?;
+    let response = match &sso_slug {
+        Some(slug) => sso_login(&mut *app.prompter, &url, slug, timeout, LOGIN_WAIT).await?,
+        None => {
+            let username = match args.username {
+                Some(username) => username,
+                None => app.prompter.input("Username", None)?,
+            };
+            password_login(&mut *app.prompter, &url, &username, timeout).await?
+        }
+    };
 
     let store = SessionStore::new(app.paths.sessions.clone());
     let mut outcome = Outcome::message(format!(
@@ -64,7 +71,17 @@ pub async fn run(args: LoginArgs, app: &mut App<'_>) -> Result<Outcome, CliError
     if shadowed {
         files.remove_profile_value(&settings.profile, "url");
     }
-    if shadowed
+    // `--sso <slug>` makes SSO the session's default login.
+    let new_provider = args
+        .sso
+        .as_deref()
+        .map(str::trim)
+        .filter(|slug| !slug.is_empty() && settings.sso_provider.as_deref() != Some(*slug));
+    if let Some(slug) = new_provider {
+        files.set_session_value(&session, "sso_provider", slug);
+    }
+    if new_provider.is_some()
+        || shadowed
         || settings.session.is_none()
         || settings.session_url.as_deref() != Some(url.as_str())
     {

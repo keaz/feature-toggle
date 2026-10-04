@@ -7,6 +7,7 @@ use super::App;
 use crate::api::ApiClient;
 use crate::auth::password::password_login;
 use crate::auth::session::{SessionCache, SessionStore};
+use crate::auth::sso_loopback::{LOGIN_WAIT, sso_login};
 use crate::cli::{ConfigureArgs, ConfigureSubcommand};
 use crate::config::files::PROFILE_KEYS;
 use crate::config::resolve::{DEFAULT_TIMEOUT_SECS, DEFAULT_URL};
@@ -16,6 +17,7 @@ use crate::error::CliError;
 use crate::output::{CONFIG_COLUMNS, Kind, Outcome, OutputFormat, PROFILE_COLUMNS};
 
 pub const LOGIN_PASSWORD: &str = "Log in with username and password";
+pub const LOGIN_SSO: &str = "Single sign-on (SSO)";
 pub const LOGIN_TOKEN: &str = "Static token (system client)";
 
 pub async fn run(args: ConfigureArgs, app: &mut App<'_>) -> Result<Outcome, CliError> {
@@ -192,15 +194,27 @@ async fn interactive(app: &mut App<'_>) -> Result<Outcome, CliError> {
     ApiClient::new(&url, None, timeout)?;
 
     let mut warnings = Vec::new();
-    let methods = vec![LOGIN_PASSWORD.to_string(), LOGIN_TOKEN.to_string()];
-    if app.prompter.select("How do you sign in", &methods)? == 0 {
+    let methods = vec![
+        LOGIN_PASSWORD.to_string(),
+        LOGIN_SSO.to_string(),
+        LOGIN_TOKEN.to_string(),
+    ];
+    let method = app.prompter.select("How do you sign in", &methods)?;
+    if method < 2 {
         let session = files
             .profile_value(&profile, "session")
             .unwrap_or(profile.as_str())
             .to_string();
         // Log in before writing anything, so a failed login changes nothing.
-        let username = app.prompter.input("Username", None)?;
-        let response = password_login(&mut *app.prompter, &url, &username, timeout).await?;
+        let (response, provider) = if method == 0 {
+            let username = app.prompter.input("Username", None)?;
+            let response = password_login(&mut *app.prompter, &url, &username, timeout).await?;
+            (response, None)
+        } else {
+            let slug = choose_sso_provider(app, &url, timeout).await?;
+            let response = sso_login(&mut *app.prompter, &url, &slug, timeout, LOGIN_WAIT).await?;
+            (response, Some(slug))
+        };
         if files
             .session_value(&session, "url")
             .is_some_and(|old| old.trim_end_matches('/') != url)
@@ -223,6 +237,10 @@ async fn interactive(app: &mut App<'_>) -> Result<Outcome, CliError> {
         }
         files.set_profile_value(&profile, "session", &session);
         files.set_session_value(&session, "url", &url);
+        match &provider {
+            Some(slug) => files.set_session_value(&session, "sso_provider", slug),
+            None => files.remove_session_value(&session, "sso_provider"),
+        }
         // The session holds the url; a profile url would shadow it.
         files.remove_profile_value(&profile, "url");
         files.save_config(&app.paths)?;
@@ -290,4 +308,40 @@ async fn interactive(app: &mut App<'_>) -> Result<Outcome, CliError> {
     ));
     outcome.warnings = warnings;
     Ok(outcome)
+}
+
+/// Asks which of the backend's enabled SSO providers to use; returns its slug.
+async fn choose_sso_provider(
+    app: &mut App<'_>,
+    url: &str,
+    timeout: Duration,
+) -> Result<String, CliError> {
+    let value = ApiClient::new(url, None, timeout)?
+        .get(&["auth", "sso", "providers"], &[])
+        .await?;
+    let providers: Vec<(String, String)> = value
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let slug = item.get("slug")?.as_str()?.to_string();
+                    let name = item
+                        .get("displayName")
+                        .and_then(Value::as_str)
+                        .unwrap_or(&slug)
+                        .to_string();
+                    Some((slug, name))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if providers.is_empty() {
+        return Err(CliError::Usage(format!(
+            "{url} has no SSO providers enabled"
+        )));
+    }
+    let names: Vec<String> = providers.iter().map(|(_, name)| name.clone()).collect();
+    let chosen = app.prompter.select("SSO provider", &names)?;
+    Ok(providers[chosen].0.clone())
 }

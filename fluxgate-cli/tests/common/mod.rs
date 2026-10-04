@@ -93,6 +93,15 @@ impl Harness {
         answers: &[&str],
     ) -> RunResult {
         let mut prompter = ScriptedPrompter::new(answers);
+        self.run_prompted(args, env, &mut prompter).await
+    }
+
+    pub async fn run_prompted(
+        &self,
+        args: &[&str],
+        env: &[(&str, &str)],
+        prompter: &mut ScriptedPrompter,
+    ) -> RunResult {
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let mut argv = vec!["fluxgate"];
         argv.extend_from_slice(args);
@@ -101,7 +110,7 @@ impl Harness {
             Io {
                 env: self.env(env),
                 is_tty: false,
-                prompter: &mut prompter,
+                prompter,
                 out: &mut out,
                 err: &mut err,
             },
@@ -152,4 +161,46 @@ pub fn features(range: std::ops::Range<usize>) -> Vec<Value> {
                          "enabled": true, "lifecycleStage": "ACTIVE" })
         })
         .collect()
+}
+
+/// Plays the browser for an SSO login: checks the authorize URL and calls the
+/// CLI's loopback callback with `query` (for example `code=...`). Returns the
+/// `cli_challenge` it saw.
+pub fn browser(
+    query: &'static str,
+) -> (
+    ScriptedPrompter,
+    std::sync::Arc<std::sync::Mutex<Option<String>>>,
+) {
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let record = seen.clone();
+    let prompter = ScriptedPrompter::new(&[]).on_open(move |url| {
+        let url = reqwest::Url::parse(url).unwrap();
+        let params: std::collections::HashMap<String, String> =
+            url.query_pairs().into_owned().collect();
+        *record.lock().unwrap() = Some(params["cli_challenge"].clone());
+        let callback = reqwest::Url::parse(&params["cli_redirect"]).unwrap();
+        let address = format!(
+            "{}:{}",
+            callback.host_str().unwrap(),
+            callback.port().unwrap()
+        );
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let mut stream = std::net::TcpStream::connect(address).unwrap();
+            write!(
+                stream,
+                "GET /callback?{query} HTTP/1.1\r\nHost: localhost\r\n\r\n"
+            )
+            .unwrap();
+            let mut response = String::new();
+            let _ = stream.read_to_string(&mut response);
+        });
+    });
+    (prompter, seen)
+}
+
+pub fn challenge_of(verifier: &str) -> String {
+    use sha2::Digest;
+    URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier.as_bytes()))
 }

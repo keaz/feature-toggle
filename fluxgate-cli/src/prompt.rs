@@ -12,6 +12,10 @@ pub trait Prompter {
     fn secret(&mut self, label: &str) -> Result<String, CliError>;
     /// Index of the chosen option.
     fn select(&mut self, label: &str, options: &[String]) -> Result<usize, CliError>;
+    /// A progress or instruction line for the person (stderr on a terminal).
+    fn notify(&mut self, message: &str);
+    /// Opens `url` in a browser; false when that is not possible.
+    fn open_browser(&mut self, url: &str) -> bool;
 }
 
 /// Asks on stderr and reads stdin, so stdout stays clean for results.
@@ -59,22 +63,62 @@ impl Prompter for TerminalPrompter {
             }
         }
     }
+
+    fn notify(&mut self, message: &str) {
+        eprintln!("{message}");
+    }
+
+    fn open_browser(&mut self, url: &str) -> bool {
+        open::that_detached(url).is_ok()
+    }
 }
 
+/// Stands in for a browser in tests.
+type Browser = Box<dyn FnMut(&str) + Send>;
+
 /// Answers questions from a list, for tests.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct ScriptedPrompter {
     answers: VecDeque<String>,
     /// Labels of the questions asked, in order.
     pub asked: Vec<String>,
+    /// Messages passed to `notify`.
+    pub notes: Vec<String>,
+    /// URLs passed to `open_browser`.
+    pub opened: Vec<String>,
+    browser: Option<Browser>,
+}
+
+impl std::fmt::Debug for ScriptedPrompter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScriptedPrompter")
+            .field("answers", &self.answers)
+            .field("asked", &self.asked)
+            .field("notes", &self.notes)
+            .field("opened", &self.opened)
+            .finish()
+    }
 }
 
 impl ScriptedPrompter {
     pub fn new(answers: &[&str]) -> Self {
         Self {
             answers: answers.iter().map(|a| a.to_string()).collect(),
-            asked: Vec::new(),
+            ..Self::default()
         }
+    }
+
+    /// Replaces the remaining answers.
+    pub fn with_answers(mut self, answers: &[&str]) -> Self {
+        self.answers = answers.iter().map(|a| a.to_string()).collect();
+        self
+    }
+
+    /// Runs `browser` for each `open_browser` call, which then succeeds.
+    /// Without one, `open_browser` fails like a machine without a browser.
+    pub fn on_open(mut self, browser: impl FnMut(&str) + Send + 'static) -> Self {
+        self.browser = Some(Box::new(browser));
+        self
     }
 
     fn next(&mut self, label: &str) -> Result<String, CliError> {
@@ -115,6 +159,21 @@ impl Prompter for ScriptedPrompter {
                     "scripted answer '{answer}' is not an option for '{label}'"
                 ))
             })
+    }
+
+    fn notify(&mut self, message: &str) {
+        self.notes.push(message.to_string());
+    }
+
+    fn open_browser(&mut self, url: &str) -> bool {
+        self.opened.push(url.to_string());
+        match &mut self.browser {
+            Some(browser) => {
+                browser(url);
+                true
+            }
+            None => false,
+        }
     }
 }
 

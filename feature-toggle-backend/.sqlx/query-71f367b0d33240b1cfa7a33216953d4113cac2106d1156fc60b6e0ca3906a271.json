@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            UPDATE sso_login_codes\n            SET used_at = now()\n            WHERE code_hash = $1 AND used_at IS NULL AND expires_at > now()\n            RETURNING id, code_hash, user_id, provider_id, expires_at, used_at, created_at\n            ",
+  "query": "\n            UPDATE sso_login_codes\n            SET used_at = now()\n            WHERE code_hash = $1 AND used_at IS NULL AND expires_at > now()\n            RETURNING id, code_hash, user_id, provider_id, expires_at, used_at, created_at,\n                      code_challenge\n            ",
   "describe": {
     "columns": [
       {
@@ -37,6 +37,11 @@
         "ordinal": 6,
         "name": "created_at",
         "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "code_challenge",
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -51,8 +56,9 @@
       false,
       false,
       true,
-      false
+      false,
+      true
     ]
   },
-  "hash": "522c166bf4d724b0f1b425a84a7f7028bb5c63aa1f035f858cd8504fec73cd72"
+  "hash": "71f367b0d33240b1cfa7a33216953d4113cac2106d1156fc60b6e0ca3906a271"
 }

@@ -617,6 +617,10 @@ pub struct SsoLoginState {
     pub redirect_path: Option<String>,
     pub expires_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
+    /// Loopback address of a CLI login; the one-time code goes there.
+    pub cli_redirect_uri: Option<String>,
+    /// PKCE S256 challenge of a CLI login, copied onto the one-time code.
+    pub cli_code_challenge: Option<String>,
 }
 
 impl std::fmt::Debug for SsoLoginState {
@@ -629,6 +633,7 @@ impl std::fmt::Debug for SsoLoginState {
             .field("redirect_path", &self.redirect_path)
             .field("expires_at", &self.expires_at)
             .field("created_at", &self.created_at)
+            .field("cli_redirect_uri", &self.cli_redirect_uri)
             .finish()
     }
 }
@@ -643,6 +648,8 @@ pub struct SsoLoginCode {
     pub expires_at: DateTime<Utc>,
     pub used_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+    /// PKCE S256 challenge the exchange must answer (CLI logins only).
+    pub code_challenge: Option<String>,
 }
 
 /// Link between a feature and an issue in an external tracker (`feature_external_links`).
