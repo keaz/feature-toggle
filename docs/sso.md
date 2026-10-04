@@ -27,6 +27,13 @@ Design points:
 - The cookie name is fixed. If a user starts SSO in two tabs, the later tab overwrites the cookie and the earlier tab fails with `sso_state_invalid`. The user starts again.
 - Any request to the callback clears the cookie, also a forged cross-site callback GET. Such a request aborts a login that is in flight in that browser (the user starts again) but never issues a session.
 
+## Command line login
+
+The `fluxgate` CLI logs in through the same providers.
+
+- `fluxgate login --sso <slug>` calls `GET /api/v1/auth/sso/{slug}/authorize?cli_redirect=http://127.0.0.1:<port>/callback&cli_challenge=<S256>`. `cli_redirect` must be exactly `http://127.0.0.1:<port>/callback` or `http://[::1]:<port>/callback`, and comes with a 43-character base64url PKCE challenge; anything else redirects to `<ui>/login?ssoError=sso_invalid_cli_redirect`. The state cookie works as for the UI. Once the state is valid, the callback sends `?code=<one-time>` (or `?error=<code>`) to the loopback address instead of the UI. The code is bound to the challenge: `POST /api/v1/auth/sso/exchange` needs `{"code", "codeVerifier"}` for it, and a wrong or missing verifier burns the code. Nothing extra is registered at the IdP: the IdP still redirects to the backend callback.
+- `fluxgate login --use-device-code` (or `--no-browser` with an SSO session) works without a local browser. `POST /api/v1/auth/device/authorize` returns a device code, a user code like `BCDF-GHJK` and `<allowed_origin>/device?code=...`. The person opens that page, signs in by any method and approves (`POST /api/v1/auth/device/approve`, a signed-in user, never a system client). The CLI polls `POST /api/v1/auth/device/token`, which answers `authorization_pending`, `slow_down`, `access_denied` or `expired_token` until one session is released. Codes live 10 minutes and are stored hashed; both public device routes are rate limited per backend instance. Approvals and denials are in the activity log (`cli_login_approved`, `cli_login_denied`).
+
 ## Configuration
 
 ### Backend settings

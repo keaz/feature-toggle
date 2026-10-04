@@ -10,7 +10,7 @@ FluxGate: a feature flag platform. Cargo workspace (edition 2024) with five crat
 - `evaluation-engine` — pure flag evaluation library (single `src/lib.rs`). Used by both backend and edge server, so evaluation semantics change in one place only.
 - `feature-edge-server` — low-latency evaluation gateway (default `:8081`). Exposes `/evaluate` and OFREP endpoints (`/ofrep/v1/evaluate/flags[/{key}]`). Subscribes to backend gRPC stream, caches features (moka LRU), batches evaluation events/assignments back to backend.
 - `feature-toggle-shared` — shared constants.
-- `fluxgate-cli` — the `fluxgate` command line client (library `fluxgate_cli` + binary). AWS-style profiles (`~/.fluxgate/config`, `~/.fluxgate/credentials`), cached login sessions with locked refresh, and commands over the REST API. Pure HTTP client: no DB, builds without `DATABASE_URL`. Integration tests drive `fluxgate_cli::run` against `wiremock`. See `fluxgate-cli/README.md`.
+- `fluxgate-cli` — the `fluxgate` command line client (library `fluxgate_cli` + binary). AWS-style profiles (`~/.fluxgate/config`, `~/.fluxgate/credentials`), cached login sessions with locked refresh (password, browser SSO with a loopback callback + PKCE, or device code approved at the UI `/device` page), and commands over the REST API (`fluxgate api` covers any endpoint). Pure HTTP client: no DB, builds without `DATABASE_URL`. Integration tests drive `fluxgate_cli::run` against `wiremock`. See `fluxgate-cli/README.md`.
 - `api-tests/` — Jest + axios end-to-end tests against a running backend (pnpm).
 
 ## Commands

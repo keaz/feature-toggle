@@ -79,11 +79,43 @@ Teams and environments can be given by name or id. A system-client token is boun
 
 ```bash
 fluxgate login --password            # asks for username and password
+fluxgate login --sso okta            # browser single sign-on; the session remembers the provider
+fluxgate login                       # SSO when the session has sso_provider, else password
+fluxgate login --use-device-code     # approve a code at <ui>/device from any machine (SSH, containers)
+fluxgate login --no-browser          # with an SSO session: same as --use-device-code
 fluxgate logout                      # revokes the session on the server
 fluxgate logout --all
 ```
 
-Access tokens are refreshed automatically. When the refresh token has expired, commands fail with `session expired: run fluxgate login --profile <p>`. SSO login is not available yet; SSO users can use a static token.
+- **SSO** opens the browser at the backend's `/auth/sso/<slug>/authorize` with a local callback (`http://127.0.0.1:<random port>/callback`) and a PKCE challenge. The backend sends the one-time code to that address and the CLI exchanges it with the verifier, so an intercepted code is useless. If the browser does not open, the CLI prints the URL. It waits 5 minutes.
+- **Device code** prints a link and a code like `BCDF-GHJK`. Open the link on any device, sign in to the FluxGate UI (password or SSO), check the code and approve. The CLI polls until the approval, a denial or the 10-minute expiry. Use it when the terminal has no browser.
+- `fluxgate login --profile staging --url https://...` creates the profile and its session.
+- A session belongs to one server. With a session credential, a different `--url`, `FLUXGATE_URL` or profile `url` is refused; `fluxgate login --url <new>` moves the session (and every profile that uses it) to the new server.
+- Logging in again revokes the session it replaces.
+
+Access tokens are refreshed automatically. When the refresh token has expired, commands fail with `session expired: run fluxgate login --profile <p>`.
+
+## Commands
+
+Flags and keys can be given by id or key. Write commands take JSON bodies with `--data`: inline JSON, `@file`, or `-` for stdin. `fluxgate <command> --help` lists every option.
+
+| Area | Commands |
+|------|----------|
+| Flags | `flags list` (filters: `--tag --owner --flag-kind --external-key --lifecycle-stage --stale --include-archived --name`, paging: `--limit --offset --all`), `get`, `create`, `update`, `archive --yes`, `bulk`, `versions`, `diff`, `rollback`, `impact`, `impact-preview`, `search "<question>"` |
+| Incidents | `flags kill <flag> --reason ... [--rollback-in MINUTES]`, `flags unkill`, `flags kill-switches` |
+| Scheduling | `flags schedules`, `flags schedule --action ... --at <RFC 3339> --reason ...`, `flags unschedule`, `flags reschedule` |
+| Jira links | `flags links`, `flags link <flag> PROJ-1 [--issue-url ...]`, `flags unlink` |
+| Rollout | `rollout promote --flag <key> --env <name> --request ... [--reason --external-ref --freeze-override-reason]`, `evaluate [--exit-code]`, `freeze active`, `canary gates/set/analyze`, `criteria get/set/variants` |
+| Approvals | `approvals list [--status pending,approved]`, `approve`, `reject`, `cancel`, `preview` |
+| Jira | `jira rules/set-rules/rotate-secret/webhook-secret/writeback/writeback-test/writeback-resume/events/jobs/retry` |
+| AI | `ai status/settings/set-settings/justify/suggest/backfill-kinds` |
+| Observability | `metrics summary/rates/count/by-feature/system/experiments/growth/features [--period 24h --since 7d --flag ...]`, `audit`, `activity`, `watch <stream> [--count N]` (one JSON document per line) |
+| Resources | `admin <resource> list/get/create/update/delete` for environments, contexts, clients, system-clients, pipelines, rollout-templates, metric-definitions, teams, users, roles, sso-providers, jira-integrations, approval-policies, freeze-windows, rule-groups |
+| Accounts | `system-clients tokens/create-token/revoke-token/rotate-token`, `jwt-secrets list/rotate/deactivate-all`, `sso mappings/set-mappings/test/settings/set-settings`, `users roles/set-roles/set-teams/temporary-password`, `notifications show/channel/preference` |
+| Config | `config export`, `config import --file <export> [--dry-run]` (creates missing environments and flags; stages, variants and criteria are not imported) |
+| Edge | `edge evaluate <flag> --targeting-key ... [--exit-code]`, `edge evaluate-all` (OFREP; `edge_url` profile key or `FLUXGATE_EDGE_URL`, SDK key `edge_key` in credentials or `FLUXGATE_EDGE_KEY`) |
+| Anything else | `api <METHOD> <PATH> [--data ...] [--query k=v]`; `{team}` and `{env}` in the path become the resolved ids |
+| Shell | `completions bash/zsh/fish/powershell/elvish` |
 
 ## CI usage
 
