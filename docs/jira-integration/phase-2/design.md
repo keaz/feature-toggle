@@ -199,7 +199,7 @@ JI-47: attach `components/ai/ReasonQualityHint.tsx` to the stage change reason f
 
 **JI-51: skip the assessment of a request Jira approved (J25).**
 
-- Migration `20261004090000_ai_judgments_skipped_status.sql`: `ai_judgments.status` allows `skipped`. A skipped row is final: `skipped` + `error` (the reason text) + `completed_at`.
+- Migration `20261004110000_ai_judgments_skipped_status.sql`: `ai_judgments.status` allows `skipped`. A skipped row is final: `skipped` + `error` (the reason text) + `completed_at`.
 - `AiJudgmentRepository::skip_unfinished(subject_type, subject_id, kind, reason) -> bool` sets `status = 'skipped'` only where `status IN ('pending','failed')`.
 - The guards of `start_attempt`, `mark_done` and `mark_failed` change from `status <> 'done'` to `status IN ('pending','failed')`. So a skipped row is never started, finished or failed. `claim_retryable` already reads only `pending` and `failed`. `upsert_pending` still reopens a row on a new submission; a closed request gets none.
 - `JudgmentService::skip(subject_type, subject_id, kind, reason)`.

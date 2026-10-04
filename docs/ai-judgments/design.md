@@ -211,6 +211,8 @@ CREATE TABLE ai_judgments (
 CREATE INDEX ai_judgments_retry_idx ON ai_judgments (status, created_at);
 ```
 
+*Added 2026-10-04 (Jira JI-51, migration `20261004110000_ai_judgments_skipped_status.sql`):* `status` also allows `skipped`. `AiJudgmentRepository::skip_unfinished` sets it on a `pending` or `failed` row, with the reason in `error` and `completed_at` set. A skipped row is final: `start_attempt`, `mark_done` and `mark_failed` only match `pending` or `failed` rows, and the retry sweep never claims it. A run in flight when the row is skipped stores nothing (`RunOutcome::Stale`), so `apply` does not run. `JudgmentService::skip` is the service entry point. A new submission (`upsert_pending`) still resets the row to `pending`.
+
 ### 4.3 Approval columns (AI-10, AI-11)
 
 ```sql
@@ -298,11 +300,12 @@ Rules: keep at most 30 diff entries (in order), and truncate `before`/`after` va
 - `require_extra_approver`: `apply_vote` and `apply_vote_tx` (`logic/approval.rs`) pass the effective requirement as the `required_approvers` argument of `add_vote`/`add_vote_tx` (`database/approval.rs`). The SQL there does not change. Without an override it is `policy.required_approvers`. With one it is `max(policy.required_approvers, min(override, reachable))`, where `reachable` is `approved_count` plus the request's eligible approvers who still qualify under the policy (enabled, team member, Approver role, named or role-routed, not the requester: the same checks as routing) and have not voted, read in one statement so a concurrent vote cannot drop out of both. Vote permission for a request with an eligible list uses the same qualification, and a vote only updates a `pending` request. So the override never needs more votes than can still be cast, and never lowers the policy. `requiredApprovalsEffective` uses the same rule. (Fix 2026-10-03: `eligible_approver_ids` is a snapshot, so an approver disabled or removed later could leave a request needing more votes than anyone could cast.)
 - Reconciliation: on each auto-approval scheduler tick, a pending request with an override, no remaining eligible approver, and `approved_count >= policy.required_approvers` is approved in one `UPDATE` that re-checks `status = 'pending'` and the same condition, its change is executed in the same transaction, and an `approval_requirement_reconciled` activity records why. A failed attempt is counted (`approval_requests.reconcile_failures`); after 3 the request is no longer reconciled and an `approval_reconciliation_stopped` activity asks for an admin override or cancel.
 - An assessment never reopens a request that is already approved, rejected, or cancelled.
+- *Added 2026-10-04 (Jira JI-51, decision J25 in [`../jira-integration/phase-2/design.md`](../jira-integration/phase-2/design.md#38-ai-judgments-and-jira-ji-51-ji-52-ji-53)):* when an external system (Jira) approves a request through `approve_stage_change_externally`, its unfinished assessment is skipped after the commit (`skipped: approval request approved by jira before the assessment ran`). No Jev call is made for it and no `approval_risk_assessed` row is written. The `approval_request_approved_externally` activity row records `ai_risk_mode_skipped` and `"ai_risk_assessment": "skipped"`. A finished assessment is kept. A request closed by a vote, a cancel or auto-approval keeps its assessment, because there the assessment is history.
 - Admin override behavior does not change.
 
 **REST.**
 
-- `ApprovalRequestResponse` (`rest/approval.rs`) gains `ai_risk: Option<AiRiskSummary>` and `required_approvals_effective: i32`. `AiRiskSummary = { status: pending|done|failed, level?, reasons, signals?, model?, assessed_at? }`. It is `None` when no judgment row exists. Populate it in `map_request_with_policy`, which is also used by `rest/stream.rs`.
+- `ApprovalRequestResponse` (`rest/approval.rs`) gains `ai_risk: Option<AiRiskSummary>` and `required_approvals_effective: i32`. `AiRiskSummary = { status: pending|done|failed, level?, reasons, signals?, model?, assessed_at? }`. It is `None` when no judgment row exists, or when the row is `skipped` (JI-51). Populate it in `map_request_with_policy`, which is also used by `rest/stream.rs`.
 - Policy DTOs (`ApprovalPolicyResponse`, `CreateApprovalPolicyRequest`, `UpdateApprovalPolicyRequest`) gain `ai_risk_mode`. Validate the value; reject unknown values with 400.
 - Follow each DTO's existing serde casing (the UI reads camelCase).
 

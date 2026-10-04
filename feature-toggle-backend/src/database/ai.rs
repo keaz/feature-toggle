@@ -224,25 +224,38 @@ pub trait AiJudgmentRepository: Send + Sync {
     async fn upsert_pending(&self, judgment: NewJudgment) -> Result<AiJudgment, Error>;
     /// Reserves one API attempt right before a run calls the API. False (and no
     /// call should be made) when `input_hash` no longer matches, the row is
-    /// done, or `MAX_ATTEMPTS` runs already reached the API. Atomic, so
+    /// done or skipped, or `MAX_ATTEMPTS` runs already reached the API. Atomic, so
     /// concurrent runs on several nodes cannot exceed the bound.
     async fn start_attempt(&self, id: Uuid, input_hash: String) -> Result<bool, Error>;
     /// Gives back an attempt reserved by `start_attempt` when the run sent
     /// nothing (no free API request slot). False when the hash is stale or no
     /// attempt is counted.
     async fn refund_attempt(&self, id: Uuid, input_hash: String) -> Result<bool, Error>;
-    /// False when `input_hash` no longer matches (a newer submission won) or the
-    /// row is already done (another run of the same input finished first).
+    /// False when `input_hash` no longer matches (a newer submission won), the
+    /// row is already done (another run of the same input finished first), or
+    /// the row was skipped while the run was in flight.
     async fn mark_done(
         &self,
         id: Uuid,
         input_hash: String,
         result: JudgmentResult,
     ) -> Result<bool, Error>;
-    /// False when the hash is stale or the row is already done. Does not count
-    /// an attempt: a run counts it when it reaches the API (`start_attempt`).
+    /// False when the hash is stale or the row is already done or skipped. Does
+    /// not count an attempt: a run counts it when it reaches the API
+    /// (`start_attempt`).
     async fn mark_failed(&self, id: Uuid, input_hash: String, error: String)
     -> Result<bool, Error>;
+    /// Closes the subject's unfinished (`pending` or `failed`) row for good:
+    /// `skipped`, with `reason` as the error. A skipped row is never started,
+    /// finished, failed or retried. False when there is no unfinished row (none
+    /// at all, or it is already done or skipped).
+    async fn skip_unfinished(
+        &self,
+        subject_type: SubjectType,
+        subject_id: Uuid,
+        kind: JudgmentKind,
+        reason: String,
+    ) -> Result<bool, Error>;
     async fn get_for_subject(
         &self,
         subject_type: SubjectType,
@@ -332,7 +345,7 @@ impl AiJudgmentRepository for PgAiJudgmentRepository {
             UPDATE ai_judgments
             SET status = 'done', model = $3, raw_answers = $4, derived = $5,
                 input_tokens = $6, error = NULL, completed_at = NOW()
-            WHERE id = $1 AND input_hash = $2 AND status <> 'done'
+            WHERE id = $1 AND input_hash = $2 AND status IN ('pending', 'failed')
             "#,
         )
         .bind(id)
@@ -350,7 +363,8 @@ impl AiJudgmentRepository for PgAiJudgmentRepository {
         let outcome = sqlx::query(
             r#"
             UPDATE ai_judgments SET attempts = attempts + 1
-            WHERE id = $1 AND input_hash = $2 AND status <> 'done' AND attempts < $3
+            WHERE id = $1 AND input_hash = $2 AND status IN ('pending', 'failed')
+              AND attempts < $3
             "#,
         )
         .bind(id)
@@ -385,7 +399,7 @@ impl AiJudgmentRepository for PgAiJudgmentRepository {
             r#"
             UPDATE ai_judgments
             SET status = 'failed', error = $3
-            WHERE id = $1 AND input_hash = $2 AND status <> 'done'
+            WHERE id = $1 AND input_hash = $2 AND status IN ('pending', 'failed')
             "#,
         )
         .bind(id)
@@ -394,6 +408,30 @@ impl AiJudgmentRepository for PgAiJudgmentRepository {
         .execute(&self.pool)
         .await;
         Ok(handle_error(Some(id), outcome)?.rows_affected() > 0)
+    }
+
+    async fn skip_unfinished(
+        &self,
+        subject_type: SubjectType,
+        subject_id: Uuid,
+        kind: JudgmentKind,
+        reason: String,
+    ) -> Result<bool, Error> {
+        let outcome = sqlx::query(
+            r#"
+            UPDATE ai_judgments
+            SET status = 'skipped', error = $4, completed_at = NOW()
+            WHERE subject_type = $1 AND subject_id = $2 AND kind = $3
+              AND status IN ('pending', 'failed')
+            "#,
+        )
+        .bind(subject_type.as_str())
+        .bind(subject_id)
+        .bind(kind.as_str())
+        .bind(&reason)
+        .execute(&self.pool)
+        .await;
+        Ok(handle_error(None, outcome)?.rows_affected() > 0)
     }
 
     async fn get_for_subject(

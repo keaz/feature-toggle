@@ -702,8 +702,8 @@ fn build_change_diff(
 /// may never finish. The UI stops polling after the same 10 minutes.
 pub(crate) const AI_RISK_PENDING_MAX_AGE_MINUTES: i64 = 10;
 
-/// Maps a stored judgment row to the response summary. No row, or a status
-/// this code does not know, means no assessment.
+/// Maps a stored judgment row to the response summary. No row, a `skipped`
+/// row, or a status this code does not know, means no assessment.
 pub(crate) fn map_ai_risk(judgment: Option<&AiJudgment>) -> Option<AiRiskSummary> {
     map_ai_risk_at(judgment, Utc::now())
 }
@@ -725,6 +725,9 @@ pub(crate) fn map_ai_risk_at(
         "pending" => AiRiskStatus::Pending,
         "done" => AiRiskStatus::Done,
         "failed" => AiRiskStatus::Failed,
+        // Skipped because the request closed before the assessment ran (an
+        // external approval, JI-51): the request has no assessment.
+        "skipped" => return None,
         _ => return None,
     };
     if status != AiRiskStatus::Done {
@@ -2168,6 +2171,13 @@ mod tests {
     #[actix_web::test]
     async fn ai_risk_unknown_status_means_no_assessment() {
         let row = judgment_row(Uuid::new_v4(), "weird", None);
+        assert_eq!(map_ai_risk(Some(&row)), None);
+    }
+
+    /// JI-51: Jira approved the request before the assessment ran.
+    #[actix_web::test]
+    async fn ai_risk_skipped_means_no_assessment() {
+        let row = judgment_row(Uuid::new_v4(), "skipped", None);
         assert_eq!(map_ai_risk(Some(&row)), None);
     }
 

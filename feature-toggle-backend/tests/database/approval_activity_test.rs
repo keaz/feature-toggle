@@ -456,3 +456,191 @@ async fn failed_execution_rolls_back_the_activity_row() {
     assert_eq!(request.status.as_str(), "pending");
     fx.cleanup().await;
 }
+
+/// Approval logic with a judgment service whose client must never be called,
+/// plus the repository to read the stored judgments.
+fn approval_logic_with_judgments(
+    pool: &PgPool,
+) -> (
+    Box<dyn ApprovalLogic>,
+    Box<dyn feature_toggle_backend::database::ai::AiJudgmentRepository>,
+) {
+    use feature_toggle_backend::database::ai::{
+        ai_judgment_repository, team_ai_settings_repository,
+    };
+    use feature_toggle_backend::judgment::client::MockJudgmentClient;
+    use feature_toggle_backend::judgment::service::JudgmentService;
+    use feature_toggle_backend::logic::approval::approval_logic_with_pool_and_notifications;
+
+    let mut client = MockJudgmentClient::new();
+    client.expect_evaluate().times(0);
+    client.expect_model().returning(|| "jev-test".to_string());
+    let service = std::sync::Arc::new(JudgmentService::new(
+        std::sync::Arc::new(client),
+        ai_judgment_repository(pool.clone()),
+        team_ai_settings_repository(pool.clone()),
+    ));
+    let activity = activity_log_repository(pool.clone());
+    let environment_logic = environment::environment_logic(
+        feature_toggle_backend::database::environment::environment_repository(pool.clone()),
+        activity,
+    );
+    let (approval_events_tx, _) = broadcast::channel::<ApprovalRequestEvent>(64);
+    let (updates_tx, _) = broadcast::channel::<FeatureUpdate>(64);
+    let logic = approval_logic_with_pool_and_notifications(
+        pool.clone(),
+        approval_repository(pool.clone()),
+        feature_repository(pool.clone()),
+        environment_logic,
+        role::role_repository(pool.clone()),
+        approval_events_tx,
+        updates_tx,
+        None,
+        Some(service),
+    );
+    (logic, ai_judgment_repository(pool.clone()))
+}
+
+/// The approval-risk row queued when the request was created.
+fn risk_judgment(
+    team_id: Uuid,
+    request_id: Uuid,
+) -> feature_toggle_backend::database::ai::NewJudgment {
+    feature_toggle_backend::database::ai::NewJudgment {
+        team_id,
+        kind: feature_toggle_backend::judgment::JudgmentKind::ApprovalRisk,
+        subject_type: feature_toggle_backend::judgment::SubjectType::ApprovalRequest,
+        subject_id: request_id,
+        input: serde_json::json!({ "change": { "type": "stage_change" } }),
+        input_hash: "ji51".to_string(),
+    }
+}
+
+fn jira_approval(actor_user_id: Uuid) -> ExternalApproval {
+    ExternalApproval {
+        actor_user_id,
+        actor_name: "Jira (Jane Doe)".to_string(),
+        source: "jira".to_string(),
+        approver: serde_json::json!({ "system": "jira" }),
+        metadata: serde_json::json!({}),
+    }
+}
+
+async fn external_approval_row(fx: &Fixture) -> ActivityLogRow {
+    sqlx::query_as::<_, ActivityLogRow>(
+        "SELECT * FROM activity_log WHERE activity_type = \
+         'approval_request_approved_externally' AND metadata->>'stage_id' = $1",
+    )
+    .bind(fx.stage_id.to_string())
+    .fetch_one(&fx.pool)
+    .await
+    .expect("external approval row")
+}
+
+async fn delete_external_rows(fx: &Fixture) {
+    sqlx::query("DELETE FROM activity_log WHERE metadata->>'stage_id' = $1")
+        .bind(fx.stage_id.to_string())
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+}
+
+/// JI-51: Jira approved the request before its risk assessment ran, so the
+/// assessment is skipped: no Jev call and no late assessment row.
+#[tokio::test]
+async fn external_approval_skips_the_unfinished_risk_assessment() {
+    let fx = Fixture::new().await;
+    sqlx::query("UPDATE approval_policies SET ai_risk_mode = 'advisory' WHERE team_id = $1")
+        .bind(fx.team_id)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    let request_id = fx.request_deployment().await;
+    let (logic, judgments) = approval_logic_with_judgments(&fx.pool);
+    judgments
+        .upsert_pending(risk_judgment(fx.team_id, request_id))
+        .await
+        .unwrap();
+
+    let result = logic
+        .approve_stage_change_externally(fx.stage_id, jira_approval(fx.approver_id))
+        .await
+        .expect("external approval");
+
+    assert_eq!(
+        result,
+        ExternalApprovalResult::Approved {
+            approval_request_id: Some(request_id)
+        }
+    );
+    let stored = judgments
+        .get_for_subject(
+            feature_toggle_backend::judgment::SubjectType::ApprovalRequest,
+            request_id,
+            feature_toggle_backend::judgment::JudgmentKind::ApprovalRisk,
+        )
+        .await
+        .unwrap()
+        .expect("judgment row");
+    assert_eq!(stored.status, "skipped");
+    assert_eq!(
+        stored.error.as_deref(),
+        Some("skipped: approval request approved by jira before the assessment ran")
+    );
+    let metadata = external_approval_row(&fx).await.metadata.expect("metadata");
+    assert_eq!(metadata["ai_risk_mode_skipped"], "advisory");
+    assert_eq!(metadata["ai_risk_assessment"], "skipped");
+
+    delete_external_rows(&fx).await;
+    fx.cleanup().await;
+}
+
+/// JI-51: an assessment that finished before Jira approved is history; it
+/// stays done.
+#[tokio::test]
+async fn external_approval_keeps_a_finished_risk_assessment() {
+    let fx = Fixture::new().await;
+    sqlx::query("UPDATE approval_policies SET ai_risk_mode = 'advisory' WHERE team_id = $1")
+        .bind(fx.team_id)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    let request_id = fx.request_deployment().await;
+    let (logic, judgments) = approval_logic_with_judgments(&fx.pool);
+    let row = judgments
+        .upsert_pending(risk_judgment(fx.team_id, request_id))
+        .await
+        .unwrap();
+    judgments
+        .mark_done(
+            row.id,
+            "ji51".to_string(),
+            feature_toggle_backend::database::ai::JudgmentResult {
+                model: "jev-test".to_string(),
+                raw_answers: serde_json::json!({}),
+                derived: serde_json::json!({ "level": "low" }),
+                input_tokens: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    logic
+        .approve_stage_change_externally(fx.stage_id, jira_approval(fx.approver_id))
+        .await
+        .expect("external approval");
+
+    let stored = judgments
+        .get_for_subject(
+            feature_toggle_backend::judgment::SubjectType::ApprovalRequest,
+            request_id,
+            feature_toggle_backend::judgment::JudgmentKind::ApprovalRisk,
+        )
+        .await
+        .unwrap()
+        .expect("judgment row");
+    assert_eq!(stored.status, "done");
+
+    delete_external_rows(&fx).await;
+    fx.cleanup().await;
+}

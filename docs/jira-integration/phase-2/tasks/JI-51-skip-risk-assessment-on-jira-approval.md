@@ -30,7 +30,7 @@ Jira's `approve` action closes the approval request in the same event that creat
    - `judgment/service.rs`: `a_run_whose_row_was_skipped_makes_no_call` (`start_attempt` false, client never called).
    - `rest/approval.rs`: `a_skipped_judgment_maps_to_no_assessment`.
    - `tests/database/system_client_approval_test.rs` (or the JI-14 test file): `jira_approval_skips_the_pending_risk_assessment`. Create a request under an `advisory` policy with a pending `approval_risk` row, approve it as Jira, then expect the row `skipped` and the activity metadata `ai_risk_assessment = "skipped"`.
-2. Migration `20261004090000_ai_judgments_skipped_status.sql`: drop `ai_judgments_status_check` and add it back with `'skipped'`.
+2. Migration `20261004110000_ai_judgments_skipped_status.sql`: drop `ai_judgments_status_check` and add it back with `'skipped'`.
 3. `database/ai.rs`: `skip_unfinished(subject_type, subject_id, kind, reason) -> Result<bool, Error>`. Change the guards of `start_attempt`, `mark_done` and `mark_failed` to `status IN ('pending','failed')`.
 4. `judgment/service.rs`: `JudgmentService::skip(subject_type, subject_id, kind, reason) -> Result<bool, crate::Error>`.
 5. `logic/approval.rs` `approve_stage_change_externally`: when `policy.ai_risk_mode != "off"`, also set `metadata["ai_risk_assessment"] = "skipped"`. After the commit, call `skip` for `(ApprovalRequest, approved.id, ApprovalRisk)` with `skipped: approval request approved by <source> before the assessment ran`. Log a failure with `warn!` and continue.

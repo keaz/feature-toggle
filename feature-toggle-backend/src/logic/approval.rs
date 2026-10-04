@@ -550,6 +550,32 @@ impl ApprovalLogicImpl {
         }
     }
 
+    /// Skips the unfinished approval-risk assessment of a request an external
+    /// system approved (JI-51, decision J25): it would only call Jev and then
+    /// report a risk for a request that is already closed. A finished
+    /// assessment is kept. Never fails the caller.
+    async fn skip_risk_assessment(&self, request: &ApprovalRequest, source: &str) {
+        let Some(judgments) = &self.judgments else {
+            return;
+        };
+        let reason =
+            format!("skipped: approval request approved by {source} before the assessment ran");
+        if let Err(err) = judgments
+            .skip(
+                SubjectType::ApprovalRequest,
+                request.id,
+                JudgmentKind::ApprovalRisk,
+                &reason,
+            )
+            .await
+        {
+            warn!(
+                "Could not skip the AI risk assessment of approval request {}: {err}",
+                request.id
+            );
+        }
+    }
+
     async fn get_applicable_policy(
         &self,
         team_id: Uuid,
@@ -2433,9 +2459,11 @@ impl ApprovalLogic for ApprovalLogicImpl {
                 .cloned()
                 .unwrap_or(JsonValue::Null);
             // AI risk assessment (and AI-11) would act on the pending request;
-            // it is closed before they run. Record that they were skipped.
+            // it is closed before they run. Record that they were skipped. The
+            // unfinished assessment itself is skipped after the commit (JI-51).
             if policy.ai_risk_mode != "off" {
                 metadata["ai_risk_mode_skipped"] = serde_json::json!(policy.ai_risk_mode);
+                metadata["ai_risk_assessment"] = serde_json::json!("skipped");
             }
             let kind = Self::stage_change_request_kind(&approved).unwrap_or("stage change");
             activity_log_repository(pool.clone())
@@ -2455,6 +2483,7 @@ impl ApprovalLogic for ApprovalLogicImpl {
                 .await
                 .map_err(Error::DatabaseError)?;
             tx.commit().await.map_err(Error::DatabaseError)?;
+            self.skip_risk_assessment(&approved, &approval.source).await;
 
             self.publish_event(&approved, policy.team_id).await?;
             self.notify_edge_servers(approved.feature_id).await;

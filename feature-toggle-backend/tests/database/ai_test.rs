@@ -460,3 +460,141 @@ async fn a_row_that_never_reaches_the_api_stops_after_max_claims() {
 
     delete_team(&pool, team_id).await;
 }
+
+const SKIP_REASON: &str = "skipped: approval request approved by jira before the assessment ran";
+
+#[tokio::test]
+async fn skip_unfinished_closes_a_pending_row_for_good() {
+    let _guard = ai_judgment_lock().lock().await;
+    let pool = init_pg_pool().await;
+    let team_id = insert_team(&pool).await;
+    let repo = ai_judgment_repository(pool.clone());
+    let subject_id = Uuid::new_v4();
+    let row = repo
+        .upsert_pending(new_judgment(team_id, subject_id, "s"))
+        .await
+        .unwrap();
+    age(&pool, row.id).await;
+
+    assert!(
+        repo.skip_unfinished(
+            SubjectType::Feature,
+            subject_id,
+            JudgmentKind::FlagKind,
+            SKIP_REASON.to_string()
+        )
+        .await
+        .unwrap()
+    );
+    let stored = repo
+        .get_for_subject(SubjectType::Feature, subject_id, JudgmentKind::FlagKind)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.status, "skipped");
+    assert_eq!(stored.error.as_deref(), Some(SKIP_REASON));
+    assert!(stored.completed_at.is_some());
+
+    assert!(
+        !repo.start_attempt(row.id, "s".into()).await.unwrap(),
+        "a skipped row must never reach the API"
+    );
+    assert!(
+        !repo.mark_done(row.id, "s".into(), result()).await.unwrap(),
+        "a run already in flight must not store its result"
+    );
+    assert!(
+        !repo
+            .mark_failed(row.id, "s".into(), "x".into())
+            .await
+            .unwrap()
+    );
+    assert!(!claimed_ids(repo.claim_retryable(1000).await.unwrap()).contains(&row.id));
+    let still = repo
+        .get_for_subject(SubjectType::Feature, subject_id, JudgmentKind::FlagKind)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(still.status, "skipped");
+
+    delete_team(&pool, team_id).await;
+}
+
+#[tokio::test]
+async fn skip_unfinished_closes_a_failed_row() {
+    let _guard = ai_judgment_lock().lock().await;
+    let pool = init_pg_pool().await;
+    let team_id = insert_team(&pool).await;
+    let repo = ai_judgment_repository(pool.clone());
+    let subject_id = Uuid::new_v4();
+    let row = repo
+        .upsert_pending(new_judgment(team_id, subject_id, "f"))
+        .await
+        .unwrap();
+    assert!(
+        repo.mark_failed(row.id, "f".into(), "busy".into())
+            .await
+            .unwrap()
+    );
+
+    assert!(
+        repo.skip_unfinished(
+            SubjectType::Feature,
+            subject_id,
+            JudgmentKind::FlagKind,
+            SKIP_REASON.to_string()
+        )
+        .await
+        .unwrap()
+    );
+    assert!(!claimed_ids(repo.claim_retryable(1000).await.unwrap()).contains(&row.id));
+
+    delete_team(&pool, team_id).await;
+}
+
+#[tokio::test]
+async fn skip_unfinished_keeps_a_done_row() {
+    let _guard = ai_judgment_lock().lock().await;
+    let pool = init_pg_pool().await;
+    let team_id = insert_team(&pool).await;
+    let repo = ai_judgment_repository(pool.clone());
+    let subject_id = Uuid::new_v4();
+    let row = repo
+        .upsert_pending(new_judgment(team_id, subject_id, "d"))
+        .await
+        .unwrap();
+    assert!(repo.mark_done(row.id, "d".into(), result()).await.unwrap());
+
+    assert!(
+        !repo
+            .skip_unfinished(
+                SubjectType::Feature,
+                subject_id,
+                JudgmentKind::FlagKind,
+                SKIP_REASON.to_string()
+            )
+            .await
+            .unwrap(),
+        "a finished judgment is history and stays done"
+    );
+    let stored = repo
+        .get_for_subject(SubjectType::Feature, subject_id, JudgmentKind::FlagKind)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.status, "done");
+    assert!(
+        !repo
+            .skip_unfinished(
+                SubjectType::Feature,
+                Uuid::new_v4(),
+                JudgmentKind::FlagKind,
+                SKIP_REASON.to_string()
+            )
+            .await
+            .unwrap(),
+        "no row, nothing to skip"
+    );
+
+    delete_team(&pool, team_id).await;
+}

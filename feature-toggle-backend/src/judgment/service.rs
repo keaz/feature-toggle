@@ -153,6 +153,22 @@ impl JudgmentService {
             .await
     }
 
+    /// Closes the subject's unfinished judgment for good (`skipped`, with
+    /// `reason` as its error), so no run calls the API for it and a run in
+    /// flight stores nothing. A finished judgment is kept. Returns whether a
+    /// row was skipped.
+    pub async fn skip(
+        &self,
+        subject_type: SubjectType,
+        subject_id: Uuid,
+        kind: JudgmentKind,
+        reason: &str,
+    ) -> Result<bool, crate::Error> {
+        self.judgments
+            .skip_unfinished(subject_type, subject_id, kind, reason.to_string())
+            .await
+    }
+
     /// Persists a pending judgment and runs it in the background. Returns the
     /// row id right after the write; never waits for the API.
     pub async fn submit(
@@ -945,5 +961,37 @@ mod tests {
         assert_eq!(outcome, RunOutcome::Deferred);
         assert_eq!(client.calls.load(Ordering::SeqCst), 0);
         assert_eq!(attempts.load(Ordering::SeqCst), 0, "no attempt was spent");
+    }
+
+    #[tokio::test]
+    async fn skip_closes_the_subjects_unfinished_row() {
+        let subject_id = Uuid::new_v4();
+        let mut repo = MockAiJudgmentRepository::new();
+        repo.expect_skip_unfinished()
+            .withf(move |subject_type, id, kind, reason| {
+                *subject_type == SubjectType::ApprovalRequest
+                    && *id == subject_id
+                    && *kind == JudgmentKind::ApprovalRisk
+                    && reason == "skipped: approved by jira"
+            })
+            .times(1)
+            .returning(|_, _, _, _| Ok(true));
+        let (service, _, _) = service(
+            MockJudgmentClient::new(),
+            repo,
+            MockTeamAiSettingsRepository::new(),
+        );
+
+        let skipped = service
+            .skip(
+                SubjectType::ApprovalRequest,
+                subject_id,
+                JudgmentKind::ApprovalRisk,
+                "skipped: approved by jira",
+            )
+            .await
+            .unwrap();
+
+        assert!(skipped);
     }
 }
