@@ -323,3 +323,47 @@ async fn metrics_reports_that_need_a_flag_say_so() {
     assert_eq!(r.code, 2);
     assert!(r.stderr.contains("--flag"), "{}", r.stderr);
 }
+
+#[tokio::test]
+async fn config_import_reports_failures_and_keeps_going() {
+    let h = Harness::new().await;
+    h.write("export.json", &export().to_string());
+    mount_target(&h).await;
+    Mock::given(method("POST"))
+        .and(path(format!("/api/v1/teams/{TEAM_A}/environments")))
+        .respond_with(ResponseTemplate::new(400).set_body_json(
+            json!({ "error": "invalid_input", "message": "environment type not allowed" }),
+        ))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!("/api/v1/teams/{TEAM_A}/features")))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "id": "new-feature" })))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    let (url, token) = (h.url(), user_token("alice"));
+    let file = h.path("export.json").display().to_string();
+    let r = h
+        .run(
+            &["config", "import", "--file", file.as_str()],
+            &[
+                ("FLUXGATE_URL", url.as_str()),
+                ("FLUXGATE_TOKEN", token.as_str()),
+                ("FLUXGATE_TEAM", TEAM_A),
+            ],
+        )
+        .await;
+    assert_eq!(r.code, 1, "{}", r.stderr);
+    let report = json_out(&r);
+    assert_eq!(report["created"]["features"], json!(["new-flag"]));
+    assert_eq!(report["created"]["environments"], json!([]));
+    assert_eq!(report["failed"]["environments"][0]["name"], "prod");
+    assert!(
+        report["failed"]["environments"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("environment type not allowed")
+    );
+}

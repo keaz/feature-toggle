@@ -46,7 +46,10 @@ async fn sso_login_exchanges_the_loopback_code_with_the_verifier() {
     );
     assert!(h.read("sessions/corp.json").contains("\"a1\""));
     let requests = h.server.received_requests().await.unwrap();
-    let exchange = requests.iter().find(|r| r.url.path() == "/api/v1/auth/sso/exchange").unwrap();
+    let exchange = requests
+        .iter()
+        .find(|r| r.url.path() == "/api/v1/auth/sso/exchange")
+        .unwrap();
     let body: serde_json::Value = serde_json::from_slice(&exchange.body).unwrap();
     let verifier = body["codeVerifier"].as_str().unwrap();
     assert_eq!(verifier.len(), 43);
