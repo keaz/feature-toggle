@@ -79,6 +79,49 @@ impl ApiClient {
         self.send(Method::POST, segments, &[], Some(body)).await
     }
 
+    pub async fn patch(&self, segments: &[&str], body: &Value) -> Result<Value, CliError> {
+        self.send(Method::PATCH, segments, &[], Some(body)).await
+    }
+
+    pub async fn put(&self, segments: &[&str], body: &Value) -> Result<Value, CliError> {
+        self.send(Method::PUT, segments, &[], Some(body)).await
+    }
+
+    pub async fn delete(&self, segments: &[&str]) -> Result<Value, CliError> {
+        self.send(Method::DELETE, segments, &[], None).await
+    }
+
+    /// Any method on `segments`.
+    pub async fn request(
+        &self,
+        method: Method,
+        segments: &[&str],
+        query: &[(&str, String)],
+        body: Option<&Value>,
+    ) -> Result<Value, CliError> {
+        self.send(method, segments, query, body).await
+    }
+
+    /// Any method on a raw `path` that starts with `/`, relative to the base
+    /// URL, used as given; the caller is responsible for its encoding.
+    pub async fn request_raw(
+        &self,
+        method: Method,
+        path: &str,
+        query: &[(&str, String)],
+        body: Option<&Value>,
+    ) -> Result<Value, CliError> {
+        if !path.starts_with('/') {
+            return Err(CliError::Usage(format!("path '{path}' must start with /")));
+        }
+        let url = Url::parse(&format!(
+            "{}{path}",
+            self.base.as_str().trim_end_matches('/')
+        ))
+        .map_err(|err| CliError::Usage(format!("invalid path '{path}': {err}")))?;
+        self.send_url(method, url, query, body).await
+    }
+
     /// Follows `meta.total` of a paginated list and returns all items.
     pub async fn get_all_pages(
         &self,
@@ -117,7 +160,17 @@ impl ApiClient {
         query: &[(&str, String)],
         body: Option<&Value>,
     ) -> Result<Value, CliError> {
-        let mut request = self.http.request(method, self.url(segments));
+        self.send_url(method, self.url(segments), query, body).await
+    }
+
+    async fn send_url(
+        &self,
+        method: Method,
+        url: Url,
+        query: &[(&str, String)],
+        body: Option<&Value>,
+    ) -> Result<Value, CliError> {
+        let mut request = self.http.request(method, url);
         if !query.is_empty() {
             request = request.query(query);
         }
@@ -328,5 +381,48 @@ mod tests {
             .unwrap();
         assert_eq!(items.len(), 3);
         assert_eq!(items[2]["id"], "c");
+    }
+
+    #[tokio::test]
+    async fn patch_put_delete_and_raw_paths() {
+        let server = MockServer::start().await;
+        for verb in ["PATCH", "PUT", "DELETE"] {
+            Mock::given(method(verb))
+                .and(path("/api/v1/things/1"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "verb": verb })))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("GET"))
+            .and(path("/api/v1/teams/a%20b/features"))
+            .and(query_param("limit", "5"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "raw": true })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let api = client(&server, None);
+        assert_eq!(
+            api.patch(&["things", "1"], &json!({})).await.unwrap()["verb"],
+            "PATCH"
+        );
+        assert_eq!(
+            api.put(&["things", "1"], &json!({})).await.unwrap()["verb"],
+            "PUT"
+        );
+        assert_eq!(
+            api.delete(&["things", "1"]).await.unwrap()["verb"],
+            "DELETE"
+        );
+        let raw = api
+            .request_raw(Method::GET, "/teams/a%20b/features?limit=5", &[], None)
+            .await
+            .unwrap();
+        assert_eq!(raw["raw"], true);
+        let err = api
+            .request_raw(Method::GET, "teams", &[], None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.exit_code(), EXIT_USAGE);
     }
 }

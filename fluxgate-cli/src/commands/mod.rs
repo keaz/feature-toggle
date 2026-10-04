@@ -1,14 +1,21 @@
 //! Command implementations. Each returns an [`Outcome`] for `run` to render.
 
+pub mod accounts;
+pub mod admin;
+pub mod ai;
+pub mod api_cmd;
 pub mod approvals;
 pub mod config_export;
 pub mod configure;
 pub mod evaluate;
 pub mod flags;
 pub mod health;
+pub mod jira;
 pub mod login;
 pub mod logout;
+pub mod observe;
 pub mod rollout;
+pub mod safety;
 pub mod teams;
 pub mod whoami;
 
@@ -63,6 +70,21 @@ pub async fn dispatch(command: Command, app: &mut App<'_>) -> Result<Outcome, Cl
         Command::Configure(args) => configure::run(args, app).await,
         Command::Whoami => whoami::run(app).await,
         Command::Teams(args) => teams::run(args, app).await,
+        Command::Api(args) => api_cmd::run(args, app).await,
+        Command::Admin(resource) => admin::run(resource, app).await,
+        Command::Freeze(args) => safety::freeze(args, app).await,
+        Command::Canary(args) => safety::canary(args, app).await,
+        Command::Criteria(args) => safety::criteria(args, app).await,
+        Command::Jira(args) => jira::run(args, app).await,
+        Command::Ai(args) => ai::run(args, app).await,
+        Command::Metrics(args) => observe::metrics(args, app).await,
+        Command::Audit(args) => observe::audit(args, app).await,
+        Command::Activity(args) => observe::activity(args, app).await,
+        Command::SystemClients(args) => accounts::system_clients(args, app).await,
+        Command::JwtSecrets(args) => accounts::jwt_secrets(args, app).await,
+        Command::Sso(args) => accounts::sso(args, app).await,
+        Command::Users(args) => accounts::users(args, app).await,
+        Command::Notifications(args) => accounts::notifications(args, app).await,
     }
 }
 
@@ -88,4 +110,88 @@ pub async fn list_paged(
         page_query.push(("offset", offset.to_string()));
     }
     api.get(segments, &page_query).await
+}
+
+/// JSON from `--data`: inline JSON, `@file`, or `-` for stdin.
+pub fn json_data(raw: &str) -> Result<Value, CliError> {
+    let text = if raw == "-" {
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
+        text
+    } else if let Some(file) = raw.strip_prefix('@') {
+        std::fs::read_to_string(file)
+            .map_err(|err| CliError::Usage(format!("cannot read --data file {file}: {err}")))?
+    } else {
+        raw.to_string()
+    };
+    serde_json::from_str(&text)
+        .map_err(|err| CliError::Usage(format!("--data is not valid JSON: {err}")))
+}
+
+/// `--data` when given, else an empty object.
+pub fn optional_data(raw: Option<&str>) -> Result<Value, CliError> {
+    raw.map(json_data)
+        .transpose()
+        .map(|data| data.unwrap_or_else(|| json!({})))
+}
+
+/// `KEY=VALUE` pairs from `--query`.
+pub fn query_pairs(raw: &[String]) -> Result<Vec<(String, String)>, CliError> {
+    raw.iter()
+        .map(|pair| {
+            pair.split_once('=')
+                .map(|(key, value)| (key.trim().to_string(), value.to_string()))
+                .filter(|(key, _)| !key.is_empty())
+                .ok_or_else(|| CliError::Usage(format!("--query {pair}: expected KEY=VALUE")))
+        })
+        .collect()
+}
+
+/// Borrowed view of owned query pairs, as [`ApiClient`] takes them.
+pub fn borrow_query(pairs: &[(String, String)]) -> Vec<(&str, String)> {
+    pairs
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.clone()))
+        .collect()
+}
+
+/// The id of a flag given by id or key.
+pub async fn feature_id(context: &Context, id_or_key: &str) -> Result<String, CliError> {
+    if crate::context::is_uuid(id_or_key) {
+        return Ok(id_or_key.trim().to_string());
+    }
+    let team = context.team_id().await?;
+    let feature = context
+        .api
+        .get(&["teams", &team, "features", "by-key", id_or_key], &[])
+        .await?;
+    feature
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| CliError::Other(format!("flag '{id_or_key}' has no id in the response")))
+}
+
+/// The team id when one is configured or implied by the token, else `None`.
+pub async fn optional_team(context: &Context) -> Result<Option<String>, CliError> {
+    match context.team_id().await {
+        Ok(team) => Ok(Some(team)),
+        Err(CliError::Usage(message)) if message.starts_with("team required") => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+/// Calls an endpoint and shows the result with automatic columns.
+pub async fn call(
+    context: &Context,
+    method: reqwest::Method,
+    segments: &[&str],
+    query: &[(&str, String)],
+    body: Option<Value>,
+) -> Result<Outcome, CliError> {
+    let value = context
+        .api
+        .request(method, segments, query, body.as_ref())
+        .await?;
+    Ok(Outcome::new(value, crate::output::Kind::Auto))
 }
