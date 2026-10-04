@@ -1,8 +1,11 @@
 //! Command implementations. Each returns an [`Outcome`] for `run` to render.
 
 pub mod approvals;
+pub mod config_export;
+pub mod evaluate;
 pub mod flags;
 pub mod health;
+pub mod rollout;
 
 use serde_json::{Value, json};
 
@@ -47,6 +50,9 @@ pub async fn dispatch(command: Command, app: &mut App<'_>) -> Result<Outcome, Cl
         Command::Health => health::run(app).await,
         Command::Flags(args) => flags::run(args, app).await,
         Command::Approvals(args) => approvals::run(args, app).await,
+        Command::Evaluate(args) => evaluate::run(args, app).await,
+        Command::Config(_) => config_export::run(app).await,
+        Command::Rollout(args) => rollout::run(args, app).await,
     }
 }
 

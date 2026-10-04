@@ -58,6 +58,12 @@ pub enum Command {
     Flags(FlagsArgs),
     /// Approval requests.
     Approvals(ApprovalsArgs),
+    /// Evaluate a flag for a targeting key.
+    Evaluate(EvaluateArgs),
+    /// Team configuration.
+    Config(ConfigArgs),
+    /// Stage changes.
+    Rollout(RolloutArgs),
 }
 
 #[derive(Debug, Clone, Default, Args)]
@@ -111,6 +117,77 @@ pub enum ApprovalsSubcommand {
     },
 }
 
+#[derive(Debug, Args)]
+pub struct EvaluateArgs {
+    /// Flag key.
+    #[arg(long = "flag", alias = "feature-key")]
+    pub flag: String,
+    /// User or entity the flag is evaluated for.
+    #[arg(long)]
+    pub targeting_key: String,
+    /// Evaluation context as a JSON object.
+    #[arg(long, default_value = "{}")]
+    pub context: String,
+    /// Exit 0 when the flag is true and 10 when it is false.
+    #[arg(long)]
+    pub exit_code: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ConfigArgs {
+    #[command(subcommand)]
+    pub command: ConfigSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConfigSubcommand {
+    /// Print the team, its environments and all flags as JSON.
+    Export,
+}
+
+pub const STAGE_REQUESTS: [&str; 6] = [
+    "DEPLOYMENT_REQUESTED",
+    "DEPLOYMENT_REJECTED",
+    "DEPLOYED",
+    "ROLLBACK_REQUESTED",
+    "ROLLBACK_REJECTED",
+    "ROLLBACKED",
+];
+
+#[derive(Debug, Args)]
+pub struct RolloutArgs {
+    #[command(subcommand)]
+    pub command: RolloutSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RolloutSubcommand {
+    /// Request a stage change, by stage id or by flag key and environment.
+    Promote {
+        /// Stage id; or use --flag with --env.
+        stage_id: Option<String>,
+        /// Flag key; the stage is found from --env.
+        #[arg(long, conflicts_with = "stage_id")]
+        flag: Option<String>,
+        #[arg(
+            long,
+            default_value = "DEPLOYMENT_REQUESTED",
+            value_parser = clap::builder::PossibleValuesParser::new(STAGE_REQUESTS),
+            ignore_case = true
+        )]
+        request: String,
+        /// Why the change is requested.
+        #[arg(long)]
+        reason: Option<String>,
+        /// Ticket or change id, for example a Jira issue key.
+        #[arg(long)]
+        external_ref: Option<String>,
+        /// Reason for changing during a freeze window.
+        #[arg(long)]
+        freeze_override_reason: Option<String>,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,5 +219,42 @@ mod tests {
     #[test]
     fn all_conflicts_with_limit() {
         assert!(Cli::try_parse_from(["fluxgate", "flags", "list", "--all", "--limit", "5"]).is_err());
+    }
+
+    #[test]
+    fn parses_legacy_evaluate_command_for_ci() {
+        let cli = Cli::parse_from([
+            "fluxgate", "--base-url", "http://localhost:8080/api/v1", "--token", "secret", "evaluate",
+            "--feature-key", "checkout", "--environment-id", "env", "--targeting-key", "user-1",
+            "--context", "{\"plan\":\"pro\"}",
+        ]);
+        assert_eq!(cli.environment.as_deref(), Some("env"));
+        match cli.command {
+            Command::Evaluate(args) => {
+                assert_eq!(args.flag, "checkout");
+                assert_eq!(args.targeting_key, "user-1");
+                assert!(!args.exit_code);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_legacy_rollout_promote_command() {
+        let cli = Cli::parse_from(["fluxgate", "rollout", "promote", "stage-123", "--request", "DEPLOYED"]);
+        match cli.command {
+            Command::Rollout(RolloutArgs { command: RolloutSubcommand::Promote { stage_id, request, flag, .. } }) => {
+                assert_eq!(stage_id.as_deref(), Some("stage-123"));
+                assert_eq!(request, "DEPLOYED");
+                assert_eq!(flag, None);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rollout_request_is_checked() {
+        assert!(Cli::try_parse_from(["fluxgate", "rollout", "promote", "s", "--request", "deployed"]).is_ok());
+        assert!(Cli::try_parse_from(["fluxgate", "rollout", "promote", "s", "--request", "LAUNCH"]).is_err());
     }
 }
