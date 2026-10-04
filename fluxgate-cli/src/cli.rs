@@ -6,7 +6,11 @@ use crate::config::Overrides;
 use crate::output::OutputFormat;
 
 #[derive(Debug, Parser)]
-#[command(name = "fluxgate", version, about = "FluxGate CLI for flag operations and CI automation")]
+#[command(
+    name = "fluxgate",
+    version,
+    about = "FluxGate CLI for flag operations and CI automation"
+)]
 pub struct Cli {
     /// Profile from ~/.fluxgate/config (env FLUXGATE_PROFILE).
     #[arg(long, global = true)]
@@ -43,7 +47,11 @@ impl Cli {
             url: self.url.clone(),
             team: self.team.clone(),
             environment: self.environment.clone(),
-            output: if self.json { Some(OutputFormat::Json) } else { self.output },
+            output: if self.json {
+                Some(OutputFormat::Json)
+            } else {
+                self.output
+            },
             token: self.token.clone(),
             timeout: self.timeout,
         }
@@ -256,17 +264,34 @@ mod tests {
 
     #[test]
     fn legacy_global_flags_still_parse() {
-        let cli = Cli::parse_from(["fluxgate", "--base-url", "http://h/api/v1", "--team-id", "team-a", "health"]);
+        let cli = Cli::parse_from([
+            "fluxgate",
+            "--base-url",
+            "http://h/api/v1",
+            "--team-id",
+            "team-a",
+            "health",
+        ]);
         assert_eq!(cli.url.as_deref(), Some("http://h/api/v1"));
         assert_eq!(cli.team.as_deref(), Some("team-a"));
     }
 
     #[test]
     fn global_flags_work_after_the_subcommand() {
-        let cli = Cli::parse_from(["fluxgate", "flags", "list", "--team-id", "team-b", "--limit", "10"]);
+        let cli = Cli::parse_from([
+            "fluxgate",
+            "flags",
+            "list",
+            "--team-id",
+            "team-b",
+            "--limit",
+            "10",
+        ]);
         assert_eq!(cli.team.as_deref(), Some("team-b"));
         match cli.command {
-            Command::Flags(FlagsArgs { command: FlagsSubcommand::List { page } }) => assert_eq!(page.limit, Some(10)),
+            Command::Flags(FlagsArgs {
+                command: FlagsSubcommand::List { page },
+            }) => assert_eq!(page.limit, Some(10)),
             other => panic!("unexpected {other:?}"),
         }
     }
@@ -275,20 +300,35 @@ mod tests {
     fn json_flag_means_json_output_and_conflicts_with_output() {
         let cli = Cli::parse_from(["fluxgate", "--json", "health"]);
         assert_eq!(cli.overrides().output, Some(OutputFormat::Json));
-        assert!(Cli::try_parse_from(["fluxgate", "--json", "--output", "table", "health"]).is_err());
+        assert!(
+            Cli::try_parse_from(["fluxgate", "--json", "--output", "table", "health"]).is_err()
+        );
     }
 
     #[test]
     fn all_conflicts_with_limit() {
-        assert!(Cli::try_parse_from(["fluxgate", "flags", "list", "--all", "--limit", "5"]).is_err());
+        assert!(
+            Cli::try_parse_from(["fluxgate", "flags", "list", "--all", "--limit", "5"]).is_err()
+        );
     }
 
     #[test]
     fn parses_legacy_evaluate_command_for_ci() {
         let cli = Cli::parse_from([
-            "fluxgate", "--base-url", "http://localhost:8080/api/v1", "--token", "secret", "evaluate",
-            "--feature-key", "checkout", "--environment-id", "env", "--targeting-key", "user-1",
-            "--context", "{\"plan\":\"pro\"}",
+            "fluxgate",
+            "--base-url",
+            "http://localhost:8080/api/v1",
+            "--token",
+            "secret",
+            "evaluate",
+            "--feature-key",
+            "checkout",
+            "--environment-id",
+            "env",
+            "--targeting-key",
+            "user-1",
+            "--context",
+            "{\"plan\":\"pro\"}",
         ]);
         assert_eq!(cli.environment.as_deref(), Some("env"));
         match cli.command {
@@ -303,9 +343,24 @@ mod tests {
 
     #[test]
     fn parses_legacy_rollout_promote_command() {
-        let cli = Cli::parse_from(["fluxgate", "rollout", "promote", "stage-123", "--request", "DEPLOYED"]);
+        let cli = Cli::parse_from([
+            "fluxgate",
+            "rollout",
+            "promote",
+            "stage-123",
+            "--request",
+            "DEPLOYED",
+        ]);
         match cli.command {
-            Command::Rollout(RolloutArgs { command: RolloutSubcommand::Promote { stage_id, request, flag, .. } }) => {
+            Command::Rollout(RolloutArgs {
+                command:
+                    RolloutSubcommand::Promote {
+                        stage_id,
+                        request,
+                        flag,
+                        ..
+                    },
+            }) => {
                 assert_eq!(stage_id.as_deref(), Some("stage-123"));
                 assert_eq!(request, "DEPLOYED");
                 assert_eq!(flag, None);
@@ -316,7 +371,20 @@ mod tests {
 
     #[test]
     fn rollout_request_is_checked() {
-        assert!(Cli::try_parse_from(["fluxgate", "rollout", "promote", "s", "--request", "deployed"]).is_ok());
-        assert!(Cli::try_parse_from(["fluxgate", "rollout", "promote", "s", "--request", "LAUNCH"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "fluxgate",
+                "rollout",
+                "promote",
+                "s",
+                "--request",
+                "deployed"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from(["fluxgate", "rollout", "promote", "s", "--request", "LAUNCH"])
+                .is_err()
+        );
     }
 }

@@ -13,7 +13,7 @@ use crate::config::resolve::{DEFAULT_TIMEOUT_SECS, DEFAULT_URL};
 use crate::config::{Credential, Resolved, Source, mask_token};
 use crate::context::Context;
 use crate::error::CliError;
-use crate::output::{CONFIG_COLUMNS, Kind, OutputFormat, Outcome, PROFILE_COLUMNS};
+use crate::output::{CONFIG_COLUMNS, Kind, Outcome, OutputFormat, PROFILE_COLUMNS};
 
 pub const LOGIN_PASSWORD: &str = "Log in with username and password";
 pub const LOGIN_TOKEN: &str = "Static token (system client)";
@@ -56,7 +56,9 @@ fn set(app: &App<'_>, key: &str, value: &str) -> Result<Outcome, CliError> {
             )));
         }
     }
-    Ok(Outcome::message(format!("Set {key} for profile '{profile}'")))
+    Ok(Outcome::message(format!(
+        "Set {key} for profile '{profile}'"
+    )))
 }
 
 fn get(app: &App<'_>, key: &str) -> Result<Outcome, CliError> {
@@ -94,12 +96,17 @@ fn list(app: &App<'_>) -> Result<Outcome, CliError> {
         Source::Default
     };
     let token = match &settings.credential {
-        Credential::Static { token, source } => {
-            row("token", &format!("{} (static)", mask_token(token)), source.as_str())
-        }
+        Credential::Static { token, source } => row(
+            "token",
+            &format!("{} (static)", mask_token(token)),
+            source.as_str(),
+        ),
         Credential::Session { name } => {
             let status = match SessionStore::new(app.paths.sessions.clone()).load(name) {
-                Ok(Some(cache)) => format!("session '{name}', expires {}", cache.expires_at.to_rfc3339()),
+                Ok(Some(cache)) => format!(
+                    "session '{name}', expires {}",
+                    cache.expires_at.to_rfc3339()
+                ),
                 Ok(None) => format!("session '{name}', not logged in"),
                 Err(_) => format!("session '{name}', cache damaged"),
             };
@@ -112,15 +119,26 @@ fn list(app: &App<'_>) -> Result<Outcome, CliError> {
         row("url", &settings.url.value, settings.url.source.as_str()),
         optional_row("team", settings.team.as_ref()),
         optional_row("environment", settings.environment.as_ref()),
-        row("output", settings.output.value.as_str(), settings.output.source.as_str()),
-        row("timeout", &settings.timeout.value.to_string(), settings.timeout.source.as_str()),
+        row(
+            "output",
+            settings.output.value.as_str(),
+            settings.output.source.as_str(),
+        ),
+        row(
+            "timeout",
+            &settings.timeout.value.to_string(),
+            settings.timeout.source.as_str(),
+        ),
         match &settings.session {
             Some(session) => row("session", session, "profile"),
             None => row("session", "-", "unset"),
         },
         token,
     ];
-    Ok(Outcome::new(json!({ "items": items }), Kind::List(CONFIG_COLUMNS)))
+    Ok(Outcome::new(
+        json!({ "items": items }),
+        Kind::List(CONFIG_COLUMNS),
+    ))
 }
 
 fn list_profiles(app: &App<'_>) -> Result<Outcome, CliError> {
@@ -143,7 +161,10 @@ fn list_profiles(app: &App<'_>) -> Result<Outcome, CliError> {
             })
         })
         .collect();
-    Ok(Outcome::new(json!({ "items": items }), Kind::List(PROFILE_COLUMNS)))
+    Ok(Outcome::new(
+        json!({ "items": items }),
+        Kind::List(PROFILE_COLUMNS),
+    ))
 }
 
 async fn interactive(app: &mut App<'_>) -> Result<Outcome, CliError> {
@@ -152,7 +173,11 @@ async fn interactive(app: &mut App<'_>) -> Result<Outcome, CliError> {
     let mut files = app.files()?;
     let current_url = files
         .profile_value(&profile, "url")
-        .or_else(|| files.profile_value(&profile, "session").and_then(|s| files.session_value(s, "url")))
+        .or_else(|| {
+            files
+                .profile_value(&profile, "session")
+                .and_then(|s| files.session_value(s, "url"))
+        })
         .unwrap_or(DEFAULT_URL)
         .to_string();
     let url = app
@@ -165,7 +190,10 @@ async fn interactive(app: &mut App<'_>) -> Result<Outcome, CliError> {
 
     let methods = vec![LOGIN_PASSWORD.to_string(), LOGIN_TOKEN.to_string()];
     if app.prompter.select("How do you sign in", &methods)? == 0 {
-        let session = files.profile_value(&profile, "session").unwrap_or(profile.as_str()).to_string();
+        let session = files
+            .profile_value(&profile, "session")
+            .unwrap_or(profile.as_str())
+            .to_string();
         files.set_profile_value(&profile, "session", &session);
         files.set_session_value(&session, "url", &url);
         // The session holds the url; a profile url would shadow it.
@@ -198,8 +226,16 @@ async fn interactive(app: &mut App<'_>) -> Result<Outcome, CliError> {
                 let names: Vec<String> = teams.iter().map(|team| team.name.clone()).collect();
                 let chosen = &teams[app.prompter.select("Team", &names)?];
                 // Store the name unless another team has the same name.
-                let duplicate = teams.iter().filter(|t| t.name.eq_ignore_ascii_case(&chosen.name)).count() > 1;
-                files.set_profile_value(&profile, "team", if duplicate { &chosen.id } else { &chosen.name });
+                let duplicate = teams
+                    .iter()
+                    .filter(|t| t.name.eq_ignore_ascii_case(&chosen.name))
+                    .count()
+                    > 1;
+                files.set_profile_value(
+                    &profile,
+                    "team",
+                    if duplicate { &chosen.id } else { &chosen.name },
+                );
                 Some(chosen.id.clone())
             }
         }
@@ -216,5 +252,8 @@ async fn interactive(app: &mut App<'_>) -> Result<Outcome, CliError> {
     let output = app.prompter.select("Default output", &outputs)?;
     files.set_profile_value(&profile, "output", &outputs[output]);
     files.save_config(&app.paths)?;
-    Ok(Outcome::message(format!("Profile '{profile}' saved to {}", app.paths.config.display())))
+    Ok(Outcome::message(format!(
+        "Profile '{profile}' saved to {}",
+        app.paths.config.display()
+    )))
 }

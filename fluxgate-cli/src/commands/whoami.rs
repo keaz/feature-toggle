@@ -37,13 +37,20 @@ pub async fn run(app: &mut App<'_>) -> Result<Outcome, CliError> {
         value["team"] = json!(context.token_team());
     } else {
         let teams = context.teams().await?;
-        value["teams"] = json!(teams.iter().map(|team| team.name.clone()).collect::<Vec<_>>());
-        value["team"] = match context.team_id().await {
-            Ok(id) => json!(teams
+        value["teams"] = json!(
+            teams
                 .iter()
-                .find(|team| team.id.eq_ignore_ascii_case(&id))
-                .map(|team| format!("{} ({})", team.name, team.id))
-                .unwrap_or(id)),
+                .map(|team| team.name.clone())
+                .collect::<Vec<_>>()
+        );
+        value["team"] = match context.team_id().await {
+            Ok(id) => json!(
+                teams
+                    .iter()
+                    .find(|team| team.id.eq_ignore_ascii_case(&id))
+                    .map(|team| format!("{} ({})", team.name, team.id))
+                    .unwrap_or(id)
+            ),
             Err(CliError::Usage(message)) => json!(format!("unresolved: {message}")),
             Err(err) => return Err(err),
         };

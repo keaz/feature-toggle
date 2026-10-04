@@ -19,18 +19,30 @@ pub async fn run(args: LoginArgs, app: &mut App<'_>) -> Result<Outcome, CliError
         )));
     }
     // A profile without a session gets one named after the profile.
-    let session = settings.session.clone().unwrap_or_else(|| settings.profile.clone());
+    let session = settings
+        .session
+        .clone()
+        .unwrap_or_else(|| settings.profile.clone());
     let username = match args.username {
         Some(username) => username,
         None => app.prompter.input("Username", None)?,
     };
-    let response =
-        password_login(&mut *app.prompter, &settings.url.value, &username, Context::timeout(&settings)).await?;
-    SessionStore::new(app.paths.sessions.clone()).save(&session, &SessionCache::from_login(&response, Utc::now()))?;
+    let response = password_login(
+        &mut *app.prompter,
+        &settings.url.value,
+        &username,
+        Context::timeout(&settings),
+    )
+    .await?;
+    SessionStore::new(app.paths.sessions.clone())
+        .save(&session, &SessionCache::from_login(&response, Utc::now()))?;
     if settings.session.is_none() {
         files.set_profile_value(&settings.profile, "session", &session);
         files.set_session_value(&session, "url", &settings.url.value);
         files.save_config(&app.paths)?;
     }
-    Ok(Outcome::message(format!("Logged in as {} (session '{session}')", response.user.username)))
+    Ok(Outcome::message(format!(
+        "Logged in as {} (session '{session}')",
+        response.user.username
+    )))
 }

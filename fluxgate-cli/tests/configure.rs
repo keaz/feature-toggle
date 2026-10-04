@@ -10,9 +10,23 @@ async fn set_then_get_a_profile_value() {
     let h = Harness::new().await;
     let r = h.run(&["configure", "set", "team", "payments"], &[]).await;
     assert_eq!(r.code, 0, "{}", r.stderr);
-    let r = h.run(&["configure", "get", "team", "--output", "text"], &[]).await;
+    let r = h
+        .run(&["configure", "get", "team", "--output", "text"], &[])
+        .await;
     assert_eq!(r.stdout.trim(), "payments");
-    let r = h.run(&["--profile", "prod", "configure", "set", "url", "https://fg.example.com/api/v1"], &[]).await;
+    let r = h
+        .run(
+            &[
+                "--profile",
+                "prod",
+                "configure",
+                "set",
+                "url",
+                "https://fg.example.com/api/v1",
+            ],
+            &[],
+        )
+        .await;
     assert_eq!(r.code, 0);
     assert!(h.read("config").contains("[profile prod]"));
 }
@@ -20,19 +34,42 @@ async fn set_then_get_a_profile_value() {
 #[tokio::test]
 async fn set_rejects_bad_keys_and_values() {
     let h = Harness::new().await;
-    let r = h.run(&["configure", "set", "colour", "blue", "--output", "text"], &[]).await;
+    let r = h
+        .run(
+            &["configure", "set", "colour", "blue", "--output", "text"],
+            &[],
+        )
+        .await;
     assert_eq!(r.code, 2);
     assert!(r.stderr.contains("unknown key 'colour'"), "{}", r.stderr);
-    assert_eq!(h.run(&["configure", "set", "output", "yaml"], &[]).await.code, 2);
-    assert_eq!(h.run(&["configure", "set", "timeout", "soon"], &[]).await.code, 2);
+    assert_eq!(
+        h.run(&["configure", "set", "output", "yaml"], &[])
+            .await
+            .code,
+        2
+    );
+    assert_eq!(
+        h.run(&["configure", "set", "timeout", "soon"], &[])
+            .await
+            .code,
+        2
+    );
 }
 
 #[tokio::test]
 async fn get_of_an_unset_key_exits_1() {
     let h = Harness::new().await;
-    let r = h.run(&["configure", "get", "environment", "--output", "text"], &[]).await;
+    let r = h
+        .run(
+            &["configure", "get", "environment", "--output", "text"],
+            &[],
+        )
+        .await;
     assert_eq!(r.code, 1);
-    assert!(r.stderr.contains("environment is not set for profile 'default'"));
+    assert!(
+        r.stderr
+            .contains("environment is not set for profile 'default'")
+    );
 }
 
 #[cfg(unix)]
@@ -40,12 +77,40 @@ async fn get_of_an_unset_key_exits_1() {
 async fn set_token_goes_to_the_private_credentials_file_and_get_masks_it() {
     use std::os::unix::fs::PermissionsExt;
     let h = Harness::new().await;
-    let r = h.run(&["--profile", "ci", "configure", "set", "token", "abcdef123456"], &[]).await;
+    let r = h
+        .run(
+            &[
+                "--profile",
+                "ci",
+                "configure",
+                "set",
+                "token",
+                "abcdef123456",
+            ],
+            &[],
+        )
+        .await;
     assert_eq!(r.code, 0, "{}", r.stderr);
     assert!(h.read("credentials").contains("[ci]"));
-    let mode = std::fs::metadata(h.path("credentials")).unwrap().permissions().mode();
+    let mode = std::fs::metadata(h.path("credentials"))
+        .unwrap()
+        .permissions()
+        .mode();
     assert_eq!(mode & 0o777, 0o600);
-    let r = h.run(&["--profile", "ci", "configure", "get", "token", "--output", "text"], &[]).await;
+    let r = h
+        .run(
+            &[
+                "--profile",
+                "ci",
+                "configure",
+                "get",
+                "token",
+                "--output",
+                "text",
+            ],
+            &[],
+        )
+        .await;
     assert_eq!(r.stdout.trim(), "****3456");
 }
 
@@ -53,7 +118,15 @@ async fn set_token_goes_to_the_private_credentials_file_and_get_masks_it() {
 async fn list_shows_values_and_their_sources() {
     let h = Harness::new().await;
     h.write("config", "[default]\nurl = https://fg.example.com/api/v1\n");
-    let r = h.run(&["configure", "list"], &[("FLUXGATE_TEAM", "payments"), ("FLUXGATE_TOKEN", "abcdef123456")]).await;
+    let r = h
+        .run(
+            &["configure", "list"],
+            &[
+                ("FLUXGATE_TEAM", "payments"),
+                ("FLUXGATE_TOKEN", "abcdef123456"),
+            ],
+        )
+        .await;
     assert_eq!(r.code, 0, "{}", r.stderr);
     let items = json_out(&r)["items"].as_array().unwrap().clone();
     let find = |name: &str| items.iter().find(|i| i["name"] == name).unwrap().clone();
@@ -68,9 +141,17 @@ async fn list_shows_values_and_their_sources() {
 #[tokio::test]
 async fn list_profiles_marks_the_active_one() {
     let h = Harness::new().await;
-    h.write("config", "[default]\nteam = a\n\n[profile prod]\nteam = b\n");
+    h.write(
+        "config",
+        "[default]\nteam = a\n\n[profile prod]\nteam = b\n",
+    );
     h.write("credentials", "[ci]\ntoken = t\n");
-    let r = h.run(&["configure", "list-profiles"], &[("FLUXGATE_PROFILE", "prod")]).await;
+    let r = h
+        .run(
+            &["configure", "list-profiles"],
+            &[("FLUXGATE_PROFILE", "prod")],
+        )
+        .await;
     assert_eq!(r.code, 0, "{}", r.stderr);
     let items = json_out(&r)["items"].as_array().unwrap().clone();
     let names: Vec<&str> = items.iter().map(|i| i["name"].as_str().unwrap()).collect();
@@ -108,12 +189,26 @@ async fn interactive_password_setup_logs_in_and_picks_team_and_environment() {
         .run_with(
             &["configure", "--output", "text"],
             &[],
-            &[url.as_str(), "Log in with username and password", "alice", "pw", "Payments", "staging", "table"],
+            &[
+                url.as_str(),
+                "Log in with username and password",
+                "alice",
+                "pw",
+                "Payments",
+                "staging",
+                "table",
+            ],
         )
         .await;
     assert_eq!(r.code, 0, "{}", r.stderr);
     let config = h.read("config");
-    for expected in ["session=default", "team=Payments", "environment=staging", "output=table", "[session default]"] {
+    for expected in [
+        "session=default",
+        "team=Payments",
+        "environment=staging",
+        "output=table",
+        "[session default]",
+    ] {
         assert!(config.contains(expected), "missing {expected} in {config}");
     }
     assert!(h.exists("sessions/default.json"));
@@ -134,11 +229,20 @@ async fn interactive_token_setup_stores_the_token_and_the_token_team() {
         .run_with(
             &["--profile", "ci", "configure"],
             &[],
-            &[url.as_str(), "Static token (system client)", token.as_str(), "staging", "json"],
+            &[
+                url.as_str(),
+                "Static token (system client)",
+                token.as_str(),
+                "staging",
+                "json",
+            ],
         )
         .await;
     assert_eq!(r.code, 0, "{}", r.stderr);
     assert!(h.read("credentials").contains("[ci]"));
     let config = h.read("config");
-    assert!(config.contains("[profile ci]") && config.contains(&format!("team={TEAM_A}")), "{config}");
+    assert!(
+        config.contains("[profile ci]") && config.contains(&format!("team={TEAM_A}")),
+        "{config}"
+    );
 }

@@ -36,7 +36,11 @@ impl Paths {
             .parent()
             .map(|dir| dir.join("sessions"))
             .unwrap_or_else(|| PathBuf::from("sessions"));
-        Ok(Self { config, credentials, sessions })
+        Ok(Self {
+            config,
+            credentials,
+            sessions,
+        })
     }
 }
 

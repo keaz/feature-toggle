@@ -43,7 +43,14 @@ async fn flags_list_all_follows_every_page() {
         .await;
     let (url, token) = (h.url(), user_token("alice"));
     let r = h
-        .run(&["flags", "list", "--all"], &[("FLUXGATE_URL", url.as_str()), ("FLUXGATE_TOKEN", token.as_str()), ("FLUXGATE_TEAM", TEAM_A)])
+        .run(
+            &["flags", "list", "--all"],
+            &[
+                ("FLUXGATE_URL", url.as_str()),
+                ("FLUXGATE_TOKEN", token.as_str()),
+                ("FLUXGATE_TEAM", TEAM_A),
+            ],
+        )
         .await;
     assert_eq!(r.code, 0, "{}", r.stderr);
     let value = json_out(&r);
@@ -68,8 +75,22 @@ async fn flags_list_sends_limit_offset_and_accepts_legacy_team_flag() {
     let url = h.url();
     let r = h
         .run(
-            &["flags", "list", "--team-id", TEAM_A, "--limit", "10", "--offset", "20", "--output", "table"],
-            &[("FLUXGATE_URL", url.as_str()), ("FLUXGATE_TOKEN", token.as_str())],
+            &[
+                "flags",
+                "list",
+                "--team-id",
+                TEAM_A,
+                "--limit",
+                "10",
+                "--offset",
+                "20",
+                "--output",
+                "table",
+            ],
+            &[
+                ("FLUXGATE_URL", url.as_str()),
+                ("FLUXGATE_TOKEN", token.as_str()),
+            ],
         )
         .await;
     assert_eq!(r.code, 0, "{}", r.stderr);
@@ -81,14 +102,26 @@ async fn flags_list_sends_limit_offset_and_accepts_legacy_team_flag() {
 async fn flags_get_by_key_uses_the_encoded_by_key_route() {
     let h = Harness::new().await;
     Mock::given(method("GET"))
-        .and(path(format!("/api/v1/teams/{TEAM_A}/features/by-key/checkout%20v2")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": FEATURE_ID, "key": "checkout v2" })))
+        .and(path(format!(
+            "/api/v1/teams/{TEAM_A}/features/by-key/checkout%20v2"
+        )))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "id": FEATURE_ID, "key": "checkout v2" })),
+        )
         .expect(1)
         .mount(&h.server)
         .await;
     let (url, token) = (h.url(), user_token("alice"));
     let r = h
-        .run(&["flags", "get", "checkout v2"], &[("FLUXGATE_URL", url.as_str()), ("FLUXGATE_TOKEN", token.as_str()), ("FLUXGATE_TEAM", TEAM_A)])
+        .run(
+            &["flags", "get", "checkout v2"],
+            &[
+                ("FLUXGATE_URL", url.as_str()),
+                ("FLUXGATE_TOKEN", token.as_str()),
+                ("FLUXGATE_TEAM", TEAM_A),
+            ],
+        )
         .await;
     assert_eq!(r.code, 0, "{}", r.stderr);
     assert_eq!(json_out(&r)["key"], "checkout v2");
@@ -99,12 +132,23 @@ async fn flags_get_by_id_needs_no_team() {
     let h = Harness::new().await;
     Mock::given(method("GET"))
         .and(path(format!("/api/v1/features/{FEATURE_ID}")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": FEATURE_ID, "key": "checkout" })))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "id": FEATURE_ID, "key": "checkout" })),
+        )
         .expect(1)
         .mount(&h.server)
         .await;
     let (url, token) = (h.url(), user_token("alice"));
-    let r = h.run(&["flags", "get", FEATURE_ID], &[("FLUXGATE_URL", url.as_str()), ("FLUXGATE_TOKEN", token.as_str())]).await;
+    let r = h
+        .run(
+            &["flags", "get", FEATURE_ID],
+            &[
+                ("FLUXGATE_URL", url.as_str()),
+                ("FLUXGATE_TOKEN", token.as_str()),
+            ],
+        )
+        .await;
     assert_eq!(r.code, 0, "{}", r.stderr);
 }
 
@@ -114,17 +158,29 @@ async fn team_name_from_a_profile_is_resolved() {
     h.write("config", "[default]\nteam = payments\n");
     Mock::given(method("GET"))
         .and(path("/api/v1/teams"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([{ "id": TEAM_A, "name": "Payments" }])))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!([{ "id": TEAM_A, "name": "Payments" }])),
+        )
         .mount(&h.server)
         .await;
     Mock::given(method("GET"))
         .and(path(format!("/api/v1/teams/{TEAM_A}/features")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "items": [], "meta": { "offset": 0, "limit": 50, "total": 0 } })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({ "items": [], "meta": { "offset": 0, "limit": 50, "total": 0 } }),
+        ))
         .expect(1)
         .mount(&h.server)
         .await;
     let (url, token) = (h.url(), user_token("alice"));
-    let r = h.run(&["flags", "list"], &[("FLUXGATE_URL", url.as_str()), ("FLUXGATE_TOKEN", token.as_str())]).await;
+    let r = h
+        .run(
+            &["flags", "list"],
+            &[
+                ("FLUXGATE_URL", url.as_str()),
+                ("FLUXGATE_TOKEN", token.as_str()),
+            ],
+        )
+        .await;
     assert_eq!(r.code, 0, "{}", r.stderr);
 }
 
@@ -144,8 +200,19 @@ async fn approvals_list_sends_statuses_and_renders_a_table() {
     let (url, token) = (h.url(), user_token("alice"));
     let r = h
         .run(
-            &["approvals", "list", "--status", "pending,approved", "--output", "table"],
-            &[("FLUXGATE_URL", url.as_str()), ("FLUXGATE_TOKEN", token.as_str()), ("FLUXGATE_TEAM", TEAM_A)],
+            &[
+                "approvals",
+                "list",
+                "--status",
+                "pending,approved",
+                "--output",
+                "table",
+            ],
+            &[
+                ("FLUXGATE_URL", url.as_str()),
+                ("FLUXGATE_TOKEN", token.as_str()),
+                ("FLUXGATE_TEAM", TEAM_A),
+            ],
         )
         .await;
     assert_eq!(r.code, 0, "{}", r.stderr);
@@ -161,10 +228,19 @@ async fn forbidden_exits_4_with_the_server_message() {
         .mount(&h.server)
         .await;
     let (url, token) = (h.url(), user_token("alice"));
-    let env = [("FLUXGATE_URL", url.as_str()), ("FLUXGATE_TOKEN", token.as_str()), ("FLUXGATE_TEAM", TEAM_A)];
+    let env = [
+        ("FLUXGATE_URL", url.as_str()),
+        ("FLUXGATE_TOKEN", token.as_str()),
+        ("FLUXGATE_TEAM", TEAM_A),
+    ];
     let r = h.run(&["flags", "list", "--output", "text"], &env).await;
     assert_eq!(r.code, 4);
-    assert!(r.stderr.contains("error: policy denied (code policy_denied, HTTP 403)"), "{}", r.stderr);
+    assert!(
+        r.stderr
+            .contains("error: policy denied (code policy_denied, HTTP 403)"),
+        "{}",
+        r.stderr
+    );
     let r = h.run(&["flags", "list"], &env).await;
     let body: serde_json::Value = serde_json::from_str(&r.stderr).unwrap();
     assert_eq!(body["code"], "policy_denied");
@@ -174,7 +250,12 @@ async fn forbidden_exits_4_with_the_server_message() {
 async fn missing_credentials_exit_3() {
     let h = Harness::new().await;
     let url = h.url();
-    let r = h.run(&["flags", "list", "--output", "text"], &[("FLUXGATE_URL", url.as_str()), ("FLUXGATE_TEAM", TEAM_A)]).await;
+    let r = h
+        .run(
+            &["flags", "list", "--output", "text"],
+            &[("FLUXGATE_URL", url.as_str()), ("FLUXGATE_TEAM", TEAM_A)],
+        )
+        .await;
     assert_eq!(r.code, 3);
     assert!(r.stderr.contains("no credentials for profile default"));
 }

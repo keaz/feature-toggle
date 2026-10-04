@@ -33,19 +33,32 @@ pub fn is_uuid(value: &str) -> bool {
 }
 
 pub fn team_names(teams: &[Team]) -> String {
-    teams.iter().map(|team| team.name.as_str()).collect::<Vec<_>>().join(", ")
+    teams
+        .iter()
+        .map(|team| team.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The one team whose name matches `wanted`, ignoring case.
 pub fn find_team(teams: &[Team], wanted: &str) -> Result<Team, CliError> {
     let wanted = wanted.trim();
-    let matches: Vec<&Team> = teams.iter().filter(|team| team.name.eq_ignore_ascii_case(wanted)).collect();
+    let matches: Vec<&Team> = teams
+        .iter()
+        .filter(|team| team.name.eq_ignore_ascii_case(wanted))
+        .collect();
     match matches.as_slice() {
         [one] => Ok((*one).clone()),
-        [] => Err(CliError::Usage(format!("team '{wanted}' not found; available: {}", team_names(teams)))),
+        [] => Err(CliError::Usage(format!(
+            "team '{wanted}' not found; available: {}",
+            team_names(teams)
+        ))),
         many => Err(CliError::Usage(format!(
             "team name '{wanted}' matches several teams ({}); use the team id",
-            many.iter().map(|team| team.id.as_str()).collect::<Vec<_>>().join(", ")
+            many.iter()
+                .map(|team| team.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         ))),
     }
 }
@@ -66,7 +79,12 @@ impl Context {
     /// A client without credentials, for public routes.
     pub fn anonymous(settings: Settings, paths: Paths) -> Result<Self, CliError> {
         let api = ApiClient::new(&settings.url.value, None, Self::timeout(&settings))?;
-        Ok(Self { settings, paths, api, claims: None })
+        Ok(Self {
+            settings,
+            paths,
+            api,
+            claims: None,
+        })
     }
 
     pub async fn connect(settings: Settings, paths: Paths) -> Result<Self, CliError> {
@@ -74,7 +92,12 @@ impl Context {
             Credential::Static { token, .. } => token.clone(),
             Credential::Session { name } => {
                 SessionStore::new(paths.sessions.clone())
-                    .access_token(name, &settings.profile, &settings.url.value, Self::timeout(&settings))
+                    .access_token(
+                        name,
+                        &settings.profile,
+                        &settings.url.value,
+                        Self::timeout(&settings),
+                    )
                     .await?
             }
             Credential::None => {
@@ -86,7 +109,12 @@ impl Context {
         };
         let claims = decode_claims(&token);
         let api = ApiClient::new(&settings.url.value, Some(token), Self::timeout(&settings))?;
-        Ok(Self { settings, paths, api, claims })
+        Ok(Self {
+            settings,
+            paths,
+            api,
+            claims,
+        })
     }
 
     /// The team a system-client token is bound to.
@@ -131,7 +159,10 @@ impl Context {
     }
 
     pub async fn environments(&self, team_id: &str) -> Result<Vec<Environment>, CliError> {
-        let items = self.api.get_all_pages(&["teams", team_id, "environments"], &[]).await?;
+        let items = self
+            .api
+            .get_all_pages(&["teams", team_id, "environments"], &[])
+            .await?;
         serde_json::from_value(Value::Array(items))
             .map_err(|err| CliError::Other(format!("unexpected environments response: {err}")))
     }
@@ -149,7 +180,11 @@ impl Context {
             .ok_or_else(|| {
                 CliError::Usage(format!(
                     "environment '{wanted}' not found; available: {}",
-                    environments.iter().map(|e| e.name.as_str()).collect::<Vec<_>>().join(", ")
+                    environments
+                        .iter()
+                        .map(|e| e.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ))
             })
     }
@@ -165,7 +200,9 @@ impl Context {
             .into_iter()
             .find(|environment| environment.id.eq_ignore_ascii_case(&wanted))
             .map(|environment| environment.name)
-            .ok_or_else(|| CliError::Usage(format!("environment {wanted} not found in team {team_id}")))
+            .ok_or_else(|| {
+                CliError::Usage(format!("environment {wanted} not found in team {team_id}"))
+            })
     }
 
     fn wanted_environment(&self) -> Result<String, CliError> {
@@ -173,7 +210,11 @@ impl Context {
             .environment
             .as_ref()
             .map(|environment| environment.value.trim().to_string())
-            .ok_or_else(|| CliError::Usage("environment required: pass --env or set FLUXGATE_ENVIRONMENT".into()))
+            .ok_or_else(|| {
+                CliError::Usage(
+                    "environment required: pass --env or set FLUXGATE_ENVIRONMENT".into(),
+                )
+            })
     }
 }
 
@@ -200,9 +241,19 @@ mod tests {
         let url = format!("{}/api/v1", server.uri());
         let mut all = vec![("FLUXGATE_URL", url.as_str()), ("FLUXGATE_TOKEN", token)];
         all.extend_from_slice(pairs);
-        let settings = resolve(&ConfigFiles::empty(), &Env::from_pairs(all), &Overrides::default(), false).unwrap();
+        let settings = resolve(
+            &ConfigFiles::empty(),
+            &Env::from_pairs(all),
+            &Overrides::default(),
+            false,
+        )
+        .unwrap();
         let dir = std::env::temp_dir();
-        let paths = Paths { config: dir.join("c"), credentials: dir.join("k"), sessions: dir.join("s") };
+        let paths = Paths {
+            config: dir.join("c"),
+            credentials: dir.join("k"),
+            sessions: dir.join("s"),
+        };
         Context::connect(settings, paths).await.unwrap()
     }
 
@@ -211,7 +262,9 @@ mod tests {
     }
 
     fn system(team: &str) -> String {
-        jwt(json!({ "sub": "sc1", "username": "ci", "exp": 4102444800i64, "token_type": "system_client", "team_id": team }))
+        jwt(
+            json!({ "sub": "sc1", "username": "ci", "exp": 4102444800i64, "token_type": "system_client", "team_id": team }),
+        )
     }
 
     async fn mount_teams(server: &MockServer, teams: serde_json::Value) {
@@ -232,7 +285,11 @@ mod tests {
     #[tokio::test]
     async fn team_name_is_matched_ignoring_case() {
         let server = MockServer::start().await;
-        mount_teams(&server, json!([{ "id": TEAM_A, "name": "Payments" }, { "id": TEAM_B, "name": "Checkout" }])).await;
+        mount_teams(
+            &server,
+            json!([{ "id": TEAM_A, "name": "Payments" }, { "id": TEAM_B, "name": "Checkout" }]),
+        )
+        .await;
         let ctx = context(&server, &user(), &[("FLUXGATE_TEAM", "payments")]).await;
         assert_eq!(ctx.team_id().await.unwrap(), TEAM_A);
     }
@@ -250,7 +307,11 @@ mod tests {
     #[tokio::test]
     async fn duplicate_team_names_ask_for_the_id() {
         let server = MockServer::start().await;
-        mount_teams(&server, json!([{ "id": TEAM_A, "name": "Ops" }, { "id": TEAM_B, "name": "ops" }])).await;
+        mount_teams(
+            &server,
+            json!([{ "id": TEAM_A, "name": "Ops" }, { "id": TEAM_B, "name": "ops" }]),
+        )
+        .await;
         let ctx = context(&server, &user(), &[("FLUXGATE_TEAM", "OPS")]).await;
         let err = ctx.team_id().await.unwrap_err();
         assert!(err.to_string().contains(TEAM_A) && err.to_string().contains(TEAM_B));
@@ -260,7 +321,13 @@ mod tests {
     async fn missing_team_for_a_user_token_is_a_usage_error() {
         let server = MockServer::start().await;
         let ctx = context(&server, &user(), &[]).await;
-        assert!(ctx.team_id().await.unwrap_err().to_string().starts_with("team required"));
+        assert!(
+            ctx.team_id()
+                .await
+                .unwrap_err()
+                .to_string()
+                .starts_with("team required")
+        );
     }
 
     #[tokio::test]
@@ -272,7 +339,10 @@ mod tests {
         let ctx = context(&server, &system(TEAM_A), &[("FLUXGATE_TEAM", TEAM_B)]).await;
         let err = ctx.team_id().await.unwrap_err();
         assert_eq!(err.exit_code(), EXIT_USAGE);
-        assert!(err.to_string().contains("does not match the system-client token's team"));
+        assert!(
+            err.to_string()
+                .contains("does not match the system-client token's team")
+        );
     }
 
     #[tokio::test]
@@ -293,16 +363,35 @@ mod tests {
         assert_eq!(ctx.environment_id(TEAM_A).await.unwrap(), ENV_ID);
         assert_eq!(ctx.environment_name(TEAM_A).await.unwrap(), "staging");
         let ctx = context(&server, &user(), &[("FLUXGATE_ENVIRONMENT", "prod")]).await;
-        assert!(ctx.environment_id(TEAM_A).await.unwrap_err().to_string().contains("available: staging"));
+        assert!(
+            ctx.environment_id(TEAM_A)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("available: staging")
+        );
     }
 
     #[tokio::test]
     async fn connect_without_credentials_is_an_auth_error() {
-        let settings = resolve(&ConfigFiles::empty(), &Env::default(), &Overrides::default(), false).unwrap();
+        let settings = resolve(
+            &ConfigFiles::empty(),
+            &Env::default(),
+            &Overrides::default(),
+            false,
+        )
+        .unwrap();
         let dir = std::env::temp_dir();
-        let paths = Paths { config: dir.join("c"), credentials: dir.join("k"), sessions: dir.join("s") };
+        let paths = Paths {
+            config: dir.join("c"),
+            credentials: dir.join("k"),
+            sessions: dir.join("s"),
+        };
         let err = Context::connect(settings, paths).await.unwrap_err();
         assert_eq!(err.exit_code(), EXIT_AUTH);
-        assert_eq!(err.to_string(), "no credentials for profile default: run fluxgate configure or fluxgate login");
+        assert_eq!(
+            err.to_string(),
+            "no credentials for profile default: run fluxgate configure or fluxgate login"
+        );
     }
 }

@@ -11,17 +11,24 @@ pub async fn run(args: TeamsArgs, app: &mut App<'_>) -> Result<Outcome, CliError
     let teams = context.teams().await?;
     match args.command {
         TeamsSubcommand::List => {
-            let active = context.settings.team.as_ref().map(|team| team.value.clone());
+            let active = context
+                .settings
+                .team
+                .as_ref()
+                .map(|team| team.value.clone());
             let items: Vec<Value> = teams
                 .iter()
                 .map(|team| {
-                    let is_active = active
-                        .as_deref()
-                        .is_some_and(|a| a.eq_ignore_ascii_case(&team.id) || a.eq_ignore_ascii_case(&team.name));
+                    let is_active = active.as_deref().is_some_and(|a| {
+                        a.eq_ignore_ascii_case(&team.id) || a.eq_ignore_ascii_case(&team.name)
+                    });
                     json!({ "active": is_active, "name": team.name, "id": team.id })
                 })
                 .collect();
-            Ok(Outcome::new(json!({ "items": items }), Kind::List(TEAM_COLUMNS)))
+            Ok(Outcome::new(
+                json!({ "items": items }),
+                Kind::List(TEAM_COLUMNS),
+            ))
         }
         TeamsSubcommand::Use { team } => {
             let wanted = team.trim();
@@ -31,7 +38,10 @@ pub async fn run(args: TeamsArgs, app: &mut App<'_>) -> Result<Outcome, CliError
                     .find(|t| t.id.eq_ignore_ascii_case(wanted))
                     .cloned()
                     .ok_or_else(|| {
-                        CliError::Usage(format!("team {wanted} not found; available: {}", team_names(&teams)))
+                        CliError::Usage(format!(
+                            "team {wanted} not found; available: {}",
+                            team_names(&teams)
+                        ))
                     })?
             } else {
                 find_team(&teams, wanted)?

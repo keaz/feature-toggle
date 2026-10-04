@@ -37,17 +37,27 @@ pub async fn password_login(
     // The reset answers 204 without a session: end the temporary one and log
     // in again with the new password.
     let _ = temporary
-        .post(&["auth", "logout"], &json!({ "refreshToken": response.refresh_token }))
+        .post(
+            &["auth", "logout"],
+            &json!({ "refreshToken": response.refresh_token }),
+        )
         .await;
     login(&api, username, &new_password).await
 }
 
 async fn login(api: &ApiClient, username: &str, password: &str) -> Result<LoginResponse, CliError> {
     let value = api
-        .post(&["auth", "login"], &json!({ "username": username, "password": password }))
+        .post(
+            &["auth", "login"],
+            &json!({ "username": username, "password": password }),
+        )
         .await
         .map_err(|err| match err {
-            CliError::Api { status: 401, message, .. } => CliError::Auth(format!("login failed: {message}")),
+            CliError::Api {
+                status: 401,
+                message,
+                ..
+            } => CliError::Auth(format!("login failed: {message}")),
             other => other,
         })?;
     serde_json::from_value(value)

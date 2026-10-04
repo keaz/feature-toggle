@@ -6,10 +6,18 @@ use crate::error::CliError;
 use crate::output::{Kind, Outcome};
 
 pub async fn run(args: RolloutArgs, app: &mut App<'_>) -> Result<Outcome, CliError> {
-    let RolloutSubcommand::Promote { stage_id, flag, request, reason, external_ref, freeze_override_reason } =
-        args.command;
+    let RolloutSubcommand::Promote {
+        stage_id,
+        flag,
+        request,
+        reason,
+        external_ref,
+        freeze_override_reason,
+    } = args.command;
     if stage_id.is_none() && flag.is_none() {
-        return Err(CliError::Usage("pass a stage id, or --flag <key> with --env <name>".into()));
+        return Err(CliError::Usage(
+            "pass a stage id, or --flag <key> with --env <name>".into(),
+        ));
     }
     let mut body = json!({ "request": request.to_ascii_uppercase() });
     if let Some(reason) = reason {
@@ -31,12 +39,26 @@ pub async fn run(args: RolloutArgs, app: &mut App<'_>) -> Result<Outcome, CliErr
             context
                 .api
                 .post(
-                    &["teams", &team, "features", "by-key", &flag, "environments", &environment, "request-change"],
+                    &[
+                        "teams",
+                        &team,
+                        "features",
+                        "by-key",
+                        &flag,
+                        "environments",
+                        &environment,
+                        "request-change",
+                    ],
                     &body,
                 )
                 .await?
         }
-        (Some(stage_id), None) => context.api.post(&["stages", &stage_id, "request-change"], &body).await?,
+        (Some(stage_id), None) => {
+            context
+                .api
+                .post(&["stages", &stage_id, "request-change"], &body)
+                .await?
+        }
         (None, None) => unreachable!("checked above"),
     };
     Ok(Outcome::new(value, Kind::Object))

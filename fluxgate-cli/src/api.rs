@@ -44,12 +44,17 @@ impl ApiClient {
         Ok(Self {
             http,
             base,
-            token: token.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()),
+            token: token
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty()),
         })
     }
 
     pub fn with_token(&self, token: Option<String>) -> Self {
-        Self { token, ..self.clone() }
+        Self {
+            token,
+            ..self.clone()
+        }
     }
 
     /// Base URL plus `segments`, each percent-encoded as one path segment.
@@ -62,7 +67,11 @@ impl ApiClient {
         url
     }
 
-    pub async fn get(&self, segments: &[&str], query: &[(&str, String)]) -> Result<Value, CliError> {
+    pub async fn get(
+        &self,
+        segments: &[&str],
+        query: &[(&str, String)],
+    ) -> Result<Value, CliError> {
         self.send(Method::GET, segments, query, None).await
     }
 
@@ -88,7 +97,10 @@ impl ApiClient {
                 .and_then(Value::as_array)
                 .cloned()
                 .ok_or_else(|| CliError::Other("unexpected list response: no items".into()))?;
-            let total = page.pointer("/meta/total").and_then(Value::as_i64).unwrap_or(0);
+            let total = page
+                .pointer("/meta/total")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
             let count = batch.len() as i64;
             items.extend(batch);
             offset += count;
@@ -137,9 +149,9 @@ async fn decode(response: reqwest::Response) -> Result<Value, CliError> {
         json!({})
     } else {
         // Proxies answer with HTML; keep the start of it as the message.
-        serde_json::from_str(&text).unwrap_or_else(|_| {
-            json!({ "message": text.chars().take(MAX_ERROR_TEXT).collect::<String>() })
-        })
+        serde_json::from_str(&text).unwrap_or_else(
+            |_| json!({ "message": text.chars().take(MAX_ERROR_TEXT).collect::<String>() }),
+        )
     };
     if status.is_success() {
         return Ok(body);
@@ -155,7 +167,12 @@ async fn decode(response: reqwest::Response) -> Result<Value, CliError> {
         .and_then(Value::as_str)
         .unwrap_or_else(|| status.canonical_reason().unwrap_or("request failed"))
         .to_string();
-    Err(CliError::Api { status: status.as_u16(), code, message, body })
+    Err(CliError::Api {
+        status: status.as_u16(),
+        code,
+        message,
+        body,
+    })
 }
 
 #[cfg(test)]
@@ -167,7 +184,12 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn client(server: &MockServer, token: Option<&str>) -> ApiClient {
-        ApiClient::new(&format!("{}/api/v1", server.uri()), token.map(str::to_string), Duration::from_secs(5)).unwrap()
+        ApiClient::new(
+            &format!("{}/api/v1", server.uri()),
+            token.map(str::to_string),
+            Duration::from_secs(5),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -187,7 +209,12 @@ mod tests {
 
     #[test]
     fn debug_hides_the_token() {
-        let api = ApiClient::new("http://h/api/v1", Some("secret-token".into()), Duration::from_secs(1)).unwrap();
+        let api = ApiClient::new(
+            "http://h/api/v1",
+            Some("secret-token".into()),
+            Duration::from_secs(1),
+        )
+        .unwrap();
         assert!(!format!("{api:?}").contains("secret-token"));
     }
 
@@ -203,7 +230,10 @@ mod tests {
             .mount(&server)
             .await;
         let value = client(&server, Some("tok"))
-            .get(&["teams", "t1", "approval-requests"], &[("statuses", "pending".into())])
+            .get(
+                &["teams", "t1", "approval-requests"],
+                &[("statuses", "pending".into())],
+            )
             .await
             .unwrap();
         assert_eq!(value, json!({ "items": [] }));
@@ -218,9 +248,15 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let err = client(&server, None).get(&["features", "x"], &[]).await.unwrap_err();
+        let err = client(&server, None)
+            .get(&["features", "x"], &[])
+            .await
+            .unwrap_err();
         assert_eq!(err.exit_code(), EXIT_NOT_FOUND);
-        assert_eq!(err.to_string(), "feature not found (code feature_not_found, HTTP 404)");
+        assert_eq!(
+            err.to_string(),
+            "feature not found (code feature_not_found, HTTP 404)"
+        );
     }
 
     #[tokio::test]
@@ -230,7 +266,10 @@ mod tests {
             .respond_with(ResponseTemplate::new(502).set_body_string("<html>Bad Gateway</html>"))
             .mount(&server)
             .await;
-        let err = client(&server, None).get(&["health"], &[]).await.unwrap_err();
+        let err = client(&server, None)
+            .get(&["health"], &[])
+            .await
+            .unwrap_err();
         assert_eq!(err.exit_code(), EXIT_SERVER);
         assert!(err.to_string().contains("Bad Gateway"));
         assert!(err.to_string().contains("HTTP 502"));
@@ -243,7 +282,10 @@ mod tests {
             .respond_with(ResponseTemplate::new(204))
             .mount(&server)
             .await;
-        let value = client(&server, None).post(&["auth", "logout"], &json!({})).await.unwrap();
+        let value = client(&server, None)
+            .post(&["auth", "logout"], &json!({}))
+            .await
+            .unwrap();
         assert_eq!(value, json!({}));
     }
 
@@ -280,7 +322,10 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        let items = client(&server, None).get_all_pages(&["teams", "t", "features"], &[]).await.unwrap();
+        let items = client(&server, None)
+            .get_all_pages(&["teams", "t", "features"], &[])
+            .await
+            .unwrap();
         assert_eq!(items.len(), 3);
         assert_eq!(items[2]["id"], "c");
     }

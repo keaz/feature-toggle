@@ -8,7 +8,9 @@ use wiremock::{Mock, ResponseTemplate};
 async fn mount_login(h: &Harness, password: &str, body: serde_json::Value) {
     Mock::given(method("POST"))
         .and(path("/api/v1/auth/login"))
-        .and(body_json(json!({ "username": "alice", "password": password })))
+        .and(body_json(
+            json!({ "username": "alice", "password": password }),
+        ))
         .respond_with(ResponseTemplate::new(200).set_body_json(body))
         .expect(1)
         .mount(&h.server)
@@ -21,10 +23,24 @@ async fn password_login_writes_the_session_and_links_the_profile() {
     h.write("config", "[default]\nteam = payments\n");
     mount_login(&h, "pw", login_body("a1", "r1")).await;
     let url = h.url();
-    let r = h.run_with(&["login", "--password", "--username", "alice", "--output", "text"], &[("FLUXGATE_URL", url.as_str())], &["pw"]).await;
+    let r = h
+        .run_with(
+            &[
+                "login",
+                "--password",
+                "--username",
+                "alice",
+                "--output",
+                "text",
+            ],
+            &[("FLUXGATE_URL", url.as_str())],
+            &["pw"],
+        )
+        .await;
     assert_eq!(r.code, 0, "{}", r.stderr);
     assert_eq!(r.stdout.trim(), "Logged in as alice (session 'default')");
-    let session: serde_json::Value = serde_json::from_str(&h.read("sessions/default.json")).unwrap();
+    let session: serde_json::Value =
+        serde_json::from_str(&h.read("sessions/default.json")).unwrap();
     assert_eq!(session["accessToken"], "a1");
     let config = h.read("config");
     assert!(config.contains("session=default"), "{config}");
@@ -35,7 +51,13 @@ async fn password_login_writes_the_session_and_links_the_profile() {
 #[tokio::test]
 async fn later_commands_use_and_refresh_the_session() {
     let h = Harness::new().await;
-    h.write("config", &format!("[default]\nsession = corp\nteam = {TEAM_A}\n\n[session corp]\nurl = {}\n", h.url()));
+    h.write(
+        "config",
+        &format!(
+            "[default]\nsession = corp\nteam = {TEAM_A}\n\n[session corp]\nurl = {}\n",
+            h.url()
+        ),
+    );
     h.write_session("corp", "a1", "r1", -5);
     Mock::given(method("POST"))
         .and(path("/api/v1/auth/refresh"))
@@ -47,7 +69,9 @@ async fn later_commands_use_and_refresh_the_session() {
     Mock::given(method("GET"))
         .and(path(format!("/api/v1/teams/{TEAM_A}/features")))
         .and(header("authorization", "Bearer a2"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "items": [], "meta": { "offset": 0, "limit": 50, "total": 0 } })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({ "items": [], "meta": { "offset": 0, "limit": 50, "total": 0 } }),
+        ))
         .expect(1)
         .mount(&h.server)
         .await;
@@ -64,7 +88,9 @@ async fn temporary_password_is_changed_then_login_repeats() {
     Mock::given(method("POST"))
         .and(path("/api/v1/auth/reset-password"))
         .and(header("authorization", "Bearer temp"))
-        .and(body_json(json!({ "currentPassword": "old", "newPassword": "new-pass" })))
+        .and(body_json(
+            json!({ "currentPassword": "old", "newPassword": "new-pass" }),
+        ))
         .respond_with(ResponseTemplate::new(204))
         .expect(1)
         .mount(&h.server)
@@ -77,7 +103,11 @@ async fn temporary_password_is_changed_then_login_repeats() {
     mount_login(&h, "new-pass", login_body("a1", "r1")).await;
     let url = h.url();
     let r = h
-        .run_with(&["login", "--password", "--username", "alice"], &[("FLUXGATE_URL", url.as_str())], &["old", "new-pass", "new-pass"])
+        .run_with(
+            &["login", "--password", "--username", "alice"],
+            &[("FLUXGATE_URL", url.as_str())],
+            &["old", "new-pass", "new-pass"],
+        )
         .await;
     assert_eq!(r.code, 0, "{}", r.stderr);
     assert!(h.read("sessions/default.json").contains("\"a1\""));
@@ -91,7 +121,18 @@ async fn mismatched_new_passwords_stop_the_login() {
     mount_login(&h, "old", temporary).await;
     let url = h.url();
     let r = h
-        .run_with(&["login", "--password", "--username", "alice", "--output", "text"], &[("FLUXGATE_URL", url.as_str())], &["old", "a", "b"])
+        .run_with(
+            &[
+                "login",
+                "--password",
+                "--username",
+                "alice",
+                "--output",
+                "text",
+            ],
+            &[("FLUXGATE_URL", url.as_str())],
+            &["old", "a", "b"],
+        )
         .await;
     assert_eq!(r.code, 2);
     assert!(r.stderr.contains("do not match"));
@@ -103,11 +144,21 @@ async fn wrong_password_exits_3() {
     let h = Harness::new().await;
     Mock::given(method("POST"))
         .and(path("/api/v1/auth/login"))
-        .respond_with(ResponseTemplate::new(401).set_body_json(json!({ "error": "unauthorized", "message": "invalid credentials" })))
+        .respond_with(
+            ResponseTemplate::new(401).set_body_json(
+                json!({ "error": "unauthorized", "message": "invalid credentials" }),
+            ),
+        )
         .mount(&h.server)
         .await;
     let url = h.url();
-    let r = h.run_with(&["login", "--username", "alice", "--output", "text"], &[("FLUXGATE_URL", url.as_str())], &["bad"]).await;
+    let r = h
+        .run_with(
+            &["login", "--username", "alice", "--output", "text"],
+            &[("FLUXGATE_URL", url.as_str())],
+            &["bad"],
+        )
+        .await;
     assert_eq!(r.code, 3);
     assert!(r.stderr.contains("login failed: invalid credentials"));
 }
@@ -115,7 +166,13 @@ async fn wrong_password_exits_3() {
 #[tokio::test]
 async fn sso_sessions_need_the_password_flag_in_this_version() {
     let h = Harness::new().await;
-    h.write("config", &format!("[default]\nsession = corp\n\n[session corp]\nurl = {}\nsso_provider = okta\n", h.url()));
+    h.write(
+        "config",
+        &format!(
+            "[default]\nsession = corp\n\n[session corp]\nurl = {}\nsso_provider = okta\n",
+            h.url()
+        ),
+    );
     let r = h.run(&["login", "--output", "text"], &[]).await;
     assert_eq!(r.code, 2);
     assert!(r.stderr.contains("fluxgate login --password"));
@@ -124,7 +181,13 @@ async fn sso_sessions_need_the_password_flag_in_this_version() {
 #[tokio::test]
 async fn logout_revokes_the_refresh_token_and_deletes_the_cache() {
     let h = Harness::new().await;
-    h.write("config", &format!("[default]\nsession = corp\n\n[session corp]\nurl = {}\n", h.url()));
+    h.write(
+        "config",
+        &format!(
+            "[default]\nsession = corp\n\n[session corp]\nurl = {}\n",
+            h.url()
+        ),
+    );
     h.write_session("corp", "a1", "r1", 600);
     Mock::given(method("POST"))
         .and(path("/api/v1/auth/logout"))
@@ -143,16 +206,28 @@ async fn logout_revokes_the_refresh_token_and_deletes_the_cache() {
 #[tokio::test]
 async fn logout_deletes_the_cache_even_when_the_server_fails() {
     let h = Harness::new().await;
-    h.write("config", &format!("[default]\nsession = corp\n\n[session corp]\nurl = {}\n", h.url()));
+    h.write(
+        "config",
+        &format!(
+            "[default]\nsession = corp\n\n[session corp]\nurl = {}\n",
+            h.url()
+        ),
+    );
     h.write_session("corp", "a1", "r1", 600);
     Mock::given(method("POST"))
         .and(path("/api/v1/auth/logout"))
-        .respond_with(ResponseTemplate::new(500).set_body_json(json!({ "error": "internal", "message": "boom" })))
+        .respond_with(
+            ResponseTemplate::new(500)
+                .set_body_json(json!({ "error": "internal", "message": "boom" })),
+        )
         .mount(&h.server)
         .await;
     let r = h.run(&["logout"], &[]).await;
     assert_eq!(r.code, 0);
-    assert!(r.stderr.contains("warning: server logout failed for session 'corp'"));
+    assert!(
+        r.stderr
+            .contains("warning: server logout failed for session 'corp'")
+    );
     assert!(!h.exists("sessions/corp.json"));
 }
 
@@ -160,7 +235,10 @@ async fn logout_deletes_the_cache_even_when_the_server_fails() {
 async fn logout_all_ends_every_cached_session() {
     let h = Harness::new().await;
     let url = h.url();
-    h.write("config", &format!("[session one]\nurl = {url}\n\n[session two]\nurl = {url}\n"));
+    h.write(
+        "config",
+        &format!("[session one]\nurl = {url}\n\n[session two]\nurl = {url}\n"),
+    );
     h.write_session("one", "a1", "r1", 600);
     h.write_session("two", "a2", "r2", 600);
     Mock::given(method("POST"))

@@ -53,9 +53,14 @@ pub struct Overrides {
 #[derive(Clone, PartialEq, Eq)]
 pub enum Credential {
     /// A bearer token from a flag, env var or the credentials file.
-    Static { token: String, source: Source },
+    Static {
+        token: String,
+        source: Source,
+    },
     /// A cached login session.
-    Session { name: String },
+    Session {
+        name: String,
+    },
     None,
 }
 
@@ -114,14 +119,21 @@ pub fn resolve(
 
     let pick = |flag: Option<String>, env_keys: &[&str], key: &str| -> Option<Resolved<String>> {
         if let Some(value) = flag.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
-            return Some(Resolved { value: value.to_string(), source: Source::Flag });
+            return Some(Resolved {
+                value: value.to_string(),
+                source: Source::Flag,
+            });
         }
         if let Some(value) = env.first(env_keys) {
-            return Some(Resolved { value: value.to_string(), source: Source::Env });
+            return Some(Resolved {
+                value: value.to_string(),
+                source: Source::Env,
+            });
         }
-        files
-            .profile_value(&profile, key)
-            .map(|value| Resolved { value: value.to_string(), source: Source::Profile })
+        files.profile_value(&profile, key).map(|value| Resolved {
+            value: value.to_string(),
+            source: Source::Profile,
+        })
     };
 
     let url = pick(overrides.url.clone(), &["FLUXGATE_URL"], "url")
@@ -129,12 +141,25 @@ pub fn resolve(
             session
                 .as_deref()
                 .and_then(|name| files.session_value(name, "url"))
-                .map(|value| Resolved { value: value.to_string(), source: Source::Session })
+                .map(|value| Resolved {
+                    value: value.to_string(),
+                    source: Source::Session,
+                })
         })
-        .unwrap_or(Resolved { value: DEFAULT_URL.to_string(), source: Source::Default });
-    let url = Resolved { value: url.value.trim_end_matches('/').to_string(), source: url.source };
+        .unwrap_or(Resolved {
+            value: DEFAULT_URL.to_string(),
+            source: Source::Default,
+        });
+    let url = Resolved {
+        value: url.value.trim_end_matches('/').to_string(),
+        source: url.source,
+    };
 
-    let team = pick(overrides.team.clone(), &["FLUXGATE_TEAM", "FLUXGATE_TEAM_ID"], "team");
+    let team = pick(
+        overrides.team.clone(),
+        &["FLUXGATE_TEAM", "FLUXGATE_TEAM_ID"],
+        "team",
+    );
     let environment = pick(
         overrides.environment.clone(),
         &["FLUXGATE_ENVIRONMENT", "FLUXGATE_ENVIRONMENT_ID"],
@@ -151,29 +176,52 @@ pub fn resolve(
             source: raw.source,
         },
         None => Resolved {
-            value: if is_tty { OutputFormat::Table } else { OutputFormat::Json },
+            value: if is_tty {
+                OutputFormat::Table
+            } else {
+                OutputFormat::Json
+            },
             source: Source::Default,
         },
     };
 
-    let timeout = match pick(overrides.timeout.map(|t| t.to_string()), &["FLUXGATE_TIMEOUT"], "timeout") {
+    let timeout = match pick(
+        overrides.timeout.map(|t| t.to_string()),
+        &["FLUXGATE_TIMEOUT"],
+        "timeout",
+    ) {
         Some(raw) => Resolved {
             value: raw.value.parse::<u64>().map_err(|_| {
                 CliError::Usage(format!("invalid timeout '{}': expected seconds", raw.value))
             })?,
             source: raw.source,
         },
-        None => Resolved { value: DEFAULT_TIMEOUT_SECS, source: Source::Default },
+        None => Resolved {
+            value: DEFAULT_TIMEOUT_SECS,
+            source: Source::Default,
+        },
     };
 
-    let credential = if let Some(token) =
-        overrides.token.as_deref().map(str::trim).filter(|t| !t.is_empty())
+    let credential = if let Some(token) = overrides
+        .token
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
     {
-        Credential::Static { token: token.to_string(), source: Source::Flag }
+        Credential::Static {
+            token: token.to_string(),
+            source: Source::Flag,
+        }
     } else if let Some(token) = env.get("FLUXGATE_TOKEN") {
-        Credential::Static { token: token.to_string(), source: Source::Env }
+        Credential::Static {
+            token: token.to_string(),
+            source: Source::Env,
+        }
     } else if let Some(token) = files.credential_token(&profile) {
-        Credential::Static { token: token.to_string(), source: Source::Profile }
+        Credential::Static {
+            token: token.to_string(),
+            source: Source::Profile,
+        }
     } else if let Some(name) = &session {
         Credential::Session { name: name.clone() }
     } else {
@@ -220,100 +268,267 @@ mod tests {
 
     #[test]
     fn defaults_without_files() {
-        let s = resolve(&ConfigFiles::empty(), &Env::default(), &Overrides::default(), false).unwrap();
+        let s = resolve(
+            &ConfigFiles::empty(),
+            &Env::default(),
+            &Overrides::default(),
+            false,
+        )
+        .unwrap();
         assert_eq!(s.profile, "default");
-        assert_eq!(s.url, Resolved { value: DEFAULT_URL.to_string(), source: Source::Default });
+        assert_eq!(
+            s.url,
+            Resolved {
+                value: DEFAULT_URL.to_string(),
+                source: Source::Default
+            }
+        );
         assert_eq!(s.team, None);
         assert_eq!(s.output.value, OutputFormat::Json);
         assert_eq!(s.timeout.value, 30);
         assert_eq!(s.credential, Credential::None);
-        let tty = resolve(&ConfigFiles::empty(), &Env::default(), &Overrides::default(), true).unwrap();
+        let tty = resolve(
+            &ConfigFiles::empty(),
+            &Env::default(),
+            &Overrides::default(),
+            true,
+        )
+        .unwrap();
         assert_eq!(tty.output.value, OutputFormat::Table);
     }
 
     #[test]
     fn profile_values_and_session_url() {
         let s = resolve(&files(), &Env::default(), &Overrides::default(), false).unwrap();
-        assert_eq!(s.url, Resolved { value: "https://fg.example.com/api/v1".into(), source: Source::Session });
-        assert_eq!(s.team, Some(Resolved { value: "payments".into(), source: Source::Profile }));
-        assert_eq!(s.output, Resolved { value: OutputFormat::Text, source: Source::Profile });
-        assert_eq!(s.credential, Credential::Session { name: "corp".into() });
+        assert_eq!(
+            s.url,
+            Resolved {
+                value: "https://fg.example.com/api/v1".into(),
+                source: Source::Session
+            }
+        );
+        assert_eq!(
+            s.team,
+            Some(Resolved {
+                value: "payments".into(),
+                source: Source::Profile
+            })
+        );
+        assert_eq!(
+            s.output,
+            Resolved {
+                value: OutputFormat::Text,
+                source: Source::Profile
+            }
+        );
+        assert_eq!(
+            s.credential,
+            Credential::Session {
+                name: "corp".into()
+            }
+        );
         assert_eq!(s.session.as_deref(), Some("corp"));
         assert_eq!(s.sso_provider.as_deref(), Some("okta"));
     }
 
     #[test]
     fn flag_beats_env_beats_profile() {
-        let overrides = Overrides { team: Some("flag-team".into()), ..Overrides::default() };
-        let s = resolve(&files(), &env(&[("FLUXGATE_TEAM", "env-team")]), &overrides, false).unwrap();
-        assert_eq!(s.team, Some(Resolved { value: "flag-team".into(), source: Source::Flag }));
-        let s = resolve(&files(), &env(&[("FLUXGATE_TEAM", "env-team")]), &Overrides::default(), false).unwrap();
-        assert_eq!(s.team, Some(Resolved { value: "env-team".into(), source: Source::Env }));
+        let overrides = Overrides {
+            team: Some("flag-team".into()),
+            ..Overrides::default()
+        };
+        let s = resolve(
+            &files(),
+            &env(&[("FLUXGATE_TEAM", "env-team")]),
+            &overrides,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            s.team,
+            Some(Resolved {
+                value: "flag-team".into(),
+                source: Source::Flag
+            })
+        );
+        let s = resolve(
+            &files(),
+            &env(&[("FLUXGATE_TEAM", "env-team")]),
+            &Overrides::default(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            s.team,
+            Some(Resolved {
+                value: "env-team".into(),
+                source: Source::Env
+            })
+        );
     }
 
     #[test]
     fn legacy_env_names_still_work_and_new_names_win() {
-        let s = resolve(&ConfigFiles::empty(), &env(&[("FLUXGATE_TEAM_ID", "t-old"), ("FLUXGATE_ENVIRONMENT_ID", "e-old")]), &Overrides::default(), false).unwrap();
+        let s = resolve(
+            &ConfigFiles::empty(),
+            &env(&[
+                ("FLUXGATE_TEAM_ID", "t-old"),
+                ("FLUXGATE_ENVIRONMENT_ID", "e-old"),
+            ]),
+            &Overrides::default(),
+            false,
+        )
+        .unwrap();
         assert_eq!(s.team.unwrap().value, "t-old");
         assert_eq!(s.environment.unwrap().value, "e-old");
-        let s = resolve(&ConfigFiles::empty(), &env(&[("FLUXGATE_TEAM_ID", "t-old"), ("FLUXGATE_TEAM", "t-new")]), &Overrides::default(), false).unwrap();
+        let s = resolve(
+            &ConfigFiles::empty(),
+            &env(&[("FLUXGATE_TEAM_ID", "t-old"), ("FLUXGATE_TEAM", "t-new")]),
+            &Overrides::default(),
+            false,
+        )
+        .unwrap();
         assert_eq!(s.team.unwrap().value, "t-new");
     }
 
     #[test]
     fn profile_comes_from_flag_then_env() {
-        let s = resolve(&files(), &env(&[("FLUXGATE_PROFILE", "prod")]), &Overrides::default(), false).unwrap();
+        let s = resolve(
+            &files(),
+            &env(&[("FLUXGATE_PROFILE", "prod")]),
+            &Overrides::default(),
+            false,
+        )
+        .unwrap();
         assert_eq!(s.profile, "prod");
         assert_eq!(s.team.unwrap().value, "checkout");
         assert_eq!(s.environment.unwrap().value, "production");
-        let overrides = Overrides { profile: Some("ci".into()), ..Overrides::default() };
-        let s = resolve(&files(), &env(&[("FLUXGATE_PROFILE", "prod")]), &overrides, false).unwrap();
+        let overrides = Overrides {
+            profile: Some("ci".into()),
+            ..Overrides::default()
+        };
+        let s = resolve(
+            &files(),
+            &env(&[("FLUXGATE_PROFILE", "prod")]),
+            &overrides,
+            false,
+        )
+        .unwrap();
         assert_eq!(s.profile, "ci");
     }
 
     #[test]
     fn missing_profile_is_a_usage_error_naming_it() {
-        let err = resolve(&files(), &env(&[("FLUXGATE_PROFILE", "nope")]), &Overrides::default(), false).unwrap_err();
+        let err = resolve(
+            &files(),
+            &env(&[("FLUXGATE_PROFILE", "nope")]),
+            &Overrides::default(),
+            false,
+        )
+        .unwrap_err();
         assert_eq!(err.exit_code(), crate::error::EXIT_USAGE);
         assert!(err.to_string().contains("'nope'"));
     }
 
     #[test]
     fn credential_order_is_flag_env_file_session() {
-        let ci = Overrides { profile: Some("ci".into()), ..Overrides::default() };
+        let ci = Overrides {
+            profile: Some("ci".into()),
+            ..Overrides::default()
+        };
         let s = resolve(&files(), &Env::default(), &ci, false).unwrap();
-        assert_eq!(s.credential, Credential::Static { token: "static-ci".into(), source: Source::Profile });
-        let s = resolve(&files(), &env(&[("FLUXGATE_TOKEN", "from-env")]), &ci, false).unwrap();
-        assert_eq!(s.credential, Credential::Static { token: "from-env".into(), source: Source::Env });
-        let flag = Overrides { token: Some("from-flag".into()), ..ci };
-        let s = resolve(&files(), &env(&[("FLUXGATE_TOKEN", "from-env")]), &flag, false).unwrap();
-        assert_eq!(s.credential, Credential::Static { token: "from-flag".into(), source: Source::Flag });
+        assert_eq!(
+            s.credential,
+            Credential::Static {
+                token: "static-ci".into(),
+                source: Source::Profile
+            }
+        );
+        let s = resolve(
+            &files(),
+            &env(&[("FLUXGATE_TOKEN", "from-env")]),
+            &ci,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            s.credential,
+            Credential::Static {
+                token: "from-env".into(),
+                source: Source::Env
+            }
+        );
+        let flag = Overrides {
+            token: Some("from-flag".into()),
+            ..ci
+        };
+        let s = resolve(
+            &files(),
+            &env(&[("FLUXGATE_TOKEN", "from-env")]),
+            &flag,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            s.credential,
+            Credential::Static {
+                token: "from-flag".into(),
+                source: Source::Flag
+            }
+        );
     }
 
     #[test]
     fn url_trailing_slash_is_trimmed() {
-        let ci = Overrides { profile: Some("ci".into()), ..Overrides::default() };
+        let ci = Overrides {
+            profile: Some("ci".into()),
+            ..Overrides::default()
+        };
         let s = resolve(&files(), &Env::default(), &ci, false).unwrap();
         assert_eq!(s.url.value, "https://ci.example.com/api/v1");
     }
 
     #[test]
     fn invalid_output_and_timeout_are_usage_errors() {
-        let err = resolve(&ConfigFiles::empty(), &env(&[("FLUXGATE_OUTPUT", "yaml")]), &Overrides::default(), false).unwrap_err();
+        let err = resolve(
+            &ConfigFiles::empty(),
+            &env(&[("FLUXGATE_OUTPUT", "yaml")]),
+            &Overrides::default(),
+            false,
+        )
+        .unwrap_err();
         assert_eq!(err.exit_code(), crate::error::EXIT_USAGE);
-        let err = resolve(&ConfigFiles::empty(), &env(&[("FLUXGATE_TIMEOUT", "soon")]), &Overrides::default(), false).unwrap_err();
+        let err = resolve(
+            &ConfigFiles::empty(),
+            &env(&[("FLUXGATE_TIMEOUT", "soon")]),
+            &Overrides::default(),
+            false,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("invalid timeout 'soon'"));
     }
 
     #[test]
     fn credential_debug_hides_the_token() {
-        let shown = format!("{:?}", Credential::Static { token: "secret-token".into(), source: Source::Env });
+        let shown = format!(
+            "{:?}",
+            Credential::Static {
+                token: "secret-token".into(),
+                source: Source::Env
+            }
+        );
         assert!(!shown.contains("secret-token"));
     }
 
     #[test]
     fn selected_profile_defaults_to_default() {
-        assert_eq!(selected_profile(&Overrides::default(), &Env::default()), "default");
-        assert_eq!(selected_profile(&Overrides::default(), &env(&[("FLUXGATE_PROFILE", "prod")])), "prod");
+        assert_eq!(
+            selected_profile(&Overrides::default(), &Env::default()),
+            "default"
+        );
+        assert_eq!(
+            selected_profile(&Overrides::default(), &env(&[("FLUXGATE_PROFILE", "prod")])),
+            "prod"
+        );
     }
 }

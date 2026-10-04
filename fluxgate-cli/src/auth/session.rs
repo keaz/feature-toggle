@@ -98,7 +98,8 @@ impl SessionStore {
     }
 
     pub fn save(&self, name: &str, cache: &SessionCache) -> Result<(), CliError> {
-        let bytes = serde_json::to_vec_pretty(cache).map_err(|err| CliError::Other(err.to_string()))?;
+        let bytes =
+            serde_json::to_vec_pretty(cache).map_err(|err| CliError::Other(err.to_string()))?;
         write_private(&self.file(name), &bytes)
     }
 
@@ -139,9 +140,15 @@ impl SessionStore {
         base_url: &str,
         timeout: Duration,
     ) -> Result<String, CliError> {
-        let expired = || CliError::Auth(format!("session expired: run fluxgate login --profile {profile}"));
+        let expired = || {
+            CliError::Auth(format!(
+                "session expired: run fluxgate login --profile {profile}"
+            ))
+        };
         let cache = self.load(name)?.ok_or_else(|| {
-            CliError::Auth(format!("not logged in: run fluxgate login --profile {profile}"))
+            CliError::Auth(format!(
+                "not logged in: run fluxgate login --profile {profile}"
+            ))
         })?;
         if !cache.needs_refresh(Utc::now()) {
             return Ok(cache.access_token);
@@ -157,11 +164,16 @@ impl SessionStore {
         }
         let api = ApiClient::new(base_url, None, timeout)?;
         let response = match api
-            .post(&["auth", "refresh"], &json!({ "refreshToken": cache.refresh_token }))
+            .post(
+                &["auth", "refresh"],
+                &json!({ "refreshToken": cache.refresh_token }),
+            )
             .await
         {
             Ok(value) => value,
-            Err(CliError::Api { status: 400 | 401, .. }) => return Err(expired()),
+            Err(CliError::Api {
+                status: 400 | 401, ..
+            }) => return Err(expired()),
             Err(err) => return Err(err),
         };
         let response: LoginResponse = serde_json::from_value(response)
@@ -202,7 +214,10 @@ mod tests {
             access_token: access.into(),
             refresh_token: refresh.into(),
             expires_at: Utc::now() + chrono::Duration::seconds(expires_in_secs),
-            user: SessionUser { id: "u1".into(), username: "alice".into() },
+            user: SessionUser {
+                id: "u1".into(),
+                username: "alice".into(),
+            },
         }
     }
 
@@ -242,7 +257,15 @@ mod tests {
         let store = SessionStore::new(dir.path().to_path_buf());
         store.save("corp", &cache("a1", "r1", 600)).unwrap();
         // No server: any request would fail to connect.
-        let token = store.access_token("corp", "default", "http://127.0.0.1:9/api/v1", Duration::from_secs(1)).await.unwrap();
+        let token = store
+            .access_token(
+                "corp",
+                "default",
+                "http://127.0.0.1:9/api/v1",
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
         assert_eq!(token, "a1");
     }
 
@@ -260,7 +283,13 @@ mod tests {
         let store = SessionStore::new(dir.path().to_path_buf());
         store.save("corp", &cache("a1", "r1", 10)).unwrap();
         let url = format!("{}/api/v1", server.uri());
-        assert_eq!(store.access_token("corp", "default", &url, Duration::from_secs(5)).await.unwrap(), "a2");
+        assert_eq!(
+            store
+                .access_token("corp", "default", &url, Duration::from_secs(5))
+                .await
+                .unwrap(),
+            "a2"
+        );
         let saved = store.load("corp").unwrap().unwrap();
         assert_eq!(saved.refresh_token, "r2");
         assert!(!saved.needs_refresh(Utc::now()));
@@ -271,15 +300,23 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/v1/auth/refresh"))
-            .respond_with(ResponseTemplate::new(401).set_body_json(json!({ "error": "unauthorized", "message": "invalid refresh token" })))
+            .respond_with(ResponseTemplate::new(401).set_body_json(
+                json!({ "error": "unauthorized", "message": "invalid refresh token" }),
+            ))
             .mount(&server)
             .await;
         let dir = tempfile::tempdir().unwrap();
         let store = SessionStore::new(dir.path().to_path_buf());
         store.save("corp", &cache("a1", "r1", -5)).unwrap();
         let url = format!("{}/api/v1", server.uri());
-        let err = store.access_token("corp", "prod", &url, Duration::from_secs(5)).await.unwrap_err();
-        assert_eq!(err.to_string(), "session expired: run fluxgate login --profile prod");
+        let err = store
+            .access_token("corp", "prod", &url, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "session expired: run fluxgate login --profile prod"
+        );
         assert_eq!(err.exit_code(), EXIT_AUTH);
     }
 
@@ -287,8 +324,14 @@ mod tests {
     async fn missing_session_says_not_logged_in() {
         let dir = tempfile::tempdir().unwrap();
         let store = SessionStore::new(dir.path().to_path_buf());
-        let err = store.access_token("corp", "prod", "http://h/api/v1", Duration::from_secs(1)).await.unwrap_err();
-        assert_eq!(err.to_string(), "not logged in: run fluxgate login --profile prod");
+        let err = store
+            .access_token("corp", "prod", "http://h/api/v1", Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "not logged in: run fluxgate login --profile prod"
+        );
     }
 
     #[tokio::test]
@@ -296,7 +339,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("corp.json"), "{\"accessToken\": \"a").unwrap();
         let store = SessionStore::new(dir.path().to_path_buf());
-        let err = store.access_token("corp", "prod", "http://h/api/v1", Duration::from_secs(1)).await.unwrap_err();
+        let err = store
+            .access_token("corp", "prod", "http://h/api/v1", Duration::from_secs(1))
+            .await
+            .unwrap_err();
         assert_eq!(err.exit_code(), EXIT_AUTH);
         assert!(err.to_string().contains("damaged"));
         assert!(err.to_string().contains("fluxgate login"));

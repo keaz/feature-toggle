@@ -29,7 +29,10 @@ pub struct RunResult {
 
 impl Harness {
     pub async fn new() -> Self {
-        Self { dir: tempfile::tempdir().unwrap(), server: MockServer::start().await }
+        Self {
+            dir: tempfile::tempdir().unwrap(),
+            server: MockServer::start().await,
+        }
     }
 
     pub fn url(&self) -> String {
@@ -66,8 +69,14 @@ impl Harness {
 
     fn env(&self, extra: &[(&str, &str)]) -> Env {
         let mut pairs = vec![
-            ("FLUXGATE_CONFIG_FILE".to_string(), self.path("config").display().to_string()),
-            ("FLUXGATE_SHARED_CREDENTIALS_FILE".to_string(), self.path("credentials").display().to_string()),
+            (
+                "FLUXGATE_CONFIG_FILE".to_string(),
+                self.path("config").display().to_string(),
+            ),
+            (
+                "FLUXGATE_SHARED_CREDENTIALS_FILE".to_string(),
+                self.path("credentials").display().to_string(),
+            ),
         ];
         pairs.extend(extra.iter().map(|(k, v)| (k.to_string(), v.to_string())));
         Env::from_pairs(pairs)
@@ -77,17 +86,32 @@ impl Harness {
         self.run_with(args, env, &[]).await
     }
 
-    pub async fn run_with(&self, args: &[&str], env: &[(&str, &str)], answers: &[&str]) -> RunResult {
+    pub async fn run_with(
+        &self,
+        args: &[&str],
+        env: &[(&str, &str)],
+        answers: &[&str],
+    ) -> RunResult {
         let mut prompter = ScriptedPrompter::new(answers);
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let mut argv = vec!["fluxgate"];
         argv.extend_from_slice(args);
         let code = fluxgate_cli::run(
             argv,
-            Io { env: self.env(env), is_tty: false, prompter: &mut prompter, out: &mut out, err: &mut err },
+            Io {
+                env: self.env(env),
+                is_tty: false,
+                prompter: &mut prompter,
+                out: &mut out,
+                err: &mut err,
+            },
         )
         .await;
-        RunResult { code, stdout: String::from_utf8(out).unwrap(), stderr: String::from_utf8(err).unwrap() }
+        RunResult {
+            code,
+            stdout: String::from_utf8(out).unwrap(),
+            stderr: String::from_utf8(err).unwrap(),
+        }
     }
 }
 
@@ -96,16 +120,24 @@ pub fn json_out(result: &RunResult) -> Value {
 }
 
 pub fn fake_jwt(claims: Value) -> String {
-    format!("{}.{}.sig", URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256"}"#), URL_SAFE_NO_PAD.encode(claims.to_string()))
+    format!(
+        "{}.{}.sig",
+        URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256"}"#),
+        URL_SAFE_NO_PAD.encode(claims.to_string())
+    )
 }
 
 pub fn user_token(username: &str) -> String {
-    fake_jwt(json!({ "sub": "u1", "username": username, "is_admin": false, "exp": 4102444800i64, "token_type": "user" }))
+    fake_jwt(
+        json!({ "sub": "u1", "username": username, "is_admin": false, "exp": 4102444800i64, "token_type": "user" }),
+    )
 }
 
 pub fn system_token(team_id: &str) -> String {
-    fake_jwt(json!({ "sub": "sc1", "username": "ci-bot", "is_admin": false, "exp": 4102444800i64,
-                     "token_type": "system_client", "team_id": team_id }))
+    fake_jwt(
+        json!({ "sub": "sc1", "username": "ci-bot", "is_admin": false, "exp": 4102444800i64,
+                     "token_type": "system_client", "team_id": team_id }),
+    )
 }
 
 pub fn login_body(access: &str, refresh: &str) -> Value {
@@ -115,7 +147,9 @@ pub fn login_body(access: &str, refresh: &str) -> Value {
 
 pub fn features(range: std::ops::Range<usize>) -> Vec<Value> {
     range
-        .map(|i| json!({ "id": format!("id-{i}"), "key": format!("flag-{i}"), "featureType": "SIMPLE",
-                         "enabled": true, "lifecycleStage": "ACTIVE" }))
+        .map(|i| {
+            json!({ "id": format!("id-{i}"), "key": format!("flag-{i}"), "featureType": "SIMPLE",
+                         "enabled": true, "lifecycleStage": "ACTIVE" })
+        })
         .collect()
 }

@@ -30,7 +30,11 @@ impl Prompter for TerminalPrompter {
             return Err(CliError::Usage(format!("no input for '{label}'")));
         }
         let line = line.trim();
-        Ok(if line.is_empty() { default.unwrap_or_default().to_string() } else { line.to_string() })
+        Ok(if line.is_empty() {
+            default.unwrap_or_default().to_string()
+        } else {
+            line.to_string()
+        })
     }
 
     fn secret(&mut self, label: &str) -> Result<String, CliError> {
@@ -67,7 +71,10 @@ pub struct ScriptedPrompter {
 
 impl ScriptedPrompter {
     pub fn new(answers: &[&str]) -> Self {
-        Self { answers: answers.iter().map(|a| a.to_string()).collect(), asked: Vec::new() }
+        Self {
+            answers: answers.iter().map(|a| a.to_string()).collect(),
+            asked: Vec::new(),
+        }
     }
 
     fn next(&mut self, label: &str) -> Result<String, CliError> {
@@ -81,7 +88,11 @@ impl ScriptedPrompter {
 impl Prompter for ScriptedPrompter {
     fn input(&mut self, label: &str, default: Option<&str>) -> Result<String, CliError> {
         let answer = self.next(label)?;
-        Ok(if answer.is_empty() { default.unwrap_or_default().to_string() } else { answer })
+        Ok(if answer.is_empty() {
+            default.unwrap_or_default().to_string()
+        } else {
+            answer
+        })
     }
 
     fn secret(&mut self, label: &str) -> Result<String, CliError> {
@@ -93,9 +104,16 @@ impl Prompter for ScriptedPrompter {
         options
             .iter()
             .position(|option| option == &answer)
-            .or_else(|| answer.parse::<usize>().ok().filter(|index| *index < options.len()))
+            .or_else(|| {
+                answer
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|index| *index < options.len())
+            })
             .ok_or_else(|| {
-                CliError::Usage(format!("scripted answer '{answer}' is not an option for '{label}'"))
+                CliError::Usage(format!(
+                    "scripted answer '{answer}' is not an option for '{label}'"
+                ))
             })
     }
 }
@@ -113,7 +131,10 @@ mod tests {
         assert_eq!(prompter.secret("Password").unwrap(), "pw");
         assert_eq!(prompter.select("Output", &options).unwrap(), 1);
         assert_eq!(prompter.select("Output", &options).unwrap(), 0);
-        assert_eq!(prompter.asked, vec!["URL", "Username", "Password", "Output", "Output"]);
+        assert_eq!(
+            prompter.asked,
+            vec!["URL", "Username", "Password", "Output", "Output"]
+        );
         assert!(prompter.input("More", None).is_err());
     }
 

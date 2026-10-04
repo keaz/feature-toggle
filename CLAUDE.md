@@ -4,12 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-FluxGate: a feature flag platform. Cargo workspace (edition 2024) with four crates, plus TypeScript API tests:
+FluxGate: a feature flag platform. Cargo workspace (edition 2024) with five crates, plus TypeScript API tests:
 
-- `feature-toggle-backend` — control plane and source of truth. Actix REST admin API (`/api/v1`, default `:8080`) and tonic gRPC (default `:50051`). Binary `fluxgate` (`src/bin/fluxgate.rs`); `src/bin/export-contracts.rs` exports API contracts.
+- `feature-toggle-backend` — control plane and source of truth. Actix REST admin API (`/api/v1`, default `:8080`) and tonic gRPC (default `:50051`). Binary `src/bin/export-contracts.rs` exports API contracts.
 - `evaluation-engine` — pure flag evaluation library (single `src/lib.rs`). Used by both backend and edge server, so evaluation semantics change in one place only.
 - `feature-edge-server` — low-latency evaluation gateway (default `:8081`). Exposes `/evaluate` and OFREP endpoints (`/ofrep/v1/evaluate/flags[/{key}]`). Subscribes to backend gRPC stream, caches features (moka LRU), batches evaluation events/assignments back to backend.
 - `feature-toggle-shared` — shared constants.
+- `fluxgate-cli` — the `fluxgate` command line client (library `fluxgate_cli` + binary). AWS-style profiles (`~/.fluxgate/config`, `~/.fluxgate/credentials`), cached login sessions with locked refresh, and commands over the REST API. Pure HTTP client: no DB, builds without `DATABASE_URL`. Integration tests drive `fluxgate_cli::run` against `wiremock`. See `fluxgate-cli/README.md`.
 - `api-tests/` — Jest + axios end-to-end tests against a running backend (pnpm).
 
 ## Commands
@@ -25,6 +26,8 @@ cargo fmt
 # Tests
 cargo test -p evaluation-engine              # pure, no DB
 cargo test -p feature-edge-server
+cargo test -p fluxgate-cli                   # no DB needed
+cargo run -p fluxgate-cli -- --help
 cargo test -p feature-toggle-backend         # needs migrated + seeded DB
 cargo test -p feature-toggle-backend logic::policy::tests          # single module (lib unit tests)
 cargo test -p feature-toggle-backend --test integration_test feature_test   # DB repository tests

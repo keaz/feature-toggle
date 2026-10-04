@@ -12,7 +12,13 @@ async fn main() {
     let is_tty = out.is_terminal();
     let code = run(
         std::env::args_os(),
-        Io { env: Env::from_process(), is_tty, prompter: &mut prompter, out: &mut out, err: &mut err },
+        Io {
+            env: Env::from_process(),
+            is_tty,
+            prompter: &mut prompter,
+            out: &mut out,
+            err: &mut err,
+        },
     )
     .await;
     let _ = out.flush();

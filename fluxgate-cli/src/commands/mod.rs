@@ -76,7 +76,9 @@ pub async fn list_paged(
     if page.all {
         let items = api.get_all_pages(segments, query).await?;
         let total = items.len();
-        return Ok(json!({ "items": items, "meta": { "offset": 0, "limit": total, "total": total } }));
+        return Ok(
+            json!({ "items": items, "meta": { "offset": 0, "limit": total, "total": total } }),
+        );
     }
     let mut page_query = query.to_vec();
     if let Some(limit) = page.limit {

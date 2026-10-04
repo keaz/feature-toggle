@@ -38,7 +38,13 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    let Io { env, is_tty, prompter, out, err } = io;
+    let Io {
+        env,
+        is_tty,
+        prompter,
+        out,
+        err,
+    } = io;
     let cli = match Cli::try_parse_from(args) {
         Ok(cli) => cli,
         Err(parse_error) => {
@@ -73,7 +79,13 @@ where
         .map(|settings| settings.output.value)
         .unwrap_or_else(|| fallback_format(&overrides, &env, is_tty));
 
-    let mut app = App { env, paths, overrides, is_tty, prompter };
+    let mut app = App {
+        env,
+        paths,
+        overrides,
+        is_tty,
+        prompter,
+    };
     match dispatch(cli.command, &mut app).await {
         Ok(outcome) => {
             for warning in &outcome.warnings {
@@ -102,6 +114,13 @@ where
 fn fallback_format(overrides: &Overrides, env: &Env, is_tty: bool) -> OutputFormat {
     overrides
         .output
-        .or_else(|| env.get("FLUXGATE_OUTPUT").and_then(|value| value.parse().ok()))
-        .unwrap_or(if is_tty { OutputFormat::Table } else { OutputFormat::Json })
+        .or_else(|| {
+            env.get("FLUXGATE_OUTPUT")
+                .and_then(|value| value.parse().ok())
+        })
+        .unwrap_or(if is_tty {
+            OutputFormat::Table
+        } else {
+            OutputFormat::Json
+        })
 }

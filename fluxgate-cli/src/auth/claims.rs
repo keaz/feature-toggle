@@ -45,7 +45,11 @@ mod tests {
     use serde_json::json;
 
     fn jwt(claims: serde_json::Value) -> String {
-        format!("{}.{}.sig", URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256"}"#), URL_SAFE_NO_PAD.encode(claims.to_string()))
+        format!(
+            "{}.{}.sig",
+            URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256"}"#),
+            URL_SAFE_NO_PAD.encode(claims.to_string())
+        )
     }
 
     #[test]
@@ -62,7 +66,8 @@ mod tests {
 
     #[test]
     fn user_tokens_default_to_user_type() {
-        let claims = decode_claims(&jwt(json!({ "sub": "u1", "username": "alice", "exp": 1 }))).unwrap();
+        let claims =
+            decode_claims(&jwt(json!({ "sub": "u1", "username": "alice", "exp": 1 }))).unwrap();
         assert!(!claims.is_system_client());
         assert_eq!(claims.token_type, "user");
     }

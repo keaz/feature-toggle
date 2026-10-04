@@ -14,10 +14,16 @@ pub async fn run(args: FlagsArgs, app: &mut App<'_>) -> Result<Outcome, CliError
         }
         FlagsSubcommand::Get { id_or_key } => {
             let value = if is_uuid(&id_or_key) {
-                context.api.get(&["features", id_or_key.trim()], &[]).await?
+                context
+                    .api
+                    .get(&["features", id_or_key.trim()], &[])
+                    .await?
             } else {
                 let team = context.team_id().await?;
-                context.api.get(&["teams", &team, "features", "by-key", &id_or_key], &[]).await?
+                context
+                    .api
+                    .get(&["teams", &team, "features", "by-key", &id_or_key], &[])
+                    .await?
             };
             Ok(Outcome::new(value, Kind::Object))
         }

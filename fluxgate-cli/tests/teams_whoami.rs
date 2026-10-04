@@ -19,7 +19,16 @@ async fn teams_list_marks_the_active_team() {
     let h = Harness::new().await;
     mount_teams(&h).await;
     let (url, token) = (h.url(), user_token("alice"));
-    let r = h.run(&["teams", "list"], &[("FLUXGATE_URL", url.as_str()), ("FLUXGATE_TOKEN", token.as_str()), ("FLUXGATE_TEAM", "checkout")]).await;
+    let r = h
+        .run(
+            &["teams", "list"],
+            &[
+                ("FLUXGATE_URL", url.as_str()),
+                ("FLUXGATE_TOKEN", token.as_str()),
+                ("FLUXGATE_TEAM", "checkout"),
+            ],
+        )
+        .await;
     assert_eq!(r.code, 0, "{}", r.stderr);
     let items = json_out(&r)["items"].as_array().unwrap().clone();
     assert_eq!(items[0]["active"], false);
@@ -32,10 +41,19 @@ async fn teams_use_saves_the_team_on_the_profile() {
     mount_teams(&h).await;
     let (url, token) = (h.url(), user_token("alice"));
     let r = h
-        .run(&["teams", "use", "Checkout", "--output", "text"], &[("FLUXGATE_URL", url.as_str()), ("FLUXGATE_TOKEN", token.as_str())])
+        .run(
+            &["teams", "use", "Checkout", "--output", "text"],
+            &[
+                ("FLUXGATE_URL", url.as_str()),
+                ("FLUXGATE_TOKEN", token.as_str()),
+            ],
+        )
         .await;
     assert_eq!(r.code, 0, "{}", r.stderr);
-    assert_eq!(r.stdout.trim(), format!("Profile 'default' now uses team Checkout ({TEAM_B})"));
+    assert_eq!(
+        r.stdout.trim(),
+        format!("Profile 'default' now uses team Checkout ({TEAM_B})")
+    );
     assert!(h.read("config").contains("team=Checkout"));
 }
 
@@ -45,7 +63,13 @@ async fn teams_use_of_an_unknown_team_lists_the_choices() {
     mount_teams(&h).await;
     let (url, token) = (h.url(), user_token("alice"));
     let r = h
-        .run(&["teams", "use", "billing", "--output", "text"], &[("FLUXGATE_URL", url.as_str()), ("FLUXGATE_TOKEN", token.as_str())])
+        .run(
+            &["teams", "use", "billing", "--output", "text"],
+            &[
+                ("FLUXGATE_URL", url.as_str()),
+                ("FLUXGATE_TOKEN", token.as_str()),
+            ],
+        )
         .await;
     assert_eq!(r.code, 2);
     assert!(r.stderr.contains("available: Payments, Checkout"));
@@ -56,7 +80,16 @@ async fn whoami_for_a_user_shows_the_active_team_and_all_teams() {
     let h = Harness::new().await;
     mount_teams(&h).await;
     let (url, token) = (h.url(), user_token("alice"));
-    let r = h.run(&["whoami"], &[("FLUXGATE_URL", url.as_str()), ("FLUXGATE_TOKEN", token.as_str()), ("FLUXGATE_TEAM", "payments")]).await;
+    let r = h
+        .run(
+            &["whoami"],
+            &[
+                ("FLUXGATE_URL", url.as_str()),
+                ("FLUXGATE_TOKEN", token.as_str()),
+                ("FLUXGATE_TEAM", "payments"),
+            ],
+        )
+        .await;
     assert_eq!(r.code, 0, "{}", r.stderr);
     let value = json_out(&r);
     assert_eq!(value["kind"], "user");
@@ -71,7 +104,15 @@ async fn whoami_for_a_user_shows_the_active_team_and_all_teams() {
 async fn whoami_for_a_system_client_needs_no_teams_request() {
     let h = Harness::new().await;
     let (url, token) = (h.url(), system_token(TEAM_A));
-    let r = h.run(&["whoami"], &[("FLUXGATE_URL", url.as_str()), ("FLUXGATE_TOKEN", token.as_str())]).await;
+    let r = h
+        .run(
+            &["whoami"],
+            &[
+                ("FLUXGATE_URL", url.as_str()),
+                ("FLUXGATE_TOKEN", token.as_str()),
+            ],
+        )
+        .await;
     assert_eq!(r.code, 0, "{}", r.stderr);
     let value = json_out(&r);
     assert_eq!(value["kind"], "system_client");

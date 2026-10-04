@@ -32,7 +32,11 @@ pub struct ConfigFiles {
 
 impl ConfigFiles {
     pub fn empty() -> Self {
-        Self { config: Ini::new(), credentials: Ini::new(), warnings: Vec::new() }
+        Self {
+            config: Ini::new(),
+            credentials: Ini::new(),
+            warnings: Vec::new(),
+        }
     }
 
     /// Missing files load as empty.
@@ -66,11 +70,18 @@ impl ConfigFiles {
                 if section == "default" {
                     Some("default".to_string())
                 } else {
-                    section.strip_prefix("profile ").map(|name| name.trim().to_string())
+                    section
+                        .strip_prefix("profile ")
+                        .map(|name| name.trim().to_string())
                 }
             })
             .collect();
-        names.extend(self.credentials.sections().flatten().map(|s| s.trim().to_string()));
+        names.extend(
+            self.credentials
+                .sections()
+                .flatten()
+                .map(|s| s.trim().to_string()),
+        );
         names.sort();
         names.dedup();
         if let Some(position) = names.iter().position(|name| name == "default") {
@@ -85,7 +96,9 @@ impl ConfigFiles {
     }
 
     pub fn set_profile_value(&mut self, profile: &str, key: &str, value: &str) {
-        self.config.with_section(Some(profile_section(profile))).set(key, value);
+        self.config
+            .with_section(Some(profile_section(profile)))
+            .set(key, value);
     }
 
     pub fn remove_profile_value(&mut self, profile: &str, key: &str) {
@@ -93,11 +106,15 @@ impl ConfigFiles {
     }
 
     pub fn set_session_value(&mut self, session: &str, key: &str, value: &str) {
-        self.config.with_section(Some(session_section(session))).set(key, value);
+        self.config
+            .with_section(Some(session_section(session)))
+            .set(key, value);
     }
 
     pub fn set_credential_token(&mut self, profile: &str, token: &str) {
-        self.credentials.with_section(Some(profile)).set("token", token);
+        self.credentials
+            .with_section(Some(profile))
+            .set("token", token);
     }
 
     pub fn save_config(&self, paths: &Paths) -> Result<(), CliError> {
@@ -206,7 +223,10 @@ mod tests {
         assert_eq!(files.profile_value("default", "team"), Some("payments"));
         assert_eq!(files.profile_value("prod", "team"), Some("checkout"));
         assert_eq!(files.profile_value("prod", "missing"), None);
-        assert_eq!(files.session_value("corp", "url"), Some("https://fg.example.com/api/v1"));
+        assert_eq!(
+            files.session_value("corp", "url"),
+            Some("https://fg.example.com/api/v1")
+        );
         assert_eq!(files.credential_token("ci"), Some("abc"));
         assert_eq!(files.profile_names(), vec!["default", "ci", "prod"]);
         assert!(files.has_profile("ci"));
@@ -217,15 +237,25 @@ mod tests {
     fn save_keeps_unknown_keys_and_adds_new_values() {
         let dir = tempfile::tempdir().unwrap();
         let p = paths(dir.path());
-        std::fs::write(&p.config, "[profile prod]\nteam = checkout\ncustom_key = keep-me\n").unwrap();
+        std::fs::write(
+            &p.config,
+            "[profile prod]\nteam = checkout\ncustom_key = keep-me\n",
+        )
+        .unwrap();
         let mut files = ConfigFiles::load(&p).unwrap();
         files.set_profile_value("prod", "environment", "production");
         files.set_session_value("corp", "url", "https://fg.example.com/api/v1");
         files.save_config(&p).unwrap();
         let again = ConfigFiles::load(&p).unwrap();
         assert_eq!(again.profile_value("prod", "custom_key"), Some("keep-me"));
-        assert_eq!(again.profile_value("prod", "environment"), Some("production"));
-        assert_eq!(again.session_value("corp", "url"), Some("https://fg.example.com/api/v1"));
+        assert_eq!(
+            again.profile_value("prod", "environment"),
+            Some("production")
+        );
+        assert_eq!(
+            again.session_value("corp", "url"),
+            Some("https://fg.example.com/api/v1")
+        );
     }
 
     #[test]
@@ -245,7 +275,10 @@ mod tests {
         let mut files = ConfigFiles::empty();
         files.set_credential_token("ci", "secret");
         files.save_credentials(&p).unwrap();
-        let mode = std::fs::metadata(&p.credentials).unwrap().permissions().mode();
+        let mode = std::fs::metadata(&p.credentials)
+            .unwrap()
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o777, 0o600);
     }
 

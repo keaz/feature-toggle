@@ -12,11 +12,21 @@ pub async fn run(app: &mut App<'_>) -> Result<Outcome, CliError> {
         .teams()
         .await
         .ok()
-        .and_then(|teams| teams.into_iter().find(|team| team.id.eq_ignore_ascii_case(&team_id)))
+        .and_then(|teams| {
+            teams
+                .into_iter()
+                .find(|team| team.id.eq_ignore_ascii_case(&team_id))
+        })
         .map(|team| json!(team))
         .unwrap_or_else(|| json!({ "id": team_id }));
-    let environments = context.api.get_all_pages(&["teams", &team_id, "environments"], &[]).await?;
-    let features = context.api.get_all_pages(&["teams", &team_id, "features"], &[]).await?;
+    let environments = context
+        .api
+        .get_all_pages(&["teams", &team_id, "environments"], &[])
+        .await?;
+    let features = context
+        .api
+        .get_all_pages(&["teams", &team_id, "features"], &[])
+        .await?;
     Ok(Outcome::new(
         json!({ "team": team, "environments": environments, "features": features }),
         Kind::Document,

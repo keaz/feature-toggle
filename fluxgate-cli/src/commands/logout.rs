@@ -18,7 +18,10 @@ pub async fn run(args: LogoutArgs, app: &mut App<'_>) -> Result<Outcome, CliErro
         store.names()?
     } else {
         vec![settings.session.clone().ok_or_else(|| {
-            CliError::Usage(format!("profile '{}' has no login session", settings.profile))
+            CliError::Usage(format!(
+                "profile '{}' has no login session",
+                settings.profile
+            ))
         })?]
     };
 
@@ -34,8 +37,18 @@ pub async fn run(args: LogoutArgs, app: &mut App<'_>) -> Result<Outcome, CliErro
             .session_value(&name, "url")
             .map(str::to_string)
             .unwrap_or_else(|| settings.url.value.clone());
-        if let Err(err) = server_logout(&store, &name, &settings.profile, &url, Context::timeout(&settings)).await {
-            warnings.push(format!("warning: server logout failed for session '{name}': {err}"));
+        if let Err(err) = server_logout(
+            &store,
+            &name,
+            &settings.profile,
+            &url,
+            Context::timeout(&settings),
+        )
+        .await
+        {
+            warnings.push(format!(
+                "warning: server logout failed for session '{name}': {err}"
+            ));
         }
         store.delete(&name)?;
         ended.push(format!("'{name}'"));
@@ -63,7 +76,10 @@ async fn server_logout(
         .load(name)?
         .ok_or_else(|| CliError::Other("session cache disappeared".into()))?;
     ApiClient::new(url, Some(access_token), timeout)?
-        .post(&["auth", "logout"], &json!({ "refreshToken": cache.refresh_token }))
+        .post(
+            &["auth", "logout"],
+            &json!({ "refreshToken": cache.refresh_token }),
+        )
         .await?;
     Ok(())
 }
