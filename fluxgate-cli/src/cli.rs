@@ -64,6 +64,10 @@ pub enum Command {
     Config(ConfigArgs),
     /// Stage changes.
     Rollout(RolloutArgs),
+    /// Log in and cache a session for the profile.
+    Login(LoginArgs),
+    /// End the profile's session, or every session with --all.
+    Logout(LogoutArgs),
 }
 
 #[derive(Debug, Clone, Default, Args)]
@@ -186,6 +190,23 @@ pub enum RolloutSubcommand {
         #[arg(long)]
         freeze_override_reason: Option<String>,
     },
+}
+
+#[derive(Debug, Args)]
+pub struct LoginArgs {
+    /// Log in with username and password.
+    #[arg(long)]
+    pub password: bool,
+    /// Username; asked for when not given.
+    #[arg(long)]
+    pub username: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct LogoutArgs {
+    /// Log out of every cached session.
+    #[arg(long)]
+    pub all: bool,
 }
 
 #[cfg(test)]

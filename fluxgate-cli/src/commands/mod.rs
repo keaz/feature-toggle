@@ -5,6 +5,8 @@ pub mod config_export;
 pub mod evaluate;
 pub mod flags;
 pub mod health;
+pub mod login;
+pub mod logout;
 pub mod rollout;
 
 use serde_json::{Value, json};
@@ -53,6 +55,8 @@ pub async fn dispatch(command: Command, app: &mut App<'_>) -> Result<Outcome, Cl
         Command::Evaluate(args) => evaluate::run(args, app).await,
         Command::Config(_) => config_export::run(app).await,
         Command::Rollout(args) => rollout::run(args, app).await,
+        Command::Login(args) => login::run(args, app).await,
+        Command::Logout(args) => logout::run(args, app).await,
     }
 }
 
