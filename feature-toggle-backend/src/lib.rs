@@ -165,6 +165,7 @@ pub async fn run() -> std::io::Result<()> {
         database::user::user_repository(db_pool.clone()),
         Some(approval_logic.clone()),
         Some(notification_logic.clone_box()),
+        judgment_service.clone(),
     );
     // Stage changes on behalf of Jira (JI-14); used by the JI-15 rule engine.
     let external_change_logic = logic::external_change::external_change_logic(

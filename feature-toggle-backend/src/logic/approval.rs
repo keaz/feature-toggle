@@ -3518,6 +3518,7 @@ mod tests {
                 &StageChangeMeta {
                     external_ref: Some("PROJ-123".to_string()),
                     reason: Some("Ready for QA".to_string()),
+                    check_reason: false,
                 },
             )
             .await

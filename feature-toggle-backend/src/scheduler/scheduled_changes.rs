@@ -173,6 +173,8 @@ impl ScheduledChangeScheduler {
                             external_ref: None,
                             reason: Some(change.reason.trim().to_string())
                                 .filter(|reason| !reason.is_empty()),
+                            // Checked as `scheduled_change` when it was created.
+                            check_reason: false,
                         },
                     )
                     .await?;

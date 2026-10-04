@@ -751,4 +751,9 @@ pub struct UpdateVariantAllocationInput {
 pub struct StageChangeMeta {
     pub external_ref: Option<String>,
     pub reason: Option<String>,
+    /// True when a person typed `reason` (the REST stage routes): the reason is
+    /// then recorded for the justification check after the change (JI-53).
+    /// False for a reason FluxGate generated, such as a Jira status rule's
+    /// `Jira status '<status>'` or a scheduled change's stored reason.
+    pub check_reason: bool,
 }

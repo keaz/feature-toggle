@@ -461,6 +461,8 @@ pub(crate) fn validate_stage_change_meta(
 
     Ok(StageChangeMeta {
         external_ref,
+        // A person typed it, so it is checked after the change (JI-53).
+        check_reason: reason.is_some(),
         reason,
     })
 }
@@ -674,6 +676,7 @@ mod tests {
         let meta = |external_ref: Option<&str>, reason: Option<&str>| StageChangeMeta {
             external_ref: external_ref.map(str::to_string),
             reason: reason.map(str::to_string),
+            check_reason: reason.is_some(),
         };
         let long_ref = "A".repeat(101);
         let max_ref = "A".repeat(100);

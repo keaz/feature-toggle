@@ -4132,6 +4132,8 @@ mod tests {
                             == StageChangeMeta {
                                 external_ref: Some("PROJ-123".to_string()),
                                 reason: Some("Ready for QA".to_string()),
+                                // JI-53: a person typed it.
+                                check_reason: true,
                             }
                 })
                 .times(1)
@@ -4443,6 +4445,7 @@ mod tests {
             let mock_logic = fixture.expect_stage_request(StageChangeMeta {
                 external_ref: Some("PROJ-7".to_string()),
                 reason: Some("Ready".to_string()),
+                check_reason: true,
             });
             let (status, body) = fixture
                 .send(

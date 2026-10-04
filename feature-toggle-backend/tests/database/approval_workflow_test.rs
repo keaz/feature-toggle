@@ -470,6 +470,7 @@ async fn test_stage_change_stores_external_ref_and_reason_on_the_approval_reques
             StageChangeMeta {
                 external_ref: Some("PROJ-123".to_string()),
                 reason: Some("Ready for QA".to_string()),
+                check_reason: false,
             },
         )
         .await
@@ -592,6 +593,7 @@ async fn test_direct_stage_change_records_external_ref_and_reason_in_activity() 
             StageChangeMeta {
                 external_ref: Some("PROJ-456".to_string()),
                 reason: Some("Ticket moved to Ready".to_string()),
+                check_reason: false,
             },
         )
         .await

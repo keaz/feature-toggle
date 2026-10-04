@@ -323,6 +323,7 @@ Rules: keep at most 30 diff entries (in order), and truncate `before`/`after` va
 | `scheduled_change` | `create_scheduled_change` and the reschedule handler (`rest/operational_safety.rs`) | `scheduled_change_created` (create only) |
 | `archive_cleanup` | `update_feature_in_tx` (`logic/feature_tx.rs`) when lifecycle moves to archived | `FEATURE_LIFECYCLE_UPDATED`, metadata **lacks** `cleanup_reason` |
 | `freeze_window` | `create_freeze_window` / `update_freeze_window` (`rest/operational_safety.rs`) | none |
+| `stage_change` | *Added 2026-10-04 (Jira JI-47, JI-53).* `perform_stage_change` (`rest/feature.rs`, stage route and by-key route) → `request_stage_change` (`logic/feature.rs`), only when `StageChangeMeta.check_reason` is on (a person typed the reason). Jira status rules (`logic/external_change.rs`) and scheduled changes leave it off. | `stage_change_requested` (with an approval) or the direct stage row, metadata has `reason`; the verdict goes into its `ai_justification` |
 
 **Sync pre-check endpoint.** `POST /api/v1/teams/{team_id}/ai/justification-check`
 

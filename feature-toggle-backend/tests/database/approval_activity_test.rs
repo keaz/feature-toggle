@@ -204,6 +204,7 @@ impl Fixture {
                 StageChangeMeta {
                     external_ref: Some("PROJ-9".to_string()),
                     reason: Some("ship it".to_string()),
+                    check_reason: false,
                 },
             )
             .await

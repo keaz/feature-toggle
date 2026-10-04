@@ -216,7 +216,7 @@ JI-47: attach `components/ai/ReasonQualityHint.tsx` to the stage change reason f
 
 **JI-53: record stage change reasons for the justification check (J27).**
 
-- `StageChangeMeta` gets `check_reason: bool` (default `false`). The REST stage route and the by-key route (`perform_stage_change`, `rest/feature.rs`) set it to `true`. `logic/external_change.rs`, used for Jira status rules, leaves it `false`.
+- `StageChangeMeta` gets `check_reason: bool` (default `false`). The REST stage route and the by-key route (`perform_stage_change`, `rest/feature.rs`) set it to `true` when a reason is present. `logic/external_change.rs`, used for Jira status rules, leaves it `false`. So does the scheduled-change scheduler, because its reason was already checked as `scheduled_change` when the change was created.
 - `FeatureLogicImpl` gets an optional `Arc<JudgmentService>`, passed in `lib.rs`. This is the same service that `ApprovalLogicImpl` already holds.
 - In `request_stage_change`, after the change and its activity row (`stage_change_requested` for a request with an approval, or the direct row), when `check_reason` is on and a reason is present: `justification::record_justification(.., SubjectType::Activity, <activity id>, ReasonKind::StageChange, reason, Some(feature key))`. The verdict is merged into that row's `metadata.ai_justification`, as for the other kinds. The team toggle, the rule check and "never fails the caller" apply as before.
 - If the activity row cannot be written (the write is best effort), nothing is recorded.

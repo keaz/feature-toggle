@@ -423,9 +423,12 @@ pub fn feature_logic_with_approval(
         user_repository,
         approval_logic,
         None,
+        None,
     )
 }
 
+/// `judgments` records stage change reasons for the justification check
+/// (JI-53); `None` without the AI subsystem.
 pub fn feature_logic_with_approval_and_notifications(
     repository: Box<dyn FeatureRepository>,
     environment_logic: Box<dyn EnvironmentLogic>,
@@ -433,6 +436,7 @@ pub fn feature_logic_with_approval_and_notifications(
     user_repository: Box<dyn crate::database::user::UserRepository>,
     approval_logic: Option<Box<dyn ApprovalLogic>>,
     notification_logic: Option<Box<dyn crate::logic::notification::NotificationLogic>>,
+    judgments: Option<std::sync::Arc<crate::judgment::service::JudgmentService>>,
 ) -> Box<dyn FeatureLogic> {
     Box::new(FeatureLogicImpl {
         repository,
@@ -441,6 +445,7 @@ pub fn feature_logic_with_approval_and_notifications(
         user_repository,
         approval_logic,
         notification_logic,
+        judgments,
     })
 }
 
@@ -494,6 +499,8 @@ struct FeatureLogicImpl {
     user_repository: Box<dyn crate::database::user::UserRepository>,
     approval_logic: Option<Box<dyn ApprovalLogic>>,
     notification_logic: Option<Box<dyn crate::logic::notification::NotificationLogic>>,
+    /// Records stage change reasons for the justification check (JI-53).
+    judgments: Option<std::sync::Arc<crate::judgment::service::JudgmentService>>,
 }
 
 impl Clone for FeatureLogicImpl {
@@ -508,6 +515,7 @@ impl Clone for FeatureLogicImpl {
                 .notification_logic
                 .as_ref()
                 .map(|logic| logic.clone_box()),
+            judgments: self.judgments.clone(),
         }
     }
 }
@@ -822,6 +830,7 @@ impl FeatureLogicImpl {
 
     /// Best-effort `stage_change_requested` row for a gated request (JI-40).
     /// Same metadata keys as the direct branch, plus `approval_request_id`.
+    /// Returns the row id, `None` when the row could not be written.
     async fn log_gated_stage_change_requested(
         &self,
         db_feature: &crate::database::entity::Feature,
@@ -830,7 +839,7 @@ impl FeatureLogicImpl {
         user_id: Uuid,
         request: &crate::database::entity::ApprovalRequest,
         meta: &crate::model::StageChangeMeta,
-    ) {
+    ) -> Option<Uuid> {
         let environment_name = self
             .resolve_environment_name(Some(stage.environment_id))
             .await;
@@ -865,15 +874,46 @@ impl FeatureLogicImpl {
         if let Some(reason) = &meta.reason {
             metadata["reason"] = serde_json::json!(reason);
         }
-        let _ = crate::utils::activity_logger::log_activity(
-            &self.activity_log_repository,
-            crate::utils::activity_logger::activity_types::STAGE_CHANGE_REQUESTED,
-            crate::utils::activity_logger::entity_types::STAGE,
-            &stage.id.to_string(),
-            Some(user_id),
-            requester_name,
-            description,
-            Some(metadata),
+        self.activity_log_repository
+            .create_activity(crate::database::activity_log::CreateActivityLog {
+                activity_type:
+                    crate::utils::activity_logger::activity_types::STAGE_CHANGE_REQUESTED
+                        .to_string(),
+                entity_type: crate::utils::activity_logger::entity_types::STAGE.to_string(),
+                entity_id: stage.id.to_string(),
+                actor_id: Some(user_id),
+                actor_name: requester_name,
+                description,
+                metadata: Some(metadata),
+            })
+            .await
+            .ok()
+            .map(|row| row.id)
+    }
+
+    /// Hands a person's stage change reason to the justification check once
+    /// the change and its activity row are stored (JI-53). The verdict is
+    /// merged into that row. Nothing happens without the AI subsystem, for a
+    /// generated reason (`check_reason` off), or when the row was not written.
+    async fn record_stage_change_reason(
+        &self,
+        db_feature: &crate::database::entity::Feature,
+        activity_id: Option<Uuid>,
+        meta: &crate::model::StageChangeMeta,
+    ) {
+        let (true, Some(activity_id), Some(reason)) =
+            (meta.check_reason, activity_id, meta.reason.as_deref())
+        else {
+            return;
+        };
+        crate::judgment::justification::record_justification(
+            self.judgments.as_ref(),
+            db_feature.team_id,
+            crate::judgment::SubjectType::Activity,
+            activity_id,
+            crate::judgment::justification::ReasonKind::StageChange,
+            reason,
+            Some(db_feature.key.as_str()),
         )
         .await;
     }
@@ -1861,15 +1901,18 @@ impl DeploymentLogic for FeatureLogicImpl {
                         return Err(Error::NotFound(stage_uuid));
                     }
                 }
-                self.log_gated_stage_change_requested(
-                    &db_feature,
-                    &stage,
-                    next_status,
-                    user_id,
-                    &request,
-                    &meta,
-                )
-                .await;
+                let activity_id = self
+                    .log_gated_stage_change_requested(
+                        &db_feature,
+                        &stage,
+                        next_status,
+                        user_id,
+                        &request,
+                        &meta,
+                    )
+                    .await;
+                self.record_stage_change_reason(&db_feature, activity_id, &meta)
+                    .await;
                 let notification_feature_id = db_feature.id;
                 let notification_feature_key = db_feature.key.clone();
                 let notification_team_id = db_feature.team_id;
@@ -2091,17 +2134,23 @@ impl DeploymentLogic for FeatureLogicImpl {
             metadata["reason"] = serde_json::json!(reason);
         }
 
-        let _ = crate::utils::activity_logger::log_activity(
-            &self.activity_log_repository,
-            activity_type,
-            crate::utils::activity_logger::entity_types::STAGE,
-            &stage_id.to_string(),
-            Some(user_id),
-            None,
-            description,
-            Some(metadata),
-        )
-        .await;
+        // Best effort, as before; the id lets the reason be recorded on it.
+        let activity_id = self
+            .activity_log_repository
+            .create_activity(crate::database::activity_log::CreateActivityLog {
+                activity_type: activity_type.to_string(),
+                entity_type: crate::utils::activity_logger::entity_types::STAGE.to_string(),
+                entity_id: stage_id.to_string(),
+                actor_id: Some(user_id),
+                actor_name: None,
+                description,
+                metadata: Some(metadata),
+            })
+            .await
+            .ok()
+            .map(|row| row.id);
+        self.record_stage_change_reason(&db_feature, activity_id, &meta)
+            .await;
 
         let actor_display_name = self
             .resolve_user_display_name(Some(user_id), Some(user_id.to_string()))
@@ -3146,6 +3195,7 @@ mod test {
             create_mock_user_repository(),
             None,
             Some(Box::new(RecordingNotificationLogic { sender })),
+            None,
         );
 
         logic
@@ -4295,6 +4345,7 @@ mod test {
         crate::model::StageChangeMeta {
             external_ref: Some("PROJ-123".to_string()),
             reason: Some("Ready for QA".to_string()),
+            check_reason: false,
         }
     }
 
@@ -4322,6 +4373,7 @@ mod test {
             create_mock_user_repository(),
             None,
             Some(Box::new(RecordingNotificationLogic { sender })),
+            None,
         );
 
         logic
@@ -4365,6 +4417,7 @@ mod test {
             create_mock_user_repository(),
             None,
             Some(Box::new(RecordingNotificationLogic { sender })),
+            None,
         );
 
         logic
@@ -4445,6 +4498,7 @@ mod test {
             create_mock_user_repository(),
             Some(Box::new(approval_logic)),
             Some(Box::new(RecordingNotificationLogic { sender })),
+            None,
         );
 
         let feature = logic
@@ -4469,6 +4523,207 @@ mod test {
             "message: {}",
             notification.message
         );
+    }
+
+    /// JI-53: activity rows with the id each one was stored under.
+    type StoredActivities = std::sync::Arc<std::sync::Mutex<Vec<(Uuid, String)>>>;
+
+    fn id_recording_activity_log(
+        stored: StoredActivities,
+    ) -> Box<dyn crate::database::activity_log::ActivityLogRepository> {
+        let mut mock = MockActivityLogRepository::new();
+        mock.expect_create_activity().returning(move |activity| {
+            let id = Uuid::new_v4();
+            stored
+                .lock()
+                .unwrap()
+                .push((id, activity.activity_type.clone()));
+            Ok(crate::database::activity_log::ActivityLogRow {
+                id,
+                activity_type: activity.activity_type,
+                entity_type: activity.entity_type,
+                entity_id: activity.entity_id,
+                actor_id: activity.actor_id,
+                actor_name: activity.actor_name,
+                description: activity.description,
+                metadata: activity.metadata,
+                created_at: chrono::Utc::now(),
+            })
+        });
+        mock.expect_clone_box()
+            .returning(|| create_mock_activity_log());
+        Box::new(mock)
+    }
+
+    fn person_meta() -> crate::model::StageChangeMeta {
+        crate::model::StageChangeMeta {
+            check_reason: true,
+            ..jira_meta()
+        }
+    }
+
+    fn pending_request(
+        request_id: Uuid,
+        feature: &crate::database::entity::Feature,
+        stage: &crate::database::entity::FeaturePipelineStage,
+        requested_by: Uuid,
+    ) -> crate::database::entity::ApprovalRequest {
+        let now = chrono::Utc::now();
+        crate::database::entity::ApprovalRequest {
+            id: request_id,
+            policy_id: Uuid::new_v4(),
+            feature_id: feature.id,
+            environment_id: Some(stage.environment_id),
+            change_type: "stage_change".to_string(),
+            change_payload: serde_json::json!({}),
+            change_description: None,
+            requested_by,
+            eligible_approver_ids: vec![],
+            routing_reason: None,
+            admin_override_enabled: false,
+            status: crate::database::entity::ApprovalStatus::Pending,
+            approved_count: 0,
+            rejected_count: 0,
+            executed_at: None,
+            created_at: now,
+            updated_at: now,
+            required_approvers_override: None,
+            external_ref: None,
+            request_reason: None,
+            approval_source: "fluxgate".to_string(),
+            external_approver: None,
+        }
+    }
+
+    /// JI-53: a reason a person typed is recorded for the justification check
+    /// on the activity row that holds it.
+    #[tokio::test]
+    async fn direct_stage_change_records_a_person_reason() {
+        use crate::judgment::justification::test_support::{Recorded, recording_runtime};
+        let stage_id = Uuid::new_v4();
+        let feature_id = Uuid::new_v4();
+        let (repository, environment_logic) = stage_change_mocks(stage_id, feature_id);
+        let stored = StoredActivities::default();
+        let recorded = Recorded::default();
+        let runtime = recording_runtime(true, false, recorded.clone());
+        let logic = feature_logic_with_approval_and_notifications(
+            Box::new(repository),
+            Box::new(environment_logic),
+            id_recording_activity_log(stored.clone()),
+            create_mock_user_repository(),
+            None,
+            None,
+            runtime.judgments.clone(),
+        );
+
+        logic
+            .request_stage_change(
+                ID::from(stage_id),
+                StageChangeRequestType::DeploymentRequested,
+                Uuid::new_v4(),
+                person_meta(),
+            )
+            .await
+            .expect("stage change should succeed");
+
+        let stored = stored.lock().unwrap().clone();
+        assert_eq!(stored.len(), 1);
+        let recorded = recorded.lock().unwrap().clone();
+        assert_eq!(recorded.len(), 1, "one reason recorded");
+        let (subject_type, subject_id, input) = &recorded[0];
+        assert_eq!(*subject_type, crate::judgment::SubjectType::Activity);
+        assert_eq!(*subject_id, stored[0].0, "the row that holds the reason");
+        assert_eq!(input["reason_kind"], "stage_change");
+        assert_eq!(input["reason"], "Ready for QA");
+        assert!(input["feature_key"].is_string());
+    }
+
+    /// JI-53: with an approval, the reason is recorded on the
+    /// `stage_change_requested` row of the request.
+    #[tokio::test]
+    async fn gated_stage_change_records_the_reason_on_the_requested_row() {
+        use crate::judgment::justification::test_support::{Recorded, recording_runtime};
+        let stage_id = Uuid::new_v4();
+        let feature_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+        let (repository, environment_logic) = stage_change_mocks(stage_id, feature_id);
+        let mut approval_logic = crate::logic::approval::MockApprovalLogic::new();
+        approval_logic
+            .expect_maybe_create_stage_change_request()
+            .returning(move |feature, stage, _, requested_by, _| {
+                Ok(Some(pending_request(
+                    request_id,
+                    feature,
+                    stage,
+                    requested_by,
+                )))
+            });
+        let stored = StoredActivities::default();
+        let recorded = Recorded::default();
+        let runtime = recording_runtime(true, false, recorded.clone());
+        let logic = feature_logic_with_approval_and_notifications(
+            Box::new(repository),
+            Box::new(environment_logic),
+            id_recording_activity_log(stored.clone()),
+            create_mock_user_repository(),
+            Some(Box::new(approval_logic)),
+            None,
+            runtime.judgments.clone(),
+        );
+
+        logic
+            .request_stage_change(
+                ID::from(stage_id),
+                StageChangeRequestType::DeploymentRequested,
+                Uuid::new_v4(),
+                person_meta(),
+            )
+            .await
+            .expect("stage change should be intercepted");
+
+        let stored = stored.lock().unwrap().clone();
+        let requested = stored
+            .iter()
+            .find(|(_, activity_type)| activity_type == "stage_change_requested")
+            .expect("stage_change_requested row");
+        let recorded = recorded.lock().unwrap().clone();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0, crate::judgment::SubjectType::Activity);
+        assert_eq!(recorded[0].1, requested.0);
+        assert_eq!(recorded[0].2["reason_kind"], "stage_change");
+    }
+
+    /// JI-53: a reason FluxGate generated (a Jira status rule, a scheduled
+    /// change) is not a person's justification and is not recorded.
+    #[tokio::test]
+    async fn generated_reasons_are_not_recorded() {
+        use crate::judgment::justification::test_support::{Recorded, recording_runtime};
+        let stage_id = Uuid::new_v4();
+        let feature_id = Uuid::new_v4();
+        let (repository, environment_logic) = stage_change_mocks(stage_id, feature_id);
+        let recorded = Recorded::default();
+        let runtime = recording_runtime(true, false, recorded.clone());
+        let logic = feature_logic_with_approval_and_notifications(
+            Box::new(repository),
+            Box::new(environment_logic),
+            create_mock_activity_log(),
+            create_mock_user_repository(),
+            None,
+            None,
+            runtime.judgments.clone(),
+        );
+
+        logic
+            .request_stage_change(
+                ID::from(stage_id),
+                StageChangeRequestType::DeploymentRequested,
+                Uuid::new_v4(),
+                jira_meta(),
+            )
+            .await
+            .expect("stage change should succeed");
+
+        assert!(recorded.lock().unwrap().is_empty());
     }
 }
 

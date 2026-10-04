@@ -334,6 +334,8 @@ impl ExternalChangeLogicImpl {
         let meta = StageChangeMeta {
             external_ref: Some(ctx.external_ref.clone()),
             reason: Some(ctx.reason.clone()),
+            // Generated from the Jira status, not a person's justification (J27).
+            check_reason: false,
         };
         let feature = self
             .feature_logic
