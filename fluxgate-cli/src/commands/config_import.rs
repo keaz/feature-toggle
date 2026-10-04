@@ -47,9 +47,13 @@ pub async fn run(file: &str, dry_run: bool, app: &mut App<'_>) -> Result<Outcome
         .api
         .get_all_pages(&["teams", &team, "environments"], &[])
         .await?;
+    // Archived flags still own their keys.
     let existing_features = context
         .api
-        .get_all_pages(&["teams", &team, "features"], &[])
+        .get_all_pages(
+            &["teams", &team, "features"],
+            &[("includeArchived", "true".to_string())],
+        )
         .await?;
     let has = |items: &[Value], field: &str, value: &str| {
         items.iter().any(|item| {

@@ -40,6 +40,25 @@ pub fn next_step(code: &str, interval: u64) -> Result<u64, CliError> {
     }
 }
 
+/// `POST /auth/device/authorize`, waiting out a few rate-limit answers.
+async fn start(api: &ApiClient) -> Result<serde_json::Value, CliError> {
+    let mut attempts = 0;
+    loop {
+        match api.post(&["auth", "device", "authorize"], &json!({})).await {
+            Err(CliError::Api {
+                status: 429,
+                retry_after,
+                ..
+            }) if attempts < 3 => {
+                attempts += 1;
+                let wait = retry_after.unwrap_or(SLOW_DOWN_SECS);
+                tokio::time::sleep(Duration::from_secs(wait)).await;
+            }
+            other => return other,
+        }
+    }
+}
+
 /// Logs in by device code. `open_browser` false only prints the link.
 pub async fn device_login(
     prompter: &mut dyn Prompter,
@@ -48,11 +67,8 @@ pub async fn device_login(
     open_browser: bool,
 ) -> Result<LoginResponse, CliError> {
     let api = ApiClient::new(base_url, None, timeout)?;
-    let started: DeviceAuthorization = serde_json::from_value(
-        api.post(&["auth", "device", "authorize"], &json!({}))
-            .await?,
-    )
-    .map_err(|err| CliError::Other(format!("unexpected device authorize response: {err}")))?;
+    let started: DeviceAuthorization = serde_json::from_value(start(&api).await?)
+        .map_err(|err| CliError::Other(format!("unexpected device authorize response: {err}")))?;
     prompter.notify(&format!(
         "To log in, open {} and enter the code {}\n(or open {})",
         started.verification_uri, started.user_code, started.verification_uri_complete
@@ -83,6 +99,15 @@ pub async fn device_login(
             Err(CliError::Api {
                 status: 400, code, ..
             }) => interval = next_step(&code, interval)?,
+            // The public device routes are rate limited: wait and keep polling.
+            Err(CliError::Api {
+                status: 429,
+                retry_after,
+                ..
+            }) => {
+                let wait = retry_after.unwrap_or(interval + SLOW_DOWN_SECS);
+                tokio::time::sleep(Duration::from_secs(wait)).await;
+            }
             Err(err) => return Err(err),
         }
     }

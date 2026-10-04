@@ -80,6 +80,27 @@ pub async fn sso_login(
     timeout: Duration,
     wait: Duration,
 ) -> Result<LoginResponse, CliError> {
+    // A mistyped slug would otherwise end on a browser error page while the
+    // terminal waits; older backends without the list are not checked.
+    let api = ApiClient::new(base_url, None, timeout)?;
+    if let Ok(serde_json::Value::Array(providers)) =
+        api.get(&["auth", "sso", "providers"], &[]).await
+    {
+        let slugs: Vec<&str> = providers
+            .iter()
+            .filter_map(|provider| provider.get("slug").and_then(serde_json::Value::as_str))
+            .collect();
+        if !slugs.contains(&slug) {
+            return Err(CliError::Usage(format!(
+                "unknown SSO provider '{slug}'; available: {}",
+                if slugs.is_empty() {
+                    "none".to_string()
+                } else {
+                    slugs.join(", ")
+                }
+            )));
+        }
+    }
     // Only this machine can reach the callback.
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
     let callback = format!(
@@ -87,7 +108,6 @@ pub async fn sso_login(
         listener.local_addr()?.port()
     );
     let verifier = new_verifier();
-    let api = ApiClient::new(base_url, None, timeout)?;
     let mut authorize = api.url(&["auth", "sso", slug, "authorize"]);
     authorize
         .query_pairs_mut()

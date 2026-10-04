@@ -140,6 +140,10 @@ impl ApiClient {
             page_query.push(("limit", PAGE_SIZE.to_string()));
             page_query.push(("offset", offset.to_string()));
             let page = self.get(segments, &page_query).await?;
+            // Some lists (teams, roles, SSO providers) are not paginated.
+            if let Value::Array(items) = page {
+                return Ok(items);
+            }
             let batch = page
                 .get("items")
                 .and_then(Value::as_array)
@@ -202,6 +206,11 @@ fn network_error(err: reqwest::Error) -> CliError {
 
 async fn decode(response: reqwest::Response) -> Result<Value, CliError> {
     let status = response.status();
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok());
     let text = response.text().await.map_err(network_error)?;
     let body: Value = if text.trim().is_empty() {
         json!({})
@@ -230,6 +239,7 @@ async fn decode(response: reqwest::Response) -> Result<Value, CliError> {
         code,
         message,
         body,
+        retry_after,
     })
 }
 
@@ -429,5 +439,44 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.exit_code(), EXIT_USAGE);
+    }
+
+    #[tokio::test]
+    async fn get_all_pages_accepts_a_bare_array() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/teams"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!([{ "id": "t1" }, { "id": "t2" }])),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let items = client(&server, None)
+            .get_all_pages(&["teams"], &[])
+            .await
+            .unwrap();
+        assert_eq!(items.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn rate_limit_errors_carry_retry_after() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("retry-after", "7")
+                    .set_body_json(json!({ "error": "rate_limited", "message": "Rate limited" })),
+            )
+            .mount(&server)
+            .await;
+        match client(&server, None).get(&["x"], &[]).await.unwrap_err() {
+            CliError::Api {
+                status: 429,
+                retry_after,
+                ..
+            } => assert_eq!(retry_after, Some(7)),
+            other => panic!("unexpected {other:?}"),
+        }
     }
 }

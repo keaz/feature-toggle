@@ -6,7 +6,7 @@ use crate::auth::password::password_login;
 use crate::auth::session::{SessionCache, SessionStore};
 use crate::auth::sso_loopback::{LOGIN_WAIT, sso_login};
 use crate::cli::LoginArgs;
-use crate::config::Source;
+use crate::config::{Credential, Source};
 use crate::context::Context;
 use crate::error::CliError;
 use crate::output::Outcome;
@@ -69,6 +69,16 @@ pub async fn run(args: LoginArgs, app: &mut App<'_>) -> Result<Outcome, CliError
             .await;
     }
     store.save(&session, &SessionCache::from_login(&response, Utc::now()))?;
+    if let Credential::Static {
+        source: Source::Profile,
+        ..
+    } = &settings.credential
+    {
+        outcome.warnings.push(format!(
+            "warning: profile '{}' has a static token in the credentials file, which commands use before this session; remove it to use the login",
+            settings.profile
+        ));
+    }
 
     // A profile url would shadow the session's url.
     let shadowed = settings.url.source == Source::Profile;

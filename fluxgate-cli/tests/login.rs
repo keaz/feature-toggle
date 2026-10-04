@@ -397,3 +397,24 @@ async fn loose_session_cache_permissions_are_reported() {
         r.stderr
     );
 }
+
+#[tokio::test]
+async fn login_on_a_static_token_profile_warns_that_the_token_wins() {
+    let h = Harness::new().await;
+    h.write("config", &format!("[profile ci]\nurl = {}\n", h.url()));
+    h.write("credentials", "[ci]\ntoken = static-ci\n");
+    mount_login(&h, "pw", login_body("a1", "r1")).await;
+    let r = h
+        .run_with(
+            &["--profile", "ci", "login", "--username", "alice"],
+            &[],
+            &["pw"],
+        )
+        .await;
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        r.stderr.contains("static token in the credentials file"),
+        "{}",
+        r.stderr
+    );
+}

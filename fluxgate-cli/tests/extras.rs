@@ -193,6 +193,7 @@ async fn mount_target(h: &Harness) {
         .await;
     Mock::given(method("GET"))
         .and(path(format!("/api/v1/teams/{TEAM_A}/features")))
+        .and(wiremock::matchers::query_param("includeArchived", "true"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "items": [{ "id": FEATURE_ID, "key": "existing" }], "meta": { "offset": 0, "limit": 200, "total": 1 } })))
         .mount(&h.server)

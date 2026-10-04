@@ -28,6 +28,8 @@ pub enum CliError {
         code: String,
         message: String,
         body: Value,
+        /// Seconds from a `Retry-After` header (429 answers).
+        retry_after: Option<u64>,
     },
     /// Timeout, connection or transport failure.
     #[error("{0}")]
@@ -91,6 +93,7 @@ mod tests {
             code: "c".into(),
             message: "m".into(),
             body: json!({ "error": "e", "message": "m", "code": "c" }),
+            retry_after: None,
         }
     }
 

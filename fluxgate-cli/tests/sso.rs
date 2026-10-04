@@ -46,7 +46,8 @@ async fn sso_login_exchanges_the_loopback_code_with_the_verifier() {
     );
     assert!(h.read("sessions/corp.json").contains("\"a1\""));
     let requests = h.server.received_requests().await.unwrap();
-    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    let exchange = requests.iter().find(|r| r.url.path() == "/api/v1/auth/sso/exchange").unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&exchange.body).unwrap();
     let verifier = body["codeVerifier"].as_str().unwrap();
     assert_eq!(verifier.len(), 43);
     assert_eq!(Some(challenge_of(verifier)), *challenge.lock().unwrap());
@@ -278,4 +279,51 @@ async fn interactive_device_setup_logs_in_without_a_password() {
         .await;
     assert_eq!(r.code, 0, "{}", r.stderr);
     assert!(h.exists("sessions/default.json"));
+}
+
+#[tokio::test]
+async fn sso_login_with_an_unknown_provider_fails_fast() {
+    let h = Harness::new().await;
+    sso_config(&h, Some("otka"));
+    Mock::given(method("GET"))
+        .and(path("/api/v1/auth/sso/providers"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!([{ "slug": "okta", "displayName": "Okta" }])),
+        )
+        .mount(&h.server)
+        .await;
+    let mut prompter = fluxgate_cli::prompt::ScriptedPrompter::new(&[]).on_open(|_| {});
+    let r = h
+        .run_prompted(&["login", "--output", "text"], &[], &mut prompter)
+        .await;
+    assert_eq!(r.code, 2);
+    assert!(
+        r.stderr
+            .contains("unknown SSO provider 'otka'; available: okta"),
+        "{}",
+        r.stderr
+    );
+    assert!(prompter.opened.is_empty());
+}
+
+#[tokio::test]
+async fn device_login_keeps_polling_through_rate_limits() {
+    let h = Harness::new().await;
+    sso_config(&h, None);
+    let limited = ResponseTemplate::new(429)
+        .insert_header("retry-after", "0")
+        .set_body_json(json!({ "error": "rate_limited", "message": "Rate limited" }));
+    mount_device(
+        &h,
+        vec![
+            limited,
+            ResponseTemplate::new(200).set_body_json(login_body("a1", "r1")),
+        ],
+    )
+    .await;
+    let r = h
+        .run(&["login", "--use-device-code", "--no-browser"], &[])
+        .await;
+    assert_eq!(r.code, 0, "{}", r.stderr);
 }
