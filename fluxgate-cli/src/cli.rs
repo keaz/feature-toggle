@@ -5,7 +5,7 @@ use clap::{Args, Parser, Subcommand};
 use crate::config::Overrides;
 use crate::output::OutputFormat;
 
-#[derive(Debug, Parser)]
+#[derive(Parser)]
 #[command(
     name = "fluxgate",
     version,
@@ -38,6 +38,16 @@ pub struct Cli {
     pub timeout: Option<u64>,
     #[command(subcommand)]
     pub command: Command,
+}
+
+impl std::fmt::Debug for Cli {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Cli")
+            .field("overrides", &self.overrides())
+            .field("json", &self.json)
+            .field("command", &self.command)
+            .finish()
+    }
 }
 
 impl Cli {
@@ -386,5 +396,11 @@ mod tests {
             Cli::try_parse_from(["fluxgate", "rollout", "promote", "s", "--request", "LAUNCH"])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn cli_debug_hides_the_token() {
+        let cli = Cli::parse_from(["fluxgate", "--token", "secret-token", "health"]);
+        assert!(!format!("{cli:?}").contains("secret-token"));
     }
 }

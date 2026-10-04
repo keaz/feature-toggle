@@ -292,3 +292,81 @@ async fn interactive_setup_checks_the_new_profile_not_env_credentials() {
     assert!(config.contains("team=Payments"), "{config}");
     assert!(!config.contains(TEAM_B), "{config}");
 }
+
+#[tokio::test]
+async fn set_url_rejects_an_invalid_url() {
+    let h = Harness::new().await;
+    let r = h
+        .run(
+            &["configure", "set", "url", "not a url", "--output", "text"],
+            &[],
+        )
+        .await;
+    assert_eq!(r.code, 2);
+    assert!(r.stderr.contains("invalid url"), "{}", r.stderr);
+}
+
+#[tokio::test]
+async fn failed_login_during_setup_leaves_the_config_unchanged() {
+    let h = Harness::new().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/login"))
+        .respond_with(
+            ResponseTemplate::new(401).set_body_json(
+                json!({ "error": "unauthorized", "message": "invalid credentials" }),
+            ),
+        )
+        .mount(&h.server)
+        .await;
+    let url = h.url();
+    let r = h
+        .run_with(
+            &["configure", "--output", "text"],
+            &[],
+            &[
+                url.as_str(),
+                "Log in with username and password",
+                "alice",
+                "bad",
+            ],
+        )
+        .await;
+    assert_eq!(r.code, 3, "{}", r.stderr);
+    assert!(!h.exists("config"), "{}", h.read("config"));
+}
+
+#[tokio::test]
+async fn changing_a_shared_session_url_warns_about_other_profiles() {
+    let h = Harness::new().await;
+    h.write("config", "[default]\nsession = corp\n\n[profile other]\nsession = corp\n\n[session corp]\nurl = https://old.example.com/api/v1\n");
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/login"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(login_body("a1", "r1")))
+        .mount(&h.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/teams"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .mount(&h.server)
+        .await;
+    let url = h.url();
+    let r = h
+        .run_with(
+            &["configure", "--output", "text"],
+            &[],
+            &[
+                url.as_str(),
+                "Log in with username and password",
+                "alice",
+                "pw",
+                "table",
+            ],
+        )
+        .await;
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        r.stderr.contains("also used by profile 'other'"),
+        "{}",
+        r.stderr
+    );
+}

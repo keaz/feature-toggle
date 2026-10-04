@@ -25,10 +25,15 @@ pub async fn run(args: TeamsArgs, app: &mut App<'_>) -> Result<Outcome, CliError
                     json!({ "active": is_active, "name": team.name, "id": team.id })
                 })
                 .collect();
-            Ok(Outcome::new(
-                json!({ "items": items }),
-                Kind::List(TEAM_COLUMNS),
-            ))
+            let mut outcome = Outcome::new(json!({ "items": items }), Kind::List(TEAM_COLUMNS));
+            if let Some(token_team) = context.token_team()
+                && teams.is_empty()
+            {
+                outcome.warnings.push(format!(
+                    "system-client tokens see no teams; this token is bound to team {token_team}"
+                ));
+            }
+            Ok(outcome)
         }
         TeamsSubcommand::Use { team } => {
             let wanted = team.trim();

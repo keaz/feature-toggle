@@ -251,3 +251,164 @@ async fn logout_all_ends_every_cached_session() {
     assert_eq!(r.code, 0, "{}", r.stderr);
     assert_eq!(r.stdout.trim(), "Logged out of 'one', 'two'");
 }
+
+#[tokio::test]
+async fn login_revokes_the_session_it_replaces() {
+    let h = Harness::new().await;
+    h.write(
+        "config",
+        &format!(
+            "[default]\nsession = corp\n\n[session corp]\nurl = {}\n",
+            h.url()
+        ),
+    );
+    h.write_session("corp", "a0", "r0", 600);
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/logout"))
+        .and(header("authorization", "Bearer a0"))
+        .and(body_json(json!({ "refreshToken": "r0" })))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    mount_login(&h, "pw", login_body("a1", "r1")).await;
+    let r = h
+        .run_with(&["login", "--username", "alice"], &[], &["pw"])
+        .await;
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(h.read("sessions/corp.json").contains("\"a1\""));
+}
+
+#[tokio::test]
+async fn login_to_another_url_moves_the_session_and_warns() {
+    let h = Harness::new().await;
+    h.write(
+        "config",
+        "[default]\nsession = corp\n\n[session corp]\nurl = https://old.example.com/api/v1\n",
+    );
+    mount_login(&h, "pw", login_body("a1", "r1")).await;
+    let url = h.url();
+    let r = h
+        .run_with(
+            &["login", "--username", "alice", "--url", url.as_str()],
+            &[],
+            &["pw"],
+        )
+        .await;
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(r.stderr.contains("now points at"), "{}", r.stderr);
+    assert!(h.read("config").contains(&format!("url={url}")));
+}
+
+#[tokio::test]
+async fn login_creates_a_new_profile_when_a_url_is_given() {
+    let h = Harness::new().await;
+    mount_login(&h, "pw", login_body("a1", "r1")).await;
+    let url = h.url();
+    let r = h
+        .run_with(
+            &[
+                "--profile",
+                "staging",
+                "login",
+                "--username",
+                "alice",
+                "--output",
+                "text",
+            ],
+            &[("FLUXGATE_URL", url.as_str())],
+            &["pw"],
+        )
+        .await;
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let config = h.read("config");
+    assert!(
+        config.contains("[profile staging]") && config.contains("session=staging"),
+        "{config}"
+    );
+    assert!(config.contains("[session staging]"), "{config}");
+    assert!(h.exists("sessions/staging.json"));
+}
+
+#[tokio::test]
+async fn login_for_an_unknown_profile_without_url_points_to_configure() {
+    let h = Harness::new().await;
+    let r = h
+        .run(&["--profile", "staging", "login", "--output", "text"], &[])
+        .await;
+    assert_eq!(r.code, 2);
+    assert!(
+        r.stderr.contains("fluxgate configure --profile staging"),
+        "{}",
+        r.stderr
+    );
+}
+
+#[tokio::test]
+async fn session_commands_refuse_a_url_of_another_server() {
+    let h = Harness::new().await;
+    h.write(
+        "config",
+        &format!(
+            "[default]\nsession = corp\nteam = {TEAM_A}\n\n[session corp]\nurl = {}\n",
+            h.url()
+        ),
+    );
+    h.write_session("corp", "a1", "r1", 600);
+    let r = h
+        .run(
+            &["flags", "list", "--output", "text"],
+            &[("FLUXGATE_URL", "https://other.example.com/api/v1")],
+        )
+        .await;
+    assert_eq!(r.code, 2);
+    assert!(r.stderr.contains("session 'corp'"), "{}", r.stderr);
+}
+
+#[tokio::test]
+async fn logout_reports_a_damaged_cache_it_removed() {
+    let h = Harness::new().await;
+    h.write(
+        "config",
+        &format!(
+            "[default]\nsession = corp\n\n[session corp]\nurl = {}\n",
+            h.url()
+        ),
+    );
+    h.write("sessions/corp.json", "{\"accessToken\": \"a");
+    let r = h.run(&["logout", "--output", "text"], &[]).await;
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        r.stderr.contains("removed damaged session cache 'corp'"),
+        "{}",
+        r.stderr
+    );
+    assert!(!h.exists("sessions/corp.json"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn loose_session_cache_permissions_are_reported() {
+    use std::os::unix::fs::PermissionsExt;
+    let h = Harness::new().await;
+    h.write(
+        "config",
+        &format!(
+            "[default]\nsession = corp\n\n[session corp]\nurl = {}\n",
+            h.url()
+        ),
+    );
+    h.write_session("corp", "a1", "r1", 600);
+    std::fs::set_permissions(
+        h.path("sessions/corp.json"),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    let r = h.run(&["configure", "list"], &[]).await;
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        r.stderr.contains("corp.json is readable by other users"),
+        "{}",
+        r.stderr
+    );
+}

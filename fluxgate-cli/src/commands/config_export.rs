@@ -7,7 +7,7 @@ use crate::output::{Kind, Outcome};
 pub async fn run(app: &mut App<'_>) -> Result<Outcome, CliError> {
     let context = app.connect().await?;
     let team_id = context.team_id().await?;
-    // System-client tokens may not read /teams; the id alone is still useful.
+    // System-client tokens see no teams in /teams; the id alone is still useful.
     let team = context
         .teams()
         .await

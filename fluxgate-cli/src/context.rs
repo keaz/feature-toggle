@@ -91,6 +91,16 @@ impl Context {
         let token = match &settings.credential {
             Credential::Static { token, .. } => token.clone(),
             Credential::Session { name } => {
+                if let Some(session_url) = &settings.session_url
+                    && session_url != &settings.url.value
+                {
+                    return Err(CliError::Usage(format!(
+                        "url {} ({}) is not the url of session '{name}' ({session_url}); its tokens work only there: remove the url or run fluxgate login --profile {}",
+                        settings.url.value,
+                        settings.url.source.as_str(),
+                        settings.profile
+                    )));
+                }
                 SessionStore::new(paths.sessions.clone())
                     .access_token(
                         name,

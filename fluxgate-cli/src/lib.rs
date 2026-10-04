@@ -17,7 +17,8 @@ use clap::Parser;
 
 use crate::cli::Cli;
 use crate::commands::{App, dispatch};
-use crate::config::{ConfigFiles, Env, Overrides, Paths, resolve};
+use crate::config::files::permission_warning;
+use crate::config::{ConfigFiles, Credential, Env, Overrides, Paths, resolve};
 use crate::error::{EXIT_OK, EXIT_USAGE};
 use crate::output::{OutputFormat, render};
 use crate::prompt::Prompter;
@@ -72,10 +73,16 @@ where
             let _ = writeln!(err, "{warning}");
         }
     }
-    let format = files
+    let settings = files
         .as_ref()
         .ok()
-        .and_then(|files| resolve(files, &env, &overrides, is_tty).ok())
+        .and_then(|files| resolve(files, &env, &overrides, is_tty).ok());
+    if let Some(Credential::Session { name }) = settings.as_ref().map(|s| &s.credential)
+        && let Some(warning) = permission_warning(&paths.sessions.join(format!("{name}.json")))
+    {
+        let _ = writeln!(err, "{warning}");
+    }
+    let format = settings
         .map(|settings| settings.output.value)
         .unwrap_or_else(|| fallback_format(&overrides, &env, is_tty));
 

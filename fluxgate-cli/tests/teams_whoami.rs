@@ -118,3 +118,29 @@ async fn whoami_for_a_system_client_needs_no_teams_request() {
     assert_eq!(value["kind"], "system_client");
     assert_eq!(value["team"], TEAM_A);
 }
+
+#[tokio::test]
+async fn teams_list_with_a_system_client_token_explains_the_empty_list() {
+    let h = Harness::new().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/teams"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .mount(&h.server)
+        .await;
+    let (url, token) = (h.url(), system_token(TEAM_A));
+    let r = h
+        .run(
+            &["teams", "list"],
+            &[
+                ("FLUXGATE_URL", url.as_str()),
+                ("FLUXGATE_TOKEN", token.as_str()),
+            ],
+        )
+        .await;
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        r.stderr.contains(&format!("bound to team {TEAM_A}")),
+        "{}",
+        r.stderr
+    );
+}

@@ -183,6 +183,27 @@ impl SessionStore {
         Ok(refreshed.access_token)
     }
 
+    /// Revokes the session's refresh token family on the server.
+    pub async fn revoke(
+        &self,
+        name: &str,
+        profile: &str,
+        base_url: &str,
+        timeout: Duration,
+    ) -> Result<(), CliError> {
+        let access_token = self.access_token(name, profile, base_url, timeout).await?;
+        let cache = self
+            .load(name)?
+            .ok_or_else(|| CliError::Other("session cache disappeared".into()))?;
+        ApiClient::new(base_url, Some(access_token), timeout)?
+            .post(
+                &["auth", "logout"],
+                &json!({ "refreshToken": cache.refresh_token }),
+            )
+            .await?;
+        Ok(())
+    }
+
     async fn lock(&self, name: &str) -> Result<File, CliError> {
         std::fs::create_dir_all(&self.dir)?;
         let path = self.dir.join(format!("{name}.lock"));

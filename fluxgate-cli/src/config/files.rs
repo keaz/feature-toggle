@@ -139,7 +139,21 @@ fn load_ini(path: &Path) -> Result<Ini, CliError> {
         return Ok(Ini::new());
     }
     Ini::load_from_file(path)
+        .map(normalize_sections)
         .map_err(|err| CliError::Usage(format!("cannot read {}: {err}", path.display())))
+}
+
+/// `[profile   prod]` becomes `[profile prod]`, so lookups find what
+/// `profile_names` lists instead of silently using defaults.
+fn normalize_sections(ini: Ini) -> Ini {
+    let mut normalized = Ini::new();
+    for (section, properties) in ini.iter() {
+        let name = section.map(|name| name.split_whitespace().collect::<Vec<_>>().join(" "));
+        for (key, value) in properties.iter() {
+            normalized.with_section(name.clone()).set(key, value);
+        }
+    }
+    normalized
 }
 
 fn save_ini(ini: &Ini, path: &Path) -> Result<(), CliError> {
@@ -339,5 +353,18 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
         let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap()).unwrap().collect();
         assert_eq!(leftovers.len(), 1, "temporary file left behind");
+    }
+
+    #[test]
+    fn section_names_with_extra_spaces_are_normalized() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = paths(dir.path());
+        std::fs::write(&p.config, "[profile   prod]\nteam = checkout\n\n[session  corp ]\nurl = https://fg.example.com/api/v1\n").unwrap();
+        let files = ConfigFiles::load(&p).unwrap();
+        assert_eq!(files.profile_value("prod", "team"), Some("checkout"));
+        assert_eq!(
+            files.session_value("corp", "url"),
+            Some("https://fg.example.com/api/v1")
+        );
     }
 }

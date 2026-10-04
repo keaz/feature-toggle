@@ -33,7 +33,7 @@ pub async fn run(app: &mut App<'_>) -> Result<Outcome, CliError> {
             .map(|expires| expires.to_rfc3339()),
     });
     if kind == "system_client" {
-        // System clients may not list teams; the token names its team.
+        // /teams is empty for system clients; the token names its team.
         value["team"] = json!(context.token_team());
     } else {
         let teams = context.teams().await?;

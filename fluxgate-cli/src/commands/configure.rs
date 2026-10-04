@@ -38,6 +38,9 @@ fn set(app: &App<'_>, key: &str, value: &str) -> Result<Outcome, CliError> {
             files.save_credentials(&app.paths)?;
         }
         _ if PROFILE_KEYS.contains(&key) => {
+            if key == "url" {
+                ApiClient::new(value, None, Duration::from_secs(DEFAULT_TIMEOUT_SECS))?;
+            }
             if key == "output" {
                 value.parse::<OutputFormat>().map_err(CliError::Usage)?;
             }
@@ -188,19 +191,41 @@ async fn interactive(app: &mut App<'_>) -> Result<Outcome, CliError> {
         .to_string();
     ApiClient::new(&url, None, timeout)?;
 
+    let mut warnings = Vec::new();
     let methods = vec![LOGIN_PASSWORD.to_string(), LOGIN_TOKEN.to_string()];
     if app.prompter.select("How do you sign in", &methods)? == 0 {
         let session = files
             .profile_value(&profile, "session")
             .unwrap_or(profile.as_str())
             .to_string();
+        // Log in before writing anything, so a failed login changes nothing.
+        let username = app.prompter.input("Username", None)?;
+        let response = password_login(&mut *app.prompter, &url, &username, timeout).await?;
+        if files
+            .session_value(&session, "url")
+            .is_some_and(|old| old.trim_end_matches('/') != url)
+        {
+            let others: Vec<String> = files
+                .profile_names()
+                .into_iter()
+                .filter(|name| {
+                    name != &profile
+                        && files.profile_value(name, "session") == Some(session.as_str())
+                })
+                .map(|name| format!("'{name}'"))
+                .collect();
+            if !others.is_empty() {
+                warnings.push(format!(
+                    "warning: session '{session}' now points at {url}; it is also used by profile {}",
+                    others.join(", ")
+                ));
+            }
+        }
         files.set_profile_value(&profile, "session", &session);
         files.set_session_value(&session, "url", &url);
         // The session holds the url; a profile url would shadow it.
         files.remove_profile_value(&profile, "url");
         files.save_config(&app.paths)?;
-        let username = app.prompter.input("Username", None)?;
-        let response = password_login(&mut *app.prompter, &url, &username, timeout).await?;
         SessionStore::new(app.paths.sessions.clone())
             .save(&session, &SessionCache::from_login(&response, Utc::now()))?;
     } else {
@@ -259,8 +284,10 @@ async fn interactive(app: &mut App<'_>) -> Result<Outcome, CliError> {
     let output = app.prompter.select("Default output", &outputs)?;
     files.set_profile_value(&profile, "output", &outputs[output]);
     files.save_config(&app.paths)?;
-    Ok(Outcome::message(format!(
+    let mut outcome = Outcome::message(format!(
         "Profile '{profile}' saved to {}",
         app.paths.config.display()
-    )))
+    ));
+    outcome.warnings = warnings;
+    Ok(outcome)
 }

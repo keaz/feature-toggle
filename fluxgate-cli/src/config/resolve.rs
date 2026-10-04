@@ -39,7 +39,7 @@ pub struct Resolved<T> {
 }
 
 /// Values given as global command line flags.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct Overrides {
     pub profile: Option<String>,
     pub url: Option<String>,
@@ -48,6 +48,20 @@ pub struct Overrides {
     pub output: Option<OutputFormat>,
     pub token: Option<String>,
     pub timeout: Option<u64>,
+}
+
+impl std::fmt::Debug for Overrides {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Overrides")
+            .field("profile", &self.profile)
+            .field("url", &self.url)
+            .field("team", &self.team)
+            .field("environment", &self.environment)
+            .field("output", &self.output)
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("timeout", &self.timeout)
+            .finish()
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -85,6 +99,8 @@ pub struct Settings {
     pub output: Resolved<OutputFormat>,
     pub timeout: Resolved<u64>,
     pub session: Option<String>,
+    /// The url of `session`; its tokens are valid only there.
+    pub session_url: Option<String>,
     pub sso_provider: Option<String>,
     pub credential: Credential,
 }
@@ -228,6 +244,10 @@ pub fn resolve(
         Credential::None
     };
 
+    let session_url = session
+        .as_deref()
+        .and_then(|name| files.session_value(name, "url"))
+        .map(|url| url.trim_end_matches('/').to_string());
     let sso_provider = session
         .as_deref()
         .and_then(|name| files.session_value(name, "sso_provider"))
@@ -241,6 +261,7 @@ pub fn resolve(
         output,
         timeout,
         session,
+        session_url,
         sso_provider,
         credential,
     })
@@ -530,5 +551,30 @@ mod tests {
             selected_profile(&Overrides::default(), &env(&[("FLUXGATE_PROFILE", "prod")])),
             "prod"
         );
+    }
+
+    #[test]
+    fn overrides_debug_hides_the_token() {
+        let overrides = Overrides {
+            token: Some("secret-token".into()),
+            ..Overrides::default()
+        };
+        assert!(!format!("{overrides:?}").contains("secret-token"));
+    }
+
+    #[test]
+    fn settings_carry_the_session_url() {
+        let s = resolve(
+            &files(),
+            &env(&[("FLUXGATE_URL", "https://other.example.com/api/v1")]),
+            &Overrides::default(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            s.session_url.as_deref(),
+            Some("https://fg.example.com/api/v1")
+        );
+        assert_eq!(s.url.value, "https://other.example.com/api/v1");
     }
 }
