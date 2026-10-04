@@ -5,6 +5,7 @@ members = [
     "feature-edge-server",
     "feature-toggle-backend",
     "feature-toggle-shared",
+    "fluxgate-cli",
 ]
 
 # Release optimizations

@@ -1,0 +1,28 @@
+[package]
+name = "fluxgate-cli"
+version = "0.1.0"
+edition = "2024"
+description = "FluxGate command line interface"
+
+[lib]
+name = "fluxgate_cli"
+path = "src/lib.rs"
+
+[dependencies]
+base64 = "0.22.1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5.40", features = ["derive"] }
+comfy-table = "7"
+dirs = "6"
+reqwest = { version = "0.12.20", default-features = false, features = ["json", "rustls-tls"] }
+rpassword = "7"
+rust-ini = "0.21"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2"
+tokio = { version = "1.45.1", features = ["macros", "rt-multi-thread"] }
+uuid = "1.17.0"
+
+[dev-dependencies]
+tempfile = "3"
+wiremock = "0.6.5"
