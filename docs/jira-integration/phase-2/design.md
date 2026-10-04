@@ -28,6 +28,9 @@ Out of scope: moving the Jira issue to another status (transitions), generic out
 | J22 | On 401 or 403 from Jira, write-back for that integration **pauses** until an admin saves a new credential or resumes. FluxGate does not retry a bad token. |
 | J23 | The public inbound route gets an **in-process rate limit** (single-server backend, see project memory). Events over the limit are not stored. |
 | J24 | Native Jira webhooks are accepted when signed with **HMAC-SHA256** (`X-Hub-Signature: sha256=<hex>`). A secret in the URL is not supported, because URLs end up in proxy and access logs. |
+| J25 | *Added 2026-10-04 (§3.8).* When Jira approves a request (`approve_stage_change_externally`), its approval-risk assessment is **skipped** if it has not finished: the judgment row becomes `skipped` and no Jev call is made. If a call is already running, its result is dropped: no `done` row and no `approval_risk_assessed` activity row. A finished assessment is kept as history. A human vote, a cancel and auto-approval do not skip, so nothing changes for them. |
+| J26 | *Added 2026-10-04 (§3.8).* The approval-risk input sent to Jev carries the request's `external_ref` and `reason` (JI-11), so Jev sees the Jira issue key and why the change was asked for. The four questions and the derivation do not change. |
+| J27 | *Added 2026-10-04 (§3.8).* A stage change reason that a **person** typed is recorded for the justification check after the change, with kind `stage_change` (JI-47), on the activity row that holds the reason. A reason that FluxGate generates for a Jira status rule (`Jira status '<status>'`) is not recorded, because it is not a person's justification. |
 
 ## 3. Changes
 
@@ -186,6 +189,38 @@ JI-47: attach `components/ai/ReasonQualityHint.tsx` to the stage change reason f
   - The network section: FluxGate needs outbound access to Jira; the built-in rate limit; the proxy limit becomes optional.
 - `api-tests/src/tests/advanced/jira-writeback.test.ts` with a small Node HTTP server as a fake Jira that records requests.
 
+### 3.8 AI judgments and Jira (JI-51, JI-52, JI-53)
+
+*Added 2026-10-04, after a check of how phase 1 and phase 2 affect the AI judgments ([`../../ai-judgments/design.md`](../../ai-judgments/design.md)).* Jira changes go through the normal stage path, so they get the same approval-risk assessment as a person's change. Three gaps were found:
+
+1. When Jira approves a request, the request closes before the queued assessment runs. AI-11 cannot act on a closed request (phase 1 §3.8 records `ai_risk_mode_skipped`), but the Jev call was still made, and a late `approval_risk_assessed` row ("AI risk assessment: high") appeared after Jira had approved. For the `approve` action from `NOT_DEPLOYED`, the request and the approval happen in the same event, so the call was always wasted.
+2. The assessment input had no `external_ref` or `reason`, so Jev never saw the Jira issue or why the change was asked for.
+3. The JI-47 hint checks a stage change reason before submit, but the reason was never recorded for the justification check after submit, as emergency, cleanup and freeze override reasons are.
+
+**JI-51: skip the assessment of a request Jira approved (J25).**
+
+- Migration `20261004090000_ai_judgments_skipped_status.sql`: `ai_judgments.status` allows `skipped`. A skipped row is final: `skipped` + `error` (the reason text) + `completed_at`.
+- `AiJudgmentRepository::skip_unfinished(subject_type, subject_id, kind, reason) -> bool` sets `status = 'skipped'` only where `status IN ('pending','failed')`.
+- The guards of `start_attempt`, `mark_done` and `mark_failed` change from `status <> 'done'` to `status IN ('pending','failed')`. So a skipped row is never started, finished or failed. `claim_retryable` already reads only `pending` and `failed`. `upsert_pending` still reopens a row on a new submission; a closed request gets none.
+- `JudgmentService::skip(subject_type, subject_id, kind, reason)`.
+- `ApprovalLogicImpl::approve_stage_change_externally`, after the commit of the path with a pending request: skip the `approval_risk` judgment of that request with `skipped: approval request approved by <source> before the assessment ran`. A failure is logged and does not fail the approval. The activity row also gets `"ai_risk_assessment": "skipped"` when the policy's mode is not `off`, written before the commit like `ai_risk_mode_skipped`. The skip runs after the commit, so it can find nothing to skip if the assessment has already finished.
+- `rest/approval.rs` `map_ai_risk`: `skipped` gives `aiRisk: null`, the same as no assessment, so there is no contract change. The approvals UI already shows "Approved by Jira (...)" for such a request.
+- A run already in flight when the skip lands: `mark_done` matches no row, the run returns `Stale`, and `apply` does not run. The API call was made; nothing is shown.
+
+**JI-52: Jira context in the approval-risk input (J26).**
+
+- `approval_risk::build_input` takes the request's `external_ref` and `request_reason`. `change` gets two keys, always present: `"external_ref": "<key>" | null` and `"reason": "<text>" | null`. `reason` is cut to 500 characters (`MAX_TEXT_CHARS`).
+- The questions and the derivation do not change. `overall_risk` already says "Use `change` and `impact`".
+- Privacy: `reason` is free text from the requester. The justification check already sends the same kind of text to Jev. Owner, user ids and emails are still never included.
+- `input_hash` changes for new requests only. Stored judgments are not re-run.
+
+**JI-53: record stage change reasons for the justification check (J27).**
+
+- `StageChangeMeta` gets `check_reason: bool` (default `false`). The REST stage route and the by-key route (`perform_stage_change`, `rest/feature.rs`) set it to `true`. `logic/external_change.rs`, used for Jira status rules, leaves it `false`.
+- `FeatureLogicImpl` gets an optional `Arc<JudgmentService>`, passed in `lib.rs`. This is the same service that `ApprovalLogicImpl` already holds.
+- In `request_stage_change`, after the change and its activity row (`stage_change_requested` for a request with an approval, or the direct row), when `check_reason` is on and a reason is present: `justification::record_justification(.., SubjectType::Activity, <activity id>, ReasonKind::StageChange, reason, Some(feature key))`. The verdict is merged into that row's `metadata.ai_justification`, as for the other kinds. The team toggle, the rule check and "never fails the caller" apply as before.
+- If the activity row cannot be written (the write is best effort), nothing is recorded.
+
 ## 4. Testing
 
 | Level | What |
@@ -213,8 +248,11 @@ Same rules as phase 1 ([`../README.md`](../README.md#rules-for-agents)): one tas
 | JI-46 | UI: write-back settings, native secret, Outbound tab, paused banner | UI | JI-42, JI-45 |
 | JI-47 | `ReasonQualityHint` on the stage change reason field (backend `stage_change` kind, then UI) | backend + UI | — |
 | JI-50 | Setup guide update and end-to-end write-back test | docs + api-tests | JI-43, JI-44, JI-45 |
+| JI-51 | Skip the AI risk assessment of a request Jira approved | backend | JI-14 |
+| JI-52 | Jira reference and reason in the AI risk input | backend | JI-11 |
+| JI-53 | Record stage change reasons for the justification check | backend | JI-47 |
 
-Order: JI-40, JI-41, JI-42, JI-43, JI-44, JI-45, JI-46, JI-47, JI-50.
+Order: JI-40, JI-41, JI-42, JI-43, JI-44, JI-45, JI-46, JI-47, JI-50, then the follow-ups JI-51, JI-52, JI-53 (added 2026-10-04).
 
 ## 6. Risks and open points
 

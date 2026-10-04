@@ -147,7 +147,7 @@ Per action, from the current stage status:
 - "Approve as Jira" closes the approval request with `status = 'approved'`, no vote row, `approval_source = 'jira'`, `external_approver` JSON (account id, display name, issue key, status), `executed_at`; it applies the stage change in the same transaction as the vote path does (`execute_change_tx`), publishes the approval event and the edge broadcast, and writes an `approval_request_approved_externally` activity row. When no policy applies to the environment, it moves the stage `DEPLOYMENT_REQUESTED → DEPLOYMENT_APPROVED` directly (check how today's code reaches `DEPLOYMENT_APPROVED` without a policy, and reuse it).
 - Migration: `approval_requests.approval_source VARCHAR(20) NOT NULL DEFAULT 'fluxgate'` (`fluxgate`, `jira`, `auto`), `approval_requests.external_approver JSONB NULL`. `ApprovalRequestResponse` gains `approvalSource` and `externalApprover`.
 - Freeze windows and rollout dependency checks apply as for any stage change. A blocked change is `Refused` with the reason; no freeze override from Jira.
-- The AI-11 extra-approver mode and auto-approval do not apply to a request approved by Jira: it is closed before they run. Record this in the activity metadata (`ai_risk_mode_skipped`), so it is visible.
+- The AI-11 extra-approver mode and auto-approval do not apply to a request approved by Jira: it is closed before they run. Record this in the activity metadata (`ai_risk_mode_skipped`), so it is visible. *Phase 2 follow-up (JI-51, decision J25):* the request's unfinished approval-risk assessment is skipped too, so no Jev call is made and no late assessment row appears.
 
 ### 3.9 Inbound events and the rule engine (JI-15)
 

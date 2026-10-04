@@ -42,6 +42,11 @@ Open points after phase 2:
 | JI-46 UI write-back settings | Done | UI `b4479f9` |
 | JI-47 reason hint on stage change | Done | backend `d5d6faf`, UI `56042f8` |
 | JI-50 guide + e2e | Done | backend `b75c9a9` (test), `e3321e3` (guide) |
+| JI-51 skip AI risk on Jira approval | Open | — |
+| JI-52 Jira context in AI risk input | Open | — |
+| JI-53 record stage change reasons | Open | — |
+
+**Phase 2 follow-ups (2026-10-04):** a check of how the Jira integration affects the AI judgments found three gaps (phase 2 [design §3.8](phase-2/design.md#38-ai-judgments-and-jira-ji-51-ji-52-ji-53), decisions J25-J27). JI-51 stops the wasted Jev call and the late "AI risk" row for requests Jira approves. JI-52 gives Jev the Jira issue key and the reason. JI-53 records a person's stage change reason for the justification check. Next task: JI-51.
 
 Facts from JI-41 (backend `3de0dec`): `logic::jira_client::{JiraClient, client_for}` build a client from a row but do not check `writeback_enabled` (the sender must); credential AAD is the integration id bytes; turning write-back off does not yet dead the pending jobs (JI-42 adds it); `web::Data<config::JiraUiBaseUrl>` carries the UI base URL. Details in the JI-41 handoff log.
 
