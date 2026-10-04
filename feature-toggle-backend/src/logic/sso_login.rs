@@ -158,7 +158,7 @@ pub fn validate_cli_redirect(value: &str) -> Option<String> {
     let loopback = matches!(url.host_str(), Some("127.0.0.1") | Some("[::1]"));
     let exact = url.scheme() == "http"
         && loopback
-        && url.port().is_some()
+        && url.port_or_known_default().is_some()
         && url.path() == "/callback"
         && url.query().is_none()
         && url.fragment().is_none()
@@ -474,7 +474,6 @@ mod tests {
             "http://127.0.0.1:53682/callback?x=1",
             "http://127.0.0.1:53682/callback#frag",
             "http://user@127.0.0.1:53682/callback",
-            "http://127.0.0.1/callback",
             "/callback",
             "",
         ] {
@@ -507,6 +506,15 @@ mod tests {
         assert_eq!(
             SsoLoginError::InvalidCliRedirect.code(),
             "sso_invalid_cli_redirect"
+        );
+    }
+
+    #[test]
+    fn cli_redirect_on_port_80_is_accepted() {
+        // The parser drops the default port; the browser still goes to :80.
+        assert_eq!(
+            validate_cli_redirect("http://127.0.0.1:80/callback").as_deref(),
+            Some("http://127.0.0.1/callback")
         );
     }
 }

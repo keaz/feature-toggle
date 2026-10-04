@@ -1,20 +1,22 @@
 //! Device-code login for the CLI. `authorize` and `token` are public and rate
 //! limited; `approve` needs a signed-in person (the UI's `/device` page).
 
+use std::net::IpAddr;
 use std::num::NonZeroU32;
 
 use actix_web::{HttpMessage, HttpRequest, HttpResponse, Responder, post, web};
 use chrono::{Duration, Utc};
 use governor::clock::{Clock, DefaultClock};
-use governor::{DefaultDirectRateLimiter, Quota, RateLimiter};
+use governor::{DefaultDirectRateLimiter, DefaultKeyedRateLimiter, Quota, RateLimiter};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::JwtUser;
 use crate::database::activity_log::{ActivityLogRepository, CreateActivityLog};
 use crate::database::cli_device_authorization::{
-    CliDeviceAuthorizationRepositoryTx, NewCliDeviceAuthorization,
-    cli_device_authorization_repository, cli_device_authorization_repository_tx,
+    CliDeviceAuthorizationRepository, CliDeviceAuthorizationRepositoryTx,
+    NewCliDeviceAuthorization, cli_device_authorization_repository,
+    cli_device_authorization_repository_tx,
 };
 use crate::database::user::user_repository;
 use crate::logic::device_login::{
@@ -32,47 +34,87 @@ use crate::utils::activity_logger::{activity_types, entity_types};
 /// Tries to find a free user code before giving up.
 const USER_CODE_ATTEMPTS: usize = 5;
 
-/// In-process limits for the public device routes. The backend runs as one
-/// instance, so the state is in memory.
+/// In-process limits for the public device routes: one budget per client
+/// address, so one noisy client cannot lock others out, and a total per route.
+/// The backend runs as one instance, so the state is in memory. Behind a
+/// reverse proxy every request has the proxy's address and shares one budget.
 pub struct DeviceAuthLimiter {
-    authorize: DefaultDirectRateLimiter,
-    token: DefaultDirectRateLimiter,
+    authorize: RouteLimit,
+    token: RouteLimit,
     clock: DefaultClock,
 }
+
+struct RouteLimit {
+    per_client: DefaultKeyedRateLimiter<IpAddr>,
+    total: DefaultDirectRateLimiter,
+}
+
+/// Client buckets kept before idle ones are dropped.
+const MAX_TRACKED_CLIENTS: usize = 10_000;
+/// Default totals are this many clients' worth of requests.
+const DEFAULT_TOTAL_FACTOR: u32 = 30;
 
 fn non_zero(value: u32) -> NonZeroU32 {
     NonZeroU32::new(value.max(1)).expect("value is at least 1")
 }
 
+/// `per_minute` requests a minute, all of which may come at once.
+fn quota(per_minute: u32) -> Quota {
+    Quota::per_minute(non_zero(per_minute)).allow_burst(non_zero(per_minute))
+}
+
 impl DeviceAuthLimiter {
-    /// Requests per minute for `authorize` and for `token`; bursts are a sixth
-    /// of the rate (at least 1).
+    /// Requests per minute and client for `authorize` and for `token`. The
+    /// totals per route default to 30 times that; see [`Self::with_totals`].
     pub fn new(authorize_per_minute: u32, token_per_minute: u32) -> Self {
-        let quota = |per_minute: u32| {
-            Quota::per_minute(non_zero(per_minute)).allow_burst(non_zero(per_minute / 6))
+        let route = |per_minute: u32| RouteLimit {
+            per_client: RateLimiter::keyed(quota(per_minute)),
+            total: RateLimiter::direct(quota(per_minute.saturating_mul(DEFAULT_TOTAL_FACTOR))),
         };
         Self {
-            authorize: RateLimiter::direct(quota(authorize_per_minute)),
-            token: RateLimiter::direct(quota(token_per_minute)),
+            authorize: route(authorize_per_minute),
+            token: route(token_per_minute),
             clock: DefaultClock::default(),
         }
     }
 
-    fn admit(&self, limiter: &DefaultDirectRateLimiter) -> Result<(), RestError> {
-        limiter.check().map_err(|not_until| {
-            let wait = not_until.wait_time_from(self.clock.now());
+    /// Requests per minute for each route across all clients.
+    pub fn with_totals(mut self, authorize_per_minute: u32, token_per_minute: u32) -> Self {
+        self.authorize.total = RateLimiter::direct(quota(authorize_per_minute));
+        self.token.total = RateLimiter::direct(quota(token_per_minute));
+        self
+    }
+
+    fn admit(&self, route: &RouteLimit, client: Option<IpAddr>) -> Result<(), RestError> {
+        let limited = |wait: std::time::Duration| {
             RestError::too_many_requests(wait.as_secs_f64().ceil().max(1.0) as u64)
-        })
+        };
+        if let Some(client) = client {
+            route
+                .per_client
+                .check_key(&client)
+                .map_err(|not_until| limited(not_until.wait_time_from(self.clock.now())))?;
+            if route.per_client.len() > MAX_TRACKED_CLIENTS {
+                route.per_client.retain_recent();
+            }
+        }
+        route
+            .total
+            .check()
+            .map_err(|not_until| limited(not_until.wait_time_from(self.clock.now())))
     }
 }
 
 impl Default for DeviceAuthLimiter {
     fn default() -> Self {
-        Self::new(60, 600)
+        // A CLI polls every 5 seconds (12 a minute); several logins from one
+        // address still fit.
+        Self::new(10, 120)
     }
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+// `Debug` redacts the device code (a plain comment: doc comments become OpenAPI text).
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceAuthorizeResponse {
     /// Secret the CLI polls `token` with.
@@ -85,6 +127,18 @@ pub struct DeviceAuthorizeResponse {
     pub expires_in: i64,
     /// Minimum seconds between polls.
     pub interval: i32,
+}
+
+impl std::fmt::Debug for DeviceAuthorizeResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceAuthorizeResponse")
+            .field("device_code", &"<redacted>")
+            .field("user_code", &self.user_code)
+            .field("verification_uri", &self.verification_uri)
+            .field("expires_in", &self.expires_in)
+            .field("interval", &self.interval)
+            .finish()
+    }
 }
 
 /// Body of `POST /auth/device/token`. `Debug` redacts the device code.
@@ -138,11 +192,12 @@ fn poll_error(code: &str, message: &str) -> RestError {
 )]
 #[post("/auth/device/authorize")]
 pub(crate) async fn device_authorize(
+    req: HttpRequest,
     db_pool: web::Data<sqlx::PgPool>,
     limiter: web::Data<DeviceAuthLimiter>,
     config: web::Data<SsoLoginConfig>,
 ) -> Result<impl Responder, RestError> {
-    limiter.admit(&limiter.authorize)?;
+    limiter.admit(&limiter.authorize, req.peer_addr().map(|addr| addr.ip()))?;
     let repo = cli_device_authorization_repository(db_pool.get_ref().clone());
     let device_code = new_device_code();
     let expires_at = Utc::now() + Duration::minutes(DEVICE_CODE_TTL_MINUTES);
@@ -191,12 +246,13 @@ pub(crate) async fn device_authorize(
 )]
 #[post("/auth/device/token")]
 pub(crate) async fn device_token(
+    req: HttpRequest,
     db_pool: web::Data<sqlx::PgPool>,
     limiter: web::Data<DeviceAuthLimiter>,
     tokens: web::Data<Box<dyn JwtTokenLogic>>,
     payload: web::Json<DeviceTokenRequest>,
 ) -> Result<impl Responder, RestError> {
-    limiter.admit(&limiter.token)?;
+    limiter.admit(&limiter.token, req.peer_addr().map(|addr| addr.ip()))?;
     let expired = || {
         poll_error(
             "expired_token",
@@ -239,18 +295,36 @@ pub(crate) async fn device_token(
             {
                 Ok(user) => user,
                 Err(crate::Error::NotFound(_)) => return Err(expired()),
-                Err(err) => return Err(RestError::from(err)),
+                Err(err) => return Err(restore(&repo, row.id, RestError::from(err)).await),
             };
             if !user.enabled {
                 return Err(expired());
             }
-            let result = tokens
-                .issue_session(ApiUser::from(user))
-                .await
-                .map_err(RestError::from)?;
-            Ok(HttpResponse::Ok().json(login_response(db_pool.get_ref(), result).await?))
+            let issued = match tokens.issue_session(ApiUser::from(user)).await {
+                Ok(result) => login_response(db_pool.get_ref(), result).await,
+                Err(err) => Err(RestError::from(err)),
+            };
+            match issued {
+                Ok(response) => Ok(HttpResponse::Ok().json(response)),
+                Err(err) => Err(restore(&repo, row.id, err).await),
+            }
         }
     }
+}
+
+/// Puts a consumed row back to approved after a failure while issuing the
+/// session, so the next poll gets the session without a new approval.
+async fn restore(
+    repo: &Box<dyn CliDeviceAuthorizationRepository>,
+    id: uuid::Uuid,
+    err: RestError,
+) -> RestError {
+    if let Err(restore_err) = repo.restore_approved(id).await {
+        log::error!(
+            "could not restore CLI device login {id} after a failed session issue: {restore_err}"
+        );
+    }
+    err
 }
 
 #[utoipa::path(
@@ -335,4 +409,24 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(device_authorize)
         .service(device_token)
         .service(device_approve);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn authorize_response_debug_hides_the_device_code() {
+        let response = DeviceAuthorizeResponse {
+            device_code: "device-secret-value".into(),
+            user_code: "BCDF-GHJK".into(),
+            verification_uri: "http://ui/device".into(),
+            verification_uri_complete: "http://ui/device?code=BCDF-GHJK".into(),
+            expires_in: 600,
+            interval: 5,
+        };
+        let shown = format!("{response:?}");
+        assert!(!shown.contains("device-secret-value"), "{shown}");
+        assert!(shown.contains("BCDF-GHJK"));
+    }
 }

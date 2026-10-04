@@ -21,8 +21,9 @@ use feature_toggle_backend::database::role::role_repository;
 use feature_toggle_backend::database::user::{CreateUser, user_repository};
 use feature_toggle_backend::logic::device_login::new_user_code;
 use feature_toggle_backend::logic::jwt_secret::jwt_secret_logic;
-use feature_toggle_backend::logic::jwt_token::{JwtTokenLogic, jwt_token_logic};
+use feature_toggle_backend::logic::jwt_token::{JwtTokenLogic, LoginResult, jwt_token_logic};
 use feature_toggle_backend::logic::role::role_logic;
+use feature_toggle_backend::logic::user::ApiUser;
 use feature_toggle_backend::logic::user::user_logic;
 use feature_toggle_backend::rest;
 use feature_toggle_backend::rest::device_auth::DeviceAuthLimiter;
@@ -68,6 +69,19 @@ async fn build_app(
     Response = ServiceResponse<impl MessageBody>,
     Error = actix_web::Error,
 > {
+    build_app_with(pool, limiter, user, None).await
+}
+
+async fn build_app_with(
+    pool: &PgPool,
+    limiter: DeviceAuthLimiter,
+    user: Option<JwtUser>,
+    tokens_override: Option<Box<dyn JwtTokenLogic>>,
+) -> impl Service<
+    actix_http::Request,
+    Response = ServiceResponse<impl MessageBody>,
+    Error = actix_web::Error,
+> {
     let auth = AuthConfig::default();
     let secret_logic = jwt_secret_logic(pool.clone(), auth);
     secret_logic.initialize_secret().await.expect("jwt secret");
@@ -80,6 +94,7 @@ async fn build_app(
         secret_logic,
         auth,
     );
+    let tokens = tokens_override.unwrap_or(tokens);
     test::init_service(
         App::new()
             .app_data(web::Data::new(pool.clone()))
@@ -323,29 +338,29 @@ async fn unknown_device_codes_are_expired() {
 async fn public_device_routes_are_rate_limited() {
     let pool = init_pg_pool().await;
     let cli = build_app(&pool, DeviceAuthLimiter::new(1, 1), None).await;
-    let (status, _) = post(&cli, "/api/v1/auth/device/authorize", json!({})).await;
-    assert_eq!(status, StatusCode::OK);
-    let req = test::TestRequest::post()
-        .uri("/api/v1/auth/device/authorize")
-        .set_json(json!({}))
-        .to_request();
-    let resp = test::call_service(&cli, req).await;
+    let peer = "10.1.1.1:4000";
+    let first = test::call_service(
+        &cli,
+        post_from("/api/v1/auth/device/authorize", json!({}), peer),
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let resp = test::call_service(
+        &cli,
+        post_from("/api/v1/auth/device/authorize", json!({}), peer),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
     assert!(resp.headers().contains_key("retry-after"));
-    let (status, _) = post(
+    let token = json!({ "deviceCode": "x" });
+    let resp = test::call_service(
         &cli,
-        "/api/v1/auth/device/token",
-        json!({ "deviceCode": "x" }),
+        post_from("/api/v1/auth/device/token", token.clone(), peer),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    let (status, _) = post(
-        &cli,
-        "/api/v1/auth/device/token",
-        json!({ "deviceCode": "x" }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let resp = test::call_service(&cli, post_from("/api/v1/auth/device/token", token, peer)).await;
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
 }
 
 #[actix_web::test]
@@ -401,4 +416,168 @@ async fn repository_consumes_once_and_cleans_up_expired_rows() {
         .execute(&pool)
         .await
         .unwrap();
+}
+
+/// Token logic whose session issue always fails, to test what a poll leaves
+/// behind when issuing the session goes wrong.
+#[derive(Clone)]
+struct FailingTokens;
+
+#[async_trait::async_trait]
+impl JwtTokenLogic for FailingTokens {
+    async fn login_user(
+        &self,
+        _: String,
+        _: String,
+    ) -> Result<LoginResult, feature_toggle_backend::Error> {
+        unimplemented!()
+    }
+    async fn authenticate(
+        &self,
+        _: String,
+        _: String,
+    ) -> Result<ApiUser, feature_toggle_backend::Error> {
+        unimplemented!()
+    }
+    async fn issue_session(
+        &self,
+        _: ApiUser,
+    ) -> Result<LoginResult, feature_toggle_backend::Error> {
+        Err(feature_toggle_backend::Error::DatabaseError(
+            sqlx::Error::PoolTimedOut,
+        ))
+    }
+    async fn logout_user(&self, _: Uuid) -> Result<u64, feature_toggle_backend::Error> {
+        unimplemented!()
+    }
+    async fn revoke_refresh_token_family(
+        &self,
+        _: Uuid,
+        _: &str,
+    ) -> Result<u64, feature_toggle_backend::Error> {
+        unimplemented!()
+    }
+    async fn store_token(
+        &self,
+        _: Uuid,
+        _: String,
+        _: chrono::DateTime<Utc>,
+    ) -> Result<feature_toggle_backend::database::jwt_token::JwtToken, feature_toggle_backend::Error>
+    {
+        unimplemented!()
+    }
+    async fn is_token_valid(&self, _: &str) -> Result<bool, feature_toggle_backend::Error> {
+        unimplemented!()
+    }
+    async fn revoke_token(&self, _: &str) -> Result<bool, feature_toggle_backend::Error> {
+        unimplemented!()
+    }
+    async fn revoke_all_user_tokens(&self, _: Uuid) -> Result<u64, feature_toggle_backend::Error> {
+        unimplemented!()
+    }
+    async fn cleanup_expired_tokens(&self) -> Result<u64, feature_toggle_backend::Error> {
+        unimplemented!()
+    }
+    async fn get_user_active_tokens(
+        &self,
+        _: Uuid,
+    ) -> Result<
+        Vec<feature_toggle_backend::database::jwt_token::JwtToken>,
+        feature_toggle_backend::Error,
+    > {
+        unimplemented!()
+    }
+    fn clone_box(&self) -> Box<dyn JwtTokenLogic> {
+        Box::new(self.clone())
+    }
+}
+
+#[actix_web::test]
+async fn a_failed_session_issue_keeps_the_approval() {
+    let pool = init_pg_pool().await;
+    let user = create_user(&pool).await;
+    let broken = build_app_with(&pool, limiter(), None, Some(Box::new(FailingTokens))).await;
+    let cli = build_app(&pool, limiter(), None).await;
+    let browser = build_app(&pool, limiter(), Some(user.clone())).await;
+    let (device_code, user_code) = start(&cli).await;
+    let (status, _) = post(
+        &browser,
+        "/api/v1/auth/device/approve",
+        json!({ "userCode": user_code, "approve": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let token = json!({ "deviceCode": device_code });
+    let (status, _) = post(&broken, "/api/v1/auth/device/token", token.clone()).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    // The person does not have to approve again: the next poll gets the session.
+    let (status, body) = post(&cli, "/api/v1/auth/device/token", token).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["user"]["id"], user.id.to_string());
+}
+
+fn post_from(uri: &str, body: Value, peer: &str) -> actix_http::Request {
+    test::TestRequest::post()
+        .uri(uri)
+        .peer_addr(peer.parse().unwrap())
+        .set_json(body)
+        .to_request()
+}
+
+#[actix_web::test]
+async fn one_noisy_client_does_not_lock_out_others() {
+    let pool = init_pg_pool().await;
+    // One authorize per client per minute, ten in total.
+    let cli = build_app(
+        &pool,
+        DeviceAuthLimiter::new(1, 1).with_totals(10, 10),
+        None,
+    )
+    .await;
+    let first = test::call_service(
+        &cli,
+        post_from("/api/v1/auth/device/authorize", json!({}), "10.0.0.1:5000"),
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let again = test::call_service(
+        &cli,
+        post_from("/api/v1/auth/device/authorize", json!({}), "10.0.0.1:5001"),
+    )
+    .await;
+    assert_eq!(again.status(), StatusCode::TOO_MANY_REQUESTS);
+    let other = test::call_service(
+        &cli,
+        post_from("/api/v1/auth/device/authorize", json!({}), "10.0.0.2:5000"),
+    )
+    .await;
+    assert_eq!(
+        other.status(),
+        StatusCode::OK,
+        "another client still gets in"
+    );
+}
+
+#[actix_web::test]
+async fn the_total_limit_still_applies_across_clients() {
+    let pool = init_pg_pool().await;
+    let cli = build_app(
+        &pool,
+        DeviceAuthLimiter::new(10, 10).with_totals(1, 1),
+        None,
+    )
+    .await;
+    let first = test::call_service(
+        &cli,
+        post_from("/api/v1/auth/device/authorize", json!({}), "10.0.0.1:5000"),
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let other = test::call_service(
+        &cli,
+        post_from("/api/v1/auth/device/authorize", json!({}), "10.0.0.2:5000"),
+    )
+    .await;
+    assert_eq!(other.status(), StatusCode::TOO_MANY_REQUESTS);
 }

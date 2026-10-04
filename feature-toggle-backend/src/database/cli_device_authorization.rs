@@ -39,6 +39,8 @@ pub trait CliDeviceAuthorizationRepository: Send + Sync {
     /// Marks an approved row consumed and returns it; a second call returns
     /// `None`, so one approval releases one session.
     async fn consume_approved(&self, id: Uuid) -> Result<Option<CliDeviceAuthorization>, Error>;
+    /// Undoes [`Self::consume_approved`] when the session could not be issued.
+    async fn restore_approved(&self, id: Uuid) -> Result<(), Error>;
     /// Deletes rows past their expiry and returns how many were removed.
     async fn delete_expired(&self) -> Result<u64, Error>;
     fn clone_box(&self) -> Box<dyn CliDeviceAuthorizationRepository>;
@@ -188,6 +190,17 @@ impl CliDeviceAuthorizationRepository for CliDeviceAuthorizationRepositoryImpl {
         .fetch_optional(&self.pool)
         .await
         .map_err(Error::DatabaseError)
+    }
+
+    async fn restore_approved(&self, id: Uuid) -> Result<(), Error> {
+        sqlx::query!(
+            "UPDATE cli_device_authorizations SET status = 'approved' WHERE id = $1 AND status = 'consumed'",
+            id
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(Error::DatabaseError)?;
+        Ok(())
     }
 
     async fn delete_expired(&self) -> Result<u64, Error> {
