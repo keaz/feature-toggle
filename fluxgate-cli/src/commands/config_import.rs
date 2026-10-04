@@ -88,7 +88,7 @@ pub async fn run(file: &str, dry_run: bool, app: &mut App<'_>) -> Result<Outcome
                 .post(&["teams", &team, "environments"], &body)
                 .await
         {
-            failed_envs.push(json!({ "name": name, "error": err.to_string() }));
+            failed_envs.push(json!({ "name": name, "error": item_error(err)? }));
             continue;
         }
         created_envs.push(name.to_string());
@@ -122,7 +122,7 @@ pub async fn run(file: &str, dry_run: bool, app: &mut App<'_>) -> Result<Outcome
                 .post(&["teams", &team, "features"], &Value::Object(body))
                 .await
         {
-            failed_features.push(json!({ "key": key, "error": err.to_string() }));
+            failed_features.push(json!({ "key": key, "error": item_error(err)? }));
             continue;
         }
         created_features.push(key.to_string());
@@ -147,4 +147,17 @@ pub async fn run(file: &str, dry_run: bool, app: &mut App<'_>) -> Result<Outcome
         outcome.exit_code = EXIT_OTHER;
     }
     Ok(outcome)
+}
+
+/// The message of an error that concerns one item. Anything else (auth,
+/// permission, rate limit, server or network) would fail every remaining
+/// item the same way, so it stops the import with its own exit code.
+fn item_error(err: CliError) -> Result<String, CliError> {
+    match err {
+        CliError::Api {
+            status: 400 | 404 | 409 | 422,
+            ..
+        } => Ok(err.to_string()),
+        other => Err(other),
+    }
 }
