@@ -2,6 +2,7 @@ pub mod activity_log;
 pub mod ai;
 pub mod approval;
 pub mod canary;
+pub mod cli_device_authorization;
 pub mod client;
 pub mod compound_rules;
 pub mod context;

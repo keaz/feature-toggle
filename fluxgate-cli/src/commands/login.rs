@@ -1,6 +1,7 @@
 use chrono::Utc;
 
 use super::App;
+use crate::auth::device::device_login;
 use crate::auth::password::password_login;
 use crate::auth::session::{SessionCache, SessionStore};
 use crate::auth::sso_loopback::{LOGIN_WAIT, sso_login};
@@ -41,7 +42,10 @@ pub async fn run(args: LoginArgs, app: &mut App<'_>) -> Result<Outcome, CliError
         _ => settings.url.value.clone(),
     };
     let timeout = Context::timeout(&settings);
+    // Without a usable browser (SSH, containers) SSO falls back to the device code.
+    let device = args.use_device_code || (sso_slug.is_some() && args.no_browser);
     let response = match &sso_slug {
+        _ if device => device_login(&mut *app.prompter, &url, timeout, !args.no_browser).await?,
         Some(slug) => sso_login(&mut *app.prompter, &url, slug, timeout, LOGIN_WAIT).await?,
         None => {
             let username = match args.username {

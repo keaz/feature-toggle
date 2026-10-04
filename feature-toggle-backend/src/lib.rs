@@ -324,7 +324,10 @@ pub async fn run() -> std::io::Result<()> {
     .with_jira_events(database::jira_event::jira_event_repository(db_pool.clone()))
     .with_jira_outbound_jobs(database::jira_outbound_job::jira_outbound_job_repository(
         db_pool.clone(),
-    ));
+    ))
+    .with_cli_device_authorizations(
+        database::cli_device_authorization::cli_device_authorization_repository(db_pool.clone()),
+    );
     tokio::spawn(async move {
         token_cleanup_scheduler.start().await;
     });
@@ -374,6 +377,9 @@ pub async fn run() -> std::io::Result<()> {
         cfg.jira.inbound_burst,
         30,
     ));
+
+    // Shared like the Jira limiter: one budget for all workers.
+    let device_auth_limiter = web::Data::new(rest::device_auth::DeviceAuthLimiter::default());
 
     HttpServer::new(move || {
         let admin_state = AdminState::new();
@@ -425,6 +431,7 @@ pub async fn run() -> std::io::Result<()> {
             .app_data(web::Data::new(cfg.auth))
             .app_data(web::Data::new(cfg.jira.clone()))
             .app_data(jira_inbound_limiter.clone())
+            .app_data(device_auth_limiter.clone())
             .app_data(web::Data::new(jira_ui_base_url.clone()))
             .app_data(web::Data::new(evaluation_events_tx.clone()))
             .app_data(web::Data::new(approval_events_tx.clone()))

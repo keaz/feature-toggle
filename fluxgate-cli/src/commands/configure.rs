@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 
 use super::App;
 use crate::api::ApiClient;
+use crate::auth::device::device_login;
 use crate::auth::password::password_login;
 use crate::auth::session::{SessionCache, SessionStore};
 use crate::auth::sso_loopback::{LOGIN_WAIT, sso_login};
@@ -18,6 +19,7 @@ use crate::output::{CONFIG_COLUMNS, Kind, Outcome, OutputFormat, PROFILE_COLUMNS
 
 pub const LOGIN_PASSWORD: &str = "Log in with username and password";
 pub const LOGIN_SSO: &str = "Single sign-on (SSO)";
+pub const LOGIN_DEVICE: &str = "Approve in a browser (device code)";
 pub const LOGIN_TOKEN: &str = "Static token (system client)";
 
 pub async fn run(args: ConfigureArgs, app: &mut App<'_>) -> Result<Outcome, CliError> {
@@ -197,10 +199,11 @@ async fn interactive(app: &mut App<'_>) -> Result<Outcome, CliError> {
     let methods = vec![
         LOGIN_PASSWORD.to_string(),
         LOGIN_SSO.to_string(),
+        LOGIN_DEVICE.to_string(),
         LOGIN_TOKEN.to_string(),
     ];
     let method = app.prompter.select("How do you sign in", &methods)?;
-    if method < 2 {
+    if method < 3 {
         let session = files
             .profile_value(&profile, "session")
             .unwrap_or(profile.as_str())
@@ -210,10 +213,15 @@ async fn interactive(app: &mut App<'_>) -> Result<Outcome, CliError> {
             let username = app.prompter.input("Username", None)?;
             let response = password_login(&mut *app.prompter, &url, &username, timeout).await?;
             (response, None)
-        } else {
+        } else if method == 1 {
             let slug = choose_sso_provider(app, &url, timeout).await?;
             let response = sso_login(&mut *app.prompter, &url, &slug, timeout, LOGIN_WAIT).await?;
             (response, Some(slug))
+        } else {
+            (
+                device_login(&mut *app.prompter, &url, timeout, true).await?,
+                None,
+            )
         };
         if files
             .session_value(&session, "url")

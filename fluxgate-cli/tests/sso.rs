@@ -148,3 +148,134 @@ async fn interactive_sso_setup_picks_a_provider_and_logs_in() {
     );
     assert!(h.exists("sessions/default.json"));
 }
+
+// ---------------------------------------------------------- device code
+
+async fn mount_device(h: &Harness, token_answers: Vec<ResponseTemplate>) {
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/device/authorize"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "deviceCode": "device-secret", "userCode": "BCDF-GHJK",
+            "verificationUri": "http://ui.test/device",
+            "verificationUriComplete": "http://ui.test/device?code=BCDF-GHJK",
+            "expiresIn": 600, "interval": 0 })))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    let count = token_answers.len() as u64;
+    for (index, answer) in token_answers.into_iter().enumerate() {
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/device/token"))
+            .and(body_partial_json(json!({ "deviceCode": "device-secret" })))
+            .respond_with(answer)
+            .up_to_n_times(1)
+            .with_priority((index + 1) as u8)
+            .expect(1)
+            .mount(&h.server)
+            .await;
+    }
+    let _ = count;
+}
+
+fn pending() -> ResponseTemplate {
+    ResponseTemplate::new(400).set_body_json(
+        json!({ "error": "invalid_input", "message": "waiting", "code": "authorization_pending" }),
+    )
+}
+
+#[tokio::test]
+async fn device_login_waits_for_approval_and_saves_the_session() {
+    let h = Harness::new().await;
+    sso_config(&h, None);
+    mount_device(
+        &h,
+        vec![
+            pending(),
+            ResponseTemplate::new(200).set_body_json(login_body("a1", "r1")),
+        ],
+    )
+    .await;
+    let mut prompter = fluxgate_cli::prompt::ScriptedPrompter::new(&[]).on_open(|_| {});
+    let r = h
+        .run_prompted(
+            &["login", "--use-device-code", "--output", "text"],
+            &[],
+            &mut prompter,
+        )
+        .await;
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(r.stdout.trim(), "Logged in as alice (session 'corp')");
+    assert!(
+        prompter
+            .notes
+            .iter()
+            .any(|n| n.contains("BCDF-GHJK") && n.contains("http://ui.test/device")),
+        "{:?}",
+        prompter.notes
+    );
+    assert_eq!(
+        prompter.opened,
+        vec!["http://ui.test/device?code=BCDF-GHJK"]
+    );
+    assert!(h.read("sessions/corp.json").contains("\"a1\""));
+}
+
+#[tokio::test]
+async fn device_login_reports_a_denial() {
+    let h = Harness::new().await;
+    sso_config(&h, None);
+    mount_device(
+        &h,
+        vec![ResponseTemplate::new(400).set_body_json(
+            json!({ "error": "invalid_input", "message": "denied", "code": "access_denied" }),
+        )],
+    )
+    .await;
+    let r = h
+        .run(&["login", "--use-device-code", "--output", "text"], &[])
+        .await;
+    assert_eq!(r.code, 3);
+    assert!(r.stderr.contains("denied in the browser"), "{}", r.stderr);
+}
+
+#[tokio::test]
+async fn no_browser_with_an_sso_session_uses_the_device_code() {
+    let h = Harness::new().await;
+    sso_config(&h, Some("okta"));
+    mount_device(
+        &h,
+        vec![ResponseTemplate::new(200).set_body_json(login_body("a1", "r1"))],
+    )
+    .await;
+    let mut prompter = fluxgate_cli::prompt::ScriptedPrompter::new(&[]).on_open(|_| {});
+    let r = h
+        .run_prompted(&["login", "--no-browser"], &[], &mut prompter)
+        .await;
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(prompter.opened.is_empty(), "{:?}", prompter.opened);
+}
+
+#[tokio::test]
+async fn interactive_device_setup_logs_in_without_a_password() {
+    let h = Harness::new().await;
+    mount_device(
+        &h,
+        vec![ResponseTemplate::new(200).set_body_json(login_body("a1", "r1"))],
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/teams"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .mount(&h.server)
+        .await;
+    let url = h.url();
+    let r = h
+        .run_with(
+            &["configure", "--output", "text"],
+            &[],
+            &[url.as_str(), "Approve in a browser (device code)", "table"],
+        )
+        .await;
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(h.exists("sessions/default.json"));
+}

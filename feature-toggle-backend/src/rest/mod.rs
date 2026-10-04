@@ -5,6 +5,7 @@ pub mod client;
 pub mod context;
 pub mod criteria;
 pub mod developer;
+pub mod device_auth;
 pub mod environment;
 pub mod error;
 pub mod evaluation;
@@ -74,6 +75,9 @@ use crate::rest::criteria::{
     VariantSelectionMode,
 };
 use crate::rest::developer::{CompatibilityCapability, OfrepStatusResponse};
+use crate::rest::device_auth::{
+    DeviceApproveRequest, DeviceApproveResponse, DeviceAuthorizeResponse, DeviceTokenRequest,
+};
 use crate::rest::environment::{
     CreateEnvironmentRequest, EnvironmentListQuery, EnvironmentResponse, EnvironmentsResponse,
     UpdateEnvironmentRequest,
@@ -285,6 +289,9 @@ async fn health() -> impl Responder {
         sso_auth::sso_authorize,
         sso_auth::sso_callback,
         sso_auth::sso_exchange,
+        device_auth::device_authorize,
+        device_auth::device_token,
+        device_auth::device_approve,
         sso::list_sso_providers,
         sso::create_sso_provider,
         sso::get_sso_provider,
@@ -508,6 +515,10 @@ async fn health() -> impl Responder {
         SsoSettingsBody,
         PublicSsoProviderResponse,
         SsoExchangeRequest,
+        DeviceAuthorizeResponse,
+        DeviceTokenRequest,
+        DeviceApproveRequest,
+        DeviceApproveResponse,
         JwtSecretResponse,
         StageCriterionResponse,
         VariantAllocationResponse,
@@ -745,6 +756,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .configure(auth::configure)
             .configure(sso::configure)
             .configure(sso_auth::configure)
+            .configure(device_auth::configure)
             .configure(jwt_secret::configure)
             .configure(notification::configure)
             .configure(operational_safety::configure)

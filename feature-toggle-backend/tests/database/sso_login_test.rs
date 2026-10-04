@@ -1959,7 +1959,11 @@ fn cli_challenge(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
 }
 
-async fn exchange_with_verifier<S, B>(app: &S, code: &str, verifier: Option<&str>) -> (StatusCode, Value)
+async fn exchange_with_verifier<S, B>(
+    app: &S,
+    code: &str,
+    verifier: Option<&str>,
+) -> (StatusCode, Value)
 where
     S: Service<actix_http::Request, Response = ServiceResponse<B>, Error = actix_web::Error>,
     B: MessageBody,
@@ -1988,7 +1992,14 @@ where
     cli_login_as(app, idp, slug, verifier, &sub, email).await
 }
 
-async fn cli_login_as<S, B>(app: &S, idp: &MockIdp, slug: &str, verifier: &str, sub: &str, email: &str) -> String
+async fn cli_login_as<S, B>(
+    app: &S,
+    idp: &MockIdp,
+    slug: &str,
+    verifier: &str,
+    sub: &str,
+    email: &str,
+) -> String
 where
     S: Service<actix_http::Request, Response = ServiceResponse<B>, Error = actix_web::Error>,
     B: MessageBody,
@@ -1998,9 +2009,16 @@ where
         ("cli_challenge", cli_challenge(verifier)),
     ])
     .unwrap();
-    let (location, cookie) =
-        get_redirect(app, &format!("/api/v1/auth/sso/{slug}/authorize?{query}"), None).await;
-    assert!(location.starts_with(&format!("{}/authorize?", idp.issuer)), "{location}");
+    let (location, cookie) = get_redirect(
+        app,
+        &format!("/api/v1/auth/sso/{slug}/authorize?{query}"),
+        None,
+    )
+    .await;
+    assert!(
+        location.starts_with(&format!("{}/authorize?", idp.issuer)),
+        "{location}"
+    );
     let params = query_of(&location);
     let cookie = cookie.expect("authorize sets the state cookie");
     let code = format!("code-{}", Uuid::new_v4());
@@ -2023,11 +2041,19 @@ async fn cli_login_sends_the_code_to_the_loopback_address_and_needs_the_verifier
     let verifier = format!("verifier-{}", Uuid::new_v4());
 
     let location = cli_login(&app, &idp, &provider.slug, &verifier, &email).await;
-    assert!(location.starts_with(&format!("{CLI_REDIRECT}?code=")), "{location}");
+    assert!(
+        location.starts_with(&format!("{CLI_REDIRECT}?code=")),
+        "{location}"
+    );
     let code = query_of(&location)["code"].clone();
     // A code issued to the CLI is useless without the verifier, and a wrong
     // verifier burns it.
-    let (status, body) = exchange_with_verifier(&app, &code, Some("wrong-verifier-wrong-verifier-wrong-verifier")).await;
+    let (status, body) = exchange_with_verifier(
+        &app,
+        &code,
+        Some("wrong-verifier-wrong-verifier-wrong-verifier"),
+    )
+    .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
     assert_eq!(body["error"], "invalid_sso_code");
     let (status, _) = exchange_with_verifier(&app, &code, Some(&verifier)).await;
@@ -2054,15 +2080,32 @@ async fn cli_redirect_must_be_a_loopback_callback_with_a_challenge() {
     let provider = create_provider(&pool, &idp, ProviderOpts::default()).await;
     let challenge = cli_challenge("some-verifier-some-verifier-some-verifier-x");
     for query in [
-        vec![("cli_redirect", "https://evil.example/callback".to_string()), ("cli_challenge", challenge.clone())],
-        vec![("cli_redirect", "http://127.0.0.1:5000/other".to_string()), ("cli_challenge", challenge.clone())],
+        vec![
+            ("cli_redirect", "https://evil.example/callback".to_string()),
+            ("cli_challenge", challenge.clone()),
+        ],
+        vec![
+            ("cli_redirect", "http://127.0.0.1:5000/other".to_string()),
+            ("cli_challenge", challenge.clone()),
+        ],
         vec![("cli_redirect", CLI_REDIRECT.to_string())],
         vec![("cli_challenge", challenge.clone())],
-        vec![("cli_redirect", CLI_REDIRECT.to_string()), ("cli_challenge", "short".to_string())],
+        vec![
+            ("cli_redirect", CLI_REDIRECT.to_string()),
+            ("cli_challenge", "short".to_string()),
+        ],
     ] {
         let query = serde_urlencoded::to_string(&query).unwrap();
-        let location = get_location(&app, &format!("/api/v1/auth/sso/{}/authorize?{query}", provider.slug)).await;
-        assert_eq!(sso_error(&location).as_deref(), Some("sso_invalid_cli_redirect"), "{query} -> {location}");
+        let location = get_location(
+            &app,
+            &format!("/api/v1/auth/sso/{}/authorize?{query}", provider.slug),
+        )
+        .await;
+        assert_eq!(
+            sso_error(&location).as_deref(),
+            Some("sso_invalid_cli_redirect"),
+            "{query} -> {location}"
+        );
     }
     cleanup(&pool, &idp).await;
 }
@@ -2072,9 +2115,27 @@ async fn cli_login_errors_go_to_the_loopback_address() {
     let pool = init_pg_pool().await;
     let app = build_app(&pool).await;
     let idp = start_idp().await;
-    let provider = create_provider(&pool, &idp, ProviderOpts { jit: false, ..ProviderOpts::default() }).await;
+    let provider = create_provider(
+        &pool,
+        &idp,
+        ProviderOpts {
+            jit: false,
+            ..ProviderOpts::default()
+        },
+    )
+    .await;
     let email = format!("{}@example.com", unique("cli-nojit"));
-    let location = cli_login(&app, &idp, &provider.slug, "verifier-verifier-verifier-verifier-verifier", &email).await;
-    assert_eq!(location, format!("{CLI_REDIRECT}?error=sso_user_not_provisioned"));
+    let location = cli_login(
+        &app,
+        &idp,
+        &provider.slug,
+        "verifier-verifier-verifier-verifier-verifier",
+        &email,
+    )
+    .await;
+    assert_eq!(
+        location,
+        format!("{CLI_REDIRECT}?error=sso_user_not_provisioned")
+    );
     cleanup(&pool, &idp).await;
 }

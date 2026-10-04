@@ -1,0 +1,72 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE cli_device_authorizations\n            SET status = $3, user_id = $2\n            WHERE user_code = $1 AND status = 'pending' AND expires_at > now()\n            RETURNING id, device_code_hash, user_code, status, user_id, interval_secs,\n                      last_polled_at, expires_at, created_at\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "device_code_hash",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "user_code",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 5,
+        "name": "interval_secs",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 6,
+        "name": "last_polled_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "expires_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "18370c4f6489e325e6c31c028ca3f3c94dc8f147f5b9e999dcd6a5c30664b184"
+}

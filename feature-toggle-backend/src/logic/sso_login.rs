@@ -485,7 +485,9 @@ mod tests {
     #[test]
     fn cli_challenge_must_be_an_s256_value() {
         assert!(valid_cli_challenge(&"a".repeat(43)));
-        assert!(valid_cli_challenge("abcdefghijklmnopqrstuvwxyzABCDEFGHIJ0123-_Q"));
+        assert!(valid_cli_challenge(
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJ0123-_Q"
+        ));
         assert!(!valid_cli_challenge(&"a".repeat(42)));
         assert!(!valid_cli_challenge(&"a".repeat(44)));
         assert!(!valid_cli_challenge(&format!("{}=", "a".repeat(42))));
@@ -494,11 +496,17 @@ mod tests {
     #[test]
     fn cli_urls_carry_the_code_or_the_error() {
         let base = "http://127.0.0.1:53682/callback";
-        assert_eq!(cli_complete_url(base, "abc-_1"), "http://127.0.0.1:53682/callback?code=abc-_1");
+        assert_eq!(
+            cli_complete_url(base, "abc-_1"),
+            "http://127.0.0.1:53682/callback?code=abc-_1"
+        );
         assert_eq!(
             cli_error_url(base, &SsoLoginError::EmailMissing),
             "http://127.0.0.1:53682/callback?error=sso_email_missing"
         );
-        assert_eq!(SsoLoginError::InvalidCliRedirect.code(), "sso_invalid_cli_redirect");
+        assert_eq!(
+            SsoLoginError::InvalidCliRedirect.code(),
+            "sso_invalid_cli_redirect"
+        );
     }
 }

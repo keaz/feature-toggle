@@ -90,7 +90,10 @@ impl std::fmt::Debug for SsoExchangeRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SsoExchangeRequest")
             .field("code", &"<redacted>")
-            .field("code_verifier", &self.code_verifier.as_ref().map(|_| "<redacted>"))
+            .field(
+                "code_verifier",
+                &self.code_verifier.as_ref().map(|_| "<redacted>"),
+            )
             .finish()
     }
 }
@@ -527,7 +530,11 @@ pub(crate) async fn sso_exchange(
     // challenge; anyone who intercepted it at the loopback address cannot use it.
     if let Some(challenge) = &login_code.code_challenge {
         let answered = payload.code_verifier.as_deref().is_some_and(|verifier| {
-            bool::from(pkce_challenge(verifier).as_bytes().ct_eq(challenge.as_bytes()))
+            bool::from(
+                pkce_challenge(verifier)
+                    .as_bytes()
+                    .ct_eq(challenge.as_bytes()),
+            )
         });
         if !answered {
             return Err(RestError::invalid_sso_code());

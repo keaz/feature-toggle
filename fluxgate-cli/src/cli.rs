@@ -225,6 +225,13 @@ pub struct LoginArgs {
     /// session's sso_provider.
     #[arg(long, value_name = "SLUG", num_args = 0..=1, default_missing_value = "")]
     pub sso: Option<String>,
+    /// Approve the login in a browser on any machine with a short code
+    /// (for SSH sessions and containers).
+    #[arg(long, conflicts_with_all = ["password", "sso"])]
+    pub use_device_code: bool,
+    /// Do not open a browser; with SSO this switches to the device code.
+    #[arg(long)]
+    pub no_browser: bool,
     /// Username; asked for when not given.
     #[arg(long)]
     pub username: Option<String>,

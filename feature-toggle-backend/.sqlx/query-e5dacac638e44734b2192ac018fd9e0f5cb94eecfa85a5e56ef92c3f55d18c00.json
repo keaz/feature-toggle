@@ -1,0 +1,74 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO cli_device_authorizations (id, device_code_hash, user_code, interval_secs, expires_at)\n            VALUES ($1, $2, $3, $4, $5)\n            RETURNING id, device_code_hash, user_code, status, user_id, interval_secs,\n                      last_polled_at, expires_at, created_at\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "device_code_hash",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "user_code",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 5,
+        "name": "interval_secs",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 6,
+        "name": "last_polled_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "expires_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Int4",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "e5dacac638e44734b2192ac018fd9e0f5cb94eecfa85a5e56ef92c3f55d18c00"
+}

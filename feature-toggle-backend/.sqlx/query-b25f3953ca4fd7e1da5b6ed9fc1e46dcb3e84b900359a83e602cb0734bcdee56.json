@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM cli_device_authorizations WHERE expires_at <= now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "b25f3953ca4fd7e1da5b6ed9fc1e46dcb3e84b900359a83e602cb0734bcdee56"
+}

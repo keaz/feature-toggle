@@ -349,6 +349,7 @@ where
                 || (path == "/api/v1/auth/refresh" && method == actix_web::http::Method::POST)
                 || (path == "/api/v1/auth/status" && method == actix_web::http::Method::GET)
                 || super::is_public_sso_path(&path, &method)
+                || super::is_public_device_path(&path, &method)
                 || super::is_public_jira_event_path(&path, &method);
 
             if is_public_path {
@@ -2165,6 +2166,9 @@ mod tests {
                     .route("/api/v1/auth/sso/{slug}/callback", web::get().to(ok))
                     .route("/api/v1/auth/sso/{slug}/other", web::get().to(ok))
                     .route("/api/v1/auth/sso/exchange", web::post().to(ok))
+                    .route("/api/v1/auth/device/authorize", web::post().to(ok))
+                    .route("/api/v1/auth/device/token", web::post().to(ok))
+                    .route("/api/v1/auth/device/approve", web::post().to(ok))
                     .route("/api/v1/integrations/jira/{id}/events", web::post().to(ok))
                     .route("/api/v1/integrations/jira/{id}/other", web::post().to(ok)),
             )
@@ -2240,6 +2244,8 @@ mod tests {
             ("GET", "/api/v1/auth/sso/okta/authorize"),
             ("GET", "/api/v1/auth/sso/okta/callback?code=c&state=s"),
             ("POST", "/api/v1/auth/sso/exchange"),
+            ("POST", "/api/v1/auth/device/authorize"),
+            ("POST", "/api/v1/auth/device/token"),
             (
                 "POST",
                 "/api/v1/integrations/jira/0f0e8c39-6f7d-4bd5-9a52-3c2a9f1d7e11/events",
@@ -2264,6 +2270,8 @@ mod tests {
             ("POST", "/api/v1/roles"),
             ("GET", "/api/v1/auth/sso/okta/other"),
             ("GET", "/api/v1/auth/sso/okta%2Fx/authorize"),
+            ("POST", "/api/v1/auth/device/approve"),
+            ("GET", "/api/v1/auth/device/token"),
             (
                 "POST",
                 "/api/v1/integrations/jira/0f0e8c39-6f7d-4bd5-9a52-3c2a9f1d7e11/other",

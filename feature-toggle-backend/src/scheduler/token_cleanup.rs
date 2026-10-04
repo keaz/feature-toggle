@@ -1,4 +1,5 @@
 use crate::Error;
+use crate::database::cli_device_authorization::CliDeviceAuthorizationRepository;
 use crate::database::jira_event::JiraEventRepository;
 use crate::database::jira_outbound_job::JiraOutboundJobRepository;
 use crate::database::jwt_token::JwtTokenRepository;
@@ -22,6 +23,7 @@ pub struct TokenCleanupScheduler {
     sso_login_code_repository: Box<dyn SsoLoginCodeRepository>,
     jira_event_repository: Option<Box<dyn JiraEventRepository>>,
     jira_outbound_job_repository: Option<Box<dyn JiraOutboundJobRepository>>,
+    cli_device_authorization_repository: Option<Box<dyn CliDeviceAuthorizationRepository>>,
     interval: Duration,
 }
 
@@ -41,6 +43,7 @@ pub struct CleanupCounts {
     pub sso_login_codes: u64,
     pub jira_events: u64,
     pub jira_outbound_jobs: u64,
+    pub cli_device_authorizations: u64,
 }
 
 impl CleanupCounts {
@@ -51,6 +54,7 @@ impl CleanupCounts {
             + self.sso_login_codes
             + self.jira_events
             + self.jira_outbound_jobs
+            + self.cli_device_authorizations
     }
 }
 
@@ -69,6 +73,7 @@ impl TokenCleanupScheduler {
             sso_login_code_repository,
             jira_event_repository: None,
             jira_outbound_job_repository: None,
+            cli_device_authorization_repository: None,
             interval,
         }
     }
@@ -89,6 +94,14 @@ impl TokenCleanupScheduler {
         self
     }
 
+    pub fn with_cli_device_authorizations(
+        mut self,
+        repository: Box<dyn CliDeviceAuthorizationRepository>,
+    ) -> Self {
+        self.cli_device_authorization_repository = Some(repository);
+        self
+    }
+
     pub async fn start(self) {
         let mut ticker = time::interval(self.interval);
         loop {
@@ -96,13 +109,14 @@ impl TokenCleanupScheduler {
             match self.run_once().await {
                 Ok(counts) if counts.total() > 0 => {
                     info!(
-                        "Token cleanup deleted {} access token(s), {} refresh token(s), {} SSO login state(s), {} SSO login code(s), {} Jira event(s) and {} Jira outbound job(s)",
+                        "Token cleanup deleted {} access token(s), {} refresh token(s), {} SSO login state(s), {} SSO login code(s), {} Jira event(s), {} Jira outbound job(s) and {} CLI device login(s)",
                         counts.access_tokens,
                         counts.refresh_tokens,
                         counts.sso_login_states,
                         counts.sso_login_codes,
                         counts.jira_events,
-                        counts.jira_outbound_jobs
+                        counts.jira_outbound_jobs,
+                        counts.cli_device_authorizations
                     );
                 }
                 Ok(_) => {}
@@ -145,6 +159,10 @@ impl TokenCleanupScheduler {
                 }
                 None => 0,
             },
+            cli_device_authorizations: match &self.cli_device_authorization_repository {
+                Some(repository) => repository.delete_expired().await?,
+                None => 0,
+            },
         })
     }
 }
@@ -152,6 +170,7 @@ impl TokenCleanupScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::cli_device_authorization::MockCliDeviceAuthorizationRepository;
     use crate::database::jira_event::MockJiraEventRepository;
     use crate::database::jira_outbound_job::MockJiraOutboundJobRepository;
     use crate::database::jwt_token::MockJwtTokenRepository;
@@ -191,6 +210,8 @@ mod tests {
             .times(1)
             .returning(|_| Ok(6));
 
+        let mut devices = MockCliDeviceAuthorizationRepository::new();
+        devices.expect_delete_expired().times(1).returning(|| Ok(8));
         let mut jira_jobs = MockJiraOutboundJobRepository::new();
         jira_jobs
             .expect_delete_finished_before()
@@ -213,7 +234,8 @@ mod tests {
             Duration::from_secs(3600),
         )
         .with_jira_events(Box::new(jira_events))
-        .with_jira_outbound_jobs(Box::new(jira_jobs));
+        .with_jira_outbound_jobs(Box::new(jira_jobs))
+        .with_cli_device_authorizations(Box::new(devices));
         assert_eq!(
             scheduler.run_once().await.unwrap(),
             CleanupCounts {
@@ -223,6 +245,7 @@ mod tests {
                 sso_login_codes: 4,
                 jira_events: 6,
                 jira_outbound_jobs: 7,
+                cli_device_authorizations: 8,
             }
         );
     }

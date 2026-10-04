@@ -652,6 +652,21 @@ pub struct SsoLoginCode {
     pub code_challenge: Option<String>,
 }
 
+/// A device-code login of the CLI (`cli_device_authorizations`). `status` is
+/// `pending`, `approved`, `denied` or `consumed`.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct CliDeviceAuthorization {
+    pub id: Uuid,
+    pub device_code_hash: String,
+    pub user_code: String,
+    pub status: String,
+    pub user_id: Option<Uuid>,
+    pub interval_secs: i32,
+    pub last_polled_at: Option<DateTime<Utc>>,
+    pub expires_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
 /// Link between a feature and an issue in an external tracker (`feature_external_links`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ExternalLinkRow {
