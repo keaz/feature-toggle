@@ -2,6 +2,7 @@
 
 pub mod approvals;
 pub mod config_export;
+pub mod configure;
 pub mod evaluate;
 pub mod flags;
 pub mod health;
@@ -57,6 +58,7 @@ pub async fn dispatch(command: Command, app: &mut App<'_>) -> Result<Outcome, Cl
         Command::Rollout(args) => rollout::run(args, app).await,
         Command::Login(args) => login::run(args, app).await,
         Command::Logout(args) => logout::run(args, app).await,
+        Command::Configure(args) => configure::run(args, app).await,
     }
 }
 

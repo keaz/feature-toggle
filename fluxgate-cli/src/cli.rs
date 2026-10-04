@@ -68,6 +68,8 @@ pub enum Command {
     Login(LoginArgs),
     /// End the profile's session, or every session with --all.
     Logout(LogoutArgs),
+    /// Set up a profile, or read and change its settings.
+    Configure(ConfigureArgs),
 }
 
 #[derive(Debug, Clone, Default, Args)]
@@ -207,6 +209,24 @@ pub struct LogoutArgs {
     /// Log out of every cached session.
     #[arg(long)]
     pub all: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ConfigureArgs {
+    #[command(subcommand)]
+    pub command: Option<ConfigureSubcommand>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConfigureSubcommand {
+    /// Set a profile value: session, url, team, environment, output, timeout or token.
+    Set { key: String, value: String },
+    /// Print a profile value from the files.
+    Get { key: String },
+    /// Show the resolved settings and where each comes from.
+    List,
+    /// List profiles.
+    ListProfiles,
 }
 
 #[cfg(test)]
