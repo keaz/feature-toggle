@@ -50,6 +50,11 @@ impl ApiClient {
         })
     }
 
+    /// The bearer token, for transports other than HTTP (WebSocket).
+    pub fn token(&self) -> Option<&str> {
+        self.token.as_deref()
+    }
+
     pub fn with_token(&self, token: Option<String>) -> Self {
         Self {
             token,

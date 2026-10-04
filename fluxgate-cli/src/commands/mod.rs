@@ -6,7 +6,9 @@ pub mod ai;
 pub mod api_cmd;
 pub mod approvals;
 pub mod config_export;
+pub mod config_import;
 pub mod configure;
+pub mod edge;
 pub mod evaluate;
 pub mod flags;
 pub mod health;
@@ -17,6 +19,7 @@ pub mod observe;
 pub mod rollout;
 pub mod safety;
 pub mod teams;
+pub mod watch;
 pub mod whoami;
 
 use serde_json::{Value, json};
@@ -35,6 +38,8 @@ pub struct App<'a> {
     pub overrides: Overrides,
     pub is_tty: bool,
     pub prompter: &'a mut dyn Prompter,
+    /// Standard output, for commands that print while they run (`watch`).
+    pub out: &'a mut dyn std::io::Write,
 }
 
 impl App<'_> {
@@ -63,7 +68,12 @@ pub async fn dispatch(command: Command, app: &mut App<'_>) -> Result<Outcome, Cl
         Command::Flags(args) => flags::run(args, app).await,
         Command::Approvals(args) => approvals::run(args, app).await,
         Command::Evaluate(args) => evaluate::run(args, app).await,
-        Command::Config(_) => config_export::run(app).await,
+        Command::Config(args) => match args.command {
+            crate::cli::ConfigSubcommand::Export => config_export::run(app).await,
+            crate::cli::ConfigSubcommand::Import { file, dry_run } => {
+                config_import::run(&file, dry_run, app).await
+            }
+        },
         Command::Rollout(args) => rollout::run(args, app).await,
         Command::Login(args) => login::run(args, app).await,
         Command::Logout(args) => logout::run(args, app).await,
@@ -85,6 +95,19 @@ pub async fn dispatch(command: Command, app: &mut App<'_>) -> Result<Outcome, Cl
         Command::Sso(args) => accounts::sso(args, app).await,
         Command::Users(args) => accounts::users(args, app).await,
         Command::Notifications(args) => accounts::notifications(args, app).await,
+        Command::Completions { shell } => {
+            use clap::CommandFactory;
+            let mut script = Vec::new();
+            clap_complete::generate(
+                shell,
+                &mut crate::cli::Cli::command(),
+                "fluxgate",
+                &mut script,
+            );
+            Ok(Outcome::raw(String::from_utf8_lossy(&script).into_owned()))
+        }
+        Command::Watch(args) => watch::run(args, app).await,
+        Command::Edge(args) => edge::run(args, app).await,
     }
 }
 

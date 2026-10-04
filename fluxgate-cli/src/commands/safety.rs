@@ -15,7 +15,8 @@ pub struct FreezeArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum FreezeCommand {
-    /// Freeze windows in effect now (create and edit them with `admin freeze-windows`).
+    /// The freeze window in effect now in the environment (--env); create and
+    /// edit windows with `admin freeze-windows`.
     Active,
 }
 
@@ -72,11 +73,12 @@ pub async fn freeze(args: FreezeArgs, app: &mut App<'_>) -> Result<Outcome, CliE
     match args.command {
         FreezeCommand::Active => {
             let team = context.team_id().await?;
+            let query = [("environmentId", context.environment_id(&team).await?)];
             call(
                 &context,
                 Method::GET,
                 &["teams", &team, "freeze-windows", "active"],
-                &[],
+                &query,
                 None,
             )
             .await

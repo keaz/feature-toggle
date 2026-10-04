@@ -82,7 +82,7 @@ fn cases() -> Vec<Case> {
         case(&["approvals", "cancel", OTHER], "POST", &format!("/approval-requests/{OTHER}/cancel")).body(json!({})),
         case(&["approvals", "preview", "--data", r#"{"changeType":"stage_change"}"#], "POST", &format!("/teams/{t}/approval-policy-preview")).body(json!({"changeType": "stage_change"})),
         // change safety
-        case(&["freeze", "active"], "GET", &format!("/teams/{t}/freeze-windows/active")),
+        case(&["freeze", "active", "--env", ENV_STAGING], "GET", &format!("/teams/{t}/freeze-windows/active")).query("environmentId", ENV_STAGING),
         case(&["canary", "gates", STAGE], "GET", &format!("/stages/{STAGE}/canary-gates")),
         case(&["canary", "set", STAGE, "--data", r#"{"gates":[]}"#], "PUT", &format!("/stages/{STAGE}/canary-gates")).body(json!({"gates": []})),
         case(&["canary", "analyze", OTHER], "POST", &format!("/canary-gates/{OTHER}/analyze")).body(json!({})),
@@ -109,8 +109,11 @@ fn cases() -> Vec<Case> {
         case(&["ai", "suggest", "--data", r#"{"description":"d"}"#], "POST", &format!("/teams/{t}/ai/feature-suggestions")).body(json!({"description": "d"})),
         case(&["ai", "backfill-kinds"], "POST", &format!("/teams/{t}/ai/flag-kind/backfill")).body(json!({})),
         // observability
-        case(&["metrics", "summary", "--query", "period=day"], "GET", "/metrics/evaluations/summary").query("teamId", t).query("period", "day"),
-        case(&["metrics", "experiments", "--query", "featureKey=checkout"], "GET", "/metrics/experiment-results").query("teamId", t),
+        case(&["metrics", "summary"], "GET", "/metrics/evaluations/summary").query("teamId", t).query("period", "PERIOD_24H"),
+        case(&["metrics", "summary", "--period", "week", "--flag", "checkout"], "GET", "/metrics/evaluations/summary").query("period", "PERIOD_7D").query("featureKey", "checkout"),
+        case(&["metrics", "rates", "--period", "30d"], "GET", "/metrics/evaluations/rates").query("period", "PERIOD_30D").query("intervalMinutes", "60"),
+        case(&["metrics", "experiments", "--flag", "checkout", "--query", "metricKeys=conversion"], "GET", "/metrics/experiment-results").query("teamId", t).query("featureKey", "checkout").query("metricKeys", "conversion"),
+        case(&["metrics", "features", "--flag", "checkout", "--env", ENV_STAGING, "--period", "7d"], "GET", "/metrics/by-feature").query("featureKey", "checkout").query("environmentId", ENV_STAGING).query("timePeriod", "week"),
         case(&["audit"], "GET", &format!("/teams/{t}/audit-analytics")),
         case(&["activity", "--query", "limit=20"], "GET", "/activity/recent").query("limit", "20"),
         // admin resources

@@ -92,8 +92,11 @@ where
         overrides,
         is_tty,
         prompter,
+        out,
     };
-    match dispatch(cli.command, &mut app).await {
+    let result = dispatch(cli.command, &mut app).await;
+    let out = app.out;
+    match result {
         Ok(outcome) => {
             for warning in &outcome.warnings {
                 let _ = writeln!(err, "{warning}");

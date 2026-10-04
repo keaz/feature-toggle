@@ -10,7 +10,15 @@ use super::Paths;
 use crate::error::CliError;
 
 /// Keys a profile section may hold.
-pub const PROFILE_KEYS: [&str; 6] = ["session", "url", "team", "environment", "output", "timeout"];
+pub const PROFILE_KEYS: [&str; 7] = [
+    "session",
+    "url",
+    "team",
+    "environment",
+    "output",
+    "timeout",
+    "edge_url",
+];
 
 pub fn profile_section(profile: &str) -> String {
     if profile == "default" {
@@ -58,7 +66,11 @@ impl ConfigFiles {
     }
 
     pub fn credential_token(&self, profile: &str) -> Option<&str> {
-        value_of(&self.credentials, profile.to_string(), "token")
+        self.credential_value(profile, "token")
+    }
+
+    pub fn credential_value(&self, profile: &str, key: &str) -> Option<&str> {
+        value_of(&self.credentials, profile.to_string(), key)
     }
 
     /// Profiles in either file: `default` first, then sorted.
@@ -117,9 +129,11 @@ impl ConfigFiles {
     }
 
     pub fn set_credential_token(&mut self, profile: &str, token: &str) {
-        self.credentials
-            .with_section(Some(profile))
-            .set("token", token);
+        self.set_credential_value(profile, "token", token);
+    }
+
+    pub fn set_credential_value(&mut self, profile: &str, key: &str, value: &str) {
+        self.credentials.with_section(Some(profile)).set(key, value);
     }
 
     pub fn save_config(&self, paths: &Paths) -> Result<(), CliError> {

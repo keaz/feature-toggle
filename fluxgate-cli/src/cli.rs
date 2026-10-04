@@ -123,6 +123,15 @@ pub enum Command {
     Users(crate::commands::accounts::UsersArgs),
     /// Notification settings.
     Notifications(crate::commands::accounts::NotificationsArgs),
+    /// Print a shell completion script.
+    Completions {
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
+    /// Follow a live stream (one JSON document per line).
+    Watch(crate::commands::watch::WatchArgs),
+    /// Evaluate through an edge server (OFREP).
+    Edge(crate::commands::edge::EdgeArgs),
 }
 
 #[derive(Debug, Clone, Default, Args)]
@@ -457,6 +466,15 @@ pub struct ConfigArgs {
 pub enum ConfigSubcommand {
     /// Print the team, its environments and all flags as JSON.
     Export,
+    /// Create the environments and flags of an export that the team lacks.
+    Import {
+        /// A file written by `config export`.
+        #[arg(long)]
+        file: String,
+        /// Show what would be created without changing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 pub const STAGE_REQUESTS: [&str; 6] = [

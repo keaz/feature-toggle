@@ -370,3 +370,35 @@ async fn changing_a_shared_session_url_warns_about_other_profiles() {
         r.stderr
     );
 }
+
+#[tokio::test]
+async fn edge_settings_are_stored_like_url_and_token() {
+    let h = Harness::new().await;
+    assert_eq!(
+        h.run(
+            &["configure", "set", "edge_url", "https://edge.example.com"],
+            &[]
+        )
+        .await
+        .code,
+        0
+    );
+    assert_eq!(
+        h.run(&["configure", "set", "edge_key", "client.secret-1234"], &[])
+            .await
+            .code,
+        0
+    );
+    assert!(
+        h.read("config")
+            .contains("edge_url=https://edge.example.com")
+    );
+    assert!(
+        h.read("credentials")
+            .contains("edge_key=client.secret-1234")
+    );
+    let r = h
+        .run(&["configure", "get", "edge_key", "--output", "text"], &[])
+        .await;
+    assert_eq!(r.stdout.trim(), "****1234");
+}

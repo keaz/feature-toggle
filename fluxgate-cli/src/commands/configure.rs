@@ -37,8 +37,8 @@ fn set(app: &App<'_>, key: &str, value: &str) -> Result<Outcome, CliError> {
     let mut files = app.files()?;
     let value = value.trim();
     match key {
-        "token" => {
-            files.set_credential_token(&profile, value);
+        "token" | "edge_key" => {
+            files.set_credential_value(&profile, key, value);
             files.save_credentials(&app.paths)?;
         }
         _ if PROFILE_KEYS.contains(&key) => {
@@ -58,7 +58,7 @@ fn set(app: &App<'_>, key: &str, value: &str) -> Result<Outcome, CliError> {
         }
         other => {
             return Err(CliError::Usage(format!(
-                "unknown key '{other}'; expected one of: {}, token",
+                "unknown key '{other}'; expected one of: {}, token, edge_key",
                 PROFILE_KEYS.join(", ")
             )));
         }
@@ -71,8 +71,8 @@ fn set(app: &App<'_>, key: &str, value: &str) -> Result<Outcome, CliError> {
 fn get(app: &App<'_>, key: &str) -> Result<Outcome, CliError> {
     let profile = app.profile();
     let files = app.files()?;
-    let value = if key == "token" {
-        files.credential_token(&profile).map(mask_token)
+    let value = if key == "token" || key == "edge_key" {
+        files.credential_value(&profile, key).map(mask_token)
     } else {
         files.profile_value(&profile, key).map(str::to_string)
     };
