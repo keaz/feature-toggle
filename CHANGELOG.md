@@ -53,6 +53,9 @@ All notable user-visible changes to FluxGate are recorded here.
 
 ### Fixed
 
+- **The first admin unblocks every worker (backend).** The admin-bootstrap cache was kept per Actix worker, so after `POST /api/v1/admins` the other workers kept answering `401 admin_account_missing` until a restart. The cache is now shared, and a cached "no admin" is checked against the database again (another node may have created the admin).
+- **CLI device login hardening (backend).** A failure while issuing the session no longer uses up the approval: the next poll gets the session. The public device routes are rate limited per client address with a total per route, so one noisy client cannot lock others out. `cli_redirect` on an explicit `:80` is accepted.
+- **CLI fixes (CLI).** `fluxgate-cli/src/output.rs` was hidden by the `output*` pattern in `.gitignore` and never committed; a fresh checkout now builds. `config import` reports each failed environment or flag and keeps going (exit 1 when any failed). Tagged releases now include `fluxgate` archives for Linux x86_64 and macOS arm64.
 - **Removing a user's last manual role works (backend).** `POST /api/v1/users/{id}/roles` with an empty `roleIds` list now removes all manual role assignments (SSO-managed ones stay). Before, an empty list was ignored.
 - **Live updates no longer send variants for Simple flags (backend).** Live `FeatureUpdate` upserts from REST feature and criteria changes and from approvals included the stored variants of `SIMPLE` features, and edge servers applied them. The stream snapshot, `GetFeatureByKey` and REST evaluation omit variants for `SIMPLE` features. So a Simple flag with non-boolean stored variants could act non-boolean on an edge after a live update until the next snapshot. Live updates now use the snapshot mapping: only `CONTEXTUAL` features carry variants.
 
