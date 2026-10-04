@@ -382,8 +382,12 @@ pub async fn run() -> std::io::Result<()> {
     // Shared like the Jira limiter: one budget for all workers.
     let device_auth_limiter = web::Data::new(rest::device_auth::DeviceAuthLimiter::default());
 
+    // One admin cache for every worker: creating the first admin on one
+    // worker must unblock the others.
+    let shared_admin_state = AdminState::new();
+
     HttpServer::new(move || {
-        let admin_state = AdminState::new();
+        let admin_state = shared_admin_state.clone();
 
         let cors = Cors::default()
             .allowed_origin(&cfg.allowed_origin) // configured frontend origin
