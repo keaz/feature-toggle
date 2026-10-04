@@ -9,6 +9,8 @@ pub mod health;
 pub mod login;
 pub mod logout;
 pub mod rollout;
+pub mod teams;
+pub mod whoami;
 
 use serde_json::{Value, json};
 
@@ -59,6 +61,8 @@ pub async fn dispatch(command: Command, app: &mut App<'_>) -> Result<Outcome, Cl
         Command::Login(args) => login::run(args, app).await,
         Command::Logout(args) => logout::run(args, app).await,
         Command::Configure(args) => configure::run(args, app).await,
+        Command::Whoami => whoami::run(app).await,
+        Command::Teams(args) => teams::run(args, app).await,
     }
 }
 

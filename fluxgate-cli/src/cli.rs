@@ -70,6 +70,10 @@ pub enum Command {
     Logout(LogoutArgs),
     /// Set up a profile, or read and change its settings.
     Configure(ConfigureArgs),
+    /// Show who the current credentials belong to.
+    Whoami,
+    /// Teams you can use.
+    Teams(TeamsArgs),
 }
 
 #[derive(Debug, Clone, Default, Args)]
@@ -227,6 +231,23 @@ pub enum ConfigureSubcommand {
     List,
     /// List profiles.
     ListProfiles,
+}
+
+#[derive(Debug, Args)]
+pub struct TeamsArgs {
+    #[command(subcommand)]
+    pub command: TeamsSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TeamsSubcommand {
+    /// List your teams; the active one is marked.
+    List,
+    /// Make a team the profile's default.
+    Use {
+        /// Team name or id.
+        team: String,
+    },
 }
 
 #[cfg(test)]
