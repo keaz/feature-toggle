@@ -62,9 +62,9 @@ The five inputs most likely to break write-back in real use, each pinned by a te
 | [x] | [JI-46](tasks/JI-46-ui-writeback-settings.md) | UI: write-back settings, native secret, Outbound tab, paused banner | UI | JI-42, JI-45 |
 | [x] | [JI-47](tasks/JI-47-reason-hint-on-stage-change.md) | `ReasonQualityHint` on the stage change reason field | backend + UI | — |
 | [x] | [JI-50](tasks/JI-50-guide-and-e2e.md) | Setup guide update and end-to-end write-back test | docs + api-tests | JI-43, JI-44, JI-45 |
-| [ ] | [JI-51](tasks/JI-51-skip-risk-assessment-on-jira-approval.md) | Skip the AI risk assessment of a request Jira approved | backend | JI-14 |
-| [ ] | [JI-52](tasks/JI-52-jira-context-in-risk-input.md) | Jira reference and reason in the AI risk input | backend | JI-11 |
-| [ ] | [JI-53](tasks/JI-53-record-stage-change-reasons.md) | Record stage change reasons for the justification check | backend | JI-47 |
+| [x] | [JI-51](tasks/JI-51-skip-risk-assessment-on-jira-approval.md) | Skip the AI risk assessment of a request Jira approved | backend | JI-14 |
+| [x] | [JI-52](tasks/JI-52-jira-context-in-risk-input.md) | Jira reference and reason in the AI risk input | backend | JI-11 |
+| [x] | [JI-53](tasks/JI-53-record-stage-change-reasons.md) | Record stage change reasons for the justification check | backend | JI-47 |
 
 ```
 JI-40 ─► JI-41 ─► JI-42 ─► JI-43 ─► JI-44 ─► JI-45 ─► JI-46 ─► JI-47 ─► JI-50 ─► JI-51 ─► JI-52 ─► JI-53

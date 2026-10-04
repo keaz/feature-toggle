@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Type | Fix (follow-up from JI-14, found 2026-10-04) |
-| Status | Open |
+| Status | Done in 222bfca |
 | Repo | backend (`feature-toggle/`) |
 | Depends on | JI-14 |
 | Behavior change | A request that Jira approves before its approval-risk assessment finishes gets no assessment. No Jev call is made for it, and no late `approval_risk_assessed` row is written. `aiRisk` is `null` for it. Finished assessments and every request closed by a person are unchanged. |
@@ -47,4 +47,9 @@ Jira's `approve` action closes the approval request in the same event that creat
 
 ## Handoff log
 
-(empty)
+2026-10-04, backend `222bfca`:
+- Implemented as specified. The migration became `20261004110000_ai_judgments_skipped_status.sql`: `20261004090000` was already taken by `sso_cli_login` (CLI work merged meanwhile).
+- `AiJudgmentRepository::skip_unfinished`, `JudgmentService::skip`, `ApprovalLogicImpl::skip_risk_assessment` (private, after the commit of the pending-request branch only). `start_attempt`, `mark_done` and `mark_failed` now match `status IN ('pending','failed')`.
+- The no-pending-request branch (no policy) has no assessment, so nothing is skipped there.
+- Tests (RED seen first): DB `skip_unfinished_closes_a_pending_row_for_good`, `skip_unfinished_closes_a_failed_row`, `skip_unfinished_keeps_a_done_row` (`ai_test.rs`); `external_approval_skips_the_unfinished_risk_assessment`, `external_approval_keeps_a_finished_risk_assessment` (`approval_activity_test.rs`, client mock expects no call); unit `skip_closes_the_subjects_unfinished_row`, `ai_risk_skipped_means_no_assessment`. An existing test already covers "start_attempt false makes no call".
+- Full backend suite on `feture_toggle_test`: lib 960, integration 367, all pass. Clippy: no new warnings. No contract change.

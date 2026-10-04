@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Type | Feature (follow-up from JI-11, found 2026-10-04) |
-| Status | Open |
+| Status | Done in 0cb6a25 |
 | Repo | backend (`feature-toggle/`) |
 | Depends on | JI-11 |
 | Behavior change | The approval-risk input sent to Jev gets `change.external_ref` and `change.reason`. The questions, the derivation and the API are unchanged. Only new requests are affected. |
@@ -40,4 +40,7 @@ A stage change from Jira, or from a person who gives a ticket and a reason, carr
 
 ## Handoff log
 
-(empty)
+2026-10-04, backend `0cb6a25`:
+- `approval_risk::RequestContext { external_ref, reason }` (both `Option<&str>`, `Default`) is a new last argument of `build_input`, instead of two loose arguments. `submit_risk_assessment` fills it from the request. `tests/approval_risk_live_test.rs` passes `RequestContext::default()`.
+- Tests (RED seen first): updated `build_input_has_the_designed_shape`; new `build_input_sends_null_reference_and_reason_when_absent`, `build_input_cuts_a_long_reason_to_500_characters`.
+- Full backend suite: lib 962, integration 367, all pass. No contract change.

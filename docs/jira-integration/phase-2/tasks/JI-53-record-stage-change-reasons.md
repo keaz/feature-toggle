@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Type | Feature (follow-up from JI-47, found 2026-10-04) |
-| Status | Open |
+| Status | Done in 1971b81 |
 | Repo | backend (`feature-toggle/`) |
 | Depends on | JI-47 |
 | Behavior change | A stage change reason typed by a person is checked after the change, like emergency, cleanup and freeze override reasons. The verdict lands in the activity row's `metadata.ai_justification`. Reasons that FluxGate generates for Jira status rules are not checked. No API change. |
@@ -45,4 +45,8 @@ JI-47 shows the reason hint before submit, but the reason was not recorded after
 
 ## Handoff log
 
-(empty)
+2026-10-04, backend `1971b81`:
+- `StageChangeMeta.check_reason`: `validate_stage_change_meta` sets it to `reason.is_some()`, so a request without a reason still equals `StageChangeMeta::default()`. The scheduled-change scheduler also sets it to `false`: its reason was checked as `scheduled_change` at creation.
+- `feature_logic_with_approval_and_notifications` takes a 7th argument `judgments` (only `lib.rs` passes a service). Both stage activity writes in `request_stage_change` now call `create_activity` directly to get the row id (still best effort); `log_gated_stage_change_requested` returns `Option<Uuid>`. New private `record_stage_change_reason`.
+- Tests (RED seen first): `direct_stage_change_records_a_person_reason`, `gated_stage_change_records_the_reason_on_the_requested_row`, `generated_reasons_are_not_recorded` (`logic/feature.rs`, with `justification::test_support::recording_runtime`). REST expectations now include `check_reason`.
+- Full backend suite: lib 965, integration 367, all pass. No contract change.

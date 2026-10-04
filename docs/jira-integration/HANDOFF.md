@@ -42,11 +42,17 @@ Open points after phase 2:
 | JI-46 UI write-back settings | Done | UI `b4479f9` |
 | JI-47 reason hint on stage change | Done | backend `d5d6faf`, UI `56042f8` |
 | JI-50 guide + e2e | Done | backend `b75c9a9` (test), `e3321e3` (guide) |
-| JI-51 skip AI risk on Jira approval | Open | — |
-| JI-52 Jira context in AI risk input | Open | — |
-| JI-53 record stage change reasons | Open | — |
+| JI-51 skip AI risk on Jira approval | Done | backend `222bfca` |
+| JI-52 Jira context in AI risk input | Done | backend `0cb6a25` |
+| JI-53 record stage change reasons | Done | backend `1971b81` |
 
-**Phase 2 follow-ups (2026-10-04):** a check of how the Jira integration affects the AI judgments found three gaps (phase 2 [design §3.8](phase-2/design.md#38-ai-judgments-and-jira-ji-51-ji-52-ji-53), decisions J25-J27). JI-51 stops the wasted Jev call and the late "AI risk" row for requests Jira approves. JI-52 gives Jev the Jira issue key and the reason. JI-53 records a person's stage change reason for the justification check. Next task: JI-51.
+**Phase 2 follow-ups (2026-10-04):** a check of how the Jira integration affects the AI judgments found three gaps (phase 2 [design §3.8](phase-2/design.md#38-ai-judgments-and-jira-ji-51-ji-52-ji-53), decisions J25-J27). JI-51 stops the wasted Jev call and the late "AI risk" row for requests Jira approves. JI-52 gives Jev the Jira issue key and the reason. JI-53 records a person's stage change reason for the justification check. All three are done; no next task.
+
+Facts from JI-51..JI-53:
+- `ai_judgments.status` can be `skipped` (migration `20261004110000_ai_judgments_skipped_status.sql`, the latest; later migrations must sort after it). A skipped row is final. `JudgmentService::skip` / `AiJudgmentRepository::skip_unfinished`. `aiRisk` is `null` for a skipped row.
+- The `approval_request_approved_externally` activity row has `ai_risk_assessment: "skipped"` next to `ai_risk_mode_skipped` when the policy's AI risk mode is not `off`.
+- `approval_risk::build_input` takes a `RequestContext`; the input's `change` has `external_ref` and `reason`.
+- `StageChangeMeta.check_reason` (true only for a reason typed at the REST stage routes); `feature_logic_with_approval_and_notifications` takes the judgment service as its 7th argument.
 
 Facts from JI-41 (backend `3de0dec`): `logic::jira_client::{JiraClient, client_for}` build a client from a row but do not check `writeback_enabled` (the sender must); credential AAD is the integration id bytes; turning write-back off does not yet dead the pending jobs (JI-42 adds it); `web::Data<config::JiraUiBaseUrl>` carries the UI base URL. Details in the JI-41 handoff log.
 

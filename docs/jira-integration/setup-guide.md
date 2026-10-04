@@ -91,6 +91,7 @@ Approval policies matter:
 
 - With a policy on the environment, `request` leaves a pending request for the policy's approvers. A trusted `approve` closes it.
 - Without a policy, `request` moves the stage to `DEPLOYMENT_REQUESTED` and it stays there: only a trusted Jira `approve` (or a reject in FluxGate) moves it on. In an environment without a policy, use `approve` (Jira-approved) rather than `request`, or add a policy.
+- AI risk assessment (Settings → AI, and the policy's AI risk mode): a request that Jira creates is assessed like any other, and the assessment sees the Jira issue key and the reason. When a trusted `approve` closes the request, the AI risk mode cannot act on it. An assessment that has not finished by then is skipped, so no AI call is made and no late risk result appears. The approval's activity entry records this (`ai_risk_mode_skipped`, `ai_risk_assessment: skipped`). If the AI risk mode must be able to stop a release, keep that environment out of the Jira-approved list.
 
 ### 1.3 Link issues to features
 
