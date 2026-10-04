@@ -81,6 +81,8 @@ pub mod activity_types {
     pub const SSO_SETTINGS_UPDATED: &str = "sso_settings_updated";
     pub const SSO_LOGIN: &str = "sso_login";
     pub const SSO_ROLE_SYNC: &str = "sso_role_sync";
+    pub const CLI_LOGIN_APPROVED: &str = "cli_login_approved";
+    pub const CLI_LOGIN_DENIED: &str = "cli_login_denied";
     pub const SSO_ROLE_SYNC_WARNING: &str = "sso_role_sync_warning";
     pub const SSO_USER_PROVISIONED: &str = "sso_user_provisioned";
     pub const SSO_IDENTITY_LINKED: &str = "sso_identity_linked";

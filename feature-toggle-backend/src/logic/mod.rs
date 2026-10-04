@@ -32,6 +32,7 @@ pub mod client_tx;
 pub mod context;
 pub mod context_tx;
 pub mod dependency_graph;
+pub mod device_login;
 pub mod environment;
 pub mod environment_tx;
 pub mod external_change;

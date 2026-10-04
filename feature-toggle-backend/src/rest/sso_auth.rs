@@ -20,7 +20,9 @@ use utoipa::{IntoParams, ToSchema};
 use crate::database::activity_log::ActivityLogRepository;
 use crate::database::role::role_repository_tx;
 use crate::database::sso_group_mapping::sso_group_mapping_repository_tx;
-use crate::database::sso_login_code::{sso_login_code_repository, sso_login_code_repository_tx};
+use crate::database::sso_login_code::{
+    SsoLoginCodeRepositoryTx, sso_login_code_repository, sso_login_code_repository_tx,
+};
 use crate::database::sso_login_state::{NewSsoLoginState, sso_login_state_repository};
 use crate::database::sso_provider::sso_provider_repository;
 use crate::database::user::{user_repository, user_repository_tx};
@@ -31,7 +33,8 @@ use crate::logic::oidc_client::{
 };
 use crate::logic::sso_login::{
     AuthorizeParams, LOGIN_STATE_TTL_MINUTES, SsoLoginError, authorize_url, callback_url,
-    complete_url, error_url, sanitize_redirect,
+    cli_complete_url, cli_error_url, complete_url, error_url, sanitize_redirect,
+    valid_cli_challenge, validate_cli_redirect,
 };
 use crate::logic::sso_login_tx::{SsoLoginRepos, complete_sso_login_in_tx};
 use crate::logic::sso_provider::{SsoSecrets, resolve_client_secret, validate_slug};
@@ -54,6 +57,14 @@ pub struct SsoAuthorizeQuery {
     /// Local path to open after login. Ignored unless it starts with `/` (and not
     /// `//` or `/\`).
     pub redirect: Option<String>,
+    /// Loopback callback of `fluxgate login --sso`: exactly
+    /// `http://127.0.0.1:<port>/callback` or `http://[::1]:<port>/callback`. The
+    /// one-time code (or `error`) goes there instead of the UI. Requires
+    /// `cli_challenge`.
+    pub cli_redirect: Option<String>,
+    /// PKCE S256 challenge (43 base64url characters) the CLI answers with
+    /// `codeVerifier` at exchange. Requires `cli_redirect`.
+    pub cli_challenge: Option<String>,
 }
 
 /// Query of the IdP callback. Deliberately not `Debug`: it carries the
@@ -70,12 +81,19 @@ pub struct SsoCallbackQuery {
 pub struct SsoExchangeRequest {
     /// The one-time code from `<ui>/auth/sso/complete?code=...`.
     pub code: String,
+    /// PKCE verifier; required for codes issued to a CLI login (`cli_challenge`).
+    #[serde(default, rename = "codeVerifier")]
+    pub code_verifier: Option<String>,
 }
 
 impl std::fmt::Debug for SsoExchangeRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SsoExchangeRequest")
             .field("code", &"<redacted>")
+            .field(
+                "code_verifier",
+                &self.code_verifier.as_ref().map(|_| "<redacted>"),
+            )
             .finish()
     }
 }
@@ -159,7 +177,7 @@ fn provider_error(err: OidcError) -> SsoLoginError {
         SsoAuthorizeQuery
     ),
     responses(
-        (status = 302, description = "Redirect to the identity provider and set the HttpOnly `fluxgate_sso_state` cookie (SameSite=Lax, Path=/api/v1/auth/sso/, 10 minutes) that binds the request to this browser; or redirect to `<ui>/login?ssoError=sso_provider_error` when the provider is unknown, disabled or unreachable")
+        (status = 302, description = "Redirect to the identity provider and set the HttpOnly `fluxgate_sso_state` cookie (SameSite=Lax, Path=/api/v1/auth/sso/, 10 minutes) that binds the request to this browser; or redirect to `<ui>/login?ssoError=sso_provider_error` when the provider is unknown, disabled or unreachable, or `ssoError=sso_invalid_cli_redirect` when `cli_redirect`/`cli_challenge` are not a loopback callback with an S256 challenge")
     ),
     security(()),
     tag = "Auth"
@@ -178,6 +196,8 @@ pub(crate) async fn sso_authorize(
         &req,
         &slug,
         query.redirect.as_deref(),
+        query.cli_redirect.as_deref(),
+        query.cli_challenge.as_deref(),
         &db_pool,
         &oidc,
         &config,
@@ -202,10 +222,20 @@ async fn start_login(
     req: &HttpRequest,
     slug: &str,
     redirect_path: Option<&str>,
+    cli_redirect: Option<&str>,
+    cli_challenge: Option<&str>,
     pool: &sqlx::PgPool,
     oidc: &OidcClient,
     config: &SsoLoginConfig,
 ) -> Result<(String, String), SsoLoginError> {
+    let cli = match (cli_redirect, cli_challenge) {
+        (None, None) => None,
+        (Some(redirect), Some(challenge)) if valid_cli_challenge(challenge) => Some((
+            validate_cli_redirect(redirect).ok_or(SsoLoginError::InvalidCliRedirect)?,
+            challenge.to_string(),
+        )),
+        _ => return Err(SsoLoginError::InvalidCliRedirect),
+    };
     validate_slug(slug).map_err(|_| SsoLoginError::ProviderError("invalid slug".into()))?;
     let provider = sso_provider_repository(pool.clone())
         .find_provider_by_slug(slug)
@@ -242,6 +272,8 @@ async fn start_login(
             pkce_verifier: verifier,
             redirect_path: sanitize_redirect(redirect_path),
             expires_at: Utc::now() + Duration::minutes(LOGIN_STATE_TTL_MINUTES),
+            cli_redirect_uri: cli.as_ref().map(|(redirect, _)| redirect.clone()),
+            cli_code_challenge: cli.map(|(_, challenge)| challenge),
         })
         .await?;
     Ok((location, state))
@@ -255,7 +287,7 @@ async fn start_login(
         SsoCallbackQuery
     ),
     responses(
-        (status = 302, description = "Requires the `fluxgate_sso_state` cookie set by authorize (missing or not matching the state gives sso_state_invalid) and always clears it. Redirect to `<ui>/auth/sso/complete?code=<one-time>[&redirect=<path>]`, or to `<ui>/login?ssoError=<code>` with one of sso_state_invalid, sso_provider_error, sso_token_invalid, sso_email_missing, sso_email_domain_not_allowed, sso_user_not_provisioned, sso_linking_not_allowed, sso_account_disabled")
+        (status = 302, description = "Requires the `fluxgate_sso_state` cookie set by authorize (missing or not matching the state gives sso_state_invalid) and always clears it. Redirect to `<ui>/auth/sso/complete?code=<one-time>[&redirect=<path>]`, or to `<ui>/login?ssoError=<code>` with one of sso_state_invalid, sso_provider_error, sso_token_invalid, sso_email_missing, sso_email_domain_not_allowed, sso_user_not_provisioned, sso_linking_not_allowed, sso_account_disabled. For a CLI login (authorize with `cli_redirect`), once the state is valid the code goes to `<cli_redirect>?code=<one-time>` and errors to `<cli_redirect>?error=<code>`")
     ),
     security(()),
     tag = "Auth"
@@ -272,6 +304,9 @@ pub(crate) async fn sso_callback(
     activity_repo: web::Data<Box<dyn ActivityLogRepository>>,
 ) -> impl Responder {
     let slug = slug.into_inner();
+    // Set once the state is consumed: a CLI login then gets its outcome at its
+    // loopback address, never at the UI.
+    let mut cli_redirect = None;
     let result = finish_login(
         &req,
         &slug,
@@ -281,6 +316,7 @@ pub(crate) async fn sso_callback(
         &secrets,
         &config,
         activity_repo.as_ref().as_ref(),
+        &mut cli_redirect,
     )
     .await;
     // The state cookie is single use like the state: cleared on every outcome.
@@ -289,7 +325,11 @@ pub(crate) async fn sso_callback(
         Ok(location) => redirect(&location, Some(clear)),
         Err(err) => {
             log::warn!("SSO callback for provider '{slug}' failed: {err}");
-            redirect(&error_url(&config.ui_origin, &err), Some(clear))
+            let location = match &cli_redirect {
+                Some(cli_redirect) => cli_error_url(cli_redirect, &err),
+                None => error_url(&config.ui_origin, &err),
+            };
+            redirect(&location, Some(clear))
         }
     }
 }
@@ -303,6 +343,7 @@ async fn finish_login(
     secrets: &SsoSecrets,
     config: &SsoLoginConfig,
     activity: &dyn ActivityLogRepository,
+    cli_redirect: &mut Option<String>,
 ) -> Result<String, SsoLoginError> {
     // The state is consumed in its own committed statement, before anything else
     // can fail: a replayed callback finds it gone even if this one fails later.
@@ -328,6 +369,7 @@ async fn finish_login(
         .consume_state(&hash_token(state_param))
         .await?
         .ok_or(SsoLoginError::StateInvalid)?;
+    cli_redirect.clone_from(&state.cli_redirect_uri);
 
     let provider = sso_provider_repository(pool.clone())
         .find_provider_by_slug(slug)
@@ -434,15 +476,26 @@ async fn finish_login(
             return Err(err);
         }
     };
+    if let Some(challenge) = &state.cli_code_challenge
+        && let Err(err) = codes
+            .set_code_challenge_tx(&mut tx, &hash_token(&completed.code), challenge)
+            .await
+    {
+        let _ = tx.rollback().await;
+        return Err(SsoLoginError::from(err));
+    }
     tx.commit()
         .await
         .map_err(|e| SsoLoginError::from(crate::Error::DatabaseError(e)))?;
 
-    Ok(complete_url(
-        &config.ui_origin,
-        &completed.code,
-        state.redirect_path.as_deref(),
-    ))
+    Ok(match &state.cli_redirect_uri {
+        Some(cli_redirect) => cli_complete_url(cli_redirect, &completed.code),
+        None => complete_url(
+            &config.ui_origin,
+            &completed.code,
+            state.redirect_path.as_deref(),
+        ),
+    })
 }
 
 #[utoipa::path(
@@ -473,6 +526,20 @@ pub(crate) async fn sso_exchange(
     else {
         return Err(RestError::invalid_sso_code());
     };
+    // A code issued to a CLI login is only good with the verifier of its
+    // challenge; anyone who intercepted it at the loopback address cannot use it.
+    if let Some(challenge) = &login_code.code_challenge {
+        let answered = payload.code_verifier.as_deref().is_some_and(|verifier| {
+            bool::from(
+                pkce_challenge(verifier)
+                    .as_bytes()
+                    .ct_eq(challenge.as_bytes()),
+            )
+        });
+        if !answered {
+            return Err(RestError::invalid_sso_code());
+        }
+    }
 
     let user = match user_repository(db_pool.get_ref().clone())
         .get_user_by_id(login_code.user_id)

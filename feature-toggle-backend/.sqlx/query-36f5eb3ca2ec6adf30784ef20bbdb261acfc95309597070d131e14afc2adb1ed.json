@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            DELETE FROM sso_login_states\n            WHERE state_hash = $1 AND expires_at > now()\n            RETURNING id, state_hash, provider_id, nonce, pkce_verifier, redirect_path,\n                      expires_at, created_at\n            ",
+  "query": "\n            DELETE FROM sso_login_states\n            WHERE state_hash = $1 AND expires_at > now()\n            RETURNING id, state_hash, provider_id, nonce, pkce_verifier, redirect_path,\n                      expires_at, created_at, cli_redirect_uri, cli_code_challenge\n            ",
   "describe": {
     "columns": [
       {
@@ -42,6 +42,16 @@
         "ordinal": 7,
         "name": "created_at",
         "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "cli_redirect_uri",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "cli_code_challenge",
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -57,8 +67,10 @@
       false,
       true,
       false,
-      false
+      false,
+      true,
+      true
     ]
   },
-  "hash": "a03b3455e8d53aa517b7f7c0568b7f3ff8929d5530ae662843ba11d909fd164c"
+  "hash": "36f5eb3ca2ec6adf30784ef20bbdb261acfc95309597070d131e14afc2adb1ed"
 }

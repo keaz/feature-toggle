@@ -617,6 +617,10 @@ pub struct SsoLoginState {
     pub redirect_path: Option<String>,
     pub expires_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
+    /// Loopback address of a CLI login; the one-time code goes there.
+    pub cli_redirect_uri: Option<String>,
+    /// PKCE S256 challenge of a CLI login, copied onto the one-time code.
+    pub cli_code_challenge: Option<String>,
 }
 
 impl std::fmt::Debug for SsoLoginState {
@@ -629,6 +633,7 @@ impl std::fmt::Debug for SsoLoginState {
             .field("redirect_path", &self.redirect_path)
             .field("expires_at", &self.expires_at)
             .field("created_at", &self.created_at)
+            .field("cli_redirect_uri", &self.cli_redirect_uri)
             .finish()
     }
 }
@@ -642,6 +647,23 @@ pub struct SsoLoginCode {
     pub provider_id: Uuid,
     pub expires_at: DateTime<Utc>,
     pub used_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    /// PKCE S256 challenge the exchange must answer (CLI logins only).
+    pub code_challenge: Option<String>,
+}
+
+/// A device-code login of the CLI (`cli_device_authorizations`). `status` is
+/// `pending`, `approved`, `denied` or `consumed`.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct CliDeviceAuthorization {
+    pub id: Uuid,
+    pub device_code_hash: String,
+    pub user_code: String,
+    pub status: String,
+    pub user_id: Option<Uuid>,
+    pub interval_secs: i32,
+    pub last_polled_at: Option<DateTime<Utc>>,
+    pub expires_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
 }
 

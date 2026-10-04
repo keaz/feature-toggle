@@ -35,6 +35,8 @@ pub enum SsoLoginError {
     LinkingNotAllowed,
     #[error("account disabled")]
     AccountDisabled,
+    #[error("cli_redirect must be a loopback callback and comes with a cli_challenge")]
+    InvalidCliRedirect,
 }
 
 impl SsoLoginError {
@@ -48,6 +50,7 @@ impl SsoLoginError {
             Self::UserNotProvisioned => "sso_user_not_provisioned",
             Self::LinkingNotAllowed => "sso_linking_not_allowed",
             Self::AccountDisabled => "sso_account_disabled",
+            Self::InvalidCliRedirect => "sso_invalid_cli_redirect",
         }
     }
 }
@@ -143,6 +146,48 @@ pub fn complete_url(ui_origin: &str, code: &str, redirect: Option<&str>) -> Stri
 /// `<ui>/login?ssoError=<code>`.
 pub fn error_url(ui_origin: &str, error: &SsoLoginError) -> String {
     ui_url(ui_origin, "/login", &[("ssoError", error.code())])
+}
+
+/// The CLI's loopback callback, when it is exactly
+/// `http://127.0.0.1:<port>/callback` or `http://[::1]:<port>/callback`.
+/// Anything else could send the one-time code to another host.
+pub fn validate_cli_redirect(value: &str) -> Option<String> {
+    let url = Url::parse(value).ok()?;
+    // The parser normalizes hosts, so other spellings of these addresses
+    // compare equal; names such as `localhost` are refused.
+    let loopback = matches!(url.host_str(), Some("127.0.0.1") | Some("[::1]"));
+    let exact = url.scheme() == "http"
+        && loopback
+        && url.port().is_some()
+        && url.path() == "/callback"
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.username().is_empty()
+        && url.password().is_none();
+    exact.then(|| url.to_string())
+}
+
+/// A PKCE S256 challenge: 43 base64url characters without padding.
+pub fn valid_cli_challenge(value: &str) -> bool {
+    value.len() == 43
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// `<cli_redirect>?code=<one-time code>`.
+pub fn cli_complete_url(cli_redirect: &str, code: &str) -> String {
+    with_query(cli_redirect, &[("code", code)])
+}
+
+/// `<cli_redirect>?error=<code>`.
+pub fn cli_error_url(cli_redirect: &str, error: &SsoLoginError) -> String {
+    with_query(cli_redirect, &[("error", error.code())])
+}
+
+fn with_query(base: &str, query: &[(&str, &str)]) -> String {
+    let encoded = serde_urlencoded::to_string(query).unwrap_or_default();
+    format!("{base}?{encoded}")
 }
 
 /// Whether `email` belongs to one of `allowed_domains` (case-insensitive). An empty
@@ -408,6 +453,60 @@ mod tests {
                 .0
                 .len(),
             100
+        );
+    }
+
+    #[test]
+    fn cli_redirect_accepts_only_loopback_callbacks() {
+        for ok in [
+            "http://127.0.0.1:53682/callback",
+            "http://[::1]:8000/callback",
+            "http://127.0.0.1:1/callback",
+        ] {
+            assert_eq!(validate_cli_redirect(ok).as_deref(), Some(ok), "{ok}");
+        }
+        for bad in [
+            "https://127.0.0.1:53682/callback",
+            "http://localhost:53682/callback",
+            "http://127.0.0.2:53682/callback",
+            "http://evil.example:53682/callback",
+            "http://127.0.0.1:53682/other",
+            "http://127.0.0.1:53682/callback?x=1",
+            "http://127.0.0.1:53682/callback#frag",
+            "http://user@127.0.0.1:53682/callback",
+            "http://127.0.0.1/callback",
+            "/callback",
+            "",
+        ] {
+            assert_eq!(validate_cli_redirect(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn cli_challenge_must_be_an_s256_value() {
+        assert!(valid_cli_challenge(&"a".repeat(43)));
+        assert!(valid_cli_challenge(
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJ0123-_Q"
+        ));
+        assert!(!valid_cli_challenge(&"a".repeat(42)));
+        assert!(!valid_cli_challenge(&"a".repeat(44)));
+        assert!(!valid_cli_challenge(&format!("{}=", "a".repeat(42))));
+    }
+
+    #[test]
+    fn cli_urls_carry_the_code_or_the_error() {
+        let base = "http://127.0.0.1:53682/callback";
+        assert_eq!(
+            cli_complete_url(base, "abc-_1"),
+            "http://127.0.0.1:53682/callback?code=abc-_1"
+        );
+        assert_eq!(
+            cli_error_url(base, &SsoLoginError::EmailMissing),
+            "http://127.0.0.1:53682/callback?error=sso_email_missing"
+        );
+        assert_eq!(
+            SsoLoginError::InvalidCliRedirect.code(),
+            "sso_invalid_cli_redirect"
         );
     }
 }

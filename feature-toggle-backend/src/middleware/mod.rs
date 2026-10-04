@@ -32,6 +32,17 @@ pub(crate) fn is_public_sso_path(path: &str, method: &actix_web::http::Method) -
     }
 }
 
+/// Whether `path` is one of the public device-login routes the CLI calls before
+/// it has a session: `POST /api/v1/auth/device/authorize` and `.../token`.
+/// `approve` stays behind the guard.
+pub(crate) fn is_public_device_path(path: &str, method: &actix_web::http::Method) -> bool {
+    method == actix_web::http::Method::POST
+        && matches!(
+            path,
+            "/api/v1/auth/device/authorize" | "/api/v1/auth/device/token"
+        )
+}
+
 /// Whether `path` (the routed path) is the inbound Jira event route,
 /// `POST /api/v1/integrations/jira/{integration_id}/events` with a UUID id.
 /// Jira authenticates with the integration secret, which the handler checks;

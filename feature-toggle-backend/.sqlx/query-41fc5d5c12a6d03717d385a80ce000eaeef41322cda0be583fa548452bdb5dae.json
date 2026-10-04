@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE sso_login_codes SET code_challenge = $2 WHERE code_hash = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "41fc5d5c12a6d03717d385a80ce000eaeef41322cda0be583fa548452bdb5dae"
+}
