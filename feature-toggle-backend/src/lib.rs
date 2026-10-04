@@ -380,7 +380,9 @@ pub async fn run() -> std::io::Result<()> {
     ));
 
     // Shared like the Jira limiter: one budget for all workers.
-    let device_auth_limiter = web::Data::new(rest::device_auth::DeviceAuthLimiter::default());
+    let device_auth_limiter = web::Data::new(rest::device_auth::DeviceAuthLimiter::from_config(
+        &cfg.device_login,
+    ));
 
     // One admin cache for every worker: creating the first admin on one
     // worker must unblock the others.

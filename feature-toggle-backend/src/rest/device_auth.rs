@@ -3,6 +3,7 @@
 
 use std::net::IpAddr;
 use std::num::NonZeroU32;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use actix_web::{HttpMessage, HttpRequest, HttpResponse, Responder, post, web};
 use chrono::{Duration, Utc};
@@ -36,11 +37,16 @@ const USER_CODE_ATTEMPTS: usize = 5;
 
 /// In-process limits for the public device routes: one budget per client
 /// address, so one noisy client cannot lock others out, and a total per route.
-/// The backend runs as one instance, so the state is in memory. Behind a
-/// reverse proxy every request has the proxy's address and shares one budget.
+/// The backend runs as one instance, so the state is in memory. Requests from
+/// a trusted reverse proxy are counted by their forwarded client address.
 pub struct DeviceAuthLimiter {
     authorize: RouteLimit,
     token: RouteLimit,
+    trusted_proxies: Vec<IpAddr>,
+    /// Client buckets kept per route; past it, new requests count only
+    /// against the total (a flood of addresses cannot grow the map).
+    client_cap: usize,
+    admits: AtomicUsize,
     clock: DefaultClock,
 }
 
@@ -49,10 +55,10 @@ struct RouteLimit {
     total: DefaultDirectRateLimiter,
 }
 
-/// Client buckets kept before idle ones are dropped.
+/// Default for [`DeviceAuthLimiter::with_client_cap`].
 const MAX_TRACKED_CLIENTS: usize = 10_000;
-/// Default totals are this many clients' worth of requests.
-const DEFAULT_TOTAL_FACTOR: u32 = 30;
+/// Idle buckets are swept at most once per this many admissions over the cap.
+const SWEEP_EVERY: usize = 256;
 
 fn non_zero(value: u32) -> NonZeroU32 {
     NonZeroU32::new(value.max(1)).expect("value is at least 1")
@@ -69,13 +75,30 @@ impl DeviceAuthLimiter {
     pub fn new(authorize_per_minute: u32, token_per_minute: u32) -> Self {
         let route = |per_minute: u32| RouteLimit {
             per_client: RateLimiter::keyed(quota(per_minute)),
-            total: RateLimiter::direct(quota(per_minute.saturating_mul(DEFAULT_TOTAL_FACTOR))),
+            total: RateLimiter::direct(quota(
+                per_minute.saturating_mul(crate::config::DEFAULT_DEVICE_TOTAL_FACTOR),
+            )),
         };
         Self {
             authorize: route(authorize_per_minute),
             token: route(token_per_minute),
+            trusted_proxies: Vec::new(),
+            client_cap: MAX_TRACKED_CLIENTS,
+            admits: AtomicUsize::new(0),
             clock: DefaultClock::default(),
         }
+    }
+
+    /// From the `[device_login]` configuration.
+    pub fn from_config(config: &crate::config::DeviceLoginConfig) -> Self {
+        Self::new(config.authorize_per_minute, config.token_per_minute)
+            .with_totals(
+                config
+                    .authorize_per_minute
+                    .saturating_mul(config.total_factor),
+                config.token_per_minute.saturating_mul(config.total_factor),
+            )
+            .with_trusted_proxies(config.trusted_proxies.clone())
     }
 
     /// Requests per minute for each route across all clients.
@@ -85,17 +108,58 @@ impl DeviceAuthLimiter {
         self
     }
 
+    /// Proxies whose `Forwarded` / `X-Forwarded-For` client address is used.
+    pub fn with_trusted_proxies(mut self, proxies: Vec<IpAddr>) -> Self {
+        self.trusted_proxies = proxies;
+        self
+    }
+
+    /// Client buckets kept per route (default 10 000).
+    pub fn with_client_cap(mut self, cap: usize) -> Self {
+        self.client_cap = cap.max(1);
+        self
+    }
+
+    /// The address to count a request against: the connection's peer, or the
+    /// forwarded client address when the peer is a trusted proxy.
+    fn client_address(&self, req: &HttpRequest) -> Option<IpAddr> {
+        let peer = req.peer_addr()?.ip();
+        if !self.trusted_proxies.contains(&peer) {
+            return Some(peer);
+        }
+        let info = req.connection_info();
+        let forwarded = info.realip_remote_addr()?;
+        forwarded
+            .parse::<IpAddr>()
+            .or_else(|_| {
+                forwarded
+                    .parse::<std::net::SocketAddr>()
+                    .map(|addr| addr.ip())
+            })
+            .ok()
+            .or(Some(peer))
+    }
+
     fn admit(&self, route: &RouteLimit, client: Option<IpAddr>) -> Result<(), RestError> {
         let limited = |wait: std::time::Duration| {
             RestError::too_many_requests(wait.as_secs_f64().ceil().max(1.0) as u64)
         };
         if let Some(client) = client {
-            route
-                .per_client
-                .check_key(&client)
-                .map_err(|not_until| limited(not_until.wait_time_from(self.clock.now())))?;
-            if route.per_client.len() > MAX_TRACKED_CLIENTS {
+            let mut tracked = route.per_client.len() < self.client_cap;
+            if !tracked
+                && self
+                    .admits
+                    .fetch_add(1, Ordering::Relaxed)
+                    .is_multiple_of(SWEEP_EVERY)
+            {
                 route.per_client.retain_recent();
+                tracked = route.per_client.len() < self.client_cap;
+            }
+            if tracked {
+                route
+                    .per_client
+                    .check_key(&client)
+                    .map_err(|not_until| limited(not_until.wait_time_from(self.clock.now())))?;
             }
         }
         route
@@ -107,9 +171,7 @@ impl DeviceAuthLimiter {
 
 impl Default for DeviceAuthLimiter {
     fn default() -> Self {
-        // A CLI polls every 5 seconds (12 a minute); several logins from one
-        // address still fit.
-        Self::new(10, 120)
+        Self::from_config(&crate::config::DeviceLoginConfig::default())
     }
 }
 
@@ -197,7 +259,7 @@ pub(crate) async fn device_authorize(
     limiter: web::Data<DeviceAuthLimiter>,
     config: web::Data<SsoLoginConfig>,
 ) -> Result<impl Responder, RestError> {
-    limiter.admit(&limiter.authorize, req.peer_addr().map(|addr| addr.ip()))?;
+    limiter.admit(&limiter.authorize, limiter.client_address(&req))?;
     let repo = cli_device_authorization_repository(db_pool.get_ref().clone());
     let device_code = new_device_code();
     let expires_at = Utc::now() + Duration::minutes(DEVICE_CODE_TTL_MINUTES);
@@ -252,7 +314,7 @@ pub(crate) async fn device_token(
     tokens: web::Data<Box<dyn JwtTokenLogic>>,
     payload: web::Json<DeviceTokenRequest>,
 ) -> Result<impl Responder, RestError> {
-    limiter.admit(&limiter.token, req.peer_addr().map(|addr| addr.ip()))?;
+    limiter.admit(&limiter.token, limiter.client_address(&req))?;
     let expired = || {
         poll_error(
             "expired_token",
@@ -428,5 +490,26 @@ mod tests {
         let shown = format!("{response:?}");
         assert!(!shown.contains("device-secret-value"), "{shown}");
         assert!(shown.contains("BCDF-GHJK"));
+    }
+
+    #[test]
+    fn past_the_client_cap_new_clients_fall_back_to_the_totals() {
+        let limiter = DeviceAuthLimiter::new(1, 1)
+            .with_totals(100, 100)
+            .with_client_cap(2);
+        let ip = |n: u8| Some(IpAddr::from([10, 0, 0, n]));
+        assert!(limiter.admit(&limiter.authorize, ip(1)).is_ok());
+        assert!(limiter.admit(&limiter.authorize, ip(2)).is_ok());
+        for n in 3..50 {
+            assert!(
+                limiter.admit(&limiter.authorize, ip(n)).is_ok(),
+                "client {n}"
+            );
+        }
+        assert!(
+            limiter.authorize.per_client.len() <= 2,
+            "the map stays bounded"
+        );
+        assert!(limiter.admit(&limiter.authorize, None).is_ok());
     }
 }

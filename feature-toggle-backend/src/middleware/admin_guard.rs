@@ -404,6 +404,8 @@ mod tests {
     /// Another worker (or node) created the first admin: a cached "no admin"
     /// must not keep blocking requests.
     #[actix_web::test]
+    // Commits an enabled admin; tests that expect no admin take the same lock.
+    #[serial_test::serial(admin_users)]
     async fn stale_no_admin_cache_is_rechecked_against_the_database() {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL not set");
         let pool = PgPoolOptions::new()

@@ -865,6 +865,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(admin_users)]
     async fn admin_exists_ignores_disabled_admins() {
         let pool = test_pool().await;
         let mut tx = pool.begin().await.expect("begin tx");
@@ -1186,6 +1187,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(admin_users)]
     async fn admin_exists_ignores_system_client_shadow_users() {
         let pool = test_pool().await;
         let team_id = insert_team(&pool).await;

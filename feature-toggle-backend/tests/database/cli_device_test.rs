@@ -581,3 +581,49 @@ async fn the_total_limit_still_applies_across_clients() {
     .await;
     assert_eq!(other.status(), StatusCode::TOO_MANY_REQUESTS);
 }
+
+fn post_via(uri: &str, peer: &str, forwarded_for: &str) -> actix_http::Request {
+    test::TestRequest::post()
+        .uri(uri)
+        .peer_addr(peer.parse().unwrap())
+        .insert_header(("x-forwarded-for", forwarded_for))
+        .set_json(json!({}))
+        .to_request()
+}
+
+#[actix_web::test]
+async fn behind_a_trusted_proxy_clients_are_told_apart() {
+    let pool = init_pg_pool().await;
+    let limiter = DeviceAuthLimiter::new(1, 1)
+        .with_totals(10, 10)
+        .with_trusted_proxies(vec!["10.9.9.9".parse().unwrap()]);
+    let cli = build_app(&pool, limiter, None).await;
+    let uri = "/api/v1/auth/device/authorize";
+    let first = test::call_service(&cli, post_via(uri, "10.9.9.9:443", "203.0.113.1")).await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let again = test::call_service(&cli, post_via(uri, "10.9.9.9:443", "203.0.113.1")).await;
+    assert_eq!(again.status(), StatusCode::TOO_MANY_REQUESTS);
+    let other = test::call_service(&cli, post_via(uri, "10.9.9.9:443", "203.0.113.2")).await;
+    assert_eq!(
+        other.status(),
+        StatusCode::OK,
+        "another client behind the proxy"
+    );
+}
+
+#[actix_web::test]
+async fn forwarded_for_from_an_untrusted_peer_is_ignored() {
+    let pool = init_pg_pool().await;
+    let cli = build_app(
+        &pool,
+        DeviceAuthLimiter::new(1, 1).with_totals(10, 10),
+        None,
+    )
+    .await;
+    let uri = "/api/v1/auth/device/authorize";
+    let first = test::call_service(&cli, post_via(uri, "10.8.8.8:5000", "203.0.113.1")).await;
+    assert_eq!(first.status(), StatusCode::OK);
+    // A client cannot get a fresh budget by inventing X-Forwarded-For.
+    let spoofed = test::call_service(&cli, post_via(uri, "10.8.8.8:5000", "203.0.113.9")).await;
+    assert_eq!(spoofed.status(), StatusCode::TOO_MANY_REQUESTS);
+}
