@@ -527,8 +527,16 @@ impl ApprovalLogicImpl {
                 return false;
             }
         };
-        let input =
-            approval_risk::build_input(feature, stage, &environment, &request.change_payload);
+        let input = approval_risk::build_input(
+            feature,
+            stage,
+            &environment,
+            &request.change_payload,
+            approval_risk::RequestContext {
+                external_ref: request.external_ref.as_deref(),
+                reason: request.request_reason.as_deref(),
+            },
+        );
         match judgments
             .submit(
                 feature.team_id,

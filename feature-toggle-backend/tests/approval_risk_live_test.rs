@@ -12,7 +12,9 @@ use feature_toggle_backend::config::TypesafeConfig;
 use feature_toggle_backend::database::activity_log::activity_log_repository;
 use feature_toggle_backend::database::approval::approval_repository;
 use feature_toggle_backend::database::entity::{Feature, FeaturePipelineStage, FeatureType};
-use feature_toggle_backend::judgment::approval_risk::{ApprovalRiskHandler, build_input};
+use feature_toggle_backend::judgment::approval_risk::{
+    ApprovalRiskHandler, RequestContext, build_input,
+};
 use feature_toggle_backend::judgment::build_client;
 use feature_toggle_backend::judgment::service::JudgmentHandler;
 use feature_toggle_backend::model::{Environment, ID, StageChangeMeta};
@@ -136,7 +138,13 @@ async fn live_approval_risk_accuracy() {
             "diff": case.change.diff,
             "blast_radius": case.blast_radius,
         });
-        let input = build_input(&feature(&case.feature), &stage, &environment, &payload);
+        let input = build_input(
+            &feature(&case.feature),
+            &stage,
+            &environment,
+            &payload,
+            RequestContext::default(),
+        );
         let parts = handler.build(&input);
         let response = client
             .evaluate(parts.state, parts.questions)

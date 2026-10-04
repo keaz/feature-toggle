@@ -112,13 +112,24 @@ fn lowercase_text(value: &str) -> String {
     value.to_lowercase()
 }
 
+/// What the requester said about the change (JI-11): a ticket or change id,
+/// for example a Jira issue key, and the reason. Sent to Jev with the change
+/// (JI-52), so it knows which issue asked for the change and why.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RequestContext<'a> {
+    pub external_ref: Option<&'a str>,
+    pub reason: Option<&'a str>,
+}
+
 /// The input snapshot sent to Jev (design §5.1). Numbers are bucketed, the diff
-/// is capped and truncated, and no owner, user id, or email is included.
+/// is capped and truncated, the reason is cut to `MAX_TEXT_CHARS`, and no
+/// owner, user id, or email is included.
 pub fn build_input(
     feature: &Feature,
     stage: &FeaturePipelineStage,
     environment: &Environment,
     change_payload: &Value,
+    context: RequestContext<'_>,
 ) -> Value {
     let blast = change_payload.get("blast_radius").unwrap_or(&Value::Null);
     let text_field = |key: &str, fallback: &str| {
@@ -159,6 +170,8 @@ pub fn build_input(
             "from_status": text_field("previous_status", &stage.status),
             "to_status": text_field("next_status", ""),
             "diff": build_diff(change_payload),
+            "external_ref": context.external_ref,
+            "reason": context.reason.map(|text| truncate_chars(text, MAX_TEXT_CHARS)),
         },
         "impact": {
             "risk_level": blast.get("riskLevel").cloned().unwrap_or(Value::Null),
@@ -531,6 +544,7 @@ mod tests {
             &stage(),
             &environment(),
             &payload(blast(clients, volume, deps), json!([])),
+            RequestContext::default(),
         )
     }
 
@@ -547,6 +561,10 @@ mod tests {
                 json!([{ "path": "stages[0].status", "change_type": "changed",
                          "before": "NOT_DEPLOYED", "after": "DEPLOYMENT_APPROVED" }]),
             ),
+            RequestContext {
+                external_ref: Some("PROJ-123"),
+                reason: Some("Ready for release"),
+            },
         );
 
         assert_eq!(
@@ -567,6 +585,8 @@ mod tests {
                     "to_status": "DEPLOYMENT_REQUESTED",
                     "diff": [{ "path": "stages[0].status", "change_type": "changed",
                                "before": "NOT_DEPLOYED", "after": "DEPLOYMENT_APPROVED" }],
+                    "external_ref": "PROJ-123",
+                    "reason": "Ready for release",
                 },
                 "impact": {
                     "risk_level": "high",
@@ -641,6 +661,7 @@ mod tests {
             &stage(),
             &environment(),
             &payload(blast(0, 0, 0), Value::Array(entries)),
+            RequestContext::default(),
         );
 
         let diff = input["change"]["diff"].as_array().unwrap();
@@ -662,6 +683,7 @@ mod tests {
                 blast(0, 0, 0),
                 json!([{ "path": "p", "change_type": "added", "before": null, "after": long }]),
             ),
+            RequestContext::default(),
         );
         let entry = &input["change"]["diff"][0];
         assert_eq!(entry["before"], Value::Null);
@@ -673,13 +695,49 @@ mod tests {
         let mut payload = payload(blast(1, 1, 1), json!([]));
         payload["requested_by"] = json!("user-id-123");
         payload["routing"] = json!({ "eligible_approver_ids": ["u1"] });
-        let input = build_input(&feature(), &stage(), &environment(), &payload);
+        let input = build_input(
+            &feature(),
+            &stage(),
+            &environment(),
+            &payload,
+            RequestContext::default(),
+        );
         let text = input.to_string();
 
         assert!(!text.contains("alice@example.com"));
         assert!(!text.contains("owner"));
         assert!(!text.contains("user-id-123"));
         assert!(!text.contains("eligible_approver_ids"));
+    }
+
+    /// JI-52: without a reference or a reason, both keys are sent as null.
+    #[test]
+    fn build_input_sends_null_reference_and_reason_when_absent() {
+        let input = input_for(0, 0, 0);
+        assert_eq!(input["change"]["external_ref"], Value::Null);
+        assert_eq!(input["change"]["reason"], Value::Null);
+        assert!(input["change"].as_object().unwrap().contains_key("reason"));
+    }
+
+    /// JI-52: a long reason is cut to 500 characters, counted as characters.
+    #[test]
+    fn build_input_cuts_a_long_reason_to_500_characters() {
+        let long = "é".repeat(700);
+        let input = build_input(
+            &feature(),
+            &stage(),
+            &environment(),
+            &payload(blast(0, 0, 0), json!([])),
+            RequestContext {
+                external_ref: Some("PROJ-9"),
+                reason: Some(&long),
+            },
+        );
+        assert_eq!(input["change"]["external_ref"], "PROJ-9");
+        assert_eq!(
+            input["change"]["reason"].as_str().unwrap().chars().count(),
+            500
+        );
     }
 
     #[test]
@@ -690,7 +748,13 @@ mod tests {
 
     #[test]
     fn build_input_tolerates_a_bare_payload() {
-        let input = build_input(&feature(), &stage(), &environment(), &json!({}));
+        let input = build_input(
+            &feature(),
+            &stage(),
+            &environment(),
+            &json!({}),
+            RequestContext::default(),
+        );
 
         assert_eq!(input["change"]["from_status"], "NOT_DEPLOYED");
         assert_eq!(input["change"]["diff"], json!([]));

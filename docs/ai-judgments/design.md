@@ -251,7 +251,9 @@ Thresholds below are **starting values**. Each backend task adds a labelled fixt
     "environment_name": "prod-eu",
     "environment_type": "production|development",
     "from_status": "...", "to_status": "...",
-    "diff": [ { "path": "...", "change_type": "added|removed|changed", "before": "...", "after": "..." } ]
+    "diff": [ { "path": "...", "change_type": "added|removed|changed", "before": "...", "after": "..." } ],
+    "external_ref": "PROJ-123|null",               // JI-52: the request's ticket or change id
+    "reason": "...|null"                           // JI-52: the request's reason, max 500 characters
   },
   "impact": {
     "risk_level": "low|medium|high",              // from the existing blast radius
@@ -264,7 +266,7 @@ Thresholds below are **starting values**. Each backend task adds a labelled fixt
 }
 ```
 
-Rules: keep at most 30 diff entries (in order), and truncate `before`/`after` values to 200 characters each. Do not include owner, user ids, or emails.
+Rules: keep at most 30 diff entries (in order), and truncate `before`/`after` values to 200 characters each. Do not include owner, user ids, or emails. *Added 2026-10-04 (Jira JI-52, decision J26):* `change.external_ref` and `change.reason` come from the request's `external_ref` and `request_reason` (Jira JI-11), so Jev knows which issue asked for the change and why. Both keys are always present (`null` when absent), and the reason is cut to 500 characters. The reason is the requester's free text, the same kind of text the justification check (§5.2) already sends. The questions and the derivation do not change.
 
 **Questions** (one request):
 
