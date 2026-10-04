@@ -8,6 +8,10 @@ description = "FluxGate command line interface"
 name = "fluxgate_cli"
 path = "src/lib.rs"
 
+[[bin]]
+name = "fluxgate"
+path = "src/main.rs"
+
 [dependencies]
 base64 = "0.22.1"
 chrono = { version = "0.4", features = ["serde"] }

@@ -1,0 +1,146 @@
+//! Command line definitions.
+
+use clap::{Args, Parser, Subcommand};
+
+use crate::config::Overrides;
+use crate::output::OutputFormat;
+
+#[derive(Debug, Parser)]
+#[command(name = "fluxgate", version, about = "FluxGate CLI for flag operations and CI automation")]
+pub struct Cli {
+    /// Profile from ~/.fluxgate/config (env FLUXGATE_PROFILE).
+    #[arg(long, global = true)]
+    pub profile: Option<String>,
+    /// Backend API URL such as https://fluxgate.example.com/api/v1 (env FLUXGATE_URL).
+    #[arg(long, alias = "base-url", global = true)]
+    pub url: Option<String>,
+    /// Team name or id (env FLUXGATE_TEAM).
+    #[arg(long, alias = "team-id", global = true)]
+    pub team: Option<String>,
+    /// Environment name or id (env FLUXGATE_ENVIRONMENT).
+    #[arg(long = "env", alias = "environment-id", global = true)]
+    pub environment: Option<String>,
+    /// Output format (env FLUXGATE_OUTPUT); table on a terminal, json otherwise.
+    #[arg(long, value_enum, global = true)]
+    pub output: Option<OutputFormat>,
+    /// Same as --output json.
+    #[arg(long, global = true, conflicts_with = "output")]
+    pub json: bool,
+    /// Bearer token; wins over profiles and sessions (env FLUXGATE_TOKEN).
+    #[arg(long, global = true)]
+    pub token: Option<String>,
+    /// Request timeout in seconds (env FLUXGATE_TIMEOUT, default 30).
+    #[arg(long, global = true)]
+    pub timeout: Option<u64>,
+    #[command(subcommand)]
+    pub command: Command,
+}
+
+impl Cli {
+    pub fn overrides(&self) -> Overrides {
+        Overrides {
+            profile: self.profile.clone(),
+            url: self.url.clone(),
+            team: self.team.clone(),
+            environment: self.environment.clone(),
+            output: if self.json { Some(OutputFormat::Json) } else { self.output },
+            token: self.token.clone(),
+            timeout: self.timeout,
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Check that the backend is up.
+    Health,
+    /// Read flags.
+    Flags(FlagsArgs),
+    /// Approval requests.
+    Approvals(ApprovalsArgs),
+}
+
+#[derive(Debug, Clone, Default, Args)]
+pub struct PageArgs {
+    /// Page size (server maximum 200).
+    #[arg(long)]
+    pub limit: Option<i64>,
+    /// Number of items to skip.
+    #[arg(long)]
+    pub offset: Option<i64>,
+    /// Fetch every page.
+    #[arg(long, conflicts_with_all = ["limit", "offset"])]
+    pub all: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct FlagsArgs {
+    #[command(subcommand)]
+    pub command: FlagsSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum FlagsSubcommand {
+    /// List the team's flags.
+    List {
+        #[command(flatten)]
+        page: PageArgs,
+    },
+    /// Show one flag by id or key.
+    Get {
+        /// Feature id (UUID) or key.
+        id_or_key: String,
+    },
+}
+
+#[derive(Debug, Args)]
+pub struct ApprovalsArgs {
+    #[command(subcommand)]
+    pub command: ApprovalsSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ApprovalsSubcommand {
+    /// List the team's approval requests.
+    List {
+        /// Comma-separated statuses: pending, approved, rejected, cancelled, auto_approved.
+        #[arg(long, default_value = "pending")]
+        status: String,
+        #[command(flatten)]
+        page: PageArgs,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_global_flags_still_parse() {
+        let cli = Cli::parse_from(["fluxgate", "--base-url", "http://h/api/v1", "--team-id", "team-a", "health"]);
+        assert_eq!(cli.url.as_deref(), Some("http://h/api/v1"));
+        assert_eq!(cli.team.as_deref(), Some("team-a"));
+    }
+
+    #[test]
+    fn global_flags_work_after_the_subcommand() {
+        let cli = Cli::parse_from(["fluxgate", "flags", "list", "--team-id", "team-b", "--limit", "10"]);
+        assert_eq!(cli.team.as_deref(), Some("team-b"));
+        match cli.command {
+            Command::Flags(FlagsArgs { command: FlagsSubcommand::List { page } }) => assert_eq!(page.limit, Some(10)),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn json_flag_means_json_output_and_conflicts_with_output() {
+        let cli = Cli::parse_from(["fluxgate", "--json", "health"]);
+        assert_eq!(cli.overrides().output, Some(OutputFormat::Json));
+        assert!(Cli::try_parse_from(["fluxgate", "--json", "--output", "table", "health"]).is_err());
+    }
+
+    #[test]
+    fn all_conflicts_with_limit() {
+        assert!(Cli::try_parse_from(["fluxgate", "flags", "list", "--all", "--limit", "5"]).is_err());
+    }
+}
