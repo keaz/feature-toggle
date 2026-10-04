@@ -246,3 +246,49 @@ async fn interactive_token_setup_stores_the_token_and_the_token_team() {
         "{config}"
     );
 }
+
+#[tokio::test]
+async fn interactive_setup_checks_the_new_profile_not_env_credentials() {
+    let h = Harness::new().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/login"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(login_body("a1", "r1")))
+        .mount(&h.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/teams"))
+        .and(header("authorization", "Bearer a1"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!([{ "id": TEAM_A, "name": "Payments" }])),
+        )
+        .mount(&h.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/teams/{TEAM_A}/environments")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "items": [{ "id": ENV_STAGING, "name": "staging", "active": true }],
+            "meta": { "offset": 0, "limit": 200, "total": 1 } })))
+        .mount(&h.server)
+        .await;
+    let (url, env_token) = (h.url(), system_token(TEAM_B));
+    // A CI token in the environment must not decide the profile's team.
+    let r = h
+        .run_with(
+            &["configure"],
+            &[("FLUXGATE_TOKEN", env_token.as_str())],
+            &[
+                url.as_str(),
+                "Log in with username and password",
+                "alice",
+                "pw",
+                "Payments",
+                "staging",
+                "table",
+            ],
+        )
+        .await;
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let config = h.read("config");
+    assert!(config.contains("team=Payments"), "{config}");
+    assert!(!config.contains(TEAM_B), "{config}");
+}

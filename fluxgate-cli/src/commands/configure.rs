@@ -10,7 +10,7 @@ use crate::auth::session::{SessionCache, SessionStore};
 use crate::cli::{ConfigureArgs, ConfigureSubcommand};
 use crate::config::files::PROFILE_KEYS;
 use crate::config::resolve::{DEFAULT_TIMEOUT_SECS, DEFAULT_URL};
-use crate::config::{Credential, Resolved, Source, mask_token};
+use crate::config::{Credential, Env, Overrides, Resolved, Source, mask_token, resolve};
 use crate::context::Context;
 use crate::error::CliError;
 use crate::output::{CONFIG_COLUMNS, Kind, Outcome, OutputFormat, PROFILE_COLUMNS};
@@ -211,7 +211,14 @@ async fn interactive(app: &mut App<'_>) -> Result<Outcome, CliError> {
         files.save_config(&app.paths)?;
     }
 
-    let context = Context::connect(app.settings(&app.files()?)?, app.paths.clone()).await?;
+    // Check the profile as written: env and flag credentials or URLs (such as
+    // an exported FLUXGATE_TOKEN) must not decide its team or environment.
+    let written = Overrides {
+        profile: Some(profile.clone()),
+        ..Overrides::default()
+    };
+    let settings = resolve(&app.files()?, &Env::default(), &written, app.is_tty)?;
+    let context = Context::connect(settings, app.paths.clone()).await?;
     let mut files = app.files()?;
     let team_id = match context.token_team() {
         Some(token_team) => {

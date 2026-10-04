@@ -2,6 +2,7 @@
 
 use std::io::Write;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use ini::Ini;
 
@@ -148,26 +149,44 @@ fn save_ini(ini: &Ini, path: &Path) -> Result<(), CliError> {
 }
 
 /// Writes `contents` to `path` with mode 0600, creating parent directories.
+///
+/// The data goes to a temporary file that is then renamed over `path`, so a
+/// reader sees the old or the new file, never an empty or partial one.
 pub fn write_private(path: &Path, contents: &[u8]) -> Result<(), CliError> {
     if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir)?;
     }
+    let name = path
+        .file_name()
+        .ok_or_else(|| CliError::Other(format!("invalid file path {}", path.display())))?;
+    let temporary = path.with_file_name(format!(
+        ".{}.tmp-{}-{}",
+        name.to_string_lossy(),
+        std::process::id(),
+        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let result =
+        write_new_private(&temporary, contents).and_then(|()| std::fs::rename(&temporary, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result.map_err(CliError::from)
+}
+
+/// Distinguishes temporary files written by one process.
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn write_new_private(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
     let mut file = options.open(path)?;
-    // `mode` applies only to new files; tighten files that already existed.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    }
     file.write_all(contents)?;
-    Ok(())
+    file.sync_all()
 }
 
 /// A warning when group or others can read `path`.
@@ -302,5 +321,23 @@ mod tests {
         std::fs::write(&p.config, "[unclosed\n").unwrap();
         let err = ConfigFiles::load(&p).err().unwrap();
         assert_eq!(err.exit_code(), crate::error::EXIT_USAGE);
+    }
+
+    #[test]
+    fn write_private_replaces_the_file_instead_of_rewriting_it() {
+        use std::io::Read;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions").join("corp.json");
+        write_private(&path, b"old contents").unwrap();
+        // A reader that opened the file before the write must still see the
+        // complete old contents, never an empty or partial file.
+        let mut reader = std::fs::File::open(&path).unwrap();
+        write_private(&path, b"new").unwrap();
+        let mut seen = String::new();
+        reader.read_to_string(&mut seen).unwrap();
+        assert_eq!(seen, "old contents");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap()).unwrap().collect();
+        assert_eq!(leftovers.len(), 1, "temporary file left behind");
     }
 }
