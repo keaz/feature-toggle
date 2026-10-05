@@ -109,6 +109,13 @@ where
                     // On DB error, be conservative: allow the request to proceed
                     state.set_exists(true);
                 }
+            } else if !state.exists()
+                && let Ok(true) = crate::logic::policy::admin_exists(&pool).await
+            {
+                // "No admin" is only cached until one appears: another worker or
+                // node may have created it. Only the bootstrap phase pays for
+                // this query; once an admin exists the cache answers.
+                state.set_exists(true);
             }
 
             // If admin exists -> proceed
@@ -392,5 +399,61 @@ mod tests {
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert!(resp.status().is_success());
+    }
+
+    /// Another worker (or node) created the first admin: a cached "no admin"
+    /// must not keep blocking requests.
+    #[actix_web::test]
+    // Commits an enabled admin; tests that expect no admin take the same lock.
+    #[serial_test::serial(admin_users)]
+    async fn stale_no_admin_cache_is_rechecked_against_the_database() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL not set");
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect");
+        let id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, first_name, last_name, email, is_admin) \
+             VALUES ($1, $2, 'x', 'Ad', 'Min', $3, TRUE)",
+        )
+        .bind(id)
+        .bind(format!("guard-admin-{id}"))
+        .bind(format!("guard-admin-{id}@example.com"))
+        .execute(&pool)
+        .await
+        .expect("insert admin");
+
+        let state = AdminState::new();
+        state.set_exists(false);
+        let app = test::init_service(
+            App::new()
+                .wrap(AdminGuard::new(
+                    pool.clone(),
+                    "http://ui".to_string(),
+                    state.clone(),
+                ))
+                .route(
+                    "/api/v1/teams",
+                    web::get().to(|| async { HttpResponse::Ok().finish() }),
+                ),
+        )
+        .await;
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get().uri("/api/v1/teams").to_request(),
+        )
+        .await;
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(resp.status().is_success(), "status {}", resp.status());
+        assert!(
+            state.exists(),
+            "the shared state learns that an admin exists"
+        );
     }
 }

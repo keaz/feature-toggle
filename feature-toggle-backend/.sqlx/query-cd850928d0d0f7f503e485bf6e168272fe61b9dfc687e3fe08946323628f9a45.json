@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE cli_device_authorizations SET status = 'approved' WHERE id = $1 AND status = 'consumed'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cd850928d0d0f7f503e485bf6e168272fe61b9dfc687e3fe08946323628f9a45"
+}

@@ -34,6 +34,65 @@ pub struct Config {
     /// Jira write-back settings. A missing `[jira]` section uses the defaults.
     #[serde(default)]
     pub jira: JiraConfig,
+    /// Rate limits of the public CLI device-login routes.
+    #[serde(default)]
+    pub device_login: DeviceLoginConfig,
+}
+
+/// Limits of `POST /auth/device/authorize` and `/auth/device/token`
+/// (`[device_login]` section).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct DeviceLoginConfig {
+    /// `authorize` calls per minute and client address (default 10).
+    pub authorize_per_minute: u32,
+    /// `token` polls per minute and client address (default 120; a CLI polls
+    /// every 5 seconds).
+    pub token_per_minute: u32,
+    /// Total per route, as a multiple of the per-client limit (default 30).
+    pub total_factor: u32,
+    /// Addresses of reverse proxies in front of the backend. For requests
+    /// from them the client address is read from `Forwarded` /
+    /// `X-Forwarded-For`; other requests use the connection's address, so
+    /// clients cannot pick their own budget.
+    pub trusted_proxies: Vec<std::net::IpAddr>,
+}
+
+pub const DEFAULT_DEVICE_AUTHORIZE_PER_MINUTE: u32 = 10;
+pub const DEFAULT_DEVICE_TOKEN_PER_MINUTE: u32 = 120;
+pub const DEFAULT_DEVICE_TOTAL_FACTOR: u32 = 30;
+
+impl Default for DeviceLoginConfig {
+    fn default() -> Self {
+        Self {
+            authorize_per_minute: DEFAULT_DEVICE_AUTHORIZE_PER_MINUTE,
+            token_per_minute: DEFAULT_DEVICE_TOKEN_PER_MINUTE,
+            total_factor: DEFAULT_DEVICE_TOTAL_FACTOR,
+            trusted_proxies: Vec::new(),
+        }
+    }
+}
+
+impl DeviceLoginConfig {
+    /// Raises limits of 0 to the defaults, with a warning: a zero limit would
+    /// refuse every CLI device login.
+    pub fn sanitized(mut self) -> Self {
+        if self.authorize_per_minute == 0 {
+            warn!(
+                "device_login.authorize_per_minute = 0; using {DEFAULT_DEVICE_AUTHORIZE_PER_MINUTE}"
+            );
+            self.authorize_per_minute = DEFAULT_DEVICE_AUTHORIZE_PER_MINUTE;
+        }
+        if self.token_per_minute == 0 {
+            warn!("device_login.token_per_minute = 0; using {DEFAULT_DEVICE_TOKEN_PER_MINUTE}");
+            self.token_per_minute = DEFAULT_DEVICE_TOKEN_PER_MINUTE;
+        }
+        if self.total_factor == 0 {
+            warn!("device_login.total_factor = 0; using {DEFAULT_DEVICE_TOTAL_FACTOR}");
+            self.total_factor = DEFAULT_DEVICE_TOTAL_FACTOR;
+        }
+        self
+    }
 }
 
 /// Jira write-back settings (`[jira]` section).
@@ -204,6 +263,7 @@ impl Default for Config {
             public_base_url: None,
             typesafe: TypesafeConfig::default(),
             jira: JiraConfig::default(),
+            device_login: DeviceLoginConfig::default(),
         }
     }
 }
@@ -259,6 +319,7 @@ impl Config {
         cfg.auth = cfg.auth.sanitized();
         cfg.typesafe = cfg.typesafe.sanitized();
         cfg.jira = cfg.jira.sanitized();
+        cfg.device_login = cfg.device_login.sanitized();
         cfg.jira.ui_base_url = cfg
             .jira
             .ui_base_url
@@ -426,6 +487,38 @@ grpc_addr = "0.0.0.0:50051"
         .unwrap();
         assert_eq!(cfg.jira.inbound_per_minute, 300);
         assert_eq!(cfg.jira.inbound_burst, 20);
+    }
+
+    #[test]
+    fn device_login_defaults_and_overrides() {
+        let cfg = Config::from_toml(BASE).unwrap();
+        assert_eq!(cfg.device_login.authorize_per_minute, 10);
+        assert_eq!(cfg.device_login.token_per_minute, 120);
+        assert_eq!(cfg.device_login.total_factor, 30);
+        assert!(cfg.device_login.trusted_proxies.is_empty());
+        let cfg = Config::from_toml(&format!(
+            "{BASE}\n[device_login]\nauthorize_per_minute = 60\ntoken_per_minute = 600\ntotal_factor = 0\ntrusted_proxies = [\"10.0.0.5\", \"::1\"]\n"
+        ))
+        .unwrap();
+        assert_eq!(cfg.device_login.authorize_per_minute, 60);
+        assert_eq!(cfg.device_login.token_per_minute, 600);
+        assert_eq!(
+            cfg.device_login.total_factor, 30,
+            "0 is raised to the default"
+        );
+        assert_eq!(
+            cfg.device_login.trusted_proxies,
+            vec![
+                "10.0.0.5".parse::<std::net::IpAddr>().unwrap(),
+                "::1".parse().unwrap()
+            ]
+        );
+        assert!(
+            Config::from_toml(&format!(
+                "{BASE}\n[device_login]\ntrusted_proxies = [\"proxy\"]\n"
+            ))
+            .is_err()
+        );
     }
 
     #[test]

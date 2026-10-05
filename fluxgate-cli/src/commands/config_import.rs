@@ -4,7 +4,7 @@
 use serde_json::{Map, Value, json};
 
 use super::App;
-use crate::error::CliError;
+use crate::error::{CliError, EXIT_OTHER};
 use crate::output::{Kind, Outcome};
 
 /// Flag fields copied from an export into `POST /teams/{team}/features`.
@@ -64,6 +64,7 @@ pub async fn run(file: &str, dry_run: bool, app: &mut App<'_>) -> Result<Outcome
     };
 
     let mut created_envs = Vec::new();
+    let mut failed_envs = Vec::new();
     let mut skipped_envs = Vec::new();
     for environment in &environments {
         let Some(name) = environment.get("name").and_then(Value::as_str) else {
@@ -80,17 +81,22 @@ pub async fn run(file: &str, dry_run: bool, app: &mut App<'_>) -> Result<Outcome
         if let Some(kind) = environment.get("environmentType").filter(|v| !v.is_null()) {
             body["environmentType"] = kind.clone();
         }
-        if !dry_run {
-            context
+        // One failure does not stop the rest; the report lists it.
+        if !dry_run
+            && let Err(err) = context
                 .api
                 .post(&["teams", &team, "environments"], &body)
-                .await?;
+                .await
+        {
+            failed_envs.push(json!({ "name": name, "error": item_error(err)? }));
+            continue;
         }
         created_envs.push(name.to_string());
     }
 
     let mut created_features = Vec::new();
     let mut skipped_features = Vec::new();
+    let mut failed_features = Vec::new();
     for feature in &features {
         let Some(key) = feature.get("key").and_then(Value::as_str) else {
             continue;
@@ -110,25 +116,48 @@ pub async fn run(file: &str, dry_run: bool, app: &mut App<'_>) -> Result<Outcome
         for field in ["dependencies", "relationships", "stages"] {
             body.insert(field.into(), json!([]));
         }
-        if !dry_run {
-            context
+        if !dry_run
+            && let Err(err) = context
                 .api
                 .post(&["teams", &team, "features"], &Value::Object(body))
-                .await?;
+                .await
+        {
+            failed_features.push(json!({ "key": key, "error": item_error(err)? }));
+            continue;
         }
         created_features.push(key.to_string());
     }
 
-    Ok(Outcome::new(
+    let any_failed = !failed_envs.is_empty() || !failed_features.is_empty();
+    let mut outcome = Outcome::new(
         json!({
             "dryRun": dry_run,
             "team": team,
             "created": { "environments": created_envs, "features": created_features },
             "skipped": { "environments": skipped_envs, "features": skipped_features },
+            "failed": { "environments": failed_envs, "features": failed_features },
             "notes": [
                 "stages, variants, dependencies and targeting criteria are not imported: they refer to ids of the source team; set them up with flags update, criteria set and canary set"
             ],
         }),
         Kind::Document,
-    ))
+    );
+    if any_failed {
+        // Re-running is safe: what was created is skipped next time.
+        outcome.exit_code = EXIT_OTHER;
+    }
+    Ok(outcome)
+}
+
+/// The message of an error that concerns one item. Anything else (auth,
+/// permission, rate limit, server or network) would fail every remaining
+/// item the same way, so it stops the import with its own exit code.
+fn item_error(err: CliError) -> Result<String, CliError> {
+    match err {
+        CliError::Api {
+            status: 400 | 404 | 409 | 422,
+            ..
+        } => Ok(err.to_string()),
+        other => Err(other),
+    }
 }

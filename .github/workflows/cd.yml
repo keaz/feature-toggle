@@ -8,6 +8,9 @@ on:
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+      version: ${{ steps.get_version.outputs.VERSION }}
 
     services:
       postgres:
@@ -76,6 +79,7 @@ jobs:
       - name: Copy release binary, migrations, and seed fixtures to artifacts
         run: |
           cp target/release/feature-toggle-backend artifacts/
+          cp target/release/fluxgate artifacts/
           cp -r feature-toggle-backend/migrations artifacts/
           cp init.sql artifacts/
           cp Dockerfile artifacts/
@@ -108,3 +112,46 @@ jobs:
           asset_content_type: application/gzip
       
       
+
+  # The fluxgate CLI for the platforms people run it on. It needs no database
+  # or SQLx cache, so these builds skip the backend setup.
+  cli-binaries:
+    needs: build-and-release
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x86_64
+          - os: macos-latest
+            target: macos-arm64
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+
+      - name: Build the CLI
+        run: cargo build --release --locked -p fluxgate-cli
+
+      - name: Package the CLI
+        run: |
+          mkdir -p fluxgate-cli-dist
+          cp target/release/fluxgate fluxgate-cli-dist/
+          cp fluxgate-cli/README.md fluxgate-cli-dist/
+          tar -czvf fluxgate-${{ needs.build-and-release.outputs.version }}-${{ matrix.target }}.tar.gz -C fluxgate-cli-dist .
+
+      - name: Upload the CLI to the release
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.build-and-release.outputs.upload_url }}
+          asset_path: ./fluxgate-${{ needs.build-and-release.outputs.version }}-${{ matrix.target }}.tar.gz
+          asset_name: fluxgate-${{ needs.build-and-release.outputs.version }}-${{ matrix.target }}.tar.gz
+          asset_content_type: application/gzip
