@@ -1,7 +1,10 @@
 use actix_web::{App, HttpServer, web};
 use std::{
     net::SocketAddr,
-    sync::{Arc, atomic::AtomicU64},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 use tracing::{error, info};
@@ -172,10 +175,30 @@ impl AssignmentCache {
 /// Sticky assignments waiting to be flushed to the backend. Purging a feature
 /// bumps its generation instead of draining the queue: entries queued under
 /// an older generation are dropped when popped.
-#[derive(Default)]
+///
+/// The queue holds at most `capacity` entries, so it stays bounded while the
+/// backend is unreachable and failed batches are requeued. An assignment
+/// pushed to a full queue is dropped and counted (see `take_dropped`).
 pub struct PendingAssignments {
     queue: crossbeam::queue::SegQueue<(u64, grpc_client::UserAssignment)>,
     generations: dashmap::DashMap<String, u64>,
+    // Entries in `queue`, including entries of purged features not popped yet.
+    len: AtomicUsize,
+    capacity: AtomicUsize,
+    // Assignments dropped because the queue was full, since `take_dropped`.
+    dropped: AtomicU64,
+}
+
+impl Default for PendingAssignments {
+    fn default() -> Self {
+        Self {
+            queue: crossbeam::queue::SegQueue::new(),
+            generations: dashmap::DashMap::new(),
+            len: AtomicUsize::new(0),
+            capacity: AtomicUsize::new(config::DEFAULT_ASSIGNMENT_QUEUE_CAPACITY),
+            dropped: AtomicU64::new(0),
+        }
+    }
 }
 
 impl PendingAssignments {
@@ -185,15 +208,42 @@ impl PendingAssignments {
             .map_or(0, |generation| *generation)
     }
 
-    /// Queue an assignment under its feature's current generation.
+    /// Set the maximum number of queued assignments (at least 1). Entries
+    /// already queued above a lower capacity stay until popped.
+    pub fn set_capacity(&self, capacity: usize) {
+        self.capacity.store(capacity.max(1), Ordering::Relaxed);
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.capacity.load(Ordering::Relaxed)
+    }
+
+    /// Queue an assignment under its feature's current generation. When the
+    /// queue is full, the assignment is dropped and counted instead.
     pub fn push(&self, assignment: grpc_client::UserAssignment) {
+        let capacity = self.capacity();
+        let reserved = self
+            .len
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |len| {
+                (len < capacity).then_some(len + 1)
+            });
+        if reserved.is_err() {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
         let generation = self.generation(&assignment.feature_id);
         self.queue.push((generation, assignment));
     }
 
+    fn pop_entry(&self) -> Option<(u64, grpc_client::UserAssignment)> {
+        let entry = self.queue.pop()?;
+        self.len.fetch_sub(1, Ordering::Relaxed);
+        Some(entry)
+    }
+
     /// Next assignment whose feature was not purged since it was queued.
     pub fn pop(&self) -> Option<grpc_client::UserAssignment> {
-        while let Some((generation, assignment)) = self.queue.pop() {
+        while let Some((generation, assignment)) = self.pop_entry() {
             if generation == self.generation(&assignment.feature_id) {
                 return Some(assignment);
             }
@@ -207,7 +257,19 @@ impl PendingAssignments {
     }
 
     pub fn clear(&self) {
-        while self.queue.pop().is_some() {}
+        while self.pop_entry().is_some() {}
+    }
+
+    /// Number of assignments dropped because the queue was full since the
+    /// last call; resets the count.
+    pub fn take_dropped(&self) -> u64 {
+        self.dropped.swap(0, Ordering::Relaxed)
+    }
+
+    /// Number of queued entries, counting entries of purged features too.
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.len.load(Ordering::Relaxed)
     }
 
     /// True when nothing is queued, counting entries of purged features too.
@@ -698,6 +760,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         evaluation_event_dropped: Arc::new(AtomicU64::new(0)),
         retry_config: cfg.retry.clone(),
     };
+    state
+        .pending_assignments
+        .set_capacity(cfg.flush.assignment_queue_capacity());
 
     // Start stream sync task
     let stream_state = state.clone();
@@ -794,6 +859,94 @@ mod tests {
             assigned: true,
             variant: None,
         }
+    }
+
+    #[test]
+    fn pending_assignments_drop_and_count_pushes_beyond_capacity() {
+        let queue = PendingAssignments::default();
+        assert_eq!(queue.capacity(), config::DEFAULT_ASSIGNMENT_QUEUE_CAPACITY);
+        queue.set_capacity(2);
+
+        for user in ["user-1", "user-2", "user-3", "user-4"] {
+            queue.push(pending(user, "x"));
+        }
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue.take_dropped(), 2);
+        // The count resets once taken.
+        assert_eq!(queue.take_dropped(), 0);
+
+        // The oldest assignments are kept; popping frees room again.
+        assert_eq!(queue.pop().unwrap().user_id, "user-1");
+        queue.push(pending("user-5", "x"));
+        assert_eq!(queue.take_dropped(), 0);
+        let users: Vec<_> = std::iter::from_fn(|| queue.pop())
+            .map(|assignment| assignment.user_id)
+            .collect();
+        assert_eq!(users, ["user-2", "user-5"]);
+        assert_eq!(queue.len(), 0);
+    }
+
+    #[test]
+    fn pending_assignments_of_purged_features_hold_capacity_until_popped() {
+        let queue = PendingAssignments::default();
+        queue.set_capacity(2);
+        queue.push(pending("user-1", "x"));
+        queue.push(pending("user-2", "x"));
+        queue.purge_feature("x");
+
+        // Purged entries are dropped lazily, so they still fill the queue.
+        queue.push(pending("user-3", "y"));
+        assert_eq!(queue.take_dropped(), 1);
+
+        // Popping skips the purged entries and releases their slots.
+        assert!(queue.pop().is_none());
+        assert_eq!(queue.len(), 0);
+        queue.push(pending("user-3", "y"));
+        queue.push(pending("user-4", "y"));
+        assert_eq!(queue.take_dropped(), 0);
+
+        queue.clear();
+        assert_eq!(queue.len(), 0);
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn pending_assignments_capacity_is_at_least_one() {
+        let queue = PendingAssignments::default();
+        queue.set_capacity(0);
+        assert_eq!(queue.capacity(), 1);
+        queue.push(pending("user-1", "x"));
+        queue.push(pending("user-2", "x"));
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.take_dropped(), 1);
+    }
+
+    /// Concurrent pushes never overshoot the capacity.
+    #[test]
+    fn pending_assignments_capacity_holds_under_concurrent_pushes() {
+        const THREADS: usize = 8;
+        const PUSHES: usize = 1_000;
+        const CAPACITY: usize = 500;
+        let queue = Arc::new(PendingAssignments::default());
+        queue.set_capacity(CAPACITY);
+
+        let handles: Vec<_> = (0..THREADS)
+            .map(|thread| {
+                let queue = Arc::clone(&queue);
+                std::thread::spawn(move || {
+                    for push in 0..PUSHES {
+                        queue.push(pending(&format!("user-{thread}-{push}"), "x"));
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        assert_eq!(queue.len(), CAPACITY);
+        assert_eq!(queue.take_dropped(), (THREADS * PUSHES - CAPACITY) as u64);
+        assert_eq!(std::iter::from_fn(|| queue.pop()).count(), CAPACITY);
     }
 
     /// Purge cost must not grow with the total number of assignments.

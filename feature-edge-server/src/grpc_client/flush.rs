@@ -73,11 +73,22 @@ async fn push_rows_individually(
 
 /// Flush queued sticky user-assignment writes. Failed batches are requeued so
 /// the edge does not drop locally observed assignments during transient outages.
-/// Rows the backend permanently rejects (`PermissionDenied`) are dropped.
+/// Rows the backend permanently rejects (`PermissionDenied`) are dropped. The
+/// queue is bounded: assignments that do not fit, new or requeued, are
+/// dropped and reported here.
 pub async fn run_flush_task(app: AppState) {
     let batch_size = app.assignment_flush_batch_size.max(1);
     loop {
         tokio::time::sleep(app.flush_interval).await;
+
+        let dropped = app.pending_assignments.take_dropped();
+        if dropped > 0 {
+            warn!(
+                "Dropped {} user assignments due to full queue (capacity={})",
+                dropped,
+                app.pending_assignments.capacity()
+            );
+        }
 
         let mut total_unique = 0usize;
         let mut total_drained = 0usize;

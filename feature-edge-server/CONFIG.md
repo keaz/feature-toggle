@@ -63,6 +63,10 @@ evaluation_event_queue_capacity = 10000
 # Max assignments per gRPC stream flush
 assignment_flush_batch_size = 1000
 
+# Max sticky assignments queued for the backend; new assignments are
+# dropped while the queue is full
+assignment_queue_capacity = 100000
+
 # Max evaluation events per gRPC request
 evaluation_flush_batch_size = 500
 
@@ -329,6 +333,11 @@ These settings have no default. Each one must be set in `config.toml` or through
 | `evaluation_event_queue_capacity` | usize | 10000 | Evaluation event queue capacity (bounded channel; values below 1 are treated as 1) |
 | `assignment_flush_batch_size` | usize | 1000 | Max assignments per gRPC stream flush (values below 1 are treated as 1) |
 | `evaluation_flush_batch_size` | usize | 500 | Max evaluation events per gRPC request (values below 1 are treated as 1) |
+| `assignment_queue_capacity` | usize | 100000 | Max sticky assignments queued for the backend. While the queue is full, new and requeued assignments are dropped (values below 1 are treated as 1; env: `EDGE_FLUSH__ASSIGNMENT_QUEUE_CAPACITY`) |
+
+**Assignment queue:** The edge queues a sticky assignment for the backend once, when a user first gets a truthy result for a feature in an environment. Results served from the assignment cache are not queued again. Every `assignment_flush_secs` the flush task sends the queue to the backend, so while the backend is reachable the queue holds about the number of new assignments made in one flush interval. When a push fails, the batch is requeued and retried on the next cycle. During a backend outage the queue grows until it reaches `assignment_queue_capacity`, and assignments that do not fit are dropped. The flush task logs the number dropped in each cycle: `Dropped N user assignments due to full queue (capacity=...)`.
+
+One queued assignment uses about 300 bytes, so the default of 100,000 holds up to about 30 MB. A dropped assignment affects only the record on the backend, not evaluation: the user keeps their cached result, and the backend does not read assignments back when the edge evaluates. The edge sends the assignment again when it evaluates the user anew, for example after the cached assignment is evicted or purged, or after a restart. Raise the capacity if the log reports drops and you need every assignment recorded through long outages.
 
 ### Retry Settings (`[retry]`)
 

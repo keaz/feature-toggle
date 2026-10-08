@@ -94,6 +94,11 @@ pub struct FlushConfig {
     #[serde(default = "default_assignment_flush_batch_size")]
     pub assignment_flush_batch_size: usize,
 
+    /// Max sticky assignments queued for the backend; new assignments are
+    /// dropped and counted while the queue is full
+    #[serde(default = "default_assignment_queue_capacity")]
+    pub assignment_queue_capacity: usize,
+
     /// Max evaluation events per gRPC request
     #[serde(default = "default_evaluation_flush_batch_size")]
     pub evaluation_flush_batch_size: usize,
@@ -194,6 +199,11 @@ fn default_evaluation_event_queue_capacity() -> usize {
 fn default_assignment_flush_batch_size() -> usize {
     1000
 }
+/// Default for `[flush] assignment_queue_capacity`.
+pub const DEFAULT_ASSIGNMENT_QUEUE_CAPACITY: usize = 100_000;
+fn default_assignment_queue_capacity() -> usize {
+    DEFAULT_ASSIGNMENT_QUEUE_CAPACITY
+}
 fn default_evaluation_flush_batch_size() -> usize {
     500
 }
@@ -232,6 +242,7 @@ impl Default for FlushConfig {
             evaluation_flush_secs: default_evaluation_flush(),
             evaluation_event_queue_capacity: default_evaluation_event_queue_capacity(),
             assignment_flush_batch_size: default_assignment_flush_batch_size(),
+            assignment_queue_capacity: default_assignment_queue_capacity(),
             evaluation_flush_batch_size: default_evaluation_flush_batch_size(),
         }
     }
@@ -301,6 +312,10 @@ impl FlushConfig {
 
     pub fn assignment_flush_batch_size(&self) -> usize {
         self.assignment_flush_batch_size.max(1)
+    }
+
+    pub fn assignment_queue_capacity(&self) -> usize {
+        self.assignment_queue_capacity.max(1)
     }
 
     pub fn evaluation_flush_batch_size(&self) -> usize {
@@ -448,7 +463,19 @@ mod tests {
         assert_eq!(config.evaluation_flush_secs, 30);
         assert_eq!(config.evaluation_event_queue_capacity, 10_000);
         assert_eq!(config.assignment_flush_batch_size, 1000);
+        assert_eq!(config.assignment_queue_capacity, 100_000);
         assert_eq!(config.evaluation_flush_batch_size, 500);
+    }
+
+    #[test]
+    fn test_flush_config_assignment_queue_capacity_override() {
+        let parsed: FlushConfig = toml::from_str("assignment_queue_capacity = 2500").unwrap();
+        assert_eq!(parsed.assignment_queue_capacity(), 2500);
+        assert_eq!(parsed.assignment_flush_batch_size, 1000);
+
+        // Values below 1 are treated as 1.
+        let zero: FlushConfig = toml::from_str("assignment_queue_capacity = 0").unwrap();
+        assert_eq!(zero.assignment_queue_capacity(), 1);
     }
 
     #[test]

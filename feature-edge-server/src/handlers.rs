@@ -934,15 +934,19 @@ async fn evaluate_for_client(
                 reason: result.reason.clone(),
             },
         );
-        // Lock-free push - no await needed!
-        app.pending_assignments
-            .push(crate::grpc_client::UserAssignment {
-                user_id,
-                feature_id: feature.id.clone(),
-                environment_id: eval_context.environment_id.clone(),
-                assigned: true,
-                variant: result.variant.clone(),
-            });
+        // Queue only new assignments. A cached result was queued when it
+        // was first assigned, and the backend upsert is idempotent, so
+        // queuing it again on every request only grows the queue.
+        if !prior_assignment {
+            app.pending_assignments
+                .push(crate::grpc_client::UserAssignment {
+                    user_id,
+                    feature_id: feature.id.clone(),
+                    environment_id: eval_context.environment_id.clone(),
+                    assigned: true,
+                    variant: result.variant.clone(),
+                });
+        }
     }
 
     // Convert evaluation reason to string using zero-allocation as_str()
@@ -1323,14 +1327,17 @@ async fn evaluate_ofrep_feature(
             },
         );
 
-        app.pending_assignments
-            .push(crate::grpc_client::UserAssignment {
-                user_id,
-                feature_id: feature.id.clone(),
-                environment_id: environment_id.to_string(),
-                assigned: true,
-                variant: result.variant.clone(),
-            });
+        // Queue only new assignments; see `evaluate_for_client`.
+        if !prior_assignment {
+            app.pending_assignments
+                .push(crate::grpc_client::UserAssignment {
+                    user_id,
+                    feature_id: feature.id.clone(),
+                    environment_id: environment_id.to_string(),
+                    assigned: true,
+                    variant: result.variant.clone(),
+                });
+        }
     }
 
     ofrep_success(
@@ -3140,6 +3147,79 @@ mod tests {
                 .is_some(),
             "expected dependency block metadata"
         );
+    }
+
+    /// A sticky assignment is queued for the backend once, when it is first
+    /// assigned. Results served from the assignment cache by either endpoint
+    /// do not queue it again.
+    #[actix_web::test]
+    async fn cached_results_do_not_queue_the_assignment_again() {
+        let (app_state, _backend) = ofrep_app_with_mock_backend().await;
+        cache_fetched_feature(&app_state, &team_feature("f-1", "sticky", "team-1", true)).await;
+        app_state.mapped_cache.run_pending_tasks().await;
+        let service = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(app_state.clone()))
+                .route("/evaluate", web::post().to(evaluate_handler))
+                .route(
+                    "/ofrep/v1/evaluate/flags/{key}",
+                    web::post().to(ofrep_evaluate_flag),
+                ),
+        )
+        .await;
+        let evaluate = |user: &str| {
+            actix_test::TestRequest::post()
+                .uri("/evaluate")
+                .set_json(serde_json::json!({
+                    "flagKey": "sticky",
+                    "context": { "bucketingKey": user }
+                }))
+                .to_request()
+        };
+        let ofrep = |user: &str| {
+            actix_test::TestRequest::post()
+                .uri("/ofrep/v1/evaluate/flags/sticky")
+                .insert_header(("x-api-key", configured_sdk_key()))
+                .set_json(serde_json::json!({ "context": { "targetingKey": user } }))
+                .to_request()
+        };
+        let drain = || {
+            let mut queued = Vec::new();
+            while let Some(assignment) = app_state.pending_assignments.pop() {
+                queued.push((assignment.user_id, assignment.feature_id));
+            }
+            queued
+        };
+
+        // u1 is assigned by /evaluate, u2 by OFREP. Every later request of
+        // either user, on either endpoint, is served from the cache.
+        for request in [
+            evaluate("u1"),
+            evaluate("u1"),
+            ofrep("u1"),
+            ofrep("u2"),
+            ofrep("u2"),
+            evaluate("u2"),
+            evaluate("u1"),
+        ] {
+            let body: serde_json::Value =
+                actix_test::call_and_read_body_json(&service, request).await;
+            assert_eq!(body["value"], serde_json::json!(true));
+        }
+        assert_eq!(
+            drain(),
+            vec![
+                ("u1".to_string(), "f-1".to_string()),
+                ("u2".to_string(), "f-1".to_string()),
+            ]
+        );
+
+        // After a purge, the next result is a new assignment and is queued.
+        app_state.purge_assignments_for_feature("f-1").await;
+        for request in [evaluate("u1"), ofrep("u1")] {
+            actix_test::call_service(&service, request).await;
+        }
+        assert_eq!(drain(), vec![("u1".to_string(), "f-1".to_string())]);
     }
 
     /// Sticky results: a truthy result is served from the assignment cache

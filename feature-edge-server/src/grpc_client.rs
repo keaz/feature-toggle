@@ -1552,6 +1552,53 @@ mod tests {
         server_handle.abort();
     }
 
+    /// Assignments pushed to a full queue are dropped and counted; the flush
+    /// task reports the count and still delivers the queued ones, including
+    /// a batch it requeued after a failure.
+    #[tokio::test]
+    async fn test_run_flush_task_bounds_queue_and_reports_dropped_assignments() {
+        let (endpoint, state, server_handle) = start_mock_backend().await;
+        let mapped_cache = Arc::new(crate::MappedFeatureCache::new(100));
+        let mut app_state = test_app_state_with_endpoint(mapped_cache, &endpoint);
+        app_state.flush_interval = std::time::Duration::from_millis(0);
+        app_state.pending_assignments.set_capacity(2);
+        for feature_id in ["feature-1", "feature-2", "feature-3"] {
+            app_state.pending_assignments.push(UserAssignment {
+                user_id: "user-1".to_string(),
+                feature_id: feature_id.to_string(),
+                environment_id: "env-1".to_string(),
+                assigned: true,
+                variant: None,
+            });
+        }
+        assert_eq!(app_state.pending_assignments.len(), 2);
+
+        let task = tokio::spawn(run_flush_task(app_state.clone()));
+
+        // Attempt 1 fails and the batch is requeued; attempt 2 stores it.
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if state.assignment_attempts.load(Ordering::SeqCst) >= 2
+                    && app_state.pending_assignments.is_empty()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("assignment flush should retry and drain");
+
+        let mut accepted = state.accepted_assignment_features.lock().unwrap().clone();
+        accepted.sort();
+        assert_eq!(accepted, ["feature-1", "feature-2"]);
+        // The flush task took (and logged) the dropped count.
+        assert_eq!(app_state.pending_assignments.take_dropped(), 0);
+
+        task.abort();
+        server_handle.abort();
+    }
+
     #[tokio::test]
     async fn test_run_flush_task_drops_rows_rejected_as_permission_denied() {
         let (endpoint, state, server_handle) = start_mock_backend().await;
