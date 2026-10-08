@@ -28,7 +28,7 @@ tokio-retry = "0.3"
 config = "0.14"
 toml = "0.8"
 # LRU cache with size-based eviction
-moka = { version = "0.12", features = ["future"] }
+moka = { version = "0.12", features = ["future", "sync"] }
 # Lock-free concurrent hashmap
 dashmap = "6.1"
 # Lock-free concurrent queue

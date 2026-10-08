@@ -39,21 +39,72 @@ impl CachedAssignment {
     }
 }
 
-/// Shards of each per-feature assignment map. dashmap's default (4x the
-/// cores) cache-pads every shard, which costs several KB per feature.
-const ASSIGNMENT_SHARDS_PER_FEATURE: usize = 8;
+/// A cached assignment and the generation of its feature when it was stored.
+#[derive(Clone)]
+struct AssignmentEntry {
+    generation: u64,
+    assignment: CachedAssignment,
+}
 
-/// Sticky assignments indexed by feature, so purging a feature is one
-/// removal instead of a scan over every cached assignment.
-#[derive(Default)]
+/// Sticky assignments, bounded by entry count and idle time.
+///
+/// The cache only saves re-evaluation. Evaluation is deterministic for a
+/// given feature config, targeting key and attributes (weighted splits hash
+/// `<flag_key>:<targetingKey>`), so an evicted user is re-evaluated to the
+/// same variant. The backend's stored assignments are never read back.
+///
+/// Purging a feature bumps its generation instead of scanning the cache:
+/// entries stored under an older generation are misses, and age out through
+/// LRU or idle eviction.
 pub struct AssignmentCache {
-    // feature_id -> "user_id|environment_id" -> assignment
-    by_feature: dashmap::DashMap<String, dashmap::DashMap<String, CachedAssignment>>,
+    // "feature_id|environment_id|user_id" -> assignment. Feature and
+    // environment IDs never contain '|', so the user ID is always last.
+    entries: moka::sync::Cache<String, AssignmentEntry>,
+    generations: dashmap::DashMap<String, u64>,
+}
+
+impl Default for AssignmentCache {
+    fn default() -> Self {
+        let cache = config::CacheConfig::default();
+        Self::new(
+            cache.assignment_max_capacity,
+            cache.assignment_time_to_idle(),
+        )
+    }
 }
 
 impl AssignmentCache {
-    fn user_key(user_id: &str, environment_id: &str) -> String {
-        format!("{user_id}|{environment_id}")
+    /// Cache up to `max_capacity` assignments. An assignment not read or
+    /// written for `time_to_idle` is evicted; `None` keeps it until it is
+    /// the least recently used one at capacity.
+    pub fn new(max_capacity: u64, time_to_idle: Option<Duration>) -> Self {
+        tracing::info!(
+            "Initializing AssignmentCache with max_capacity={}, time_to_idle={:?}",
+            max_capacity,
+            time_to_idle
+        );
+        let mut builder = moka::sync::Cache::builder()
+            .max_capacity(max_capacity)
+            // Plain LRU: a new user is always admitted, unlike TinyLFU,
+            // which can reject first-time keys when the cache is full.
+            .eviction_policy(moka::policy::EvictionPolicy::lru());
+        if let Some(time_to_idle) = time_to_idle {
+            builder = builder.time_to_idle(time_to_idle);
+        }
+        Self {
+            entries: builder.build(),
+            generations: dashmap::DashMap::new(),
+        }
+    }
+
+    fn key(user_id: &str, feature_id: &str, environment_id: &str) -> String {
+        format!("{feature_id}|{environment_id}|{user_id}")
+    }
+
+    fn generation(&self, feature_id: &str) -> u64 {
+        self.generations
+            .get(feature_id)
+            .map_or(0, |generation| *generation)
     }
 
     pub fn get(
@@ -62,10 +113,10 @@ impl AssignmentCache {
         feature_id: &str,
         environment_id: &str,
     ) -> Option<CachedAssignment> {
-        self.by_feature
-            .get(feature_id)?
-            .get(&Self::user_key(user_id, environment_id))
-            .map(|entry| entry.value().clone())
+        let entry = self
+            .entries
+            .get(&Self::key(user_id, feature_id, environment_id))?;
+        (entry.generation == self.generation(feature_id)).then_some(entry.assignment)
     }
 
     pub fn insert(
@@ -75,34 +126,46 @@ impl AssignmentCache {
         environment_id: &str,
         assignment: CachedAssignment,
     ) {
-        let key = Self::user_key(user_id, environment_id);
-        // Common case: only a read lock on the outer shard.
-        if let Some(users) = self.by_feature.get(feature_id) {
-            users.insert(key, assignment);
-            return;
-        }
-        self.by_feature
-            .entry(feature_id.to_string())
-            .or_insert_with(|| dashmap::DashMap::with_shard_amount(ASSIGNMENT_SHARDS_PER_FEATURE))
-            .insert(key, assignment);
+        let entry = AssignmentEntry {
+            generation: self.generation(feature_id),
+            assignment,
+        };
+        self.entries
+            .insert(Self::key(user_id, feature_id, environment_id), entry);
     }
 
+    /// Drop every assignment of `feature_id` cached so far. O(1).
     pub fn remove_feature(&self, feature_id: &str) {
-        self.by_feature.remove(feature_id);
+        *self.generations.entry(feature_id.to_string()).or_insert(0) += 1;
     }
 
     pub fn clear(&self) {
-        self.by_feature.clear();
+        self.entries.invalidate_all();
     }
 
+    /// Number of live assignments, after applying pending evictions.
     #[cfg(test)]
     pub fn len(&self) -> usize {
-        self.by_feature.iter().map(|users| users.len()).sum()
+        self.entries.run_pending_tasks();
+        self.entries
+            .iter()
+            .filter(|(key, entry)| {
+                let feature_id = key.split('|').next().unwrap_or_default();
+                entry.generation == self.generation(feature_id)
+            })
+            .count()
     }
 
     #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Entries held, counting ones of purged features not yet evicted.
+    #[cfg(test)]
+    pub fn entry_count(&self) -> u64 {
+        self.entries.run_pending_tasks();
+        self.entries.entry_count()
     }
 }
 
@@ -621,7 +684,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         client_secret: cfg.client_secret.clone(),
         edge_team_id: Arc::new(std::sync::OnceLock::new()),
         connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        assigned_cache: Arc::new(crate::AssignmentCache::default()),
+        assigned_cache: Arc::new(AssignmentCache::new(
+            cfg.cache.assignment_max_capacity,
+            cfg.cache.assignment_time_to_idle(),
+        )),
         pending_assignments: Arc::new(crate::PendingAssignments::default()),
         flush_interval: cfg.flush.assignment_flush_interval(),
         assignment_flush_batch_size: cfg.flush.assignment_flush_batch_size(),
@@ -820,6 +886,153 @@ mod tests {
         // The queue still accepts new assignments afterwards.
         state.pending_assignments.push(pending("user-2", "x"));
         assert!(state.pending_assignments.pop().is_some());
+    }
+
+    fn sticky_variant(variant: &str) -> CachedAssignment {
+        CachedAssignment {
+            value: serde_json::json!(format!("{variant}-value")),
+            variant: Some(variant.to_string()),
+            reason: evaluation_engine::EvaluationReason::Split,
+        }
+    }
+
+    /// Distinct users no longer grow the cache without bound.
+    #[test]
+    fn assignment_cache_is_bounded_by_max_capacity() {
+        const CAPACITY: u64 = 1_000;
+        let cache = AssignmentCache::new(CAPACITY, None);
+        for user in 0..20_000 {
+            cache.insert(
+                &format!("user-{user}"),
+                &format!("feature-{}", user % 50),
+                "env-1",
+                sticky_true(),
+            );
+        }
+
+        assert!(
+            cache.entry_count() <= CAPACITY,
+            "{} entries held",
+            cache.entry_count()
+        );
+        // The most recent assignment survives eviction.
+        assert!(cache.get("user-19999", "feature-49", "env-1").is_some());
+    }
+
+    #[test]
+    fn assignment_cache_evicts_least_recently_used_first() {
+        let cache = AssignmentCache::new(2, None);
+        cache.insert("old", "x", "env-1", sticky_variant("control"));
+        cache.insert("recent", "x", "env-1", sticky_variant("treatment"));
+        cache.entries.run_pending_tasks();
+        // Reading "old" makes "recent" the least recently used entry.
+        assert!(cache.get("old", "x", "env-1").is_some());
+        cache.entries.run_pending_tasks();
+
+        cache.insert("new", "x", "env-1", sticky_variant("control"));
+        cache.entries.run_pending_tasks();
+
+        assert_eq!(
+            cache.get("old", "x", "env-1").and_then(|a| a.variant),
+            Some("control".to_string())
+        );
+        assert!(cache.get("recent", "x", "env-1").is_none());
+        assert!(cache.get("new", "x", "env-1").is_some());
+    }
+
+    #[test]
+    fn assignment_cache_expires_idle_entries() {
+        let cache = AssignmentCache::new(100, Some(Duration::from_millis(100)));
+        cache.insert("idle", "x", "env-1", sticky_true());
+        cache.insert("busy", "x", "env-1", sticky_true());
+
+        for _ in 0..4 {
+            std::thread::sleep(Duration::from_millis(40));
+            assert!(cache.get("busy", "x", "env-1").is_some());
+        }
+
+        assert!(cache.get("idle", "x", "env-1").is_none());
+        assert!(cache.get("busy", "x", "env-1").is_some());
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn assignment_cache_without_idle_expiry_keeps_entries() {
+        let cache = AssignmentCache::new(100, None);
+        cache.insert("user-1", "x", "env-1", sticky_true());
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(cache.get("user-1", "x", "env-1").is_some());
+        assert_eq!(cache.entries.policy().time_to_idle(), None);
+    }
+
+    /// Entries of a purged feature are never served again, and an insert
+    /// after the purge is served normally.
+    #[test]
+    fn assignment_cache_purge_hides_stale_entries_until_evicted() {
+        let cache = AssignmentCache::new(100, None);
+        cache.insert("user-1", "x", "env-1", sticky_variant("control"));
+        cache.insert("user-2", "x", "env-1", sticky_variant("control"));
+        cache.insert("user-1", "y", "env-1", sticky_variant("control"));
+
+        cache.remove_feature("x");
+        assert!(cache.get("user-1", "x", "env-1").is_none());
+        assert!(cache.get("user-2", "x", "env-1").is_none());
+        assert!(cache.get("user-1", "y", "env-1").is_some());
+        assert_eq!(cache.len(), 1);
+        // Stale entries still hold capacity until LRU eviction reclaims them.
+        assert_eq!(cache.entry_count(), 3);
+
+        cache.insert("user-1", "x", "env-1", sticky_variant("treatment"));
+        assert_eq!(
+            cache.get("user-1", "x", "env-1").and_then(|a| a.variant),
+            Some("treatment".to_string())
+        );
+        assert!(cache.get("user-2", "x", "env-1").is_none());
+    }
+
+    #[test]
+    fn assignment_cache_reclaims_capacity_held_by_purged_features() {
+        let cache = AssignmentCache::new(10, None);
+        for user in 0..10 {
+            cache.insert(&format!("user-{user}"), "x", "env-1", sticky_true());
+        }
+        cache.remove_feature("x");
+        for user in 0..10 {
+            cache.insert(&format!("user-{user}"), "y", "env-1", sticky_true());
+        }
+
+        assert_eq!(cache.len(), 10);
+        assert!(cache.entry_count() <= 10);
+        assert!(cache.get("user-0", "y", "env-1").is_some());
+    }
+
+    #[test]
+    fn assignment_cache_keys_separate_users_and_environments() {
+        let cache = AssignmentCache::new(100, None);
+        cache.insert("a|b", "x", "env-1", sticky_variant("control"));
+        cache.insert("a|b", "x", "env-2", sticky_variant("treatment"));
+
+        assert_eq!(
+            cache.get("a|b", "x", "env-1").and_then(|a| a.variant),
+            Some("control".to_string())
+        );
+        assert_eq!(
+            cache.get("a|b", "x", "env-2").and_then(|a| a.variant),
+            Some("treatment".to_string())
+        );
+    }
+
+    #[test]
+    fn assignment_cache_clear_drops_everything() {
+        let cache = AssignmentCache::new(100, None);
+        cache.insert("user-1", "x", "env-1", sticky_true());
+        cache.insert("user-1", "y", "env-1", sticky_true());
+
+        cache.clear();
+
+        assert!(cache.is_empty());
+        cache.insert("user-2", "x", "env-1", sticky_true());
+        assert!(cache.get("user-2", "x", "env-1").is_some());
     }
 
     #[tokio::test]

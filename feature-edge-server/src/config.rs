@@ -131,6 +131,16 @@ pub struct CacheConfig {
     /// Maximum number of client credentials whose info is cached
     #[serde(default = "default_client_max_capacity")]
     pub client_max_capacity: u64,
+
+    /// Maximum number of sticky assignments (user, feature, environment)
+    /// cached; the least recently used one is evicted when exceeded
+    #[serde(default = "default_assignment_max_capacity")]
+    pub assignment_max_capacity: u64,
+
+    /// Seconds a cached assignment survives without being read or written.
+    /// 0 disables idle expiry, leaving only the capacity bound
+    #[serde(default = "default_assignment_time_to_idle")]
+    pub assignment_time_to_idle_secs: u64,
 }
 
 fn default_max_capacity() -> u64 {
@@ -143,6 +153,14 @@ fn default_client_max_capacity() -> u64 {
 
 fn default_client_ttl() -> u64 {
     300 // 5 minutes
+}
+
+fn default_assignment_max_capacity() -> u64 {
+    50_000
+}
+
+fn default_assignment_time_to_idle() -> u64 {
+    0 // disabled: evict only at capacity
 }
 
 // Default value functions
@@ -236,6 +254,8 @@ impl Default for CacheConfig {
             max_capacity: default_max_capacity(),
             client_ttl_secs: default_client_ttl(),
             client_max_capacity: default_client_max_capacity(),
+            assignment_max_capacity: default_assignment_max_capacity(),
+            assignment_time_to_idle_secs: default_assignment_time_to_idle(),
         }
     }
 }
@@ -243,6 +263,12 @@ impl Default for CacheConfig {
 impl CacheConfig {
     pub fn client_ttl(&self) -> Duration {
         Duration::from_secs(self.client_ttl_secs)
+    }
+
+    /// Idle expiry for cached assignments; `None` when disabled.
+    pub fn assignment_time_to_idle(&self) -> Option<Duration> {
+        (self.assignment_time_to_idle_secs > 0)
+            .then(|| Duration::from_secs(self.assignment_time_to_idle_secs))
     }
 }
 
@@ -363,6 +389,8 @@ mod tests {
             max_capacity: 5000,
             client_ttl_secs: 600,
             client_max_capacity: 200,
+            assignment_max_capacity: 1000,
+            assignment_time_to_idle_secs: 60,
         };
         assert_eq!(config.max_capacity, 5000);
         assert_eq!(config.client_ttl_secs, 600);
@@ -373,6 +401,24 @@ mod tests {
         assert_eq!(CacheConfig::default().client_max_capacity, 1000);
         let parsed: CacheConfig = toml::from_str("client_max_capacity = 50").unwrap();
         assert_eq!(parsed.client_max_capacity, 50);
+        assert_eq!(parsed.max_capacity, 10000);
+    }
+
+    #[test]
+    fn test_cache_config_assignment_bounds_default_and_override() {
+        let defaults = CacheConfig::default();
+        assert_eq!(defaults.assignment_max_capacity, 50_000);
+        // Idle expiry is off by default.
+        assert_eq!(defaults.assignment_time_to_idle(), None);
+
+        let parsed: CacheConfig =
+            toml::from_str("assignment_max_capacity = 500\nassignment_time_to_idle_secs = 900")
+                .unwrap();
+        assert_eq!(parsed.assignment_max_capacity, 500);
+        assert_eq!(
+            parsed.assignment_time_to_idle(),
+            Some(Duration::from_secs(900))
+        );
         assert_eq!(parsed.max_capacity, 10000);
     }
 

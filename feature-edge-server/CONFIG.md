@@ -95,6 +95,14 @@ client_ttl_secs = 300
 
 # Maximum number of client credentials whose info is cached
 client_max_capacity = 1000
+
+# Maximum number of sticky assignments (user, feature, environment) cached;
+# the least recently used one is evicted when exceeded
+assignment_max_capacity = 50000
+
+# Seconds a cached assignment survives without being read or written
+# (0 disables idle expiry)
+assignment_time_to_idle_secs = 0
 ```
 
 ## Environment Variable Overrides
@@ -338,6 +346,8 @@ These settings have no default. Each one must be set in `config.toml` or through
 | `max_capacity` | u64 | 10000 | Maximum number of features to cache (LRU eviction when exceeded) |
 | `client_ttl_secs` | u64 | 300 | How long a successful client authentication (client info fetched from the backend) is cached, in seconds. Rejected credentials are cached separately for a fixed 30 seconds. Both caches are keyed by client ID and a SHA-256 hash of the secret. |
 | `client_max_capacity` | u64 | 1000 | Maximum number of client credentials whose info is cached (env: `EDGE_CACHE__CLIENT_MAX_CAPACITY`) |
+| `assignment_max_capacity` | u64 | 50000 | Maximum number of sticky assignments (one per user, feature and environment) cached. The least recently used assignment is evicted when exceeded (env: `EDGE_CACHE__ASSIGNMENT_MAX_CAPACITY`) |
+| `assignment_time_to_idle_secs` | u64 | 0 | Seconds a cached assignment survives without being read or written. `0` disables idle expiry, so assignments are evicted only at capacity (env: `EDGE_CACHE__ASSIGNMENT_TIME_TO_IDLE_SECS`) |
 
 **Cache Capacity Recommendations:**
 
@@ -347,6 +357,10 @@ These settings have no default. Each one must be set in `config.toml` or through
 - **Very large deployment** (> 10000 features): `max_capacity = 50000` or higher
 
 Memory usage estimate: Each feature uses approximately 1-5 KB depending on configuration complexity. A cache of 10,000 features typically uses 10-50 MB of memory.
+
+**Sticky assignment cache:** The edge caches each truthy evaluation result per user, feature and environment, so a user keeps the same result until the feature changes. One entry uses about 450-500 bytes, so the default of 50,000 entries holds up to about 25 MB. Size `assignment_max_capacity` from your memory budget, not from the number of users: a 1 GB budget fits about 2,000,000 entries. Earlier versions had no bound, and an edge that served many distinct users across many flags grew until it ran out of memory.
+
+Eviction does not change a user's variant. The cache only saves re-evaluation: evaluation is deterministic for the same feature configuration, targeting key and attributes, and weighted splits always place a targeting key in the same bucket (`SHA256("<flag_key>:<targetingKey>")`). An evicted user is evaluated again and gets the same variant. The difference from a cached result appears only when the result depends on something that changed since the assignment was cached: a targeting rule now matches the user's attributes differently, or the feature was changed without the edge purging its assignments. The same applies after an edge restart, because the cache is not persisted. The assignments the edge reports to the backend are recorded there but are not read back during evaluation.
 
 **LRU Eviction:** When the cache reaches `max_capacity`, the least recently used features are automatically evicted to make room for new ones. This prevents unbounded memory growth while maintaining performance for frequently accessed features.
 
@@ -399,13 +413,20 @@ Memory usage estimate: Each feature uses approximately 1-5 KB depending on confi
    max_capacity = 5000  # Reduce from default 10000
    ```
 
+   With many distinct users, sticky assignments usually take more memory than features. Reduce `assignment_max_capacity` (about 450-500 bytes per entry), or set `assignment_time_to_idle_secs` to release assignments of inactive users:
+   ```toml
+   [cache]
+   assignment_max_capacity = 20000  # Reduce from default 50000
+   assignment_time_to_idle_secs = 1800
+   ```
+
 2. **Frequent backend requests**: If you see many gRPC calls to fetch features, your cache may be too small. Increase `max_capacity`:
    ```toml
    [cache]
    max_capacity = 20000  # Increase from default 10000
    ```
 
-3. **Check the configured capacity**: The edge server does not log individual evictions, but it logs the capacity in use at startup (`Initializing MappedFeatureCache with max_capacity=...`). Confirm that it matches the value you intended.
+3. **Check the configured capacity**: The edge server does not log individual evictions, but it logs the capacity in use at startup (`Initializing MappedFeatureCache with max_capacity=...` and `Initializing AssignmentCache with max_capacity=..., time_to_idle=...`). Confirm that it matches the value you intended.
 
 ## Migration from Environment Variables
 

@@ -3214,6 +3214,89 @@ mod tests {
         assert_eq!(purged, (serde_json::json!(false), serde_json::json!(false)));
     }
 
+    /// A user whose sticky assignment was evicted is re-evaluated to the same
+    /// variant: weighted splits bucket deterministically by targeting key.
+    #[actix_web::test]
+    async fn evicted_assignments_are_reevaluated_to_the_same_variant() {
+        const USERS: usize = 40;
+        let (mut app_state, _backend) = ofrep_app_with_mock_backend().await;
+        // Room for two assignments only, so nearly every user is evicted.
+        app_state.assigned_cache = Arc::new(crate::AssignmentCache::new(2, None));
+
+        let mut split = team_feature("f-1", "split", "team-1", true);
+        split.feature_type = "Contextual".to_string();
+        split.variants = ["control", "treatment"]
+            .into_iter()
+            .map(|control| pb::FeatureVariant {
+                control: control.to_string(),
+                value: format!("\"{control}-value\""),
+            })
+            .collect();
+        split.stages[0].criterias = vec![pb::StageCriterionFull {
+            id: "criterion-1".to_string(),
+            stage_id: split.stages[0].id.clone(),
+            priority: 0,
+            rule_groups: vec![],
+            variant_allocations: ["control", "treatment"]
+                .into_iter()
+                .map(|control| pb::VariantAllocation {
+                    variant_control: control.to_string(),
+                    weight: 50,
+                })
+                .collect(),
+            variant_selection_mode: "WEIGHTED_SPLIT".to_string(),
+            selected_variant_control: String::new(),
+        }];
+        cache_fetched_feature(&app_state, &split).await;
+        app_state.mapped_cache.run_pending_tasks().await;
+
+        let service = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(app_state.clone()))
+                .route("/evaluate", web::post().to(evaluate_handler))
+                .route(
+                    "/ofrep/v1/evaluate/flags/{key}",
+                    web::post().to(ofrep_evaluate_flag),
+                ),
+        )
+        .await;
+        let variants = || async {
+            let mut variants = Vec::new();
+            for user in 0..USERS {
+                let req = actix_test::TestRequest::post()
+                    .uri("/evaluate")
+                    .set_json(serde_json::json!({
+                        "flagKey": "split",
+                        "context": { "bucketingKey": format!("user-{user}") }
+                    }))
+                    .to_request();
+                let evaluate: serde_json::Value =
+                    actix_test::call_and_read_body_json(&service, req).await;
+                let req = actix_test::TestRequest::post()
+                    .uri("/ofrep/v1/evaluate/flags/split")
+                    .insert_header(("x-api-key", configured_sdk_key()))
+                    .set_json(serde_json::json!({
+                        "context": { "targetingKey": format!("user-{user}") }
+                    }))
+                    .to_request();
+                let ofrep: serde_json::Value =
+                    actix_test::call_and_read_body_json(&service, req).await;
+                assert_eq!(evaluate["variant"], ofrep["variant"], "user-{user}");
+                variants.push(evaluate["variant"].clone());
+            }
+            variants
+        };
+
+        let first = variants().await;
+        assert!(first.contains(&serde_json::json!("control")), "{first:?}");
+        assert!(first.contains(&serde_json::json!("treatment")), "{first:?}");
+        assert!(app_state.assigned_cache.len() <= 2);
+
+        let again = variants().await;
+        assert_eq!(first, again);
+        assert!(app_state.assigned_cache.len() <= 2);
+    }
+
     #[tokio::test]
     async fn cache_fetched_feature_clears_negative_cache_and_indexes_by_id() {
         let mapped_cache = Arc::new(crate::MappedFeatureCache::new(10));

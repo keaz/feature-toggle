@@ -79,6 +79,8 @@ docker run -d \
 
 The image ships without a `config.toml`, so these four variables are required when no config file is mounted. Any other setting can also be set with an `EDGE_` variable. For settings inside a section (such as `[grpc]` or `[flush]`), separate the section and the key with a double underscore (`__`), for example `EDGE_GRPC__TIMEOUT_SECS=15` or `EDGE_FLUSH__ASSIGNMENT_FLUSH_SECS=5`. A single underscore there (`EDGE_GRPC_TIMEOUT_SECS`) is ignored. The old `EDGE_GRPC_COMPRESSION` still works but is deprecated in favor of `EDGE_GRPC__COMPRESSION`, which wins if both are set. Environment variables override values from a mounted `config.toml`. See `feature-edge-server/CONFIG.md` for all settings.
 
+Memory: the edge caches features and sticky user assignments, and both caches are bounded. In a container with a memory limit, size the assignment cache to fit: each entry takes about 450-500 bytes, so the default `EDGE_CACHE__ASSIGNMENT_MAX_CAPACITY=50000` uses up to about 25 MB. For example, `EDGE_CACHE__ASSIGNMENT_MAX_CAPACITY=20000` caps it at about 10 MB. `EDGE_CACHE__ASSIGNMENT_TIME_TO_IDLE_SECS` also evicts assignments that were not used for that many seconds (default `0`, disabled).
+
 ## Development
 
 ### Local Development Setup
