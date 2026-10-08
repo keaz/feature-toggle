@@ -1690,6 +1690,148 @@ mod tests {
         server_handle.abort();
     }
 
+    /// An event shaped like the perf-test traffic (k6-tests/breakpoint-test.js):
+    /// a bucketing key and nine string attributes.
+    fn perf_test_event(i: usize) -> crate::EvaluationEvent {
+        let attributes = [
+            ("region", "eu-west"),
+            ("tier", "pro"),
+            ("userRole", "editor"),
+            ("deviceType", "mobile"),
+            ("osType", "android"),
+            ("appVersion", "v2.1"),
+            ("language", "de"),
+            ("country", "DE"),
+            ("beta", "false"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), serde_json::json!(value)))
+        .collect();
+        crate::EvaluationEvent {
+            feature_key: format!("feature={}", 10_000 + i % 1_000),
+            environment_id: "8f4fa8aa-ac42-4ec8-b27b-bb5ae3b49aae".to_string(),
+            evaluation_result: true,
+            evaluation_context: crate::handlers::EvaluateContext {
+                bucketing_key: format!("user-{}", i % 10_000),
+                environment_id: "8f4fa8aa-ac42-4ec8-b27b-bb5ae3b49aae".to_string(),
+                attributes,
+            },
+            user_context: Some(format!("user-{}", i % 10_000)),
+            evaluated_at: std::time::SystemTime::now(),
+            prior_assignment: false,
+            variant: None,
+            variant_value: None,
+        }
+    }
+
+    /// Run `cycle` on the current single-thread runtime while a probe task
+    /// sleeps 1 ms in a loop. Returns the cycle's result, its wall time and
+    /// the longest probe delay: the longest stretch the cycle held the
+    /// runtime thread without yielding.
+    async fn measure_runtime_hold<T>(
+        cycle: impl std::future::Future<Output = T>,
+    ) -> (T, Duration, Duration) {
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let probe_done = done.clone();
+        let probe = tokio::task::spawn_local(async move {
+            let mut worst = Duration::ZERO;
+            while !probe_done.load(Ordering::Relaxed) {
+                let slept_at = std::time::Instant::now();
+                tokio::time::sleep(Duration::from_millis(1)).await;
+                worst = worst.max(slept_at.elapsed().saturating_sub(Duration::from_millis(1)));
+            }
+            worst
+        });
+        tokio::task::yield_now().await;
+        let started = std::time::Instant::now();
+        let result = cycle.await;
+        let elapsed = started.elapsed();
+        done.store(true, Ordering::Relaxed);
+        (result, elapsed, probe.await.unwrap())
+    }
+
+    /// How long one flush cycle at perf-test volume holds the runtime thread.
+    /// The edge in perf-test/docker-compose.tiny.yml (0.5 CPU) runs one
+    /// runtime worker thread, so this is how long the flush can delay other
+    /// work on that thread. The mock backend runs on a separate runtime.
+    ///
+    /// cargo test -p feature-edge-server --release flush_cycle_runtime_hold -- --ignored --nocapture
+    #[test]
+    #[ignore = "benchmark; run in release"]
+    fn flush_cycle_runtime_hold() {
+        const EVENTS: usize = 10_000; // evaluation_event_queue_capacity default
+        const ASSIGNMENTS: usize = 20_000; // ~one 10 s cycle at 3,840 req/s in perf-test
+
+        let backend = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (endpoint, _state, _server) = backend.block_on(start_mock_backend());
+
+        let edge = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+        local.block_on(&edge, async {
+            let mut app = test_app_state_with_endpoint(
+                Arc::new(crate::MappedFeatureCache::new(100)),
+                &endpoint,
+            );
+            app.retry_config.base_delay_ms = 0;
+            app.evaluation_event_queue_capacity = EVENTS;
+            app.pending_assignments.set_capacity(ASSIGNMENTS);
+
+            // The mock fails the first push of each kind; get that out of the way.
+            app.pending_assignments.push(UserAssignment {
+                user_id: "warm-up".into(),
+                feature_id: "warm-up".into(),
+                environment_id: "env-1".into(),
+                assigned: true,
+                variant: None,
+            });
+            flush::flush_assignments_once(&app).await;
+            flush::flush_assignments_once(&app).await;
+
+            for round in 1..=3 {
+                let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(EVENTS);
+                for i in 0..EVENTS {
+                    event_tx.try_send(perf_test_event(i)).unwrap();
+                }
+                let mut buffer = Vec::new();
+                let (flush, elapsed, hold) = measure_runtime_hold(
+                    flush::flush_evaluations_once(&app, &mut event_rx, &mut buffer),
+                )
+                .await;
+                assert_eq!(flush.sent, EVENTS, "round {round}: {flush:?}");
+                println!(
+                    "round {round}: evaluation flush of {EVENTS} events: {} batches in {elapsed:?}, \
+                     building {:?}, longest runtime hold {hold:?}",
+                    flush.batches, flush.build
+                );
+
+                for i in 0..ASSIGNMENTS {
+                    app.pending_assignments.push(UserAssignment {
+                        user_id: format!("user-{round}-{i}"),
+                        feature_id: format!("feature-{}", i % 1_000),
+                        environment_id: "env-1".into(),
+                        assigned: true,
+                        variant: None,
+                    });
+                }
+                let (flush, elapsed, hold) =
+                    measure_runtime_hold(flush::flush_assignments_once(&app)).await;
+                assert_eq!(flush.pushed, ASSIGNMENTS, "round {round}: {flush:?}");
+                println!(
+                    "round {round}: assignment flush of {ASSIGNMENTS} assignments: {} batches in \
+                     {elapsed:?}, longest runtime hold {hold:?}",
+                    flush.batches
+                );
+            }
+        });
+    }
+
     #[test]
     fn is_transient_retries_only_transient_codes() {
         use tonic::Code;

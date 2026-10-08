@@ -14,6 +14,7 @@ use utoipa_swagger_ui::SwaggerUi;
 mod config;
 mod grpc_client;
 mod handlers;
+mod lag;
 
 mod pb {
     #![allow(clippy::all)]
@@ -787,9 +788,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         http_addr, cfg.backend_grpc
     );
 
+    tokio::spawn(lag::watch_runtime_lag("background"));
+
     let openapi = ApiDoc::openapi();
 
     HttpServer::new(move || {
+        // Called once per worker, on the worker's own runtime thread.
+        actix_web::rt::spawn(lag::watch_runtime_lag("http worker"));
         App::new()
             .app_data(web::Data::new(state.clone()))
             .service(SwaggerUi::new("/docs/{_:.*}").url("/api-doc/openapi.json", openapi.clone()))
