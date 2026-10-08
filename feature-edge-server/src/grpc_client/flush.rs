@@ -198,7 +198,7 @@ pub async fn run_flush_task(app: AppState) {
     }
 }
 
-/// Outcome of one evaluation flush cycle.
+/// Outcome of one or more evaluation pushes.
 #[derive(Debug, Default)]
 pub(crate) struct EvaluationFlush {
     pub sent: usize,
@@ -207,8 +207,33 @@ pub(crate) struct EvaluationFlush {
     pub batches: usize,
     /// A batch failed after retries; it and the rest were put back in the buffer.
     pub failed: bool,
+    /// Events dropped because a failed batch did not fit back in the buffer.
+    pub dropped: usize,
+    /// Time spent pushing, including building the requests.
+    pub elapsed: Duration,
     /// Time spent converting events to request messages, on the runtime thread.
     pub build: Duration,
+}
+
+impl EvaluationFlush {
+    fn add(&mut self, other: EvaluationFlush) {
+        self.sent += other.sent;
+        self.processed += other.processed;
+        self.batches += other.batches;
+        self.failed |= other.failed;
+        self.dropped += other.dropped;
+        self.elapsed += other.elapsed;
+        self.build += other.build;
+    }
+}
+
+/// Which buffered events a push sends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PushScope {
+    /// Only whole batches; a partial batch stays buffered.
+    FullBatches,
+    /// Everything buffered, including a final partial batch.
+    All,
 }
 
 /// Convert events to the request message. Runs synchronously on the caller's
@@ -265,58 +290,44 @@ fn evaluation_events_to_proto(
     proto_events
 }
 
-/// Move queued events into `buffer` (at most `evaluation_event_queue_capacity`)
-/// and push the buffer in batches of `evaluation_flush_batch_size`. A batch
-/// that still fails after retries goes back into `buffer` with everything
-/// after it, oldest dropped first once the buffer is full.
-pub(crate) async fn flush_evaluations_once(
+/// Evaluation events per gRPC request. A batch never exceeds the buffer
+/// capacity, so a full buffer is always at least one whole batch.
+fn evaluation_batch_size(app: &AppState) -> usize {
+    app.evaluation_flush_batch_size
+        .max(1)
+        .min(app.evaluation_event_queue_capacity.max(1))
+}
+
+/// Push buffered events in batches of `evaluation_batch_size`, oldest first.
+/// With [`PushScope::FullBatches`] a trailing partial batch stays in `buffer`.
+/// A batch that still fails after retries goes back to the front of `buffer`
+/// with every event after it, and the push stops. If they no longer fit in
+/// `evaluation_event_queue_capacity`, the oldest are dropped.
+pub(crate) async fn push_evaluation_batches(
     app: &AppState,
-    event_rx: &mut tokio::sync::mpsc::Receiver<crate::EvaluationEvent>,
     buffer: &mut Vec<crate::EvaluationEvent>,
+    scope: PushScope,
 ) -> EvaluationFlush {
-    let flush_interval = app.evaluation_flush_interval;
     let max_buffered = app.evaluation_event_queue_capacity.max(1);
-    let batch_size = app.evaluation_flush_batch_size.max(1);
+    let batch_size = evaluation_batch_size(app);
     let mut flush = EvaluationFlush::default();
 
-    while buffer.len() < max_buffered {
-        match event_rx.try_recv() {
-            Ok(event) => buffer.push(event),
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+    let sendable = match scope {
+        PushScope::All => buffer.len(),
+        PushScope::FullBatches => buffer.len() - buffer.len() % batch_size,
+    };
+    if sendable == 0 {
+        return flush;
+    }
+    let started = Instant::now();
+    let rest = buffer.split_off(sendable);
+    let mut to_send = std::mem::replace(buffer, rest).into_iter();
+
+    loop {
+        let chunk: Vec<crate::EvaluationEvent> = to_send.by_ref().take(batch_size).collect();
+        if chunk.is_empty() {
+            break;
         }
-    }
-
-    let mut dropped_in_flush = 0u64;
-    if buffer.len() >= max_buffered {
-        loop {
-            match event_rx.try_recv() {
-                Ok(_) => dropped_in_flush += 1,
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
-            }
-        }
-    }
-    if dropped_in_flush > 0 {
-        warn!(
-            "Dropped {} evaluation events while draining (buffer full, capacity={})",
-            dropped_in_flush, max_buffered
-        );
-    }
-
-    let mut to_send = std::mem::take(buffer);
-
-    while !to_send.is_empty() {
-        let chunk = if to_send.len() > batch_size {
-            let rest = to_send.split_off(batch_size);
-            let chunk = to_send;
-            to_send = rest;
-            chunk
-        } else {
-            let chunk = to_send;
-            to_send = Vec::new();
-            chunk
-        };
 
         let build_started = Instant::now();
         let proto_events = evaluation_events_to_proto(app, &chunk);
@@ -345,63 +356,119 @@ pub(crate) async fn flush_evaluations_once(
                 error!("Failed to push evaluation events after retries: {}", e);
                 warn!(
                     "Will retry on next flush cycle ({}s)",
-                    flush_interval.as_secs()
+                    app.evaluation_flush_interval.as_secs()
                 );
-                // Keep original order when requeueing so retries preserve
-                // batch semantics as much as possible. If the local buffer
-                // is already full, we drop the oldest events first.
+                // Requeue in the original order, ahead of the events buffered
+                // after them. Drop the oldest when they no longer fit.
                 let mut requeue = chunk;
                 requeue.extend(to_send);
-                if requeue.len() > max_buffered {
-                    let drop_count = requeue.len() - max_buffered;
-                    buffer.extend(requeue.into_iter().skip(drop_count));
+                requeue.append(buffer);
+                let drop_count = requeue.len().saturating_sub(max_buffered);
+                if drop_count > 0 {
+                    requeue.drain(..drop_count);
                     warn!(
                         "Dropped {} evaluation events while requeueing (buffer limit={})",
                         drop_count, max_buffered
                     );
-                } else {
-                    buffer.extend(requeue);
                 }
+                *buffer = requeue;
+                flush.dropped = drop_count;
                 flush.failed = true;
                 break;
             }
         }
     }
+    flush.elapsed = started.elapsed();
     flush
 }
 
-/// Flush evaluation events with bounded local buffering. Retries preserve
-/// original ordering and drop only the oldest events once the edge-side buffer
-/// is already at capacity.
+/// Send evaluation events to the backend as they arrive, so the volume the
+/// edge can record is limited by push throughput, not by the queue capacity
+/// per flush interval.
+///
+/// Events are received into a local buffer and pushed as soon as a whole
+/// batch of `evaluation_flush_batch_size` is buffered. Every
+/// `evaluation_flush_interval` the task also pushes a partial batch, so an
+/// event waits at most about one interval, and logs what it pushed and
+/// dropped since the last interval. After a push fails, the task waits for
+/// the next interval before pushing again; the buffer keeps filling up to
+/// `evaluation_event_queue_capacity`, then the channel fills and handlers
+/// drop new events (counted in `evaluation_event_dropped`).
+///
+/// Memory stays bounded: at most `evaluation_event_queue_capacity` events in
+/// the channel plus as many in the buffer and the batches in flight.
+///
+/// Returns when every sender is dropped, after pushing what is buffered.
 pub async fn run_evaluation_flush_task(
     app: AppState,
     mut event_rx: tokio::sync::mpsc::Receiver<crate::EvaluationEvent>,
 ) {
-    let mut buffer = Vec::new();
     let max_buffered = app.evaluation_event_queue_capacity.max(1);
+    let batch_size = evaluation_batch_size(&app);
+    // `sleep_until` with a zero period would fire on every loop iteration
+    // and starve the receive branch.
+    let interval = app.evaluation_flush_interval.max(Duration::from_millis(1));
+    let mut buffer: Vec<crate::EvaluationEvent> = Vec::with_capacity(batch_size);
+    let mut next_report = tokio::time::Instant::now() + interval;
+    let mut report_started = Instant::now();
+    let mut report = EvaluationFlush::default();
+    let mut dropped_total = 0u64;
+    // Set after a failed push: hold whole-batch pushes until the next interval.
+    let mut backing_off = false;
 
     loop {
-        tokio::time::sleep(app.evaluation_flush_interval).await;
+        let room = max_buffered.saturating_sub(buffer.len());
+        tokio::select! {
+            biased;
+            () = tokio::time::sleep_until(next_report) => {
+                let flush = push_evaluation_batches(&app, &mut buffer, PushScope::All).await;
+                backing_off = flush.failed;
+                report.add(flush);
 
-        let dropped = app.evaluation_event_dropped.swap(0, Ordering::Relaxed);
-        if dropped > 0 {
-            warn!(
-                "Dropped {} evaluation events due to full queue (capacity={})",
-                dropped, max_buffered
-            );
-        }
-
-        let started = Instant::now();
-        let flush = flush_evaluations_once(&app, &mut event_rx, &mut buffer).await;
-        if !flush.failed && flush.sent > 0 {
-            info!(
-                "Successfully pushed {} evaluation events in {} batch(es) ({} processed) in {} ms ({} ms building requests)",
-                flush.sent,
-                flush.batches,
-                flush.processed,
-                started.elapsed().as_millis(),
-                flush.build.as_millis()
-            );
+                let dropped = app.evaluation_event_dropped.swap(0, Ordering::Relaxed)
+                    + report.dropped as u64;
+                dropped_total += dropped;
+                if dropped > 0 {
+                    warn!(
+                        "Dropped {} evaluation events due to full queue (capacity={}, {} dropped since start)",
+                        dropped, max_buffered, dropped_total
+                    );
+                }
+                if report.sent > 0 {
+                    info!(
+                        "Successfully pushed {} evaluation events in {} batch(es) ({} processed) in the last {} ms: {} ms pushing ({} ms building requests), {} buffered",
+                        report.sent,
+                        report.batches,
+                        report.processed,
+                        report_started.elapsed().as_millis(),
+                        report.elapsed.as_millis(),
+                        report.build.as_millis(),
+                        buffer.len()
+                    );
+                }
+                report = EvaluationFlush::default();
+                report_started = Instant::now();
+                next_report = tokio::time::Instant::now() + interval;
+            }
+            received = event_rx.recv_many(&mut buffer, room), if room > 0 => {
+                if received == 0 {
+                    // Every sender is gone: the edge is shutting down.
+                    let flush = push_evaluation_batches(&app, &mut buffer, PushScope::All).await;
+                    if flush.failed {
+                        warn!(
+                            "Dropped {} evaluation events at shutdown after a failed push",
+                            buffer.len()
+                        );
+                    }
+                    return;
+                }
+                if !backing_off && buffer.len() >= batch_size {
+                    let flush =
+                        push_evaluation_batches(&app, &mut buffer, PushScope::FullBatches).await;
+                    backing_off = flush.failed;
+                    report.add(flush);
+                }
+            }
         }
     }
 }

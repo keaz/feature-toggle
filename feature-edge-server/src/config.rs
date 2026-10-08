@@ -82,11 +82,13 @@ pub struct FlushConfig {
     #[serde(default = "default_assignment_flush")]
     pub assignment_flush_secs: u64,
 
-    /// Evaluation events flush interval in seconds
+    /// Longest wait in seconds for a partial batch of evaluation events, and
+    /// the log report interval; whole batches are sent as soon as they fill
     #[serde(default = "default_evaluation_flush")]
     pub evaluation_flush_secs: u64,
 
-    /// Evaluation event queue capacity (bounded channel)
+    /// Evaluation events waiting to be sent: the bounded channel holds this
+    /// many, and the send buffer as many again
     #[serde(default = "default_evaluation_event_queue_capacity")]
     pub evaluation_event_queue_capacity: usize,
 

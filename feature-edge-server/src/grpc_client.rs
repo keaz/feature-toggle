@@ -303,6 +303,9 @@ mod tests {
         evaluation_attempts: AtomicUsize,
         /// When set, `PushEvaluationEvents` always fails with this code.
         evaluation_error: std::sync::Mutex<Option<tonic::Code>>,
+        /// Feature key of every evaluation event in an accepted push, one
+        /// inner vector per push.
+        accepted_evaluation_batches: std::sync::Mutex<Vec<Vec<String>>>,
         feature_attempts: AtomicUsize,
         client_info_attempts: AtomicUsize,
         /// Codes returned by `GetFeatureByKey` / `GetClientInfo`, one per
@@ -496,6 +499,11 @@ mod tests {
                 return Err(Status::unavailable("transient evaluation ingest failure"));
             }
 
+            self.state
+                .accepted_evaluation_batches
+                .lock()
+                .unwrap()
+                .push(req.events.iter().map(|e| e.feature_key.clone()).collect());
             Ok(Response::new(backend_pb::PushEvaluationEventsResponse {
                 message_id: format!("evaluation-ack-{}", req.events.len()),
                 processed_count: req.events.len() as i32,
@@ -1795,14 +1803,12 @@ mod tests {
             flush::flush_assignments_once(&app).await;
 
             for round in 1..=3 {
-                let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(EVENTS);
-                for i in 0..EVENTS {
-                    event_tx.try_send(perf_test_event(i)).unwrap();
-                }
-                let mut buffer = Vec::new();
-                let (flush, elapsed, hold) = measure_runtime_hold(
-                    flush::flush_evaluations_once(&app, &mut event_rx, &mut buffer),
-                )
+                let mut buffer: Vec<_> = (0..EVENTS).map(perf_test_event).collect();
+                let (flush, elapsed, hold) = measure_runtime_hold(flush::push_evaluation_batches(
+                    &app,
+                    &mut buffer,
+                    flush::PushScope::All,
+                ))
                 .await;
                 assert_eq!(flush.sent, EVENTS, "round {round}: {flush:?}");
                 println!(
@@ -2072,6 +2078,158 @@ mod tests {
 
         assert_eq!(state.evaluation_attempts.load(Ordering::SeqCst), 1);
         task.abort();
+        server.abort();
+    }
+
+    fn keyed_evaluation_event(feature_key: String) -> crate::EvaluationEvent {
+        crate::EvaluationEvent {
+            feature_key,
+            environment_id: "env-a".to_string(),
+            evaluation_result: true,
+            evaluation_context: crate::handlers::EvaluateContext {
+                bucketing_key: "user-1".to_string(),
+                environment_id: "env-a".to_string(),
+                attributes: std::collections::HashMap::new(),
+            },
+            user_context: Some("user-1".to_string()),
+            evaluated_at: std::time::SystemTime::UNIX_EPOCH,
+            prior_assignment: false,
+            variant: None,
+            variant_value: None,
+        }
+    }
+
+    fn feature_keys(range: std::ops::Range<usize>) -> Vec<String> {
+        range.map(|i| format!("f-{i}")).collect()
+    }
+
+    fn accepted_evaluation_keys(state: &MockBackendState) -> Vec<String> {
+        state
+            .accepted_evaluation_batches
+            .lock()
+            .unwrap()
+            .iter()
+            .flatten()
+            .cloned()
+            .collect()
+    }
+
+    async fn wait_for_accepted_evaluations(state: &MockBackendState, count: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while accepted_evaluation_keys(state).len() < count {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "backend accepted {} of {count} evaluation events",
+                accepted_evaluation_keys(state).len()
+            )
+        });
+    }
+
+    #[tokio::test]
+    async fn evaluation_flush_pushes_whole_batches_without_waiting_for_the_interval() {
+        let (mut app, state, server) = app_with_mock_backend().await;
+        app.evaluation_flush_interval = std::time::Duration::from_secs(60);
+        app.evaluation_flush_batch_size = 10;
+        app.evaluation_event_queue_capacity = 100;
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(100);
+        for key in feature_keys(0..25) {
+            event_tx.try_send(keyed_evaluation_event(key)).unwrap();
+        }
+
+        let task = tokio::spawn(run_evaluation_flush_task(app.clone(), event_rx));
+        wait_for_accepted_evaluations(&state, 20).await;
+        // The partial batch waits for the interval.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let batches = state.accepted_evaluation_batches.lock().unwrap().clone();
+        assert_eq!(batches, vec![feature_keys(0..10), feature_keys(10..20)]);
+        task.abort();
+        server.abort();
+    }
+
+    /// Regression: the flush ran only on a timer and took at most the queue
+    /// capacity per interval, so the edge recorded at most
+    /// `capacity / interval` events per second and dropped the rest.
+    #[tokio::test]
+    async fn evaluation_flush_sends_far_more_than_capacity_per_interval() {
+        const EVENTS: usize = 2_000;
+        let (mut app, state, server) = app_with_mock_backend().await;
+        app.evaluation_flush_interval = std::time::Duration::from_secs(60);
+        app.evaluation_flush_batch_size = 10;
+        app.evaluation_event_queue_capacity = 50;
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(50);
+
+        let task = tokio::spawn(run_evaluation_flush_task(app.clone(), event_rx));
+        for key in feature_keys(0..EVENTS) {
+            event_tx.send(keyed_evaluation_event(key)).await.unwrap();
+        }
+        wait_for_accepted_evaluations(&state, EVENTS).await;
+
+        assert_eq!(accepted_evaluation_keys(&state), feature_keys(0..EVENTS));
+        task.abort();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn evaluation_flush_waits_for_the_interval_after_a_failed_push() {
+        let (mut app, state, server) = app_with_mock_backend().await;
+        *state.evaluation_error.lock().unwrap() = Some(tonic::Code::Unauthenticated);
+        let flush_interval = std::time::Duration::from_millis(400);
+        app.evaluation_flush_interval = flush_interval;
+        app.evaluation_flush_batch_size = 10;
+        app.evaluation_event_queue_capacity = 100;
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(100);
+        let task = tokio::spawn(run_evaluation_flush_task(app.clone(), event_rx));
+
+        for key in feature_keys(0..10) {
+            event_tx.send(keyed_evaluation_event(key)).await.unwrap();
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while state.evaluation_attempts.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a whole batch is pushed right away");
+
+        // Another whole batch arrives, but the task backs off until the interval.
+        for key in feature_keys(10..20) {
+            event_tx.send(keyed_evaluation_event(key)).await.unwrap();
+        }
+        tokio::time::sleep(flush_interval / 4).await;
+        assert_eq!(state.evaluation_attempts.load(Ordering::SeqCst), 1);
+
+        *state.evaluation_error.lock().unwrap() = None;
+        wait_for_accepted_evaluations(&state, 20).await;
+        // The failed batch is requeued ahead of the newer events.
+        assert_eq!(accepted_evaluation_keys(&state), feature_keys(0..20));
+        task.abort();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn evaluation_flush_pushes_the_partial_batch_when_senders_are_dropped() {
+        let (mut app, state, server) = app_with_mock_backend().await;
+        app.evaluation_flush_interval = std::time::Duration::from_secs(60);
+        app.evaluation_flush_batch_size = 10;
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(10);
+        for key in feature_keys(0..3) {
+            event_tx.try_send(keyed_evaluation_event(key)).unwrap();
+        }
+        drop(event_tx);
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            run_evaluation_flush_task(app.clone(), event_rx),
+        )
+        .await
+        .expect("the task returns once every sender is dropped");
+
+        assert_eq!(accepted_evaluation_keys(&state), feature_keys(0..3));
         server.abort();
     }
 }

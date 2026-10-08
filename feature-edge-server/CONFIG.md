@@ -54,10 +54,12 @@ compression = "none"
 # Assignment flush interval in seconds
 assignment_flush_secs = 10
 
-# Evaluation events flush interval in seconds
+# Longest wait for a partial batch of evaluation events, in seconds;
+# whole batches are sent as soon as they fill
 evaluation_flush_secs = 30
 
-# Evaluation event queue capacity (bounded channel)
+# Evaluation events waiting to be sent (bounded channel, and as many again
+# in the send buffer); new events are dropped while both are full
 evaluation_event_queue_capacity = 10000
 
 # Max assignments per gRPC stream flush
@@ -329,11 +331,23 @@ These settings have no default. Each one must be set in `config.toml` or through
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `assignment_flush_secs` | u64 | 10 | Assignment flush interval in seconds |
-| `evaluation_flush_secs` | u64 | 30 | Evaluation events flush interval in seconds |
-| `evaluation_event_queue_capacity` | usize | 10000 | Evaluation event queue capacity (bounded channel; values below 1 are treated as 1) |
+| `evaluation_flush_secs` | u64 | 30 | Longest time an evaluation event waits in a partial batch, and the interval of the evaluation log report. Whole batches are sent as soon as they fill (0 is treated as 1 ms) |
+| `evaluation_event_queue_capacity` | usize | 10000 | Evaluation events waiting to be sent: the bounded channel holds this many, and the send buffer as many again. While both are full, new events are dropped (values below 1 are treated as 1) |
 | `assignment_flush_batch_size` | usize | 1000 | Max assignments per gRPC stream flush (values below 1 are treated as 1) |
-| `evaluation_flush_batch_size` | usize | 500 | Max evaluation events per gRPC request (values below 1 are treated as 1) |
+| `evaluation_flush_batch_size` | usize | 500 | Evaluation events per gRPC request; a whole batch is sent as soon as it is buffered (values below 1 are treated as 1; capped at `evaluation_event_queue_capacity`) |
 | `assignment_queue_capacity` | usize | 100000 | Max sticky assignments queued for the backend. While the queue is full, new and requeued assignments are dropped (values below 1 are treated as 1; env: `EDGE_FLUSH__ASSIGNMENT_QUEUE_CAPACITY`) |
+
+**Evaluation events:** The edge records one event per evaluation (`/evaluate` and OFREP), and the backend stores one row per event. Analytics count these rows: evaluation counts, cache hit rate, unique users and the live evaluation stream. Events are not sampled or aggregated, so every dropped event is missing from these numbers.
+
+A handler puts the event on a bounded channel without waiting. The flush task moves events from the channel into its send buffer and pushes each batch of `evaluation_flush_batch_size` as soon as it is full, one request at a time. Every `evaluation_flush_secs` it also pushes the remaining partial batch and logs what it sent:
+
+```
+Successfully pushed 115200 evaluation events in 231 batch(es) (115200 processed) in the last 30001 ms: 9800 ms pushing (310 ms building requests), 120 buffered
+```
+
+So the edge records as many events per second as the backend accepts, not `evaluation_event_queue_capacity` per interval. The queue only has to absorb bursts and the time one push takes. If a push still fails after the retries in `[retry]`, the batch goes back into the buffer and the task waits for the next interval before it pushes again. During a backend outage or when the backend is slower than the evaluation rate, the buffer and then the channel fill up, and new events are dropped. Each interval the task logs the drops: `Dropped N evaluation events due to full queue (capacity=..., M dropped since start)`.
+
+Memory stays bounded: at most `evaluation_event_queue_capacity` events in the channel and as many in the send buffer and the batch in flight. An event uses about 300 bytes plus its context attributes, about 1.5 KB with ten attributes, so the default of 10,000 holds up to about 30 MB in the worst case. Raise the capacity to ride out longer backend slowdowns without drops; lower it on small containers.
 
 **Assignment queue:** The edge queues a sticky assignment for the backend once, when a user first gets a truthy result for a feature in an environment. Results served from the assignment cache are not queued again. Every `assignment_flush_secs` the flush task sends the queue to the backend, so while the backend is reachable the queue holds about the number of new assignments made in one flush interval. When a push fails, the batch is requeued and retried on the next cycle. During a backend outage the queue grows until it reaches `assignment_queue_capacity`, and assignments that do not fit are dropped. The flush task logs the number dropped in each cycle: `Dropped N user assignments due to full queue (capacity=...)`.
 
