@@ -11,6 +11,19 @@ pub(crate) fn routed_path(req: &actix_web::dev::ServiceRequest) -> String {
     req.match_info().as_str().to_string()
 }
 
+/// Whether the request is for the admin UI files: only when the backend serves
+/// the UI (`ui_dir` set, so `UiDir` is in the app data), and never for `/api/`.
+/// These reach only static files and `index.html`, which hold no data.
+pub(crate) fn is_public_ui_path(
+    req: &actix_web::dev::ServiceRequest,
+    path: &str,
+    method: &actix_web::http::Method,
+) -> bool {
+    req.app_data::<actix_web::web::Data<crate::rest::ui::UiDir>>()
+        .is_some()
+        && crate::rest::ui::is_ui_request(path, method)
+}
+
 /// Whether `path` (the routed path) is one of the public SSO login routes:
 /// `GET /api/v1/auth/sso/providers`, `GET /api/v1/auth/sso/{slug}/authorize`,
 /// `GET /api/v1/auth/sso/{slug}/callback` and `POST /api/v1/auth/sso/exchange`.

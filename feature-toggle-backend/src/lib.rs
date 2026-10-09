@@ -388,6 +388,17 @@ pub async fn run() -> std::io::Result<()> {
     // worker must unblock the others.
     let shared_admin_state = AdminState::new();
 
+    // The admin UI on this port, when `ui_dir` is set. A wrong folder stops the
+    // start instead of serving 404s.
+    let ui_dir = match cfg.ui_dir.as_deref() {
+        Some(dir) => {
+            let ui = rest::ui::UiDir::open(dir)?;
+            log::info!("Serving the admin UI from {}", ui.path().display());
+            Some(ui)
+        }
+        None => None,
+    };
+
     HttpServer::new(move || {
         let admin_state = shared_admin_state.clone();
 
@@ -472,6 +483,12 @@ pub async fn run() -> std::io::Result<()> {
             )
             .configure(rest::configure)
             .service(rest::swagger_ui())
+            // Last: the UI answers every path the API did not match.
+            .configure(|c| {
+                if let Some(ui) = &ui_dir {
+                    rest::ui::configure(c, ui);
+                }
+            })
     })
     .bind(&cfg.http_addr)?
     .run()

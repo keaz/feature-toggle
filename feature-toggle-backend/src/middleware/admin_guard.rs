@@ -144,7 +144,8 @@ where
             let is_allowed_rest = is_public_path
                 || (path == "/api/v1/admins" && method == actix_web::http::Method::POST)
                 || (path == "/api/v1/auth/status" && method == actix_web::http::Method::GET)
-                || (path == "/api/v1/auth/sso/providers" && method == actix_web::http::Method::GET);
+                || (path == "/api/v1/auth/sso/providers" && method == actix_web::http::Method::GET)
+                || super::is_public_ui_path(&req, &path, &method);
 
             if is_allowed_rest {
                 let res = service.call(req).await?;
@@ -175,6 +176,42 @@ mod tests {
         PgPoolOptions::new()
             .connect_lazy("postgres://user:pass@localhost/feature_toggle_test")
             .expect("lazy pool")
+    }
+
+    /// Before the first admin exists, the UI must load so it can show
+    /// `/create-admin`; the API stays blocked.
+    #[actix_web::test]
+    async fn ui_reads_pass_without_admin_only_when_the_ui_is_served() {
+        for served in [true, false] {
+            let state = AdminState::new();
+            state.set_exists(false);
+            let mut app = App::new()
+                .wrap(AdminGuard::new(
+                    test_pool(),
+                    "http://localhost:8080".to_string(),
+                    state,
+                ))
+                .route(
+                    "/create-admin",
+                    web::get().to(|| async { HttpResponse::Ok().finish() }),
+                )
+                .route(
+                    "/api/v1/teams",
+                    web::get().to(|| async { HttpResponse::Ok().finish() }),
+                );
+            if served {
+                app = app.app_data(web::Data::new(crate::rest::ui::UiDir::for_tests()));
+            }
+            let app = test::init_service(app).await;
+
+            let req = test::TestRequest::get().uri("/create-admin").to_request();
+            let status = test::call_service(&app, req).await.status();
+            assert_eq!(status.is_success(), served, "UI read, served={served}");
+
+            let req = test::TestRequest::get().uri("/api/v1/teams").to_request();
+            let status = test::call_service(&app, req).await.status();
+            assert!(!status.is_success(), "API read, served={served}");
+        }
     }
 
     #[actix_web::test]

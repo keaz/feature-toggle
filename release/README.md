@@ -4,7 +4,7 @@ Each tagged release on GitHub has one archive per component and platform. The bi
 
 | Archive | Contents |
 |---|---|
-| `fluxgate-backend-<version>-<platform>.tar.gz` | `fluxgate-backend`, `config.toml`, `log4rs.yaml`, this README |
+| `fluxgate-backend-<version>-<platform>.tar.gz` | `fluxgate-backend`, the admin UI in `ui/`, `config.toml`, `log4rs.yaml`, this README |
 | `fluxgate-edge-<version>-<platform>.tar.gz` | `fluxgate-edge`, `config.toml`, `log4rs.yaml`, `CONFIG.md` |
 | `fluxgate-<version>-<platform>.tar.gz` | the `fluxgate` CLI, `README.md` |
 
@@ -26,6 +26,8 @@ export FLUXGATE_ENCRYPTION_KEY=$(cat encryption.key)
 ```
 
 Keep `encryption.key`. The backend encrypts stored secrets with it, and they cannot be decrypted with a new key.
+
+Open `http://localhost:8080`. The backend serves the admin UI from `ui/` on the same port as the API (`ui_dir = "ui"` in `config.toml`), so the UI needs no CORS setup. If you open it at another address, set `allowed_origin` to that address.
 
 The backend reads `config.toml` and `log4rs.yaml` from the working directory. Set `FEATURE_TOGGLE_CONFIG` to use another config file.
 

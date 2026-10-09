@@ -5,6 +5,12 @@ on:
     tags:
       - 'v*'
 
+env:
+  # The admin UI bundled into the backend archives. The UI lives in its own
+  # repository and is released as the keaz/flux-gate-ui image; bump this when a
+  # new UI version should ship with the backend.
+  UI_VERSION: v1.2.0
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -62,12 +68,36 @@ jobs:
             fail_ci_if_error: true
             token: ${{ secrets.CODECOV_TOKEN }}
 
+  # The built admin UI, copied out of the public UI image. The files are the
+  # same for every platform. The backend serves its own /config.js, so the
+  # image's is left out.
+  ui:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Copy the UI out of keaz/flux-gate-ui
+        run: |
+          set -euo pipefail
+          id=$(docker create --platform linux/amd64 "keaz/flux-gate-ui:${UI_VERSION}")
+          docker cp "$id:/usr/share/nginx/html" ui
+          docker rm "$id"
+          rm -f ui/config.js
+          test -f ui/index.html
+          ls ui
+
+      - name: Upload the UI
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui
+          path: ui/
+          if-no-files-found: error
+
   # The backend, edge server and CLI for every platform the release supports.
   # The backend compiles its SQLx queries against the committed .sqlx cache, so
   # these builds need no database. The Linux builds run on Ubuntu 22.04 so the
   # binaries work on glibc 2.35 and later.
   binaries:
-    needs: test
+    needs: [test, ui]
     strategy:
       fail-fast: false
       matrix:
@@ -99,6 +129,12 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
+      - name: Download the UI
+        uses: actions/download-artifact@v4
+        with:
+          name: ui
+          path: pkg/backend/ui
+
       - name: Build
         env:
           SQLX_OFFLINE: 'true'
@@ -114,6 +150,7 @@ jobs:
           bin="target/${{ matrix.target }}/release"
           suffix="${version}-${{ matrix.platform }}"
           mkdir -p dist pkg/backend pkg/edge pkg/cli
+          test -f pkg/backend/ui/index.html
 
           cp "$bin/feature-toggle-backend" pkg/backend/fluxgate-backend
           cp release/backend-config.toml pkg/backend/config.toml

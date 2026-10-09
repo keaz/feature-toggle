@@ -1,8 +1,13 @@
 # Feature Toggle Backend configuration
 # Default values match the previously hardcoded ones
 
-# CORS allowed origin for the frontend
-allowed_origin = "http://localhost:3000"
+# The address browsers use to open FluxGate. With the bundled UI (ui_dir below)
+# this is the backend's own address. If you run the UI elsewhere, set its origin.
+allowed_origin = "http://localhost:8080"
+
+# The bundled admin UI, served on the HTTP port next to /api/v1. Remove the line
+# to run the backend without the UI.
+ui_dir = "ui"
 
 # Address that the Actix-Web HTTP server binds to
 http_addr = "0.0.0.0:8080"

@@ -350,7 +350,8 @@ where
                 || (path == "/api/v1/auth/status" && method == actix_web::http::Method::GET)
                 || super::is_public_sso_path(&path, &method)
                 || super::is_public_device_path(&path, &method)
-                || super::is_public_jira_event_path(&path, &method);
+                || super::is_public_jira_event_path(&path, &method)
+                || super::is_public_ui_path(&req, &path, &method);
 
             if is_public_path {
                 let res = service.call(req).await?;
@@ -954,6 +955,56 @@ mod tests {
             .returning(|_| Ok(Some(TEST_SECRET.to_string())));
         mock.expect_clone_box().returning(mock_jwt_secret_logic);
         Box::new(mock)
+    }
+
+    /// UI files are public only when the backend serves the UI; the API is not.
+    #[actix_web::test]
+    async fn ui_reads_are_public_only_when_the_ui_is_served() {
+        for served in [true, false] {
+            let mut app = App::new()
+                .wrap(JwtGuard::new(
+                    "http://localhost:8080".to_string(),
+                    mock_jwt_secret_logic(),
+                    test_pool(),
+                ))
+                .route(
+                    "/settings/sso",
+                    web::get().to(|| async { HttpResponse::Ok().finish() }),
+                )
+                .route(
+                    "/api/v1/teams",
+                    web::get().to(|| async { HttpResponse::Ok().finish() }),
+                );
+            if served {
+                app = app.app_data(web::Data::new(crate::rest::ui::UiDir::for_tests()));
+            }
+            let app = test::init_service(app).await;
+
+            let req = test::TestRequest::get().uri("/settings/sso").to_request();
+            let status = test::call_service(&app, req).await.status();
+            let expected = if served {
+                actix_web::http::StatusCode::OK
+            } else {
+                actix_web::http::StatusCode::UNAUTHORIZED
+            };
+            assert_eq!(status, expected, "UI read, served={served}");
+
+            let req = test::TestRequest::get().uri("/api/v1/teams").to_request();
+            let status = test::call_service(&app, req).await.status();
+            assert_eq!(
+                status,
+                actix_web::http::StatusCode::UNAUTHORIZED,
+                "API read, served={served}"
+            );
+
+            let req = test::TestRequest::post().uri("/settings/sso").to_request();
+            let status = test::call_service(&app, req).await.status();
+            assert_eq!(
+                status,
+                actix_web::http::StatusCode::UNAUTHORIZED,
+                "UI write, served={served}"
+            );
+        }
     }
 
     #[actix_web::test]

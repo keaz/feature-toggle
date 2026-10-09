@@ -37,6 +37,11 @@ pub struct Config {
     /// Rate limits of the public CLI device-login routes.
     #[serde(default)]
     pub device_login: DeviceLoginConfig,
+    /// Folder with the built admin UI (`index.html` and its assets). When set,
+    /// the backend serves the UI on its HTTP port next to `/api/v1`, with a
+    /// `/config.js` that points the UI at the same origin. Unset: no UI routes.
+    #[serde(default)]
+    pub ui_dir: Option<String>,
 }
 
 /// Limits of `POST /auth/device/authorize` and `/auth/device/token`
@@ -264,6 +269,7 @@ impl Default for Config {
             typesafe: TypesafeConfig::default(),
             jira: JiraConfig::default(),
             device_login: DeviceLoginConfig::default(),
+            ui_dir: None,
         }
     }
 }
@@ -329,6 +335,10 @@ impl Config {
             .public_base_url
             .map(|url| url.trim().trim_end_matches('/').to_string())
             .filter(|url| !url.is_empty());
+        cfg.ui_dir = cfg
+            .ui_dir
+            .map(|dir| dir.trim().to_string())
+            .filter(|dir| !dir.is_empty());
         Ok(cfg)
     }
 
@@ -419,6 +429,15 @@ grpc_addr = "0.0.0.0:50051"
         );
         let cfg = Config::from_toml(&format!("public_base_url = \"  \"\n{BASE}")).unwrap();
         assert_eq!(cfg.public_base_url, None);
+    }
+
+    #[test]
+    fn ui_dir_is_optional_and_blank_means_unset() {
+        assert_eq!(Config::from_toml(BASE).unwrap().ui_dir, None);
+        let cfg = Config::from_toml(&format!("ui_dir = \" ui \"\n{BASE}")).unwrap();
+        assert_eq!(cfg.ui_dir.as_deref(), Some("ui"));
+        let cfg = Config::from_toml(&format!("ui_dir = \"  \"\n{BASE}")).unwrap();
+        assert_eq!(cfg.ui_dir, None);
     }
 
     #[test]

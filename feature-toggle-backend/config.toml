@@ -20,6 +20,11 @@ grpc_addr = "0.0.0.0:50051"
 # FLUXGATE_SSO_<SLUG>_CLIENT_SECRET. See docs/sso.md.
 #public_base_url = "https://fluxgate.example.com"
 
+# Folder with the built admin UI (optional). When set, the backend serves the UI
+# on http_addr next to /api/v1, and allowed_origin should be this backend's own
+# address. The release archives ship the UI in ui/.
+#ui_dir = "ui"
+
 # Session token lifetimes (optional section; these are the defaults).
 # Access tokens (JWT) are short-lived; clients renew them with the rotating
 # refresh token returned by POST /api/v1/auth/login and POST /api/v1/auth/refresh.

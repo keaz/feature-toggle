@@ -11,6 +11,7 @@ evaluation-engine = { path = "../evaluation-engine" }
 feature-toggle-shared = { path = "../feature-toggle-shared" }
 uuid = { version = "1.17.0", features = ["v4", "serde"] }
 actix-cors = "0.7.1"
+actix-files = "0.7.0"
 sqlx = { version = "0.8.6", features = [
     "postgres",
     "runtime-tokio-native-tls",

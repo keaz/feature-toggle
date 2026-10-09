@@ -30,6 +30,7 @@ pub mod stream;
 pub mod system_client;
 pub mod team;
 pub mod types;
+pub mod ui;
 pub mod user;
 
 use actix_web::{HttpResponse, Responder, get, web};
