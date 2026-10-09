@@ -172,6 +172,19 @@ async fn activities(conn: &mut PgConnection, user_id: Uuid, kind: &str) -> Vec<V
     .unwrap()
 }
 
+/// The entry of `logged` that is not `first`. Every row of one test transaction
+/// has the same `created_at` (`now()` is the transaction start), so the order
+/// of `activities` does not say which entry is newer.
+fn newer_than<'a>(logged: &'a [Value], first: &Value) -> &'a Value {
+    let mut newer = logged.iter().filter(|entry| *entry != first);
+    let entry = newer.next().expect("a second entry");
+    assert!(
+        newer.next().is_none(),
+        "exactly one entry differs from the first"
+    );
+    entry
+}
+
 #[tokio::test]
 async fn additive_adds_and_never_removes() {
     let pool = init_pg_pool().await;
@@ -430,13 +443,15 @@ async fn activity_log_records_the_diff_only_when_something_changed() {
     assert_eq!(logged[0]["removed_roles"], json!([]));
     assert_eq!(logged[0]["removed_teams"], json!([]));
     assert!(logged[0]["admin_change"].is_null());
+    let first = logged[0].clone();
 
     sync(&mut tx, &pool, &p, u, json!({"groups": []}), None).await;
     let logged = activities(&mut tx, u, "sso_role_sync").await;
     assert_eq!(logged.len(), 2);
-    assert_eq!(logged[1]["removed_roles"], json!([ROLE_A]));
-    assert_eq!(logged[1]["removed_teams"], json!([t.to_string()]));
-    assert_eq!(logged[1]["added_roles"], json!([]));
+    let second = newer_than(&logged, &first);
+    assert_eq!(second["removed_roles"], json!([ROLE_A]));
+    assert_eq!(second["removed_teams"], json!([t.to_string()]));
+    assert_eq!(second["added_roles"], json!([]));
     tx.rollback().await.unwrap();
 }
 
@@ -455,6 +470,7 @@ async fn sso_admin_is_granted_then_revoked_in_authoritative_mode() {
     assert_eq!(admin_state(&mut tx, u).await, (true, Some("sso".into())));
     let logged = activities(&mut tx, u, "sso_role_sync").await;
     assert_eq!(logged[0]["admin_change"], json!("granted"));
+    let first = logged[0].clone();
 
     // Still in the group: nothing to log.
     sync(&mut tx, &pool, &p, u, json!({"groups": ["admins"]}), None).await;
@@ -463,7 +479,11 @@ async fn sso_admin_is_granted_then_revoked_in_authoritative_mode() {
     sync(&mut tx, &pool, &p, u, json!({"groups": []}), None).await;
     assert_eq!(admin_state(&mut tx, u).await, (false, None));
     let logged = activities(&mut tx, u, "sso_role_sync").await;
-    assert_eq!(logged[1]["admin_change"], json!("revoked"));
+    assert_eq!(logged.len(), 2);
+    assert_eq!(
+        newer_than(&logged, &first)["admin_change"],
+        json!("revoked")
+    );
     tx.rollback().await.unwrap();
 }
 
