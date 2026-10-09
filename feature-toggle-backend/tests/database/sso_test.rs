@@ -38,6 +38,7 @@ use feature_toggle_backend::database::user_identity::{
     user_identity_repository_tx,
 };
 use feature_toggle_backend::logic::user::user_logic;
+use serial_test::serial;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -974,7 +975,9 @@ async fn test_login_code_consume_is_atomic_under_concurrency() {
 // -------------------------------------------------------------- settings
 
 /// Runs inside a rolled-back transaction because the settings row is global.
+/// Serial with the login tests that commit `enforce_sso`.
 #[tokio::test]
+#[serial(sso_settings)]
 async fn test_settings_enforce_sso_round_trip() {
     let pool = init_pg_pool().await;
     let repo = sso_settings_repository_tx(pool.clone());

@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, SubsecRound, Utc};
 use feature_toggle_backend::database::activity_log::activity_log_repository;
 use feature_toggle_backend::database::entity::FeatureType;
 use feature_toggle_backend::database::feature::{CreateFeature, feature_repository};
@@ -105,6 +105,12 @@ async fn feature(pool: &PgPool, team_id: Uuid, link: Option<&str>) -> Uuid {
         .expect("link feature");
     }
     feature_id
+}
+
+/// Now at the microsecond precision Postgres stores. A nanosecond clock (Linux)
+/// would make a timestamp read back from the database compare below the one sent.
+fn now_micros() -> DateTime<Utc> {
+    Utc::now().trunc_subsecs(6)
 }
 
 async fn set_cursor(pool: &PgPool, at: DateTime<Utc>) {
@@ -370,7 +376,7 @@ async fn late_committed_row_inside_the_overlap_is_captured() {
     let pool = init_pg_pool().await;
     let team = team_with_integration(&pool, true).await;
     let feature_id = feature(&pool, team.team_id, Some("PROJ-1")).await;
-    let at = Utc::now() - Duration::seconds(5);
+    let at = now_micros() - Duration::seconds(5);
     set_cursor(&pool, at).await;
     // A transaction that started before the cursor and committed after it.
     activity(
@@ -612,7 +618,7 @@ async fn failing_row_does_not_block_the_cursor() {
     .unwrap();
     let start = Utc::now() - Duration::minutes(1);
     set_cursor(&pool, start).await;
-    let now = Utc::now();
+    let now = now_micros();
     activity(
         &pool,
         "stage_deployed",
