@@ -1,0 +1,59 @@
+# Feature Toggle Backend configuration
+# Default values match the previously hardcoded ones
+
+# CORS allowed origin for the frontend
+allowed_origin = "http://localhost:3000"
+
+# Address that the Actix-Web HTTP server binds to
+http_addr = "0.0.0.0:8080"
+
+# Address that the gRPC server binds to
+grpc_addr = "0.0.0.0:50051"
+
+# Public base URL of this backend as browsers and identity providers reach it
+# (optional). SSO callbacks go to <public_base_url>/api/v1/auth/sso/<slug>/callback,
+# which must be registered as a redirect URI at the identity provider. When unset,
+# it is derived from each request (scheme and host, including Forwarded /
+# X-Forwarded-* headers); set it explicitly in production behind a proxy. The
+# backend logs a warning at startup when it is unset. SSO secrets are not set
+# here: use env FLUXGATE_ENCRYPTION_KEY (base64 of 32 bytes) and optionally
+# FLUXGATE_SSO_<SLUG>_CLIENT_SECRET. See docs/sso.md.
+#public_base_url = "https://fluxgate.example.com"
+
+# Session token lifetimes (optional section; these are the defaults).
+# Access tokens (JWT) are short-lived; clients renew them with the rotating
+# refresh token returned by POST /api/v1/auth/login and POST /api/v1/auth/refresh.
+# Values below 1 are raised to 1. After a JWT signing-secret rotation, tokens
+# signed by the previous secret stay valid for access_token_ttl_minutes.
+# System-client (M2M) tokens signed by a rotated secret stop working
+# access_token_ttl_minutes after the rotation, and legacy tokens without a `kid`
+# stop at the first rotation. Re-issue M2M tokens after every rotation.
+[auth]
+access_token_ttl_minutes = 30
+refresh_token_ttl_days = 7
+
+# Cluster replication (optional). Uncomment and adjust when running multiple backend instances.
+# Uses database-backed discovery where nodes register themselves in PostgreSQL and discover
+# peers via heartbeat table (similar to JGroups JDBC_PING - no external service discovery needed).
+# Each node automatically generates a unique UUID as its node_id, making it suitable for auto-scaling.
+#[cluster]
+#enabled = true
+#listen_addr = "0.0.0.0:6000"
+#reconnect_delay_ms = 2000
+
+## Database-backed peer discovery configuration
+#[cluster.discovery]
+#heartbeat_interval_secs = 30   # How often to update node's heartbeat (default: 30)
+#stale_threshold_secs = 90      # When to consider a node dead (default: 90)
+#cleanup_interval_secs = 60     # How often to clean up stale nodes (default: 60)
+
+# TypeSafe AI judgments (optional section; these are the defaults).
+# The subsystem turns on only when env TYPESAFE_API_KEY is set. Never put the key
+# in this file. Keep the model pinned to a versioned id: aliases such as
+# jev-latest move and change answers. A value of 0 for timeout_ms or
+# max_in_flight falls back to the default.
+#[typesafe]
+#base_url = "https://api.typesafe.ai"
+#model = "jev-1.13.0"
+#timeout_ms = 3000          # per HTTP attempt
+#max_in_flight = 16         # concurrent requests across the server

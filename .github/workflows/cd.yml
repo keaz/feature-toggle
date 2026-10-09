@@ -6,11 +6,8 @@ on:
       - 'v*'
 
 jobs:
-  build-and-release:
+  test:
     runs-on: ubuntu-latest
-    outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
-      version: ${{ steps.get_version.outputs.VERSION }}
 
     services:
       postgres:
@@ -24,17 +21,14 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Get Postgres container ID
         id: postgres_container_id
         run: echo "POSTGRES_CONTAINER_ID=$(docker ps --filter 'ancestor=postgres:latest' -q)" >> $GITHUB_ENV
 
       - name: Set up Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          profile: minimal
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Install sqlx-cli
         run: cargo install sqlx-cli --no-default-features --features postgres
@@ -48,11 +42,6 @@ jobs:
 
       - name: Seed fixture data from init.sql
         run: docker exec ${{ env.POSTGRES_CONTAINER_ID }} psql -U postgres -d feature_toggle -f /init.sql
-
-      - name: Build
-        env:
-          DATABASE_URL: postgres://postgres:local123@localhost:5432/feature_toggle
-        run: cargo build --release --verbose
 
       - name: Install llvm-tools and cargo-llvm-cov
         run: |
@@ -73,85 +62,105 @@ jobs:
             fail_ci_if_error: true
             token: ${{ secrets.CODECOV_TOKEN }}
 
-      - name: Create artifact directory
-        run: mkdir -p artifacts
-
-      - name: Copy release binary, migrations, and seed fixtures to artifacts
-        run: |
-          cp target/release/feature-toggle-backend artifacts/
-          cp target/release/fluxgate artifacts/
-          cp -r feature-toggle-backend/migrations artifacts/
-          cp init.sql artifacts/
-          cp Dockerfile artifacts/
-          cp docker-compose.yml artifacts/
-          tar -czvf feature-toggle-release.tar.gz artifacts/
-
-      - name: Get the version
-        id: get_version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-
-      - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.ref }}
-          release_name: Release ${{ steps.get_version.outputs.VERSION }}
-          draft: false
-          prerelease: false
-
-      - name: Upload Release Asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./feature-toggle-release.tar.gz
-          asset_name: feature-toggle-release.tar.gz
-          asset_content_type: application/gzip
-      
-      
-
-  # The fluxgate CLI for the platforms people run it on. It needs no database
-  # or SQLx cache, so these builds skip the backend setup.
-  cli-binaries:
-    needs: build-and-release
+  # The backend, edge server and CLI for every platform the release supports.
+  # The backend compiles its SQLx queries against the committed .sqlx cache, so
+  # these builds need no database. The Linux builds run on Ubuntu 22.04 so the
+  # binaries work on glibc 2.35 and later.
+  binaries:
+    needs: test
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: linux-x86_64
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            platform: linux-x86_64
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            platform: linux-arm64
           - os: macos-latest
-            target: macos-arm64
+            target: aarch64-apple-darwin
+            platform: macos-arm64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            platform: macos-x86_64
     runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          profile: minimal
+          targets: ${{ matrix.target }}
 
-      - name: Build the CLI
-        run: cargo build --release --locked -p fluxgate-cli
+      - name: Install OpenSSL headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
-      - name: Package the CLI
-        run: |
-          mkdir -p fluxgate-cli-dist
-          cp target/release/fluxgate fluxgate-cli-dist/
-          cp fluxgate-cli/README.md fluxgate-cli-dist/
-          tar -czvf fluxgate-${{ needs.build-and-release.outputs.version }}-${{ matrix.target }}.tar.gz -C fluxgate-cli-dist .
-
-      - name: Upload the CLI to the release
-        uses: actions/upload-release-asset@v1
+      - name: Build
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SQLX_OFFLINE: 'true'
+        run: >
+          cargo build --release --locked --target ${{ matrix.target }}
+          -p feature-toggle-backend -p feature-edge-server -p fluxgate-cli
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          bin="target/${{ matrix.target }}/release"
+          suffix="${version}-${{ matrix.platform }}"
+          mkdir -p dist pkg/backend pkg/edge pkg/cli
+
+          cp "$bin/feature-toggle-backend" pkg/backend/fluxgate-backend
+          cp release/backend-config.toml pkg/backend/config.toml
+          cp release/log4rs.yaml release/README.md LICENSE pkg/backend/
+
+          cp "$bin/feature-edge-server" pkg/edge/fluxgate-edge
+          cp release/edge-config.toml pkg/edge/config.toml
+          cp release/log4rs.yaml feature-edge-server/CONFIG.md LICENSE pkg/edge/
+
+          cp "$bin/fluxgate" pkg/cli/
+          cp fluxgate-cli/README.md LICENSE pkg/cli/
+
+          tar -czf "dist/fluxgate-backend-${suffix}.tar.gz" -C pkg/backend .
+          tar -czf "dist/fluxgate-edge-${suffix}.tar.gz" -C pkg/edge .
+          tar -czf "dist/fluxgate-${suffix}.tar.gz" -C pkg/cli .
+          ls -l dist
+
+      - name: Upload the archives
+        uses: actions/upload-artifact@v4
         with:
-          upload_url: ${{ needs.build-and-release.outputs.upload_url }}
-          asset_path: ./fluxgate-${{ needs.build-and-release.outputs.version }}-${{ matrix.target }}.tar.gz
-          asset_name: fluxgate-${{ needs.build-and-release.outputs.version }}-${{ matrix.target }}.tar.gz
-          asset_content_type: application/gzip
+          name: binaries-${{ matrix.platform }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  # One release with every archive, published only when all platforms built.
+  release:
+    needs: binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download the archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: binaries-*
+          path: dist
+          merge-multiple: true
+
+      - name: Write checksums
+        working-directory: dist
+        run: sha256sum *.tar.gz > SHA256SUMS && cat SHA256SUMS
+
+      - name: Create the release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Release ${{ github.ref_name }}
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS

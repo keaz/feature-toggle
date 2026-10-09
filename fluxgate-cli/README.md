@@ -4,7 +4,7 @@ Command line client for the FluxGate admin API: flag reads, evaluation, approval
 
 ## Install
 
-Each tagged release has `fluxgate-<version>-linux-x86_64.tar.gz` and `fluxgate-<version>-macos-arm64.tar.gz`. Unpack one and put `fluxgate` on your `PATH`. From a checkout:
+Each tagged release has `fluxgate-<version>-<platform>.tar.gz` for `linux-x86_64`, `linux-arm64`, `macos-arm64` and `macos-x86_64`, with checksums in `SHA256SUMS`. Unpack one and put `fluxgate` on your `PATH`. From a checkout:
 
 ```bash
 cargo install --path fluxgate-cli

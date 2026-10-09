@@ -1,0 +1,62 @@
+# Edge Server Configuration
+
+# Backend gRPC server address
+backend_grpc = "http://localhost:50051"
+
+# HTTP server bind address
+http_addr = "0.0.0.0:8081"
+
+# Client credentials for backend authentication. Prefer the EDGE_CLIENT_ID and
+# EDGE_CLIENT_SECRET environment variables over writing the secret here.
+client_id = ""
+client_secret = ""
+
+# gRPC connection settings
+[grpc]
+# Connection timeout in seconds
+connect_timeout_secs = 20
+# Request timeout in seconds
+timeout_secs = 20
+# TCP keepalive interval in seconds
+tcp_keepalive_secs = 30
+# HTTP/2 keepalive interval in seconds
+http2_keepalive_secs = 30
+# Keep connection alive even when idle
+keep_alive_while_idle = true
+# Maximum concurrent requests
+concurrency_limit = 256
+# Enable TCP_NODELAY
+tcp_nodelay = true
+# Request compression: "none" or "gzip"
+compression = "none"
+
+# Flush settings
+[flush]
+# User assignment flush interval in seconds
+assignment_flush_secs = 10
+# Evaluation events flush interval in seconds
+evaluation_flush_secs = 10
+# Evaluation event queue capacity (bounded)
+evaluation_event_queue_capacity = 1000000
+# Max user assignment messages per gRPC stream flush
+assignment_flush_batch_size = 1000
+# Max evaluation events per gRPC request
+evaluation_flush_batch_size = 1000
+
+# Retry settings
+[retry]
+# Base delay for exponential backoff in milliseconds
+base_delay_ms = 500
+# Maximum retry attempts for direct gRPC calls
+max_attempts = 3
+# Initial delay for stream reconnection in seconds
+stream_initial_delay_secs = 1
+# Maximum delay for stream reconnection in seconds
+stream_max_delay_secs = 30
+
+# Cache settings
+[cache]
+# Maximum number of features to cache (LRU eviction when exceeded)
+# Default: 10000
+# Set based on your memory constraints and feature count
+max_capacity = 10000
