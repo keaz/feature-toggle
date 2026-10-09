@@ -7,9 +7,10 @@ on:
 
 env:
   # The admin UI bundled into the backend archives. The UI lives in its own
-  # repository and is released as the keaz/flux-gate-ui image; bump this when a
-  # new UI version should ship with the backend.
-  UI_VERSION: v1.2.0
+  # repository and is released as the keaz/flux-gate-ui image. Empty: use the
+  # newest vX.Y.Z tag of that image, so a new UI release ships with the next
+  # backend release. Set a tag such as v1.2.0 to pin one.
+  UI_VERSION: ''
 
 jobs:
   test:
@@ -73,16 +74,34 @@ jobs:
   # image's is left out.
   ui:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
 
     steps:
-      - name: Copy the UI out of keaz/flux-gate-ui
+      - name: Pick the UI version
+        id: version
         run: |
           set -euo pipefail
-          id=$(docker create --platform linux/amd64 "keaz/flux-gate-ui:${UI_VERSION}")
+          version="${UI_VERSION}"
+          if [ -z "$version" ]; then
+            version=$(curl -fsS 'https://hub.docker.com/v2/repositories/keaz/flux-gate-ui/tags?page_size=100' \
+              | jq -r '.results[].name' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
+          fi
+          test -n "$version"
+          echo "UI version: $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Copy the UI out of keaz/flux-gate-ui
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          id=$(docker create --platform linux/amd64 "keaz/flux-gate-ui:${VERSION}")
           docker cp "$id:/usr/share/nginx/html" ui
           docker rm "$id"
           rm -f ui/config.js
           test -f ui/index.html
+          echo "$VERSION" > ui/VERSION
           ls ui
 
       - name: Upload the UI
@@ -177,7 +196,7 @@ jobs:
 
   # One release with every archive, published only when all platforms built.
   release:
-    needs: binaries
+    needs: [binaries, ui]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -198,6 +217,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           name: Release ${{ github.ref_name }}
+          body: |
+            The backend archives include the admin UI ${{ needs.ui.outputs.version }} in `ui/`.
+            Checksums are in `SHA256SUMS`.
           files: |
             dist/*.tar.gz
             dist/SHA256SUMS
